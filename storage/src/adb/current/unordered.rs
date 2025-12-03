@@ -4,13 +4,13 @@
 
 use crate::{
     adb::{
-        any::unordered::fixed::Any,
+        any::{unordered::fixed::Any, CleanAny, DirtyAny},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{
             fixed::{unordered::Operation, Value},
             Keyed as _,
         },
-        store::LogStore,
+        store::{CleanStore, DirtyStore, LogStore},
         Error, FloorHelper,
     },
     bitmap::CleanBitMap,
@@ -618,7 +618,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > LogStore for Current<E, K, V, H, T, N>
+        S: State<DigestOf<H>>,
+    > LogStore for Current<E, K, V, H, T, N, S>
 {
     type Value = V;
 
@@ -686,6 +687,128 @@ impl<
     }
 }
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > CleanStore for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Dirty = Current<E, K, V, H, T, N, Dirty>;
+
+    fn root(&self) -> Self::Digest {
+        todo!()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > DirtyStore for Current<E, K, V, H, T, N, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Clean = Current<E, K, V, H, T, N, Clean<DigestOf<H>>>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > CleanAny for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+{
+    type Key = K;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get(key).await
+    }
+
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > DirtyAny for Current<E, K, V, H, T, N, Dirty>
+{
+    type Key = K;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get(key).await
+    }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
+        self.create(key, value).await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
+        self.delete(key).await
+    }
+}
 #[cfg(test)]
 pub mod test {
     use super::*;

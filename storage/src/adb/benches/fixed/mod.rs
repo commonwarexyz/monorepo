@@ -7,7 +7,7 @@ use commonware_storage::{
         any::{
             ordered::fixed::Any as OAny,
             unordered::{fixed::Any as UAny, variable::Any as VariableAny},
-            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
+            CleanAny, FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
@@ -192,6 +192,7 @@ async fn get_unordered_current(ctx: Context) -> UCurrentDb {
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
+        .into_dirty()
 }
 
 /// Get an ordered current ADB instance.
@@ -201,6 +202,7 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
+        .into_dirty()
 }
 
 async fn get_store(ctx: Context) -> StoreDb {
@@ -226,11 +228,8 @@ async fn gen_random_kv<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: commonware_storage::store::Store<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-        > + Batchable
-        + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>,
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -251,12 +250,12 @@ where
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
             }
         }
     }
 
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db
 }
 
@@ -267,11 +266,8 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: commonware_storage::store::Store<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-        > + Batchable
-        + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>,
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -297,7 +293,7 @@ where
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
                 db.write_batch(iter).await.unwrap();
-                db.commit().await?;
+                db.commit(None).await.unwrap();
                 batch = db.start_batch();
             }
         }
@@ -305,6 +301,6 @@ where
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db
 }

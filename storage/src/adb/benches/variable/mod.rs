@@ -149,10 +149,7 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: Batchable
-        + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + commonware_storage::store::StorePersistable<Error: std::fmt::Debug>
-        + LogStorePrunable<Value = Vec<u8>>,
+    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

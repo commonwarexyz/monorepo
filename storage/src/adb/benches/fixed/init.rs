@@ -38,12 +38,15 @@ fn bench_fixed_init(c: &mut Criterion) {
                 runner.start(|ctx| async move {
                     match variant {
                         Variant::Store => {
+                            todo!()
+                            /*
                             let db = get_store(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
+                             */
                         }
                         Variant::AnyUnordered => {
                             let db = get_unordered_any(ctx.clone()).await;

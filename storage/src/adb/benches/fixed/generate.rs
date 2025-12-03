@@ -10,7 +10,10 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::store::{Batchable, LogStore, LogStorePrunable};
+use commonware_storage::adb::{
+    any::CleanAny,
+    store::{Batchable, LogStore, LogStorePrunable},
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -135,12 +138,7 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, commonware_storage::adb::Error>
 where
-    A: commonware_storage::store::Store<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-        > + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>
-        + LogStorePrunable<Value = <Sha256 as Hasher>::Digest>
-        + Batchable,
+    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     let start = Instant::now();
     let mut db = if use_batch {
@@ -148,7 +146,7 @@ where
     } else {
         gen_random_kv(db, elements, operations, Some(commit_frequency)).await
     };
-    db.commit().await?;
+    db.commit(None).await?;
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
     db.destroy().await?; // don't time destroy
