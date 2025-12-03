@@ -166,11 +166,7 @@ pub trait DirtyStore: Sized {
     type Operation;
 
     /// The clean state type that this dirty store transitions to.
-    type Clean: CleanStore<
-        Digest = Self::Digest,
-        Operation = Self::Operation,
-        Dirty = Self,
-    >;
+    type Clean: CleanStore<Digest = Self::Digest, Operation = Self::Operation, Dirty = Self>;
 
     /// Merkleize the store and compute the root digest.
     ///
@@ -190,11 +186,7 @@ pub trait CleanStore: Sized {
     type Operation;
 
     /// The dirty state type that this clean store transitions to.
-    type Dirty: DirtyStore<
-        Digest = Self::Digest,
-        Operation = Self::Operation,
-        Clean = Self,
-    >;
+    type Dirty: DirtyStore<Digest = Self::Digest, Operation = Self::Operation, Clean = Self>;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;

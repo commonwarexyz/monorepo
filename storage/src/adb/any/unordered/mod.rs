@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::AnyDb,
+        any::{AnyCleanStore, AnyDb, AnyDirtyStore},
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
         store::LogStore,
@@ -762,6 +762,106 @@ impl<
 
     async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
         IndexedLog::commit(self, metadata).await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > AnyCleanStore for IndexedLog<E, C, I, H>
+{
+    type Key = <C::Item as Keyed>::Key;
+    type Value = <C::Item as Keyed>::Value;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
+        self.get_metadata().await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get(key).await
+    }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
+        self.create(key, value).await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
+        self.delete(key).await
+    }
+
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
+        IndexedLog::commit(self, metadata).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > AnyDirtyStore for IndexedLog<E, C, I, H, Dirty>
+{
+    type Key = <C::Item as Keyed>::Key;
+    type Value = <C::Item as Keyed>::Value;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get_key_op_loc(key)
+            .await
+            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 }
 

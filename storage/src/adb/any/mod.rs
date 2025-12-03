@@ -5,7 +5,7 @@
 use crate::{
     adb::{
         operation::{Committable, Keyed},
-        store::LogStore,
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     journal::{
@@ -18,6 +18,7 @@ use crate::{
 use commonware_codec::{Codec, CodecFixed};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_utils::Array;
 use std::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
@@ -70,6 +71,113 @@ pub trait AnyDb<O: Keyed, D: Digest>: LogStore {
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+}
+
+/// Extension trait for Any ADBs in a clean (merkleized) state.
+///
+/// Provides read access, proof generation, mutations, commit, and lifecycle operations.
+/// Use `into_dirty()` (from `CleanStore`) to transition to `AnyDirtyStore` for batched
+/// MMR operations.
+pub trait AnyCleanStore: CleanStore {
+    /// The key type for this database.
+    type Key: Array;
+
+    /// The value type for this database.
+    type Value: Codec;
+
+    // Log info
+
+    /// The number of operations applied to this db, including pruned and uncommitted operations.
+    fn op_count(&self) -> Location;
+
+    /// The inactivity floor location. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+
+    /// Returns true if there are no active keys in the database.
+    fn is_empty(&self) -> bool;
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+
+    // Read access
+
+    /// Get the value for a given key, or None if it has no value.
+    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+
+    // Mutations
+
+    /// Update `key` to have value `value`. Subject to rollback until next `commit`.
+    fn update(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>>;
+
+    /// Create a new key-value pair. Returns true if created, false if key already existed.
+    /// Subject to rollback until next `commit`.
+    fn create(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<bool, Error>>;
+
+    /// Delete `key` and its value. Returns true if deleted, false if already inactive.
+    /// Subject to rollback until next `commit`.
+    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Error>>;
+
+    // Commit
+
+    /// Commit pending operations to the database, ensuring durability.
+    /// Returns the location range of committed operations.
+    fn commit(
+        &mut self,
+        metadata: Option<Self::Value>,
+    ) -> impl Future<Output = Result<Range<Location>, Error>>;
+
+    // Lifecycle
+
+    /// Sync all database state to disk.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Prune historical operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+
+    /// Close the db. Uncommitted operations will be lost or rolled back on restart.
+    fn close(self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Destroy the db, removing all data from disk.
+    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+}
+
+/// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
+///
+/// Provides read access and log info while in dirty state.
+/// Use `merkleize()` (from `DirtyStore`) to compute the root and transition back to `AnyCleanStore`.
+pub trait AnyDirtyStore: DirtyStore {
+    /// The key type for this database.
+    type Key: Array;
+
+    /// The value type for this database.
+    type Value: Codec;
+
+    // Log info (also needed in dirty state)
+
+    /// The number of operations applied to this db, including pruned and uncommitted operations.
+    fn op_count(&self) -> Location;
+
+    /// The inactivity floor location. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+
+    /// Returns true if there are no active keys in the database.
+    fn is_empty(&self) -> bool;
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+
+    // Read access (still need to read while dirty)
+
+    /// Get the value for a given key, or None if it has no value.
+    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
