@@ -14,7 +14,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -130,7 +130,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(*addr);
+                    let new_ip = entry.update(*addr);
+                    if new_ip {
+                        info!(?peer, ip = ?addr.ip(), "added new IP for peer");
+                    }
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -229,13 +232,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Return all registered IP addresses.
+    ///
+    /// Returns all tracked IPs for each allowed peer, enabling connections
+    /// from any IP a peer has used while in an active peer set.
     pub fn registered(&self) -> HashSet<IpAddr> {
-        // Using `.allowed()` here excludes any peers that are still connected but no longer
-        // part of a peer set (and will be dropped shortly).
+        // Using `.in_peer_set()` here excludes any peers that are blocked, ourselves,
+        // or no longer part of a peer set. Unlike `.allowed()`, this does not filter
+        // based on the current socket's IP, allowing tracked public IPs to be returned
+        // even if the peer's current IP is private.
         self.peers
             .values()
-            .filter(|r| r.allowed(self.allow_private_ips))
-            .filter_map(|r| r.socket().map(|s| s.ip()))
+            .filter(|r| r.in_peer_set())
+            .flat_map(|r| r.ips(self.allow_private_ips))
             .collect()
     }
 
@@ -471,6 +479,176 @@ mod tests {
                 record.socket(),
                 None,
                 "Blocked peer should not regain its socket"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_returns_all_tracked_ips() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 11)), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with first IP
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 1);
+            assert!(registered.contains(&addr_1.ip()));
+
+            // Update peer with second IP - should now have both IPs registered
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 2, "Should have both IPs registered");
+            assert!(
+                registered.contains(&addr_1.ip()),
+                "First IP should still be registered"
+            );
+            assert!(
+                registered.contains(&addr_2.ip()),
+                "Second IP should be registered"
+            );
+
+            // Update peer with third IP - should have all three IPs
+            directory.add_set(2, OrderedAssociated::from([(pk_1.clone(), addr_3)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 3, "Should have all three IPs registered");
+            assert!(registered.contains(&addr_1.ip()));
+            assert!(registered.contains(&addr_2.ip()));
+            assert!(registered.contains(&addr_3.ip()));
+        });
+    }
+
+    #[test]
+    fn test_registered_clears_ips_on_peer_removal() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 1, // Only keep one set
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register first peer
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            let registered = directory.registered();
+            assert!(registered.contains(&addr_1.ip()));
+
+            // Register second peer, which evicts first peer (max_sets = 1)
+            directory.add_set(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert!(
+                !registered.contains(&addr_1.ip()),
+                "First peer's IP should be removed"
+            );
+            assert!(
+                registered.contains(&addr_2.ip()),
+                "Second peer's IP should be present"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_clears_ips_on_block() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with multiple IPs
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 2);
+
+            // Block the peer - all IPs should be removed
+            directory.block(&pk_1);
+            let registered = directory.registered();
+            assert!(
+                !registered.contains(&addr_1.ip()),
+                "Blocked peer's first IP should be removed"
+            );
+            assert!(
+                !registered.contains(&addr_2.ip()),
+                "Blocked peer's second IP should be removed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_returns_public_ips_when_current_is_private() {
+        // Regression test: when allow_private_ips is false and a peer's current
+        // IP is private, their tracked public IPs should still be returned.
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: false, // Important: private IPs not allowed
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let private_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with public IP
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), public_addr)]));
+            let registered = directory.registered();
+            assert!(
+                registered.contains(&public_addr.ip()),
+                "Public IP should be registered"
+            );
+
+            // Update peer to private IP - public IP should still be registered
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), private_addr)]));
+            let registered = directory.registered();
+            assert!(
+                registered.contains(&public_addr.ip()),
+                "Public IP should still be registered even when current IP is private"
+            );
+            assert!(
+                !registered.contains(&private_addr.ip()),
+                "Private IP should not be registered when allow_private_ips is false"
             );
         });
     }
