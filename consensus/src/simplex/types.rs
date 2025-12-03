@@ -209,6 +209,11 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.nullify(signer).is_some()
     }
 
+    /// Returns `true` if the given signer has a finalize vote recorded.
+    pub fn has_finalize(&self, signer: u32) -> bool {
+        self.finalize(signer).is_some()
+    }
+
     /// Clears all notarize votes but keeps the allocations for reuse.
     pub fn clear_notarizes(&mut self) {
         self.notarizes.clear();

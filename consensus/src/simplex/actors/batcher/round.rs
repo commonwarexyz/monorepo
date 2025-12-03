@@ -352,7 +352,9 @@ impl<
     }
 
     pub fn is_active(&self, leader: u32) -> bool {
-        self.pending_votes.has_notarize(leader) || self.pending_votes.has_nullify(leader)
+        self.pending_votes.has_notarize(leader)
+            || self.pending_votes.has_nullify(leader)
+            || self.pending_votes.has_finalize(leader)
     }
 
     /// Stores a verified vote for certificate construction.
