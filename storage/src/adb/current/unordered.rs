@@ -516,8 +516,10 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > LogStore<K, V> for Current<E, K, V, H, T, N>
+    > LogStore for Current<E, K, V, H, T, N>
 {
+    type Value = V;
+
     fn op_count(&self) -> Location {
         self.op_count()
     }

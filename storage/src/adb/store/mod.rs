@@ -135,7 +135,9 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait LogStore<K: Array, V: Codec> {
+pub trait LogStore {
+    type Value: Codec;
+
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
 
@@ -148,7 +150,7 @@ pub trait LogStore<K: Array, V: Codec> {
     fn inactivity_floor_loc(&self) -> Location;
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -491,13 +493,15 @@ where
     }
 }
 
-impl<E, K, V, T> LogStore<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> LogStore for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
 {
+    type Value = V;
+
     fn op_count(&self) -> Location {
         self.op_count()
     }

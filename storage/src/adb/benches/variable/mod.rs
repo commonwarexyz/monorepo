@@ -111,7 +111,7 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = Vec<u8>,
             Error: std::fmt::Debug,
-        > + LogStore<<Sha256 as Hasher>::Digest, Vec<u8>>
+        > + LogStore
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
         + commonware_storage::store::StoreDestructible,
@@ -152,7 +152,7 @@ async fn gen_random_kv_batched<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + LogStore<<Sha256 as Hasher>::Digest, Vec<u8>>
+        + LogStore<Value = Vec<u8>>
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
         + commonware_storage::store::StoreDestructible,

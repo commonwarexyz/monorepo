@@ -92,7 +92,7 @@ async fn test_db<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + LogStore<<Sha256 as Hasher>::Digest, Vec<u8>>
+        + LogStore<Value = Vec<u8>>
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
         + commonware_storage::store::StoreDestructible,

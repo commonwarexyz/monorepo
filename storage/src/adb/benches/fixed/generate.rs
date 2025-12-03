@@ -138,7 +138,7 @@ where
     A: commonware_storage::store::Store<
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
-        > + LogStore<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        > + LogStore<Value = <Sha256 as Hasher>::Digest>
         + Batchable
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable

@@ -875,6 +875,8 @@ impl<
         H: Hasher,
     > AnyDb<C::Item, H::Digest> for IndexedLog<E, C, I, H>
 {
+    type Value = Value<C::Item>;
+
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
         self.log.root()
@@ -932,8 +934,10 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > LogStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > LogStore for IndexedLog<E, C, I, H>
 {
+    type Value = Value<C::Item>;
+
     fn op_count(&self) -> Location {
         self.op_count()
     }
@@ -1037,7 +1041,8 @@ mod test {
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
         D: AnyDb<O, Digest>
-            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
+            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>
+            + LogStore<Value = Digest>,
     {
         let mut hasher = Standard::<Sha256>::new();
         assert_eq!(db.op_count(), 0);

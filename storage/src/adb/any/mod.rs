@@ -15,7 +15,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
     translator::Translator,
 };
-use commonware_codec::CodecFixed;
+use commonware_codec::{Codec, CodecFixed};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::{
@@ -29,7 +29,9 @@ pub mod unordered;
 
 /// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
 /// associated with a key.
-pub trait AnyDb<O: Keyed, D: Digest>: LogStore<O::Key, O::Value> {
+pub trait AnyDb<O: Keyed, D: Digest>: LogStore {
+    type Value: Codec;
+
     fn root(&self) -> D;
 
     /// Generate and return:
