@@ -11,7 +11,7 @@ use crate::{
             Keyed as _,
         },
         store::LogStore,
-        Error,
+        Error, FloorHelper,
     },
     bitmap::CleanBitMap,
     mmr::{
@@ -361,15 +361,41 @@ impl<
             .last_commit
             .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
-        self.commit_ops(metadata).await?; // recovery is ensured after this returns
+        let empty_status = CleanBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
+        let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
+
+        // Inactivate the current commit operation.
+        if let Some(last_commit_loc) = self.any.last_commit {
+            status.set_bit(*last_commit_loc, false);
+        }
+
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let mut floor_helper = FloorHelper {
+            snapshot: &mut self.any.snapshot,
+            log: &mut self.any.log,
+        };
+        let inactivity_floor_loc = floor_helper
+            .raise_floor_with_bitmap(&mut status, start_loc)
+            .await?;
+
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        status.push(true);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+
+        self.any.apply_commit_op(commit_op).await?;
+
+        // self.commit_ops(metadata).await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
-        let hasher = &mut self.any.log.hasher;
         let mmr = &self.any.log.mmr;
-        let empty_status = CleanBitMap::<H::Digest, N>::new(hasher, None);
-        let status = std::mem::replace(&mut self.status, empty_status).into_dirty();
-        self.status =
-            merkleize_grafted_bitmap::<H, N>(hasher, status, mmr, Self::grafting_height()).await?;
+        self.status = merkleize_grafted_bitmap(
+            &mut self.any.log.hasher,
+            status,
+            mmr,
+            Self::grafting_height(),
+        )
+        .await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
@@ -470,6 +496,7 @@ impl<
         Ok(true)
     }
 
+    /*
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
     /// function.
     async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
@@ -488,6 +515,7 @@ impl<
 
         self.any.apply_commit_op(commit_op).await
     }
+    */
 }
 
 impl<

@@ -441,11 +441,30 @@ impl<
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
+        // let inactivity_floor_loc = self.raise_floor().await?;
+
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                let mut floor_helper = FloorHelper {
+                    snapshot: &mut self.snapshot,
+                    log: &mut self.log,
+                };
+                self.inactivity_floor_loc = floor_helper.raise_floor(loc).await?;
+            }
+        }
+        self.steps = 0;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
-            .await?;
+        self.apply_commit_op(C::Item::new_commit_floor(
+            metadata,
+            self.inactivity_floor_loc,
+        ))
+        .await?;
 
         Ok(start_loc..self.op_count())
     }
