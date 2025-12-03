@@ -86,7 +86,10 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::unordered::Operation, Committable as _, Keyed as _},
+        operation::{
+            variable::{unordered::Operation, Value},
+            Committable as _, Keyed as _,
+        },
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
@@ -220,7 +223,7 @@ pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     /// A log of all [Operation]s that have been applied to the store.
@@ -257,7 +260,7 @@ impl<E, K, V, T> Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     /// Initializes a new [`Store`] database with the given configuration.
@@ -362,7 +365,7 @@ impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     fn op_count(&self) -> Location {

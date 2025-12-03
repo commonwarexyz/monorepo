@@ -1,12 +1,12 @@
-use crate::adb::operation::{self, Committable};
+use crate::adb::operation::{self, variable::Value, Committable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_utils::hex;
 use core::fmt::Display;
 
 /// Operations for keyless stores.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<V: Codec> {
+pub enum Operation<V: Value> {
     /// Wraps the value appended to the database by this operation.
     Append(V),
 
@@ -14,7 +14,7 @@ pub enum Operation<V: Codec> {
     Commit(Option<V>),
 }
 
-impl<V: Codec> Operation<V> {
+impl<V: Value> Operation<V> {
     /// Returns the value (if any) wrapped by this operation.
     pub fn into_value(self) -> Option<V> {
         match self {
@@ -24,7 +24,7 @@ impl<V: Codec> Operation<V> {
     }
 }
 
-impl<V: Codec> EncodeSize for Operation<V> {
+impl<V: Value> EncodeSize for Operation<V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Append(v) => v.encode_size(),
@@ -33,7 +33,7 @@ impl<V: Codec> EncodeSize for Operation<V> {
     }
 }
 
-impl<V: Codec> Write for Operation<V> {
+impl<V: Value> Write for Operation<V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Append(value) => {
@@ -48,13 +48,13 @@ impl<V: Codec> Write for Operation<V> {
     }
 }
 
-impl<V: Codec> Committable for Operation<V> {
+impl<V: Value> Committable for Operation<V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_))
     }
 }
 
-impl<V: Codec> Read for Operation<V> {
+impl<V: Value> Read for Operation<V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -66,7 +66,7 @@ impl<V: Codec> Read for Operation<V> {
     }
 }
 
-impl<V: Codec> Display for Operation<V> {
+impl<V: Value> Display for Operation<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
