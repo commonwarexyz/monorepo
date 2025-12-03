@@ -39,13 +39,8 @@ pub struct Config<S: Scheme> {
 
 /// Per-[Epoch] state machine.
 ///
-/// # Vote Tracking Semantics
-///
-/// Votes that conflict with the first leader proposal we observe for a view are discarded once an
-/// equivocation is detected. This relies on the [crate::simplex::actors::batcher] to enforce that honest replicas only emit
-/// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
-/// additional conflicting votes are ignored because they can never form a quorum under the batcher
-/// invariants, so retaining them would just waste memory.
+/// Tracks proposals and certificates for each view. Vote aggregation and verification
+/// is handled by the [crate::simplex::actors::batcher].
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,

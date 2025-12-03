@@ -202,7 +202,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 true
             }
             ProposalChange::Unchanged
-            | ProposalChange::Replaced { .. }
+            | ProposalChange::Equivocated { .. }
             | ProposalChange::Skipped => false,
         }
     }
@@ -263,7 +263,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 None
             }
             ProposalChange::Unchanged => None,
-            ProposalChange::Replaced { dropped, retained } => {
+            ProposalChange::Equivocated { dropped, retained } => {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view).
@@ -383,7 +383,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Replaced).
+        // the proposal would be set to ProposalStatus::Equivocated).
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -410,7 +410,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Replaced).
+        // the proposal would be set to ProposalStatus::Equivocated).
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
