@@ -199,11 +199,7 @@ impl<
                                 // to a new view)
                                 work.len() < self.skip_timeout.get() as usize
                                 // Leader active in at least one recent round
-                                || {
-                                    let min_view = current.saturating_sub(self.skip_timeout);
-                                    let recent: Vec<_> = work.range(min_view..).collect();
-                                    recent.iter().any(|(_, round)| round.is_active(leader))
-                                };
+                                || work.iter().rev().take(self.skip_timeout.get() as usize).any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {

@@ -1172,12 +1172,13 @@ mod tests {
 
             // Test 5: Jump far ahead to create a gap in recent views
             // Skip from view 6 to view 100 (this creates a gap where we don't have
-            // data for views 7-99). With sufficient data, but no recent activity, should be inactive.
+            // data for views 7-99). The activity check looks at the last skip_timeout
+            // rounds we have data for, so the leader's vote in view 5 is still visible.
             let view = View::new(100);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                !active,
-                "view 100 should be active (insufficient recent history due to gap)"
+                active,
+                "view 100 should be active (leader voted in view 5, still in last {skip_timeout} rounds)"
             );
         });
     }

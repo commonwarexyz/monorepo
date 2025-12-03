@@ -88,10 +88,10 @@ pub struct Config<
     pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many views.
+    /// for this many recent known views (we ignore views we don't have data for).
     ///
     /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking).
+    /// many views we are tracking below the finalized tip).
     pub skip_timeout: ViewDelta,
 
     /// Timeout to wait for a peer to respond to a request.
