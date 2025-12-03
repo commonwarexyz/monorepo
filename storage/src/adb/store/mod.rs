@@ -508,7 +508,7 @@ impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     type Key = K;
@@ -524,7 +524,7 @@ impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -536,7 +536,7 @@ impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
@@ -548,7 +548,7 @@ impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn commit(&mut self) -> Result<(), Self::Error> {

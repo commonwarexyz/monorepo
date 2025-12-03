@@ -452,7 +452,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
     crate::store::Store for Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     type Key = K;

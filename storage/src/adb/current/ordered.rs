@@ -633,7 +633,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -651,7 +651,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -665,7 +665,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
