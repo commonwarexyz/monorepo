@@ -193,13 +193,13 @@ impl<
                                 .set_leader(leader);
 
                             // Check if the leader has been active recently
-                            let min_view = current.saturating_sub(self.skip_timeout);
                             let is_active =
                                 // Not enough views have passed to judge activity
                                 current < View::new(self.skip_timeout.get())
                                 // Check leader activity in recent window
                                 || {
                                     // Not enough recent history to judge (assume active)
+                                    let min_view = current.saturating_sub(self.skip_timeout);
                                     let recent: Vec<_> = work.range(min_view..).collect();
                                     (recent.len() as u64) < self.skip_timeout.get()
                                     // Leader was active in at least one recent round
