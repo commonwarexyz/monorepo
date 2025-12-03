@@ -130,7 +130,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::Merkleize => {
-                    bitmap.merkleize(&mut hasher).await.unwrap();
+                    bitmap = bitmap.into_dirty().merkleize(&mut hasher).await.unwrap();
                     assert!(!bitmap.is_dirty());
                 }
 

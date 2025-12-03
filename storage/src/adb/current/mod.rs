@@ -6,6 +6,7 @@
 
 use crate::{
     adb::{any::FixedConfig as AConfig, Error, Keyed},
+    bitmap::{CleanBitMap, DirtyBitMap},
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage, Verifier},
@@ -206,10 +207,10 @@ async fn range_proof<
 /// Performs merkleization of a grafted bitmap.
 async fn merkleize_grafted_bitmap<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &mut BitMap<H::Digest, N>,
+    status: DirtyBitMap<H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
     grafting_height: u32,
-) -> Result<(), Error>
+) -> Result<CleanBitMap<H::Digest, N>, Error>
 where
     H: CHasher,
 {

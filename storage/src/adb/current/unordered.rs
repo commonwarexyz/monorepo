@@ -108,7 +108,8 @@ impl<
             thread_pool,
             &mut hasher,
         )
-        .await?;
+        .await?
+        .into_dirty();
 
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
@@ -126,7 +127,7 @@ impl<
         .await?;
 
         let height = Self::grafting_height();
-        merkleize_grafted_bitmap(&mut hasher, &mut status, &any.log.mmr, height).await?;
+        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, height).await?;
 
         Ok(Self {
             any,
@@ -412,8 +413,10 @@ impl<
         // Merkleize the new bitmap entries.
         let hasher = &mut self.any.log.hasher;
         let mmr = &self.any.log.mmr;
-        merkleize_grafted_bitmap::<H, N>(hasher, &mut self.status, mmr, Self::grafting_height())
-            .await?;
+        let empty_status = BitMap::<H::Digest, N>::new(hasher, None);
+        let status = std::mem::replace(&mut self.status, empty_status).into_dirty();
+        self.status =
+            merkleize_grafted_bitmap::<H, N>(hasher, status, mmr, Self::grafting_height()).await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
