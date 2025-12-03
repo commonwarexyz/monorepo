@@ -175,8 +175,8 @@ pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
     /// Create GT from blst_fp12.
-    pub(crate) fn from_blst_fp12(fp12: blst_fp12) -> Self {
-        GT(fp12)
+    pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
+        Self(fp12)
     }
 
     /// Converts the GT element to its canonical big-endian byte representation.
@@ -265,10 +265,11 @@ impl Scalar {
         // Create a new scalar
         let mut ret = blst_fr::default();
 
+        let buffer = [i, 0, 0, 0];
+
         // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        let buffer = [i, 0, 0, 0];
         unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
         Self(ret)
     }
@@ -505,7 +506,7 @@ impl G1 {
     }
 
     /// Creates a G1 point from a raw `blst_p1`.
-    pub(crate) fn from_blst_p1(p: blst_p1) -> Self {
+    pub(crate) const fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
     }
 }
@@ -644,7 +645,7 @@ impl Point for G1 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == G1::zero() || scalar == &Scalar::zero() {
+            if *point == Self::zero() || scalar == &Scalar::zero() {
                 continue;
             }
 
@@ -655,7 +656,7 @@ impl Point for G1 {
 
         // If all points were filtered, return zero.
         if points_filtered.is_empty() {
-            return G1::zero();
+            return Self::zero();
         }
 
         // Create vectors of pointers for the blst API.
@@ -686,7 +687,7 @@ impl Point for G1 {
             );
         }
 
-        G1::from_blst_p1(msm_result)
+        Self::from_blst_p1(msm_result)
     }
 }
 
@@ -722,7 +723,7 @@ impl G2 {
     }
 
     /// Creates a G2 point from a raw `blst_p2`.
-    pub(crate) fn from_blst_p2(p: blst_p2) -> Self {
+    pub(crate) const fn from_blst_p2(p: blst_p2) -> Self {
         Self(p)
     }
 }
@@ -861,7 +862,7 @@ impl Point for G2 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == G2::zero() || scalar == &Scalar::zero() {
+            if *point == Self::zero() || scalar == &Scalar::zero() {
                 continue;
             }
             points_filtered.push(point.as_blst_p2_affine());
@@ -870,7 +871,7 @@ impl Point for G2 {
 
         // If all points were filtered, return zero.
         if points_filtered.is_empty() {
-            return G2::zero();
+            return Self::zero();
         }
 
         // Create vectors of pointers for the blst API
@@ -900,7 +901,7 @@ impl Point for G2 {
             );
         }
 
-        G2::from_blst_p2(msm_result)
+        Self::from_blst_p2(msm_result)
     }
 }
 

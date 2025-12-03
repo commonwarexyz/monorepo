@@ -1,10 +1,6 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    adb::{
-        self,
-        any::unordered::{fixed::Any, IndexedLog},
-        operation::fixed::unordered::Operation,
-    },
+    adb::{self, any::unordered::fixed::Any, operation::fixed::unordered::Operation},
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
@@ -95,7 +91,7 @@ where
         .await?;
         // Build the snapshot from the log.
         let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
-        let db = IndexedLog::from_components(range.start, log, snapshot).await?;
+        let db = Self::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }
@@ -1148,10 +1144,10 @@ mod tests {
             assert_eq!(synced_db.root(), new_root);
 
             // Verify the target database matches the synced database
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             {
                 assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(

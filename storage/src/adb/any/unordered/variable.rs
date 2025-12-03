@@ -80,7 +80,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         )
         .await?;
 
-        let log = IndexedLog::init_from_log(
+        let log = Self::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
             log,
             None,

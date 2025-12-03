@@ -56,7 +56,7 @@ impl<const N: usize> BitMap<N> {
     /* Constructors */
 
     /// Create a new empty bitmap.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
 
@@ -110,19 +110,19 @@ impl<const N: usize> BitMap<N> {
 
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.len
     }
 
     /// Returns true if the bitmap is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns true if the bitmap length is aligned to a chunk boundary.
     #[inline]
-    pub fn is_chunk_aligned(&self) -> bool {
+    pub const fn is_chunk_aligned(&self) -> bool {
         self.len.is_multiple_of(Self::CHUNK_SIZE_BITS)
     }
 
@@ -176,7 +176,7 @@ impl<const N: usize> BitMap<N> {
     /// Get the value at the given `bit` from the `chunk`.
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
-    fn get_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+    const fn get_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
         let byte = Self::chunk_byte_offset(bit);
         let byte = chunk[byte];
         let mask = Self::chunk_byte_bitmask(bit);
@@ -471,13 +471,13 @@ impl<const N: usize> BitMap<N> {
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
-    pub(super) fn chunk_byte_bitmask(bit: u64) -> u8 {
+    pub(super) const fn chunk_byte_bitmask(bit: u64) -> u8 {
         1 << (bit % 8)
     }
 
     /// Convert a bit into the index of the byte within a chunk containing the bit.
     #[inline]
-    pub(super) fn chunk_byte_offset(bit: u64) -> usize {
+    pub(super) const fn chunk_byte_offset(bit: u64) -> usize {
         ((bit / 8) % N as u64) as usize
     }
 
@@ -499,7 +499,7 @@ impl<const N: usize> BitMap<N> {
     /* Iterator */
 
     /// Creates an iterator over the bits.
-    pub fn iter(&self) -> Iterator<'_, N> {
+    pub const fn iter(&self) -> Iterator<'_, N> {
         Iterator {
             bitmap: self,
             pos: 0,
@@ -510,7 +510,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Helper for binary operations
     #[inline]
-    fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &BitMap<N>, op: F) {
+    fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &Self, op: F) {
         self.assert_eq_len(other);
         for (a_chunk, b_chunk) in self.chunks.iter_mut().zip(other.chunks.iter()) {
             for (a_byte, b_byte) in a_chunk.iter_mut().zip(b_chunk.iter()) {
@@ -526,7 +526,7 @@ impl<const N: usize> BitMap<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn and(&mut self, other: &BitMap<N>) {
+    pub fn and(&mut self, other: &Self) {
         self.binary_op(other, |a, b| a & b);
     }
 
@@ -535,7 +535,7 @@ impl<const N: usize> BitMap<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn or(&mut self, other: &BitMap<N>) {
+    pub fn or(&mut self, other: &Self) {
         self.binary_op(other, |a, b| a | b);
     }
 
@@ -544,7 +544,7 @@ impl<const N: usize> BitMap<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn xor(&mut self, other: &BitMap<N>) {
+    pub fn xor(&mut self, other: &Self) {
         self.binary_op(other, |a, b| a ^ b);
     }
 
@@ -563,7 +563,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Asserts that the lengths of two [BitMap]s match.
     #[inline(always)]
-    fn assert_eq_len(&self, other: &BitMap<N>) {
+    fn assert_eq_len(&self, other: &Self) {
         assert_eq!(
             self.len(),
             other.len(),
@@ -718,7 +718,7 @@ impl<const N: usize> Read for BitMap<N> {
             chunks.push_back(chunk);
         }
 
-        let mut result = BitMap { chunks, len };
+        let mut result = Self { chunks, len };
 
         // Verify trailing bits are zero (maintain invariant)
         if result.clear_trailing_bits() {
@@ -907,7 +907,7 @@ mod tests {
         bv_or.or(&bv2);
         check_trailing_bits_zero(&bv_or);
 
-        let mut bv_xor = bv1.clone();
+        let mut bv_xor = bv1;
         bv_xor.xor(&bv2);
         check_trailing_bits_zero(&bv_xor);
 

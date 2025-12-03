@@ -282,7 +282,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
-    ) -> Result<Journal<E, V>, crate::adb::Error> {
+    ) -> Result<Self, crate::adb::Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -293,7 +293,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         );
 
         // Initialize contiguous journal
-        let mut journal = Journal::init(context.with_label("journal"), cfg.clone()).await?;
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
 
         let size = journal.size();
 
@@ -308,7 +308,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+                return Ok(Self::init_at_size(context, cfg, range.start).await?);
             }
         }
 
@@ -327,7 +327,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+            return Ok(Self::init_at_size(context, cfg, range.start).await?);
         }
 
         // Prune to lower bound if needed
@@ -427,14 +427,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.size
     }
 
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
-    pub fn oldest_retained_pos(&self) -> Option<u64> {
+    pub const fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
             None
@@ -805,15 +805,15 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn size(&self) -> u64 {
-        Journal::size(self)
+        Self::size(self)
     }
 
     fn oldest_retained_pos(&self) -> Option<u64> {
-        Journal::oldest_retained_pos(self)
+        Self::oldest_retained_pos(self)
     }
 
     fn pruning_boundary(&self) -> u64 {
-        Journal::pruning_boundary(self)
+        Self::pruning_boundary(self)
     }
 
     async fn replay(
@@ -821,43 +821,43 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Journal::replay(self, start_pos, buffer).await
+        Self::replay(self, start_pos, buffer).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Journal::read(self, position).await
+        Self::read(self, position).await
     }
 }
 
 impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
+        Self::append(self, item).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
+        Self::prune(self, min_position).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
+        Self::rewind(self, size).await
     }
 }
 
 impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
     async fn commit(&mut self) -> Result<(), Error> {
-        Journal::commit(self).await
+        Self::commit(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        Journal::sync(self).await
+        Self::sync(self).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        Journal::close(self).await
+        Self::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        Journal::destroy(self).await
+        Self::destroy(self).await
     }
 }
 #[cfg(test)]

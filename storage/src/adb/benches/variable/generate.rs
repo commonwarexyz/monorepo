@@ -23,7 +23,7 @@ const COMMITS_PER_ITERATION: u64 = 100;
 /// Benchmark the generation of a large randomly generated any db.
 fn bench_variable_generate(c: &mut Criterion) {
     let cfg = Config::default();
-    let runner = tokio::Runner::new(cfg.clone());
+    let runner = tokio::Runner::new(cfg);
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VARIANTS {

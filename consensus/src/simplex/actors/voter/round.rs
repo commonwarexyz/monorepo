@@ -159,7 +159,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Removes the leader and advance deadlines so timeouts stop firing.
-    pub fn clear_deadlines(&mut self) {
+    pub const fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
         self.advance_deadline = None;
     }
@@ -179,32 +179,32 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the notarization certificate if we already reconstructed one.
-    pub fn notarization(&self) -> Option<&Notarization<S, D>> {
+    pub const fn notarization(&self) -> Option<&Notarization<S, D>> {
         self.notarization.as_ref()
     }
 
     /// Returns the nullification certificate if we already reconstructed one.
-    pub fn nullification(&self) -> Option<&Nullification<S>> {
+    pub const fn nullification(&self) -> Option<&Nullification<S>> {
         self.nullification.as_ref()
     }
 
     /// Returns the finalization certificate if we already reconstructed one.
-    pub fn finalization(&self) -> Option<&Finalization<S, D>> {
+    pub const fn finalization(&self) -> Option<&Finalization<S, D>> {
         self.finalization.as_ref()
     }
 
     /// Returns how many nullify votes we currently track.
-    pub fn len_nullifies(&self) -> usize {
+    pub const fn len_nullifies(&self) -> usize {
         self.votes.len_nullifies()
     }
 
     /// Returns how many notarize votes we currently track.
-    pub fn len_notarizes(&self) -> usize {
+    pub const fn len_notarizes(&self) -> usize {
         self.votes.len_notarizes()
     }
 
     /// Returns how many finalize votes we currently track.
-    pub fn len_finalizes(&self) -> usize {
+    pub const fn len_finalizes(&self) -> usize {
         self.votes.len_finalizes()
     }
 
@@ -236,29 +236,33 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
-    pub fn proposal(&self) -> Option<&Proposal<D>> {
+    pub const fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
     }
 
-    pub fn has_broadcast_notarization(&self) -> bool {
+    pub const fn has_broadcast_notarization(&self) -> bool {
         self.broadcast_notarization
     }
 
-    pub fn has_broadcast_nullification(&self) -> bool {
+    pub const fn has_broadcast_nullification(&self) -> bool {
         self.broadcast_nullification
     }
 
-    pub fn has_broadcast_finalization(&self) -> bool {
+    pub const fn has_broadcast_finalization(&self) -> bool {
         self.broadcast_finalization
     }
 
-    pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
+    pub const fn set_deadlines(
+        &mut self,
+        leader_deadline: SystemTime,
+        advance_deadline: SystemTime,
+    ) {
         self.leader_deadline = Some(leader_deadline);
         self.advance_deadline = Some(advance_deadline);
     }
 
     /// Overrides the nullify retry deadline, allowing callers to reschedule retries deterministically.
-    pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
+    pub const fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
     }
 
@@ -267,7 +271,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
     /// `Some(false)` if this is the first timeout for this round, and `None` if we
     /// should not timeout (e.g. because we have already finalized).
-    pub fn construct_nullify(&mut self) -> Option<bool> {
+    pub const fn construct_nullify(&mut self) -> Option<bool> {
         // Ensure we haven't already broadcast a finalize vote.
         if self.broadcast_finalize {
             return None;
@@ -644,7 +648,7 @@ mod tests {
         assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
-        let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        let vote = Notarize::sign(&schemes[1], namespace, proposal_a).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
     }
@@ -702,7 +706,7 @@ mod tests {
         assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
-        let vote = Finalize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        let vote = Finalize::sign(&schemes[1], namespace, proposal_a).unwrap();
         assert!(round.add_verified_finalize(vote).is_none());
         assert_eq!(round.votes.len_finalizes(), 0);
     }
@@ -760,7 +764,7 @@ mod tests {
         assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
-        let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        let vote = Notarize::sign(&schemes[1], namespace, proposal_a).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
     }
@@ -811,7 +815,7 @@ mod tests {
             Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
 
         // Replay messages and verify broadcast flags
-        let mut round = Round::new(local_scheme.clone(), round, now);
+        let mut round = Round::new(local_scheme, round, now);
         round.set_leader(None);
         round.replay(&Voter::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
@@ -849,11 +853,10 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
 
         // Create finalized vote
-        let finalize_local =
-            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
+        let finalize_local = Finalize::sign(&local_scheme, namespace, proposal).expect("finalize");
 
         // Replay finalize and verify nullify is blocked
-        let mut round = Round::new(local_scheme.clone(), round_info, now);
+        let mut round = Round::new(local_scheme, round_info, now);
         round.set_leader(None);
         round.replay(&Voter::Finalize(finalize_local));
 

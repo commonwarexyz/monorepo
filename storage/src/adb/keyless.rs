@@ -100,7 +100,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
     }
 
     /// Returns the location of the last commit, if any.
-    pub fn last_commit_loc(&self) -> Option<Location> {
+    pub const fn last_commit_loc(&self) -> Option<Location> {
         self.last_commit_loc
     }
 
@@ -169,7 +169,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> H::Digest {
         self.journal.root()
     }
 

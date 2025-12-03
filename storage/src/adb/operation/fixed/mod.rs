@@ -48,7 +48,7 @@ mod tests {
 
         let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
-            value: value.clone(),
+            value,
             next_key: key.clone(),
         });
         assert_eq!(&key, update_op.key().unwrap());
@@ -87,7 +87,7 @@ mod tests {
         });
         assert_eq!(&value, update_op.value().unwrap());
 
-        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.value());
 
         let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
@@ -125,7 +125,7 @@ mod tests {
         });
         assert_eq!(value, update_op.into_value().unwrap());
 
-        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.into_value());
 
         let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));

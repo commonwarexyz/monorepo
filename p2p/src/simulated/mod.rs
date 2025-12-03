@@ -2309,7 +2309,7 @@ mod tests {
 
             let (id, latest, all) = subscription.next().await.unwrap();
             assert_eq!(id, 2);
-            let latest_keys: Vec<_> = Vec::from(latest.clone());
+            let latest_keys: Vec<_> = Vec::from(latest);
             assert_eq!(latest_keys, vec![pk2.clone()]);
             let all_keys: Vec<_> = Vec::from(all);
             assert_eq!(all_keys, vec![pk1, pk2]);

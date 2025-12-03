@@ -20,13 +20,11 @@ where
     type Error = Error;
 
     async fn size(&self) -> u64 {
-        contiguous::fixed::Journal::size(self)
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        contiguous::fixed::Journal::append(self, op)
-            .await
-            .map(|_| ())
+        Self::append(self, op).await.map(|_| ())
     }
 }
 

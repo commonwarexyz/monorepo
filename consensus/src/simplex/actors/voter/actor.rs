@@ -730,10 +730,9 @@ impl<
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
-            let propose_wait = match &mut pending_propose {
-                Some(propose) => Either::Left(propose),
-                None => Either::Right(futures::future::pending()),
-            };
+            let propose_wait = pending_propose
+                .as_mut()
+                .map_or_else(|| Either::Right(futures::future::pending()), Either::Left);
 
             // Attempt to verify current view
             if let Some((context, new_verify)) = self.try_verify().await {
@@ -741,10 +740,9 @@ impl<
                 pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
             }
-            let verify_wait = match &mut pending_verify {
-                Some(verify) => Either::Left(verify),
-                None => Either::Right(futures::future::pending()),
-            };
+            let verify_wait = pending_verify
+                .as_mut()
+                .map_or_else(|| Either::Right(futures::future::pending()), Either::Left);
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.state.next_timeout_deadline();

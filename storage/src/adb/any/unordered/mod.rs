@@ -113,7 +113,7 @@ impl<
     }
 
     /// Whether the snapshot currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -333,7 +333,9 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    pub(crate) const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -375,7 +377,7 @@ impl<
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
+    pub const fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
@@ -439,11 +441,9 @@ impl<
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -697,7 +697,7 @@ impl<
     type Value = <C::Item as Keyed>::Value;
 
     async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        IndexedLog::commit(self, metadata).await
+        self.commit(metadata).await
     }
 }
 
@@ -744,7 +744,7 @@ impl<
     }
 
     async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        IndexedLog::commit(self, metadata).await
+        self.commit(metadata).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

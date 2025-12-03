@@ -23,12 +23,12 @@ pub struct Ordered<T>(Vec<T>);
 
 impl<T> Ordered<T> {
     /// Returns the size of the ordered collection.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns `true` if the collection is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -229,12 +229,12 @@ pub struct OrderedAssociated<K, V> {
 
 impl<K, V> OrderedAssociated<K, V> {
     /// Returns the number of entries in the map.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.keys.len()
     }
 
     /// Returns `true` if the map is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 
@@ -252,7 +252,7 @@ impl<K, V> OrderedAssociated<K, V> {
     }
 
     /// Returns the ordered keys as an [`Ordered`] reference.
-    pub fn keys(&self) -> &Ordered<K> {
+    pub const fn keys(&self) -> &Ordered<K> {
         &self.keys
     }
 

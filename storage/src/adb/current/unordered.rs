@@ -344,7 +344,7 @@ impl<
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
+    pub const fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
     }
 
@@ -400,11 +400,10 @@ impl<
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.any.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
+        let start_loc = self
+            .any
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
         self.commit_ops(metadata).await?; // recovery is ensured after this returns
 

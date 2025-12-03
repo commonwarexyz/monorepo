@@ -107,10 +107,9 @@ pub fn sign_message<V: Variant>(
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> V::Signature {
-    let payload = match namespace {
-        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-        None => Cow::Borrowed(message),
-    };
+    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+        Cow::Owned(union_unique(namespace, message))
+    });
     sign::<V>(private, V::MESSAGE, &payload)
 }
 
@@ -126,10 +125,9 @@ pub fn verify_message<V: Variant>(
     message: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    let payload = match namespace {
-        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-        None => Cow::Borrowed(message),
-    };
+    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+        Cow::Owned(union_unique(namespace, message))
+    });
     verify::<V>(public, V::MESSAGE, &payload, signature)
 }
 
@@ -254,10 +252,10 @@ where
     // Sum the hashed messages
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let hm = match namespace {
-            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            None => hash_message::<V>(V::MESSAGE, msg),
-        };
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
         hm_sum.add(&hm);
     }
 
@@ -680,9 +678,11 @@ where
             messages
                 .into_iter()
                 .par_bridge()
-                .map(|(namespace, msg)| match namespace {
-                    Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                    None => hash_message::<V>(V::MESSAGE, msg),
+                .map(|(namespace, msg)| {
+                    namespace.as_ref().map_or_else(
+                        || hash_message::<V>(V::MESSAGE, msg),
+                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                    )
                 })
                 .reduce(V::Signature::zero, |mut sum, hm| {
                     sum.add(&hm);
@@ -702,10 +702,10 @@ where
 {
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let hm = match namespace {
-            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            None => hash_message::<V>(V::MESSAGE, msg),
-        };
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
         hm_sum.add(&hm);
     }
     hm_sum
@@ -1337,7 +1337,7 @@ mod tests {
         // Failure with signatures from different public_keys
         let signer2 = &shares[1];
         let partial2 = partial_sign_message::<V>(signer2, messages[0].0, messages[0].1);
-        let mut partials_mixed_public_keys = partials.clone();
+        let mut partials_mixed_public_keys = partials;
         partials_mixed_public_keys[0] = partial2;
         assert!(matches!(
             partial_verify_multiple_messages::<V, _, _>(

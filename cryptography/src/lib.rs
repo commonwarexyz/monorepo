@@ -100,6 +100,20 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 /// A [Signature] over a message.
 pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
+/// An extension of [Signature] that supports public key recovery.
+pub trait Recoverable: Signature {
+    /// The type of [PublicKey] that can be recovered from this [Signature].
+    type PublicKey: PublicKey<Signature = Self>;
+
+    /// Recover the [PublicKey] of the signer that created this [Signature] over the given message.
+    ///
+    /// The message should not be hashed prior to calling this function. If a particular
+    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+    ///
+    /// Like when verifying a signature, the namespace must match what was used during signing exactly.
+    fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
+}
+
 /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
 pub trait BatchVerifier<K: PublicKey> {
     /// Create a new batch verifier.
@@ -395,51 +409,96 @@ mod tests {
     }
 
     #[test]
-    fn test_secp256r1_validate() {
-        test_validate::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_validate() {
+        test_validate::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_validate_invalid_public_key() {
-        test_validate_invalid_public_key::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_sign_and_verify() {
-        test_sign_and_verify::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_sign_and_verify() {
+        test_sign_and_verify::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_sign_and_verify_wrong_message() {
-        test_sign_and_verify_wrong_message::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_sign_and_verify_wrong_namespace() {
-        test_sign_and_verify_wrong_namespace::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_empty_namespace() {
-        test_empty_namespace::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_empty_namespace() {
+        test_empty_namespace::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_signature_determinism() {
-        test_signature_determinism::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_signature_determinism() {
+        test_signature_determinism::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_invalid_signature_publickey_pair() {
-        test_invalid_signature_publickey_pair::<secp256r1::PrivateKey>();
+    fn test_secp256r1_standard_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<secp256r1::standard::PrivateKey>();
     }
 
     #[test]
-    fn test_secp256r1_len() {
-        assert_eq!(secp256r1::PublicKey::SIZE, 33);
-        assert_eq!(secp256r1::Signature::SIZE, 64);
+    fn test_secp256r1_standard_len() {
+        assert_eq!(secp256r1::standard::PublicKey::SIZE, 33);
+        assert_eq!(secp256r1::standard::Signature::SIZE, 64);
     }
 
+    #[test]
+    fn test_secp256r1_recoverable_validate() {
+        test_validate::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_sign_and_verify() {
+        test_sign_and_verify::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_empty_namespace() {
+        test_empty_namespace::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_signature_determinism() {
+        test_signature_determinism::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_len() {
+        assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
+        assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
+    }
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();

@@ -120,7 +120,7 @@ pub struct BatchGuard<'a, const N: usize> {
 impl<'a, const N: usize> BatchGuard<'a, N> {
     /// Get the length of the bitmap as it would be after committing this batch.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.bitmap
             .active_batch
             .as_ref()
@@ -130,13 +130,13 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
     /// Returns true if the bitmap would be empty after committing this batch.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Get the number of pruned chunks after this batch.
     #[inline]
-    pub fn pruned_chunks(&self) -> usize {
+    pub const fn pruned_chunks(&self) -> usize {
         self.bitmap
             .active_batch
             .as_ref()

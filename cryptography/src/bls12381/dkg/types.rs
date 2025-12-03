@@ -33,7 +33,7 @@ pub struct Share<V: Variant> {
 
 impl<V: Variant> Share<V> {
     /// Create a new [Share] message.
-    pub fn new(commitment: Public<V>, share: group::Share) -> Self {
+    pub const fn new(commitment: Public<V>, share: group::Share) -> Self {
         Self { commitment, share }
     }
 }
@@ -201,7 +201,7 @@ mod test {
         let (commitment, identities) = generate_identities(NUM_PARTICIPANTS);
         let (_, share) = &identities[0];
 
-        let share = Share::<MinSig>::new(commitment.clone(), share.clone());
+        let share = Share::<MinSig>::new(commitment, share.clone());
 
         let mut buf = Vec::with_capacity(share.encode_size());
         share.write(&mut buf);

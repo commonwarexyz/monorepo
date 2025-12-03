@@ -217,7 +217,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let last_commit = journal.size().checked_sub(1);
 
-        Ok(Immutable {
+        Ok(Self {
             journal,
             snapshot,
             last_commit,
@@ -276,7 +276,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let last_commit = journal.size().checked_sub(1);
 
-        let mut db = Immutable {
+        let mut db = Self {
             journal,
             snapshot,
             last_commit,
@@ -320,7 +320,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> H::Digest {
         self.journal.root()
     }
 

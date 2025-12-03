@@ -343,7 +343,7 @@ where
         Ok(None)
     }
 
-    fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
+    const fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -351,7 +351,7 @@ where
     }
 
     /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -371,13 +371,13 @@ where
 
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
-    pub fn op_count(&self) -> Location {
+    pub const fn op_count(&self) -> Location {
         Location::new_unchecked(self.log.size())
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
+    pub const fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
@@ -451,11 +451,9 @@ where
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
