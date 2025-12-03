@@ -10,7 +10,7 @@ use crate::{
             fixed::{unordered::Operation, Value},
             Keyed as _,
         },
-        store::LogStore,
+        store::{Batchable, LogStore},
         Error,
     },
     mmr::{
@@ -572,6 +572,16 @@ impl<
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
     }
+}
+
+impl<E, K, V, T, H, const N: usize> Batchable for Current<E, K, V, H, T, N>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+    H: Hasher,
+{
 }
 
 #[cfg(test)]

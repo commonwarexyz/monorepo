@@ -3,7 +3,7 @@ use crate::{
         any::{CleanAny, DirtyAny},
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::LogStore,
+        store::{Batchable, LogStore},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -1074,6 +1074,15 @@ impl<
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
         self.delete(key).await
     }
+}
+
+impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistableContiguous<Item: Operation>,
+    I: Index<Value = Location>,
+    H: Hasher,
+{
 }
 
 #[cfg(test)]

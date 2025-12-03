@@ -2,7 +2,7 @@
 
 use crate::{
     adb::Error,
-    store::{Store, StoreDeletable, StoreMut},
+    store::{Store, StoreDeletable},
 };
 use commonware_codec::Codec;
 use commonware_utils::Array;
@@ -169,15 +169,6 @@ pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Er
             Ok(())
         }
     }
-}
-
-/// Default implementation of [Batchable] for all databases.
-impl<D> Batchable for D
-where
-    D: Store<Error = Error> + StoreMut + StoreDeletable,
-    D::Key: Array,
-    D::Value: Codec + Clone,
-{
 }
 
 #[cfg(test)]

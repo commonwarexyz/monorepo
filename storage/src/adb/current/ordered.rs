@@ -7,9 +7,9 @@ use crate::{
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{
             fixed::{ordered::Operation, Value},
-            Committable as _, KeyData, Keyed as _,
+            Committable as _, KeyData, Keyed,
         },
-        store::LogStore,
+        store::{Batchable, LogStore},
         Error,
     },
     mmr::{
@@ -736,6 +736,16 @@ impl<
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
     }
+}
+
+impl<E, K, V, T, H, const N: usize> Batchable for Current<E, K, V, H, T, N>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+    H: Hasher,
+{
 }
 
 #[cfg(test)]
