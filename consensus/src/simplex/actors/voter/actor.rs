@@ -898,11 +898,11 @@ impl<
 
             // Attempt to send any new view messages
             //
-            // It is possible that the batcher may drop any votes we construct during this call
-            // if it has not yet been updated to the message's view (and it sees the vote as not interesting).
-            // This is acceptable because we update the batcher after this call if we enter a new view,
-            // and any votes for old views that are dropped have no impact on liveness (we may, however, miss
-            // building a finalization for an old view where we otherwise could have contributed).
+            // The batcher may drop votes we construct here if it has not yet been updated to the
+            // message's view. This only happens when we skip ahead multiple views, which always
+            // coincides with entering a new view (triggering a batcher update below before we send
+            // any votes for the new current view). This has no impact on liveness, however, we may miss
+            // building a finalization for an old view where we otherwise could have contributed.
             self.notify(
                 &mut batcher,
                 &mut resolver,
