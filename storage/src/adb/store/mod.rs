@@ -568,6 +568,8 @@ where
     V: Value,
     T: Translator,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
     }

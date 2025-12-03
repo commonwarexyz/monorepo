@@ -660,6 +660,8 @@ impl<
         const N: usize,
     > crate::store::StorePersistable for Current<E, K, V, H, T, N>
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
     }

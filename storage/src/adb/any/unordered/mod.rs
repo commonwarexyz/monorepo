@@ -526,6 +526,8 @@ impl<
         H: Hasher,
     > crate::store::StorePersistable for IndexedLog<E, C, I, H>
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
     }

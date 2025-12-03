@@ -1039,6 +1039,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut fo
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersistable
     for Freezer<E, K, V>
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await?;
         Ok(())
