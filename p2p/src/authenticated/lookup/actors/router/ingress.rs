@@ -59,7 +59,7 @@ pub struct Messenger<P: PublicKey> {
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub fn new(sender: Mailbox<Message<P>>) -> Self {
+    pub const fn new(sender: Mailbox<Message<P>>) -> Self {
         Self { sender }
     }
 

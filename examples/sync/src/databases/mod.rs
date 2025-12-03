@@ -22,8 +22,8 @@ impl std::str::FromStr for DatabaseType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "any" => Ok(DatabaseType::Any),
-            "immutable" => Ok(DatabaseType::Immutable),
+            "any" => Ok(Self::Any),
+            "immutable" => Ok(Self::Immutable),
             _ => Err(format!(
                 "Invalid database type: '{s}'. Must be 'any' or 'immutable'",
             )),
@@ -32,10 +32,10 @@ impl std::str::FromStr for DatabaseType {
 }
 
 impl DatabaseType {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            DatabaseType::Any => "any",
-            DatabaseType::Immutable => "immutable",
+            Self::Any => "any",
+            Self::Immutable => "immutable",
         }
     }
 }

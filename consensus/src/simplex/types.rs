@@ -91,12 +91,12 @@ impl<T: Attributable> AttributableMap<T> {
     }
 
     /// Returns the number of items in the [AttributableMap].
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.added
     }
 
     /// Returns `true` if the [AttributableMap] is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.added == 0
     }
 
@@ -638,8 +638,8 @@ pub struct Proposal<D: Digest> {
 
 impl<D: Digest> Proposal<D> {
     /// Creates a new proposal with the specified view, parent view, and payload.
-    pub fn new(round: Round, parent: View, payload: D) -> Self {
-        Proposal {
+    pub const fn new(round: Round, parent: View, payload: D) -> Self {
+        Self {
             round,
             parent,
             payload,
@@ -699,7 +699,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Returns the round associated with this notarize vote.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.proposal.round
     }
 }
@@ -824,7 +824,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     }
 
     /// Returns the round associated with the notarized proposal.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.proposal.round
     }
 }
@@ -944,7 +944,7 @@ impl<S: Scheme> Nullify<S> {
     }
 
     /// Returns the round associated with this nullify vote.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.round
     }
 }
@@ -1015,7 +1015,7 @@ impl<S: Scheme> Nullification<S> {
     }
 
     /// Returns the round associated with this nullification.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.round
     }
 }
@@ -1103,7 +1103,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Returns the round associated with this finalize vote.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.proposal.round
     }
 }
@@ -1228,7 +1228,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     }
 
     /// Returns the round associated with the finalized proposal.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.proposal.round
     }
 }
@@ -1316,11 +1316,11 @@ pub enum Backfiller<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Write for Backfiller<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Backfiller::Request(request) => {
+            Self::Request(request) => {
                 0u8.write(writer);
                 request.write(writer);
             }
-            Backfiller::Response(response) => {
+            Self::Response(response) => {
                 1u8.write(writer);
                 response.write(writer);
             }
@@ -1331,8 +1331,8 @@ impl<S: Scheme, D: Digest> Write for Backfiller<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Backfiller<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Backfiller::Request(v) => v.encode_size(),
-            Backfiller::Response(v) => v.encode_size(),
+            Self::Request(v) => v.encode_size(),
+            Self::Response(v) => v.encode_size(),
         }
     }
 }
@@ -1346,11 +1346,11 @@ impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
             0 => {
                 let (max_len, _) = cfg;
                 let v = Request::read_cfg(reader, max_len)?;
-                Ok(Backfiller::Request(v))
+                Ok(Self::Request(v))
             }
             1 => {
                 let v = Response::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Backfiller::Response(v))
+                Ok(Self::Response(v))
             }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Backfiller",
@@ -1374,8 +1374,8 @@ pub struct Request {
 
 impl Request {
     /// Creates a new request for missing notarizations and nullifications.
-    pub fn new(id: u64, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
-        Request {
+    pub const fn new(id: u64, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
+        Self {
             id,
             notarizations,
             nullifications,
@@ -1425,7 +1425,7 @@ impl Read for Request {
                 ));
             }
         }
-        Ok(Request {
+        Ok(Self {
             id,
             notarizations,
             nullifications,
@@ -1447,12 +1447,12 @@ pub struct Response<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Response<S, D> {
     /// Creates a new response with the given id, notarizations, and nullifications.
-    pub fn new(
+    pub const fn new(
         id: u64,
         notarizations: Vec<Notarization<S, D>>,
         nullifications: Vec<Nullification<S>>,
     ) -> Self {
-        Response {
+        Self {
             id,
             notarizations,
             nullifications,
@@ -1535,7 +1535,7 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
                 ));
             }
         }
-        Ok(Response {
+        Ok(Self {
             id,
             notarizations,
             nullifications,
@@ -1585,15 +1585,15 @@ pub enum Activity<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Activity::Notarize(a), Activity::Notarize(b)) => a == b,
-            (Activity::Notarization(a), Activity::Notarization(b)) => a == b,
-            (Activity::Nullify(a), Activity::Nullify(b)) => a == b,
-            (Activity::Nullification(a), Activity::Nullification(b)) => a == b,
-            (Activity::Finalize(a), Activity::Finalize(b)) => a == b,
-            (Activity::Finalization(a), Activity::Finalization(b)) => a == b,
-            (Activity::ConflictingNotarize(a), Activity::ConflictingNotarize(b)) => a == b,
-            (Activity::ConflictingFinalize(a), Activity::ConflictingFinalize(b)) => a == b,
-            (Activity::NullifyFinalize(a), Activity::NullifyFinalize(b)) => a == b,
+            (Self::Notarize(a), Self::Notarize(b)) => a == b,
+            (Self::Notarization(a), Self::Notarization(b)) => a == b,
+            (Self::Nullify(a), Self::Nullify(b)) => a == b,
+            (Self::Nullification(a), Self::Nullification(b)) => a == b,
+            (Self::Finalize(a), Self::Finalize(b)) => a == b,
+            (Self::Finalization(a), Self::Finalization(b)) => a == b,
+            (Self::ConflictingNotarize(a), Self::ConflictingNotarize(b)) => a == b,
+            (Self::ConflictingFinalize(a), Self::ConflictingFinalize(b)) => a == b,
+            (Self::NullifyFinalize(a), Self::NullifyFinalize(b)) => a == b,
             _ => false,
         }
     }
@@ -1604,39 +1604,39 @@ impl<S: Scheme, D: Digest> Eq for Activity<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            Activity::Notarize(v) => {
+            Self::Notarize(v) => {
                 0u8.hash(state);
                 v.hash(state);
             }
-            Activity::Notarization(v) => {
+            Self::Notarization(v) => {
                 1u8.hash(state);
                 v.hash(state);
             }
-            Activity::Nullify(v) => {
+            Self::Nullify(v) => {
                 2u8.hash(state);
                 v.hash(state);
             }
-            Activity::Nullification(v) => {
+            Self::Nullification(v) => {
                 3u8.hash(state);
                 v.hash(state);
             }
-            Activity::Finalize(v) => {
+            Self::Finalize(v) => {
                 4u8.hash(state);
                 v.hash(state);
             }
-            Activity::Finalization(v) => {
+            Self::Finalization(v) => {
                 5u8.hash(state);
                 v.hash(state);
             }
-            Activity::ConflictingNotarize(v) => {
+            Self::ConflictingNotarize(v) => {
                 6u8.hash(state);
                 v.hash(state);
             }
-            Activity::ConflictingFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 7u8.hash(state);
                 v.hash(state);
             }
-            Activity::NullifyFinalize(v) => {
+            Self::NullifyFinalize(v) => {
                 8u8.hash(state);
                 v.hash(state);
             }
@@ -1646,17 +1646,17 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
 
 impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
-    pub fn verified(&self) -> bool {
+    pub const fn verified(&self) -> bool {
         match self {
-            Activity::Notarize(_) => false,
-            Activity::Notarization(_) => true,
-            Activity::Nullify(_) => false,
-            Activity::Nullification(_) => true,
-            Activity::Finalize(_) => false,
-            Activity::Finalization(_) => true,
-            Activity::ConflictingNotarize(_) => false,
-            Activity::ConflictingFinalize(_) => false,
-            Activity::NullifyFinalize(_) => false,
+            Self::Notarize(_) => false,
+            Self::Notarization(_) => true,
+            Self::Nullify(_) => false,
+            Self::Nullification(_) => true,
+            Self::Finalize(_) => false,
+            Self::Finalization(_) => true,
+            Self::ConflictingNotarize(_) => false,
+            Self::ConflictingFinalize(_) => false,
+            Self::NullifyFinalize(_) => false,
         }
     }
 
@@ -1667,15 +1667,15 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// necessary before calling this method.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         match self {
-            Activity::Notarize(n) => n.verify(scheme, namespace),
-            Activity::Notarization(n) => n.verify(rng, scheme, namespace),
-            Activity::Nullify(n) => n.verify::<D>(scheme, namespace),
-            Activity::Nullification(n) => n.verify::<R, D>(rng, scheme, namespace),
-            Activity::Finalize(f) => f.verify(scheme, namespace),
-            Activity::Finalization(f) => f.verify(rng, scheme, namespace),
-            Activity::ConflictingNotarize(c) => c.verify(scheme, namespace),
-            Activity::ConflictingFinalize(c) => c.verify(scheme, namespace),
-            Activity::NullifyFinalize(c) => c.verify(scheme, namespace),
+            Self::Notarize(n) => n.verify(scheme, namespace),
+            Self::Notarization(n) => n.verify(rng, scheme, namespace),
+            Self::Nullify(n) => n.verify::<D>(scheme, namespace),
+            Self::Nullification(n) => n.verify::<R, D>(rng, scheme, namespace),
+            Self::Finalize(f) => f.verify(scheme, namespace),
+            Self::Finalization(f) => f.verify(rng, scheme, namespace),
+            Self::ConflictingNotarize(c) => c.verify(scheme, namespace),
+            Self::ConflictingFinalize(c) => c.verify(scheme, namespace),
+            Self::NullifyFinalize(c) => c.verify(scheme, namespace),
         }
     }
 }
@@ -1683,39 +1683,39 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
 impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Notarize(v) => {
+            Self::Notarize(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Activity::Notarization(v) => {
+            Self::Notarization(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullify(v) => {
+            Self::Nullify(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullification(v) => {
+            Self::Nullification(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalize(v) => {
+            Self::Finalize(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalization(v) => {
+            Self::Finalization(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingNotarize(v) => {
+            Self::ConflictingNotarize(v) => {
                 6u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 7u8.write(writer);
                 v.write(writer);
             }
-            Activity::NullifyFinalize(v) => {
+            Self::NullifyFinalize(v) => {
                 8u8.write(writer);
                 v.write(writer);
             }
@@ -1726,15 +1726,15 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Notarize(v) => v.encode_size(),
-            Activity::Notarization(v) => v.encode_size(),
-            Activity::Nullify(v) => v.encode_size(),
-            Activity::Nullification(v) => v.encode_size(),
-            Activity::Finalize(v) => v.encode_size(),
-            Activity::Finalization(v) => v.encode_size(),
-            Activity::ConflictingNotarize(v) => v.encode_size(),
-            Activity::ConflictingFinalize(v) => v.encode_size(),
-            Activity::NullifyFinalize(v) => v.encode_size(),
+            Self::Notarize(v) => v.encode_size(),
+            Self::Notarization(v) => v.encode_size(),
+            Self::Nullify(v) => v.encode_size(),
+            Self::Nullification(v) => v.encode_size(),
+            Self::Finalize(v) => v.encode_size(),
+            Self::Finalization(v) => v.encode_size(),
+            Self::ConflictingNotarize(v) => v.encode_size(),
+            Self::ConflictingFinalize(v) => v.encode_size(),
+            Self::NullifyFinalize(v) => v.encode_size(),
         }
     }
 }
@@ -1747,39 +1747,39 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
         match tag {
             0 => {
                 let v = Notarize::<S, D>::read(reader)?;
-                Ok(Activity::Notarize(v))
+                Ok(Self::Notarize(v))
             }
             1 => {
                 let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Activity::Notarization(v))
+                Ok(Self::Notarization(v))
             }
             2 => {
                 let v = Nullify::<S>::read(reader)?;
-                Ok(Activity::Nullify(v))
+                Ok(Self::Nullify(v))
             }
             3 => {
                 let v = Nullification::<S>::read_cfg(reader, cfg)?;
-                Ok(Activity::Nullification(v))
+                Ok(Self::Nullification(v))
             }
             4 => {
                 let v = Finalize::<S, D>::read(reader)?;
-                Ok(Activity::Finalize(v))
+                Ok(Self::Finalize(v))
             }
             5 => {
                 let v = Finalization::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Activity::Finalization(v))
+                Ok(Self::Finalization(v))
             }
             6 => {
                 let v = ConflictingNotarize::<S, D>::read(reader)?;
-                Ok(Activity::ConflictingNotarize(v))
+                Ok(Self::ConflictingNotarize(v))
             }
             7 => {
                 let v = ConflictingFinalize::<S, D>::read(reader)?;
-                Ok(Activity::ConflictingFinalize(v))
+                Ok(Self::ConflictingFinalize(v))
             }
             8 => {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
-                Ok(Activity::NullifyFinalize(v))
+                Ok(Self::NullifyFinalize(v))
             }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",
@@ -1792,15 +1792,15 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
 impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
-            Activity::Notarize(v) => v.epoch(),
-            Activity::Notarization(v) => v.epoch(),
-            Activity::Nullify(v) => v.epoch(),
-            Activity::Nullification(v) => v.epoch(),
-            Activity::Finalize(v) => v.epoch(),
-            Activity::Finalization(v) => v.epoch(),
-            Activity::ConflictingNotarize(v) => v.epoch(),
-            Activity::ConflictingFinalize(v) => v.epoch(),
-            Activity::NullifyFinalize(v) => v.epoch(),
+            Self::Notarize(v) => v.epoch(),
+            Self::Notarization(v) => v.epoch(),
+            Self::Nullify(v) => v.epoch(),
+            Self::Nullification(v) => v.epoch(),
+            Self::Finalize(v) => v.epoch(),
+            Self::Finalization(v) => v.epoch(),
+            Self::ConflictingNotarize(v) => v.epoch(),
+            Self::ConflictingFinalize(v) => v.epoch(),
+            Self::NullifyFinalize(v) => v.epoch(),
         }
     }
 }
@@ -1808,15 +1808,15 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
 impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
     fn view(&self) -> View {
         match self {
-            Activity::Notarize(v) => v.view(),
-            Activity::Notarization(v) => v.view(),
-            Activity::Nullify(v) => v.view(),
-            Activity::Nullification(v) => v.view(),
-            Activity::Finalize(v) => v.view(),
-            Activity::Finalization(v) => v.view(),
-            Activity::ConflictingNotarize(v) => v.view(),
-            Activity::ConflictingFinalize(v) => v.view(),
-            Activity::NullifyFinalize(v) => v.view(),
+            Self::Notarize(v) => v.view(),
+            Self::Notarization(v) => v.view(),
+            Self::Nullify(v) => v.view(),
+            Self::Nullification(v) => v.view(),
+            Self::Finalize(v) => v.view(),
+            Self::Finalization(v) => v.view(),
+            Self::ConflictingNotarize(v) => v.view(),
+            Self::ConflictingFinalize(v) => v.view(),
+            Self::NullifyFinalize(v) => v.view(),
         }
     }
 }
@@ -1852,7 +1852,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
         assert_eq!(notarize_1.round(), notarize_2.round());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
 
-        ConflictingNotarize {
+        Self {
             notarize_1,
             notarize_2,
         }
@@ -1903,7 +1903,7 @@ impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
             ));
         }
 
-        Ok(ConflictingNotarize {
+        Ok(Self {
             notarize_1,
             notarize_2,
         })
@@ -1947,7 +1947,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
         assert_eq!(finalize_1.round(), finalize_2.round());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
 
-        ConflictingFinalize {
+        Self {
             finalize_1,
             finalize_2,
         }
@@ -1998,7 +1998,7 @@ impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
             ));
         }
 
-        Ok(ConflictingFinalize {
+        Ok(Self {
             finalize_1,
             finalize_2,
         })
@@ -2043,7 +2043,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
         assert_eq!(nullify.round, finalize.round());
         assert_eq!(nullify.signer(), finalize.signer());
 
-        NullifyFinalize { nullify, finalize }
+        Self { nullify, finalize }
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
@@ -2091,7 +2091,7 @@ impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
             ));
         }
 
-        Ok(NullifyFinalize { nullify, finalize })
+        Ok(Self { nullify, finalize })
     }
 }
 
@@ -2395,8 +2395,7 @@ mod tests {
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let cfg = schemes[0].certificate_codec_config();
         let mut decoded =
-            Response::<S, Sha256>::decode_cfg(response.encode(), &(usize::MAX, cfg.clone()))
-                .unwrap();
+            Response::<S, Sha256>::decode_cfg(response.encode(), &(usize::MAX, cfg)).unwrap();
         assert_eq!(response.id, decoded.id);
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());

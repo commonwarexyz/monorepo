@@ -321,7 +321,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.size
     }
 
@@ -421,7 +421,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// Return the position of the oldest item in the journal that remains readable.
     ///
     /// Note that this value could be older than the `min_item_pos` last passed to prune.
-    pub fn oldest_retained_pos(&self) -> Option<u64> {
+    pub const fn oldest_retained_pos(&self) -> Option<u64> {
         if self.pruning_boundary == self.size {
             return None;
         }
@@ -430,7 +430,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     }
 
     /// Return the location before which all items have been pruned.
-    pub fn pruning_boundary(&self) -> u64 {
+    pub const fn pruning_boundary(&self) -> u64 {
         self.pruning_boundary
     }
 
@@ -650,15 +650,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
     type Item = A;
 
     fn size(&self) -> u64 {
-        Journal::size(self)
+        Self::size(self)
     }
 
     fn oldest_retained_pos(&self) -> Option<u64> {
-        Journal::oldest_retained_pos(self)
+        Self::oldest_retained_pos(self)
     }
 
     fn pruning_boundary(&self) -> u64 {
-        Journal::pruning_boundary(self)
+        Self::pruning_boundary(self)
     }
 
     async fn replay(
@@ -666,43 +666,43 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Journal::replay(self, buffer, start_pos).await
+        Self::replay(self, buffer, start_pos).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Journal::read(self, position).await
+        Self::read(self, position).await
     }
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journal<E, A> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
+        Self::append(self, item).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
+        Self::prune(self, min_position).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
+        Self::rewind(self, size).await
     }
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistableContiguous for Journal<E, A> {
     async fn commit(&mut self) -> Result<(), Error> {
-        Journal::sync(self).await
+        Self::sync(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        Journal::sync(self).await
+        Self::sync(self).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        Journal::close(self).await
+        Self::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        Journal::destroy(self).await
+        Self::destroy(self).await
     }
 }
 

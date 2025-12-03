@@ -37,7 +37,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
 }

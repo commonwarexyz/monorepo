@@ -57,7 +57,7 @@ impl<
     > AttributableReporter<E, S, D, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
         Self {
             rng,
             scheme,

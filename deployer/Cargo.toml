@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
 documentation = "https://docs.rs/commonware-deployer"
 
+[lints]
+workspace = true
+
 [features]
 default = ["aws"]
 aws = ["aws-config", "aws-sdk-ec2", "reqwest", "tokio", "tracing", "tracing-subscriber", "thiserror", "futures", "clap", "uuid"]

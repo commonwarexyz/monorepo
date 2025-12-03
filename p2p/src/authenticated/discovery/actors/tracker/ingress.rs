@@ -208,7 +208,7 @@ pub struct Releaser<C: PublicKey> {
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
@@ -228,7 +228,7 @@ pub struct Oracle<C: PublicKey> {
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 }

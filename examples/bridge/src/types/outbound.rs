@@ -23,15 +23,15 @@ pub enum Outbound<D: Digest> {
 impl<D: Digest> Write for Outbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Outbound::Success(success) => {
+            Self::Success(success) => {
                 buf.put_u8(0);
                 success.write(buf);
             }
-            Outbound::Block(data) => {
+            Self::Block(data) => {
                 buf.put_u8(1);
                 data.write(buf);
             }
-            Outbound::Finalization(data) => {
+            Self::Finalization(data) => {
                 buf.put_u8(2);
                 data.write(buf);
             }
@@ -47,15 +47,15 @@ impl<D: Digest> Read for Outbound<D> {
         match tag {
             0 => {
                 let success = bool::read(buf)?;
-                Ok(Outbound::Success(success))
+                Ok(Self::Success(success))
             }
             1 => {
                 let block = BlockFormat::<D>::read(buf)?;
-                Ok(Outbound::Block(block))
+                Ok(Self::Block(block))
             }
             2 => {
                 let finalization = Finalization::read(buf)?;
-                Ok(Outbound::Finalization(finalization))
+                Ok(Self::Finalization(finalization))
             }
             _ => Err(Error::InvalidEnum(tag)),
         }
@@ -65,9 +65,9 @@ impl<D: Digest> Read for Outbound<D> {
 impl<D: Digest> EncodeSize for Outbound<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Outbound::Success(success) => success.encode_size(),
-            Outbound::Block(data) => data.encode_size(),
-            Outbound::Finalization(finalization) => finalization.encode_size(),
+            Self::Success(success) => success.encode_size(),
+            Self::Block(data) => data.encode_size(),
+            Self::Finalization(finalization) => finalization.encode_size(),
         }
     }
 }

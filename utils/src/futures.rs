@@ -160,7 +160,7 @@ pub struct Closed<'a, T> {
 
 impl<'a, T> Closed<'a, T> {
     /// Creates a new future that resolves when the receiver is dropped.
-    pub fn new(sender: &'a mut oneshot::Sender<T>) -> Self {
+    pub const fn new(sender: &'a mut oneshot::Sender<T>) -> Self {
         Self { sender }
     }
 }
@@ -242,10 +242,9 @@ impl<F: Future> Future for OptionFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        match this.0.as_pin_mut() {
-            Some(fut) => fut.poll(cx),
-            None => Poll::Pending,
-        }
+        this.0
+            .as_pin_mut()
+            .map_or_else(|| Poll::Pending, |fut| fut.poll(cx))
     }
 }
 

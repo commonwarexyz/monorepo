@@ -34,14 +34,14 @@ enum Variant {
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            Variant::Store => "store",
-            Variant::AnyUnordered => "any::fixed::unordered",
-            Variant::AnyOrdered => "any::fixed::ordered",
-            Variant::Variable => "any::variable",
-            Variant::CurrentUnordered => "current::unordered",
-            Variant::CurrentOrdered => "current::ordered",
+            Self::Store => "store",
+            Self::AnyUnordered => "any::fixed::unordered",
+            Self::AnyOrdered => "any::fixed::ordered",
+            Self::Variable => "any::variable",
+            Self::CurrentUnordered => "current::unordered",
+            Self::CurrentOrdered => "current::ordered",
         }
     }
 }

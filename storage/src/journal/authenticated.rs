@@ -290,7 +290,7 @@ where
     }
 
     /// Return the root of the MMR.
-    pub fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> H::Digest {
         self.mmr.root()
     }
 
@@ -364,7 +364,7 @@ where
 
     /// Merkleize the journal and compute the root digest.
     pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
-        let Journal {
+        let Self {
             mmr,
             journal,
             mut hasher,

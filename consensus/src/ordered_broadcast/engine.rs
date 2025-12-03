@@ -956,7 +956,7 @@ impl<
     ////////////////////////////////////////
 
     /// Returns the section of the journal for the given height.
-    fn get_journal_section(&self, height: u64) -> u64 {
+    const fn get_journal_section(&self, height: u64) -> u64 {
         height / self.journal_heights_per_section
     }
 

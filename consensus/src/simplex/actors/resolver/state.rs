@@ -24,7 +24,7 @@ pub struct State<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub const fn new(fetch_concurrent: usize) -> Self {
         Self {
             nullifications: BTreeMap::new(),
             current_view: View::zero(),

@@ -67,8 +67,8 @@ pub enum Error {
 
 impl Error {
     /// Returns true if the error represents a blockable offense by a peer.
-    pub fn blockable(&self) -> bool {
-        matches!(self, Error::PeerMismatch | Error::InvalidAckSignature)
+    pub const fn blockable(&self) -> bool {
+        matches!(self, Self::PeerMismatch | Self::InvalidAckSignature)
     }
 }
 
@@ -303,15 +303,15 @@ pub enum Activity<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> Write for Activity<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Ack(ack) => {
+            Self::Ack(ack) => {
                 0u8.write(writer);
                 ack.write(writer);
             }
-            Activity::Certified(certificate) => {
+            Self::Certified(certificate) => {
                 1u8.write(writer);
                 certificate.write(writer);
             }
-            Activity::Tip(index) => {
+            Self::Tip(index) => {
                 2u8.write(writer);
                 UInt(*index).write(writer);
             }
@@ -324,9 +324,9 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Certified(Certificate::read(reader)?)),
-            2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
+            0 => Ok(Self::Ack(Ack::read(reader)?)),
+            1 => Ok(Self::Certified(Certificate::read(reader)?)),
+            2 => Ok(Self::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
                 "Invalid type",
@@ -338,9 +338,9 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
 impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Ack(ack) => ack.encode_size(),
-            Activity::Certified(certificate) => certificate.encode_size(),
-            Activity::Tip(index) => UInt(*index).encode_size(),
+            Self::Ack(ack) => ack.encode_size(),
+            Self::Certified(certificate) => certificate.encode_size(),
+            Self::Tip(index) => UInt(*index).encode_size(),
         }
     }
 }

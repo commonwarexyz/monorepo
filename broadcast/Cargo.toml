@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/broadcast"
 documentation = "https://docs.rs/commonware-broadcast"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 commonware-codec.workspace = true
