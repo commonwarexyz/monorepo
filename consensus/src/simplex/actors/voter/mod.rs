@@ -786,7 +786,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"certificate_override_test".to_vec();
+        let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -834,7 +834,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_certificate_override_test".to_string(),
+                partition: "voter_certificate_conflicts_proposal_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -970,7 +970,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"proposal_replaced_test".to_vec();
+        let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let (network, oracle) = Network::new(
@@ -1014,7 +1014,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_proposal_replaced_test".to_string(),
+                partition: "voter_proposal_conflicts_certificate_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -1136,7 +1136,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"certificate_verifies_test".to_vec();
+        let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let (network, oracle) = Network::new(
@@ -1180,7 +1180,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_certificate_verifies_test".to_string(),
+                partition: "voter_certificate_conflicts_proposal_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -1301,7 +1301,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"peer_before_our".to_vec();
+        let namespace = b"drop_our_proposal_on_conflict_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1503,7 +1503,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"finalization_without_notarization".to_vec();
+        let namespace = b"populate_resolver_on_restart_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1551,7 +1551,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "populate_resolver_on_restart".to_string(),
+                partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -1636,7 +1636,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "populate_resolver_on_restart".to_string(),
+                partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,

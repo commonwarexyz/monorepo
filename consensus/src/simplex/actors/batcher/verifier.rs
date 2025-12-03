@@ -11,8 +11,8 @@ use rand::{CryptoRng, Rng};
 ///
 /// In consensus, verifying multiple signatures at the same time can be much more efficient
 /// than verifying them one by one. This struct collects messages from participants in consensus
-/// and signals they are ready to be verified when certain conditions are met (e.g., enough messages
-/// to potentially reach a quorum, or when a leader's message is received).
+/// and signals they are ready to be verified (when there exist enough messages to potentially reach
+/// a quorum).
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
