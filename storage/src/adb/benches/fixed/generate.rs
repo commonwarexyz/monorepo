@@ -10,7 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::store::Batchable;
+use commonware_storage::adb::store::{Batchable, LogStore};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -138,11 +138,11 @@ where
     A: commonware_storage::store::Store<
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
-        > + Batchable
+        > + LogStore<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        + Batchable
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible
-        + commonware_storage::store::StoreInactivityFloor,
+        + commonware_storage::store::StoreDestructible,
 {
     let start = Instant::now();
     let mut db = if use_batch {

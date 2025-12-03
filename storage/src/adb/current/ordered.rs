@@ -679,20 +679,6 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreInactivityFloor for Current<E, K, V, H, T, N>
-{
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-}
-
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
     > LogStore<K, V> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {

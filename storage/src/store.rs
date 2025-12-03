@@ -83,8 +83,3 @@ pub trait StorePrunable: StoreMut {
     /// Prune operations
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Self::Error>>;
 }
-
-pub trait StoreInactivityFloor: StoreMut {
-    /// Get the inactivity floor of the database.
-    fn inactivity_floor_loc(&self) -> Location;
-}

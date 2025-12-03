@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{unordered::variable::Any, VariableConfig as AConfig},
-        store::{Batchable, Config as SConfig, Store},
+        store::{Batchable, Config as SConfig, LogStore, Store},
     },
     translator::EightCap,
 };
@@ -111,10 +111,10 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = Vec<u8>,
             Error: std::fmt::Debug,
-        > + commonware_storage::store::StoreCommittable
+        > + LogStore<<Sha256 as Hasher>::Digest, Vec<u8>>
+        + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible
-        + commonware_storage::store::StoreInactivityFloor,
+        + commonware_storage::store::StoreDestructible,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -152,10 +152,10 @@ async fn gen_random_kv_batched<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + LogStore<<Sha256 as Hasher>::Digest, Vec<u8>>
         + commonware_storage::store::StoreCommittable
         + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible
-        + commonware_storage::store::StoreInactivityFloor,
+        + commonware_storage::store::StoreDestructible,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

@@ -467,18 +467,6 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StoreInactivityFloor for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    T: Translator,
-{
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-}
-
 impl<E, K, V, T> crate::store::StoreDestructible for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,

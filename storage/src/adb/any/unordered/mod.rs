@@ -534,18 +534,6 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreInactivityFloor for IndexedLog<E, C, I, H>
-{
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
     > AnyDb<C::Item, H::Digest> for IndexedLog<E, C, I, H>
 {
     /// Returns the root of the authenticated log.
