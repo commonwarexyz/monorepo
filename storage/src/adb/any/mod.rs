@@ -15,7 +15,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixed};
+use commonware_codec::CodecFixed;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
@@ -30,29 +30,13 @@ pub mod unordered;
 
 /// Extension trait for Any ADBs in a clean (merkleized) state.
 ///
-/// Provides read access, proof generation, mutations, commit, and lifecycle operations.
+/// Provides read access, mutations, commit, and lifecycle operations beyond what `CleanStore`
+/// and `LogStore` provide. Log info methods come from `LogStore` supertrait.
 /// Use `into_dirty()` (from `CleanStore`) to transition to `AnyDirtyStore` for batched
 /// MMR operations.
 pub trait AnyCleanStore: CleanStore {
     /// The key type for this database.
     type Key: Array;
-
-    /// The value type for this database.
-    type Value: Codec;
-
-    // Log info
-
-    /// The number of operations applied to this db, including pruned and uncommitted operations.
-    fn op_count(&self) -> Location;
-
-    /// The inactivity floor location. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
-
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 
     // Read access
 
@@ -106,28 +90,11 @@ pub trait AnyCleanStore: CleanStore {
 
 /// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
 ///
-/// Provides read access and log info while in dirty state.
+/// Provides read access while in dirty state. Log info methods come from `LogStore` supertrait.
 /// Use `merkleize()` (from `DirtyStore`) to compute the root and transition back to `AnyCleanStore`.
 pub trait AnyDirtyStore: DirtyStore {
     /// The key type for this database.
     type Key: Array;
-
-    /// The value type for this database.
-    type Value: Codec;
-
-    // Log info (also needed in dirty state)
-
-    /// The number of operations applied to this db, including pruned and uncommitted operations.
-    fn op_count(&self) -> Location;
-
-    /// The inactivity floor location. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
-
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 
     // Read access (still need to read while dirty)
 

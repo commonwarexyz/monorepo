@@ -158,7 +158,7 @@ pub trait LogStore {
 ///
 /// Dirty stores have pending changes that have not yet been merkleized. Use `merkleize()`
 /// to compute the root digest and transition to a `CleanStore`.
-pub trait DirtyStore: Sized {
+pub trait DirtyStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
 
@@ -166,7 +166,12 @@ pub trait DirtyStore: Sized {
     type Operation;
 
     /// The clean state type that this dirty store transitions to.
-    type Clean: CleanStore<Digest = Self::Digest, Operation = Self::Operation, Dirty = Self>;
+    type Clean: CleanStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Dirty = Self,
+        Value = Self::Value,
+    >;
 
     /// Merkleize the store and compute the root digest.
     ///
@@ -178,7 +183,7 @@ pub trait DirtyStore: Sized {
 ///
 /// Clean stores can generate proofs and access the root digest. Use `into_dirty()` to
 /// transition to a `DirtyStore` for batched updates.
-pub trait CleanStore: Sized {
+pub trait CleanStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
 
@@ -186,7 +191,12 @@ pub trait CleanStore: Sized {
     type Operation;
 
     /// The dirty state type that this clean store transitions to.
-    type Dirty: DirtyStore<Digest = Self::Digest, Operation = Self::Operation, Clean = Self>;
+    type Dirty: DirtyStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Clean = Self,
+        Value = Self::Value,
+    >;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;

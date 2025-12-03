@@ -309,6 +309,64 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Dirty> 
     }
 }
 
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::LogStore
+    for Keyless<E, V, H, Clean<H::Digest>>
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    // Always 0 because all operations are active in a keyless store.
+    fn inactivity_floor_loc(&self) -> Location {
+        Location::new_unchecked(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.op_count() == 0
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let Some(last_commit_loc) = self.last_commit_loc else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.journal.read(last_commit_loc).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit_loc}");
+        };
+        Ok(metadata)
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::LogStore
+    for Keyless<E, V, H, Dirty>
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.journal.size()
+    }
+
+    // Always 0 because all operations are active in a keyless store.
+    fn inactivity_floor_loc(&self) -> Location {
+        Location::new_unchecked(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.journal.size() == 0
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let Some(last_commit_loc) = self.last_commit_loc else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.journal.read(last_commit_loc).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit_loc}");
+        };
+        Ok(metadata)
+    }
+}
+
 impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::CleanStore
     for Keyless<E, V, H, Clean<H::Digest>>
 {

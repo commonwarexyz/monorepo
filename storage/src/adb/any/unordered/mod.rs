@@ -592,6 +592,36 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
+    > LogStore for IndexedLog<E, C, I, H, Dirty>
+{
+    type Value = <C::Item as Keyed>::Value;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
     > crate::store::Store for IndexedLog<E, C, I, H>
 {
     type Key = <C::Item as Keyed>::Key;
@@ -695,23 +725,6 @@ impl<
     > AnyCleanStore for IndexedLog<E, C, I, H>
 {
     type Key = <C::Item as Keyed>::Key;
-    type Value = <C::Item as Keyed>::Value;
-
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-
-    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
-        self.get_metadata().await
-    }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
         self.get(key).await
@@ -758,27 +771,6 @@ impl<
     > AnyDirtyStore for IndexedLog<E, C, I, H, Dirty>
 {
     type Key = <C::Item as Keyed>::Key;
-    type Value = <C::Item as Keyed>::Value;
-
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-
-    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let op = self.log.read(last_commit).await?;
-        Ok(op.into_value())
-    }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
         self.get_key_op_loc(key)
