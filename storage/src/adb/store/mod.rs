@@ -201,9 +201,17 @@ pub trait CleanStore: LogStore {
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
-    /// Generate a proof of all operations in the range starting at `start_loc`.
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
     ///
-    /// Returns both the proof and the operations corresponding to the leaves in this range.
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     #[allow(clippy::type_complexity)]
     fn proof(
         &self,
@@ -211,7 +219,18 @@ pub trait CleanStore: LogStore {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
 
-    /// Generate a historical proof with respect to when the database had `historical_size` operations.
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    /// for the database when it had `historical_size` operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     #[allow(clippy::type_complexity)]
     fn historical_proof(
         &self,

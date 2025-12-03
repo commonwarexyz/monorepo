@@ -107,6 +107,12 @@ impl<
         self.log.size()
     }
 
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub const fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
@@ -631,7 +637,6 @@ impl<
     pub async fn delete(&mut self, key: Key<C::Item>) -> Result<bool, Error> {
         let mut r = false;
         self.delete_with_callback(key, |_, _| r = true).await?;
-
         Ok(r)
     }
 }
@@ -769,12 +774,6 @@ impl<
         Ok(())
     }
 
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
@@ -900,31 +899,17 @@ impl<
     > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
 {
     type Digest = H::Digest;
-
     type Operation = C::Item;
-
     type Dirty = IndexedLog<E, C, I, H, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
     }
 
-    /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
         self.log.root()
     }
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     async fn proof(
         &self,
         start_loc: Location,
@@ -934,12 +919,6 @@ impl<
         self.historical_proof(size, start_loc, max_ops).await
     }
 
-    /// Returns a proof of inclusion of all operations in the range starting at (and including)
-    /// location `start_loc`, and ending at the first of either:
-    /// - the last operation performed, or
-    /// - the operation `max_ops` from the start.
-    ///
-    /// Also returns a vector of operations corresponding to this range.
     async fn historical_proof(
         &self,
         historical_size: Location,
@@ -968,7 +947,7 @@ impl<
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
+        self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
