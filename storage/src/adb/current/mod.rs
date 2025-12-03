@@ -94,9 +94,6 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     status: &BitMap<H::Digest, N>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    }
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
     let mmr_root = grafted_mmr.root(hasher).await?;
 
@@ -155,10 +152,6 @@ async fn range_proof<
     start_loc: Location,
     max_ops: NonZeroU64,
 ) -> Result<(Proof<H::Digest>, Vec<O>, Vec<[u8; N]>), Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    };
-
     // Compute the start and end locations & positions of the range.
     let leaves = mmr.leaves();
     if start_loc >= leaves {

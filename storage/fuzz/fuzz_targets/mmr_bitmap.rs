@@ -20,7 +20,6 @@ enum BitmapOperation {
     PrunedBits,
     PruneToBit { bit_offset: u64 },
     Merkleize,
-    IsDirty,
     DirtyChunks,
     GetNode { position: u64 },
     Size,
@@ -117,7 +116,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::PruneToBit { bit_offset } => {
-                    if bit_count > 0 && !bitmap.is_dirty() {
+                    if bit_count > 0 {
                         let safe_offset = (bit_offset % (bit_count + 1)).min(bit_count);
                         if safe_offset >= pruned_bits {
                             bitmap.prune_to_bit(safe_offset).unwrap();
@@ -131,11 +130,6 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::Merkleize => {
                     bitmap = bitmap.into_dirty().merkleize(&mut hasher).await.unwrap();
-                    assert!(!bitmap.is_dirty());
-                }
-
-                BitmapOperation::IsDirty => {
-                    let _ = bitmap.is_dirty();
                 }
 
                 BitmapOperation::DirtyChunks => {
@@ -163,7 +157,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::Proof { bit_offset } => {
-                    if bit_count > pruned_bits && !bitmap.is_dirty() {
+                    if bit_count > pruned_bits {
                         let bit_offset = (bit_offset % (bit_count - pruned_bits)) + pruned_bits;
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root(&mut hasher).await.unwrap();

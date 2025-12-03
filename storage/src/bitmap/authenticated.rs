@@ -182,11 +182,6 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
         }
     }
 
-    /// Whether there are any updates that are not yet reflected in this bitmap's root.
-    pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.complete_chunks()
-    }
-
     /// The chunks that have been modified or added since the last call to `merkleize`.
     pub fn dirty_chunks(&self) -> Vec<Location> {
         let pruned_chunks = self.bitmap.pruned_chunks();
@@ -316,10 +311,6 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
         metadata.destroy().await.map_err(MetadataError)
     }
 }
-
-// =============================================================================
-// Clean state impl block
-// =============================================================================
 
 impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     /// Return a new empty bitmap.
@@ -461,9 +452,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     ///
     /// - Returns [Error::DirtyState] if there are unmerkleized updates.
     pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
-        if self.is_dirty() {
-            return Err(Error::DirtyState);
-        }
         let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
         if chunk < self.bitmap.pruned_chunks() {
             return Ok(());
@@ -495,10 +483,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     ///
     /// Panics if there are unmerkleized updates.
     pub async fn root(&self, hasher: &mut impl Hasher<D>) -> Result<D, Error> {
-        assert!(
-            !self.is_dirty(),
-            "cannot compute root with unmerkleized updates",
-        );
         let mmr_root = *self.mmr.root();
 
         // Check if there's a partial chunk to add
@@ -537,9 +521,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
             return Err(Error::BitOutOfBounds(bit, self.len()));
-        }
-        if self.is_dirty() {
-            return Err(Error::DirtyState);
         }
 
         let chunk = *self.get_chunk_containing(bit);
