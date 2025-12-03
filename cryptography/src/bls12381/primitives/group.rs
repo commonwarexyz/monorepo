@@ -34,7 +34,7 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Ring, Space,
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
 use commonware_utils::hex;
 use core::{
@@ -554,6 +554,12 @@ impl Ring for Scalar {
 impl Field for Scalar {
     fn inv(&self) -> Self {
         self.inverse().unwrap_or(<Self as Additive>::zero())
+    }
+}
+
+impl Random for Scalar {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        Self::from_rand(&mut rng)
     }
 }
 
