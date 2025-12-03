@@ -25,7 +25,7 @@ pub enum Operation<K: Array, V: Codec> {
 
 impl<K: Array, V: Codec> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
-    pub fn key(&self) -> Option<&K> {
+    pub const fn key(&self) -> Option<&K> {
         match self {
             Self::Delete(key) => Some(key),
             Self::Update(key, _) => Some(key),
@@ -174,7 +174,7 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(key.clone(), value);
         assert_eq!(&key, update_op.key().unwrap());
 
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
@@ -192,7 +192,7 @@ mod tests {
         let update_op = Operation::Update(key.clone(), value.clone());
         assert_eq!(&value, update_op.value().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.value());
 
         let commit_floor_op =
@@ -210,9 +210,9 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(value.clone(), update_op.into_value().unwrap());
+        assert_eq!(value, update_op.into_value().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.into_value());
 
         let commit_floor_op =
@@ -236,14 +236,14 @@ mod tests {
         assert_eq!(update_op, decoded);
 
         // Test Delete operation
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         let encoded = delete_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(delete_op, decoded);
 
         // Test CommitFloor operation with value
         let commit_floor_op =
-            Operation::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
+            Operation::<U64, U64>::CommitFloor(Some(value), Location::new_unchecked(42));
         let encoded = commit_floor_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(commit_floor_op, decoded);
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(update_op.encode().len(), update_op.encode_size());
 
         // Test Delete operation
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(delete_op.encode_size(), 1 + U64::SIZE);
         assert_eq!(delete_op.encode().len(), delete_op.encode_size());
 
@@ -400,9 +400,9 @@ mod tests {
 
         // Test all operation variants
         let operations: Vec<Operation<U64, U64>> = vec![
-            Operation::Update(key2.clone(), value2.clone()),
-            Operation::Delete(key1.clone()),
-            Operation::CommitFloor(Some(value1.clone()), location),
+            Operation::Update(key2, value2),
+            Operation::Delete(key1),
+            Operation::CommitFloor(Some(value1), location),
             Operation::CommitFloor(None, location),
         ];
 
@@ -443,7 +443,7 @@ mod tests {
             }
             let mut data = vec![0u8; len];
             buf.copy_to_slice(&mut data);
-            Ok(VariableSizeValue(data))
+            Ok(Self(data))
         }
     }
 
@@ -457,7 +457,7 @@ mod tests {
         let empty_value = VariableSizeValue(vec![]);
 
         // Test Update with variable sizes
-        let update_small = Operation::Update(key.clone(), small_value.clone());
+        let update_small = Operation::Update(key.clone(), small_value);
         let encoded = update_small.encode();
         let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
         assert_eq!(update_small, decoded);
@@ -467,14 +467,14 @@ mod tests {
         let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
         assert_eq!(update_large, decoded);
 
-        let update_empty = Operation::Update(key.clone(), empty_value.clone());
+        let update_empty = Operation::Update(key, empty_value);
         let encoded = update_empty.encode();
         let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
         assert_eq!(update_empty, decoded);
 
         // Test CommitFloor with variable sizes
         let commit_floor = Operation::<U64, VariableSizeValue>::CommitFloor(
-            Some(large_value.clone()),
+            Some(large_value),
             Location::new_unchecked(42),
         );
         let encoded = commit_floor.encode();

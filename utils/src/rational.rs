@@ -66,23 +66,23 @@ pub trait BigRationalExt {
 
 impl BigRationalExt for BigRational {
     fn from_u64(value: u64) -> Self {
-        BigRational::from_integer(BigInt::from(value))
+        Self::from_integer(BigInt::from(value))
     }
 
     fn from_frac_u64(numerator: u64, denominator: u64) -> Self {
-        BigRational::new(BigInt::from(numerator), BigInt::from(denominator))
+        Self::new(BigInt::from(numerator), BigInt::from(denominator))
     }
 
     fn from_u128(value: u128) -> Self {
-        BigRational::from_integer(BigInt::from(value))
+        Self::from_integer(BigInt::from(value))
     }
 
     fn from_frac_u128(numerator: u128, denominator: u128) -> Self {
-        BigRational::new(BigInt::from(numerator), BigInt::from(denominator))
+        Self::new(BigInt::from(numerator), BigInt::from(denominator))
     }
 
     fn ceil_to_u128(&self) -> Option<u128> {
-        if self < &BigRational::zero() {
+        if self < &Self::zero() {
             return Some(0);
         }
 
@@ -100,15 +100,15 @@ impl BigRationalExt for BigRational {
     }
 
     fn from_usize(value: usize) -> Self {
-        BigRational::from_integer(BigInt::from(value))
+        Self::from_integer(BigInt::from(value))
     }
 
     fn from_frac_usize(numerator: usize, denominator: usize) -> Self {
-        BigRational::new(BigInt::from(numerator), BigInt::from(denominator))
+        Self::new(BigInt::from(numerator), BigInt::from(denominator))
     }
 
     fn log2_ceil(&self, binary_digits: usize) -> BigRational {
-        if self <= &BigRational::zero() {
+        if self <= &Self::zero() {
             panic!("log2 undefined for non-positive numbers");
         }
 
@@ -149,7 +149,7 @@ impl BigRationalExt for BigRational {
         if normalized_numer == normalized_denom {
             let numerator = BigInt::from(integer_part) << binary_digits;
             let denominator = BigInt::one() << binary_digits;
-            return BigRational::new(numerator, denominator);
+            return Self::new(numerator, denominator);
         }
 
         // Step 5: Extract binary fractional digits using the square-and-compare method.
@@ -195,7 +195,7 @@ impl BigRationalExt for BigRational {
         }
 
         let denominator = one << binary_digits;
-        BigRational::new(numerator, denominator)
+        Self::new(numerator, denominator)
     }
 }
 

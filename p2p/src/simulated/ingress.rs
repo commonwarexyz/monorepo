@@ -83,7 +83,7 @@ pub struct Oracle<P: PublicKey> {
 
 impl<P: PublicKey> Oracle<P> {
     /// Create a new instance of the oracle.
-    pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
     }
 

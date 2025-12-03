@@ -228,7 +228,7 @@ use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 
@@ -272,11 +272,10 @@ where
         !participants.is_empty(),
         "no participants to select leader from"
     );
-    let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
-    } else {
-        (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len()
-    };
+    let idx = seed.map_or_else(
+        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
+        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
+    );
     let leader = participants[idx].clone();
 
     (leader, idx as u32)
@@ -996,12 +995,12 @@ mod tests {
                 result
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(180))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             // Check if we should exit
             if complete {

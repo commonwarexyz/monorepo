@@ -27,7 +27,7 @@ pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
 impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
-    pub fn new(
+    pub const fn new(
         context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,

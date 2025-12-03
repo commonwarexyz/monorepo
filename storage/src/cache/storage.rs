@@ -25,7 +25,7 @@ struct Record<V: Codec> {
 
 impl<V: Codec> Record<V> {
     /// Create a new `Record`.
-    fn new(index: u64, value: V) -> Self {
+    const fn new(index: u64, value: V) -> Self {
         Self { index, value }
     }
 }
@@ -72,7 +72,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
 
 impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Calculate the section for a given index.
-    fn section(&self, index: u64) -> u64 {
+    const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
     }
 

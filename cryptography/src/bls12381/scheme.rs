@@ -386,10 +386,9 @@ impl Batch {
         signature: &Signature,
     ) -> bool {
         self.publics.push(public_key.key);
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
+        let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+            Cow::Owned(union_unique(namespace, message))
+        });
         let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
         self.hms.push(hm);
         self.signatures.push(signature.signature);

@@ -18,7 +18,7 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Voter<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Voter<S, D>>) -> Self {
         Self { sender }
     }
 
@@ -35,7 +35,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
 }
