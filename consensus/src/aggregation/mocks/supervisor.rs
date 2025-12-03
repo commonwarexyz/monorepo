@@ -45,7 +45,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         }
 
         // Evaluate the polynomial
-        let identity = *poly::public::<V>(&polynomial);
+        let identity = *polynomial.constant();
         assert_eq!(identity, self.identity);
         let polynomial = evaluate_all::<V>(&polynomial, validators.len() as u32);
 

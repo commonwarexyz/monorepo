@@ -57,7 +57,7 @@ impl<V: Variant> Read for Share<V> {
     fn read_cfg(buf: &mut impl Buf, n: &u32) -> Result<Self, commonware_codec::Error> {
         let t = quorum(*n);
         Ok(Self {
-            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
+            commitment: Public::<V>::read_cfg(buf, &(RangeCfg::exact(NZU32!(t)), ()))?,
             share: group::Share::read(buf)?,
         })
     }

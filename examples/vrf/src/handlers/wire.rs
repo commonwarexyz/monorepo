@@ -153,13 +153,16 @@ impl<S: Signature> Read for Payload<S> {
         let t = quorum(u32::try_from(*p).expect("participant count exceeds u32")); // threshold
         let result = match tag {
             0 => Self::Start {
-                group: Option::<poly::Public<MinSig>>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
+                group: Option::<poly::Public<MinSig>>::read_cfg(
+                    buf,
+                    &(RangeCfg::exact(NZU32!(t)), ()),
+                )?,
             },
             1 => Self::Share(Share::read_cfg(buf, &(*p as u32))?),
             2 => Self::Ack(Ack::read(buf)?),
             3 => {
                 let commitment =
-                    poly::Public::<MinSig>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?;
+                    poly::Public::<MinSig>::read_cfg(buf, &(RangeCfg::exact(NZU32!(t)), ()))?;
                 let acks = Vec::<Ack<S>>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
@@ -172,7 +175,7 @@ impl<S: Signature> Read for Payload<S> {
             4 => {
                 let commitments = BTreeMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
-                    &((..=*p).into(), ((), RangeCfg::exact(NZU32!(t)))),
+                    &((..=*p).into(), ((), (RangeCfg::exact(NZU32!(t)), ()))),
                 )?;
                 let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Self::Success {
@@ -284,10 +287,9 @@ mod tests {
     }
 
     fn new_poly() -> poly::Public<MinSig> {
-        let mut public = <MinSig as Variant>::Public::one();
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        public.mul(&scalar);
-        poly::Public::<MinSig>::from(vec![public; T])
+        // Create a scalar polynomial and commit it to get a public polynomial
+        let scalar_poly = poly::Private::new(&mut thread_rng(), (T - 1) as u32);
+        poly::Public::<MinSig>::commit(scalar_poly)
     }
 
     #[test]
