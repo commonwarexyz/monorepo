@@ -2,6 +2,7 @@
 mod tests {
     use commonware_macros::{select, select_loop};
     use futures::{channel::mpsc, executor::block_on, SinkExt, StreamExt};
+    use std::future::Future;
 
     #[test]
     fn test_select_macro() {
@@ -35,6 +36,22 @@ mod tests {
         });
     }
 
+    struct MockSignaler;
+
+    impl MockSignaler {
+        pub fn stopped(&self) -> impl Future<Output = ()> {
+            futures::future::pending()
+        }
+    }
+
+    struct MockSignalerResolves;
+
+    impl MockSignalerResolves {
+        pub fn stopped(&self) -> impl Future<Output = ()> {
+            futures::future::ready(())
+        }
+    }
+
     #[test]
     fn test_select_loop_basic() {
         block_on(async move {
@@ -45,7 +62,10 @@ mod tests {
             drop(tx);
 
             let mut received = Vec::new();
+            let mock_context = MockSignaler;
             select_loop! {
+                mock_context,
+                on_shutdown => {},
                 msg = rx.next() => {
                     match msg {
                         Some(v) => received.push(v),
@@ -54,6 +74,31 @@ mod tests {
                 },
             }
             assert_eq!(received, vec![1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn test_select_loop_basic_shuts_down() {
+        block_on(async move {
+            let (mut tx, mut rx) = mpsc::unbounded();
+            tx.send(1).await.unwrap();
+            drop(tx);
+
+            #[allow(unused)]
+            let mut did_shutdown = false;
+
+            let mock_context = MockSignalerResolves;
+            select_loop! {
+                mock_context,
+                on_shutdown => {
+                    did_shutdown = true;
+                },
+                _ = rx.next() => {
+                    // sink msg
+                },
+            }
+
+            assert!(did_shutdown);
         });
     }
 
@@ -67,7 +112,10 @@ mod tests {
             drop(tx);
 
             let mut evens = Vec::new();
+            let mock_context = MockSignaler;
             select_loop! {
+                mock_context,
+                on_shutdown => {},
                 msg = rx.next() => {
                     match msg {
                         Some(v) if v % 2 != 0 => continue,
@@ -94,7 +142,10 @@ mod tests {
             let mut results = Vec::new();
             let mut count = 0;
 
+            let mock_context = MockSignaler;
             select_loop! {
+                mock_context,
+                on_shutdown => {},
                 msg = high_rx.next() => {
                     if let Some(v) = msg {
                         results.push(v);
