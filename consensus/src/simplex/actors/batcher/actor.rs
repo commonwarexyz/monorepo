@@ -192,31 +192,16 @@ impl<
                                 .or_insert_with(|| self.new_round())
                                 .set_leader(leader);
 
-                            // If we haven't seen enough rounds yet, assume active
+                            // Check if the leader has been active recently
                             let is_active =
-                                if current < View::new(self.skip_timeout.get())
-                                    || (work.len() as u64) < self.skip_timeout.get()
-                                {
-                                    true
-                                } else {
-                                    let min_view = current.saturating_sub(self.skip_timeout);
-
-                                    // Check if the leader is active within the views we know about
-                                    let mut active = false;
-                                    for (view, round) in work.iter().rev() {
-                                        // If we haven't seen activity within the skip timeout, break
-                                        if *view < min_view {
-                                            break;
-                                        }
-
-                                        // If the leader is active, we can stop
-                                        if round.is_active(leader) {
-                                            active = true;
-                                            break;
-                                        };
-                                    }
-                                    active
-                                };
+                                // Not enough views have passed to judge activity
+                                current < View::new(self.skip_timeout.get())
+                                // We don't have enough history to judge activity
+                                || (work.len() as u64) < self.skip_timeout.get()
+                                // Leader was active in at least one recent round
+                                || work
+                                    .range(current.saturating_sub(self.skip_timeout)..)
+                                    .any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {
