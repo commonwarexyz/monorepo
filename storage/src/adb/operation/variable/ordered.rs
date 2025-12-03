@@ -1,18 +1,16 @@
 use crate::{
-    adb::operation::{self, Committable, KeyData, Keyed, Ordered},
+    adb::operation::{self, variable::Value, Committable, KeyData, Keyed, Ordered},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
 /// An operation applied to an authenticated database with a variable sized value that supports
 /// exclusion proofs over ordered keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: Codec> {
+pub enum Operation<K: Array, V: Value> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -24,7 +22,7 @@ pub enum Operation<K: Array, V: Codec> {
     CommitFloor(Option<V>, Location),
 }
 
-impl<K: Array, V: Codec> Write for Operation<K, V> {
+impl<K: Array, V: Value> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
@@ -46,7 +44,7 @@ impl<K: Array, V: Codec> Write for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
+impl<K: Array, V: Value> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Delete(_) => K::SIZE,
@@ -56,7 +54,7 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Keyed for Operation<K, V> {
+impl<K: Array, V: Value> Keyed for Operation<K, V> {
     type Key = K;
     type Value = V;
 
@@ -100,13 +98,13 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Committable for Operation<K, V> {
+impl<K: Array, V: Value> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K: Array, V: Codec> Ordered for Operation<K, V> {
+impl<K: Array, V: Value> Ordered for Operation<K, V> {
     fn key_data(&self) -> Option<&KeyData<K, V>> {
         match self {
             Self::Update(data) => Some(data),
@@ -122,7 +120,7 @@ impl<K: Array, V: Codec> Ordered for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Read for Operation<K, V> {
+impl<K: Array, V: Value> Read for Operation<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -157,7 +155,7 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Display for Operation<K, V> {
+impl<K: Array, V: Value> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),

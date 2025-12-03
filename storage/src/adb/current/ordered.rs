@@ -5,7 +5,10 @@ use crate::{
     adb::{
         any::{ordered::fixed::Any, AnyDb as _},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{fixed::ordered::Operation, Committable as _, KeyData, Keyed as _},
+        operation::{
+            fixed::{ordered::Operation, Value},
+            Committable as _, KeyData, Keyed as _,
+        },
         store::Db,
         Error,
     },
@@ -17,7 +20,7 @@ use crate::{
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
-use commonware_codec::{CodecFixed, FixedSize};
+use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -33,7 +36,7 @@ use std::num::NonZeroU64;
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: Value,
     H: Hasher,
     T: Translator,
     const N: usize,
@@ -54,7 +57,7 @@ pub struct Current<
 
 /// The information required to verify a key value proof from a Current adb.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+pub struct KeyValueProofInfo<K: Array, V: Value, const N: usize> {
     /// The key whose value is being proven.
     pub key: K,
 
@@ -73,7 +76,7 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 
 // The information required to verify an exclusion proof.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+pub enum ExclusionProofInfo<K: Array, V: Value, const N: usize> {
     /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
@@ -93,7 +96,7 @@ pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -512,7 +515,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,

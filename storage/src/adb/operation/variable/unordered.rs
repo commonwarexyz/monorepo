@@ -1,17 +1,15 @@
 use crate::{
-    adb::operation::{self, Committable, Keyed},
+    adb::operation::{self, variable::Value, Committable, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
 /// An operation applied to a mutable authenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: Codec> {
+pub enum Operation<K: Array, V: Value> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -23,7 +21,7 @@ pub enum Operation<K: Array, V: Codec> {
     CommitFloor(Option<V>, Location),
 }
 
-impl<K: Array, V: Codec> Operation<K, V> {
+impl<K: Array, V: Value> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
@@ -34,7 +32,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
+impl<K: Array, V: Value> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Delete(_) => K::SIZE,
@@ -44,7 +42,7 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Keyed for Operation<K, V> {
+impl<K: Array, V: Value> Keyed for Operation<K, V> {
     type Key = K;
     type Value = V;
 
@@ -86,13 +84,13 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Committable for Operation<K, V> {
+impl<K: Array, V: Value> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K: Array, V: Codec> Write for Operation<K, V> {
+impl<K: Array, V: Value> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
@@ -113,7 +111,7 @@ impl<K: Array, V: Codec> Write for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Read for Operation<K, V> {
+impl<K: Array, V: Value> Read for Operation<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -143,7 +141,7 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Display for Operation<K, V> {
+impl<K: Array, V: Value> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),

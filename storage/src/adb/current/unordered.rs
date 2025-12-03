@@ -6,7 +6,10 @@ use crate::{
     adb::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{fixed::unordered::Operation, Keyed as _},
+        operation::{
+            fixed::{unordered::Operation, Value},
+            Keyed as _,
+        },
         store::Db,
         Error,
     },
@@ -18,7 +21,7 @@ use crate::{
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
-use commonware_codec::{CodecFixed, FixedSize};
+use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -34,7 +37,7 @@ use std::num::NonZeroU64;
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: Value,
     H: Hasher,
     T: Translator,
     const N: usize,
@@ -55,7 +58,7 @@ pub struct Current<
 
 /// The information required to verify a key value proof from a Current adb.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+pub struct KeyValueProofInfo<K: Array, V: Value, const N: usize> {
     /// The key whose value is being proven.
     pub key: K,
 
@@ -72,7 +75,7 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -340,7 +343,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: Value,
         H: Hasher,
         T: Translator,
         const N: usize,
