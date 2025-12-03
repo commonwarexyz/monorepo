@@ -8,7 +8,7 @@ pub trait Store {
     type Value;
     type Error;
 
-    /// Get the value for a given key.
+    /// Get the value of a key.
     fn get(
         &self,
         key: &Self::Key,
@@ -17,8 +17,8 @@ pub trait Store {
 
 /// A mutable key-value store that supports setting values.
 pub trait StoreMut: Store {
-    /// Set the value for a given key.
-    fn set(
+    /// Update the value of a key.
+    fn update(
         &mut self,
         key: Self::Key,
         value: Self::Value,
@@ -26,8 +26,8 @@ pub trait StoreMut: Store {
 }
 
 /// A mutable key-value store that supports deleting values.
-pub trait StoreDelete: StoreMut {
-    /// Delete the value for a given key.
+pub trait StoreDeletable: StoreMut {
+    /// Delete the value of a key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
     fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;

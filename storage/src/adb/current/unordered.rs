@@ -480,7 +480,7 @@ impl<
         const N: usize,
     > crate::store::StoreMut for Current<E, K, V, H, T, N>
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         Db::update(self, key, value).await
     }
 }
@@ -492,7 +492,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDelete for Current<E, K, V, H, T, N>
+    > crate::store::StoreDeletable for Current<E, K, V, H, T, N>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         Db::delete(self, key).await

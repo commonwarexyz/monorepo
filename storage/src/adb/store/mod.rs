@@ -524,12 +524,12 @@ where
     V: Codec,
     T: Translator,
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         Db::update(self, key, value).await
     }
 }
 
-impl<E, K, V, T> crate::store::StoreDelete for Store<E, K, V, T>
+impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

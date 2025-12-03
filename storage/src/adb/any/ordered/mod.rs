@@ -895,7 +895,7 @@ impl<
         H: Hasher,
     > crate::store::StoreMut for IndexedLog<E, C, I, H>
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         Db::update(self, key, value).await
     }
 }
@@ -905,7 +905,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDelete for IndexedLog<E, C, I, H>
+    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         Db::delete(self, key).await

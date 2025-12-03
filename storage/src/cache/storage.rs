@@ -320,7 +320,7 @@ impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
 }
 
 impl<E: Storage + Metrics, V: Codec> crate::store::StoreMut for Cache<E, V> {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
