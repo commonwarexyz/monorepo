@@ -232,7 +232,7 @@ mod topology {
             }
         }
 
-        fn required_samples(&self) -> usize {
+        pub(crate) fn required_samples(&self) -> usize {
             let k = BigRational::from_usize(self.encoded_rows - self.data_rows);
             let m = BigRational::from_usize(self.encoded_rows);
             let fraction = (&k + BigRational::from_u64(1)) / (BigRational::from_usize(2) * &m);
@@ -763,6 +763,17 @@ mod tests {
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
+
+        // Verify we hit the 1-column fallback and the security invariant holds.
+        // When the loop in reckon() exits without finding a multi-column config,
+        // correct_column_samples() must compensate by adding column samples.
+        assert_eq!(topology.data_cols, 1);
+        let required = topology.required_samples();
+        let provided = topology.samples * (topology.column_samples / 2);
+        assert!(
+            provided >= required,
+            "security invariant violated: provided {provided} < required {required}"
+        );
     }
 
     #[test]
