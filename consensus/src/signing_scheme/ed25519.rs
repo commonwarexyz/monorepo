@@ -44,7 +44,7 @@ impl Ed25519 {
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
-    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    pub const fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -65,7 +65,7 @@ impl Ed25519 {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = context.namespace_and_message(namespace);
-        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
+        let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
         Some(Vote {
             signer: *index,
@@ -89,7 +89,7 @@ impl Ed25519 {
         };
 
         let (namespace, message) = context.namespace_and_message(namespace);
-        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
+        public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature)
     }
 
     /// Batch-verifies votes and returns verified votes and invalid signers.
@@ -119,7 +119,7 @@ impl Ed25519 {
             };
 
             batch.add(
-                Some(namespace.as_ref()),
+                namespace.as_ref(),
                 message.as_ref(),
                 public_key,
                 &vote.signature,
@@ -131,7 +131,7 @@ impl Ed25519 {
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);
                 }
             }
@@ -217,12 +217,7 @@ impl Ed25519 {
                 return false;
             };
 
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+            batch.add(namespace.as_ref(), message.as_ref(), public_key, signature);
         }
 
         true
@@ -272,15 +267,16 @@ impl Ed25519 {
         batch.verify(rng)
     }
 
-    pub fn is_attributable(&self) -> bool {
+    pub const fn is_attributable(&self) -> bool {
         true
     }
 
-    pub fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
+    pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
 
-    pub fn certificate_codec_config_unbounded() -> <Certificate as commonware_codec::Read>::Cfg {
+    pub const fn certificate_codec_config_unbounded() -> <Certificate as commonware_codec::Read>::Cfg
+    {
         u32::MAX as usize
     }
 }
@@ -376,7 +372,7 @@ mod macros {
                 /// Builds a verifier that can authenticate votes without generating signatures.
                 ///
                 /// Participants use the same key for both identity and consensus.
-                pub fn verifier(
+                pub const fn verifier(
                     participants: commonware_utils::set::Ordered<
                         commonware_cryptography::ed25519::PublicKey,
                     >,
@@ -710,7 +706,7 @@ mod tests {
         assert_eq!(result.verified.len(), quorum - 1);
 
         // Test 2: Corrupt one vote - invalid signature
-        let mut votes_corrupted = votes.clone();
+        let mut votes_corrupted = votes;
         votes_corrupted[0].signature = votes_corrupted[1].signature.clone();
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
@@ -820,7 +816,7 @@ mod tests {
         ));
 
         // Corrupted certificate fails
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
@@ -1319,7 +1315,7 @@ mod simplex_tests {
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
@@ -1507,7 +1503,7 @@ mod simplex_tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let mut truncated = certificate.clone();
+        let mut truncated = certificate;
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);

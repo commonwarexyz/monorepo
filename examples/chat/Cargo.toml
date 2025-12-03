@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/chat"
 documentation = "https://docs.rs/commonware-chat"
 
+[lints]
+workspace = true
+
 [dependencies]
 chrono.workspace = true
 clap.workspace = true

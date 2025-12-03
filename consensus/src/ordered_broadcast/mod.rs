@@ -411,12 +411,12 @@ mod tests {
                 }
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(180))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             if complete {
                 break;
@@ -915,7 +915,7 @@ mod tests {
                         ]),
                         validators_scheme_provider: validators_provider,
                         relay: automaton.clone(),
-                        automaton: automaton.clone(),
+                        automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),
                         namespace: namespace.to_vec(),

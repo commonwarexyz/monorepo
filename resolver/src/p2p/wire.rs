@@ -32,7 +32,7 @@ impl<Key: Span> Read for Message<Key> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let id = u64::read(buf)?;
         let payload = Payload::read(buf)?;
-        Ok(Message { id, payload })
+        Ok(Self { id, payload })
     }
 }
 
@@ -54,15 +54,15 @@ pub enum Payload<Key: Span> {
 impl<Key: Span> Write for Payload<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::Request(key) => {
+            Self::Request(key) => {
                 buf.put_u8(0);
                 key.write(buf);
             }
-            Payload::Response(data) => {
+            Self::Response(data) => {
                 buf.put_u8(1);
                 data.write(buf);
             }
-            Payload::Error => {
+            Self::Error => {
                 buf.put_u8(2);
             }
         }
@@ -72,9 +72,9 @@ impl<Key: Span> Write for Payload<Key> {
 impl<Key: Span> EncodeSize for Payload<Key> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Payload::Request(key) => key.encode_size(),
-            Payload::Response(data) => data.encode_size(),
-            Payload::Error => 0,
+            Self::Request(key) => key.encode_size(),
+            Self::Response(data) => data.encode_size(),
+            Self::Error => 0,
         }
     }
 }
@@ -87,7 +87,7 @@ impl<Key: Span> Read for Payload<Key> {
         match payload_type {
             0 => {
                 let key = Key::read(buf)?;
-                Ok(Payload::Request(key))
+                Ok(Self::Request(key))
             }
             1 => {
                 // The maximum length of a message is already bounded by the P2P connection.
@@ -96,9 +96,9 @@ impl<Key: Span> Read for Payload<Key> {
                 // the bytes with a value greater than the buffer size, the read will fail without
                 // allocating more memory.
                 let data = Bytes::read_cfg(buf, &(..).into())?;
-                Ok(Payload::Response(data))
+                Ok(Self::Response(data))
             }
-            2 => Ok(Payload::Error),
+            2 => Ok(Self::Error),
             _ => Err(Error::Invalid("Payload", "Invalid payload type")),
         }
     }

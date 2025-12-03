@@ -109,7 +109,7 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: &VoteContext<D>,
+    context: &VoteContext<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     match context {
         VoteContext::Notarize { proposal } => {
@@ -129,7 +129,7 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: &VoteContext<D>,
+    context: &VoteContext<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),

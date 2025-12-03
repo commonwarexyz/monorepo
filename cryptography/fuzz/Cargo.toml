@@ -36,8 +36,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "secp256r1_decode"
-path = "fuzz_targets/secp256r1_decode.rs"
+name = "secp256r1_standard_decode"
+path = "fuzz_targets/secp256r1_standard_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secp256r1_recoverable_decode"
+path = "fuzz_targets/secp256r1_recoverable_decode.rs"
 test = false
 doc = false
 bench = false

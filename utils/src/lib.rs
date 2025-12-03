@@ -82,7 +82,7 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
 }
 
 #[inline]
-fn decode_hex_digit(byte: u8) -> Option<u8> {
+const fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -101,7 +101,7 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
 
 /// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
 /// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
-pub fn max_faults(n: u32) -> u32 {
+pub const fn max_faults(n: u32) -> u32 {
     n.saturating_sub(1) / 3
 }
 
@@ -237,7 +237,7 @@ impl NonZeroDuration {
     }
 
     /// Returns the wrapped `Duration`.
-    pub fn get(self) -> Duration {
+    pub const fn get(self) -> Duration {
         self.0
     }
 }

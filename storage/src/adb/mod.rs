@@ -79,8 +79,8 @@ pub enum Error {
 impl From<crate::journal::authenticated::Error> for Error {
     fn from(e: crate::journal::authenticated::Error) -> Self {
         match e {
-            crate::journal::authenticated::Error::Journal(j) => Error::Journal(j),
-            crate::journal::authenticated::Error::Mmr(m) => Error::Mmr(m),
+            crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
+            crate::journal::authenticated::Error::Mmr(m) => Self::Mmr(m),
         }
     }
 }

@@ -779,7 +779,7 @@ impl<
     // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `index`.
-    fn get_journal_section(&self, index: Index) -> u64 {
+    const fn get_journal_section(&self, index: Index) -> u64 {
         index / self.journal_heights_per_section
     }
 
@@ -840,14 +840,12 @@ impl<
             // Check if we have our own ack (which means we've verified the digest)
             let current_scheme = self.scheme(self.epoch).ok();
             let our_signer = current_scheme.as_ref().and_then(|s| s.me());
-            let our_digest = if let Some(signer) = our_signer {
+            let our_digest = our_signer.and_then(|signer| {
                 acks_group
                     .iter()
                     .find(|ack| ack.epoch == self.epoch && ack.vote.signer == signer)
                     .map(|ack| ack.item.digest)
-            } else {
-                None
-            };
+            });
 
             // If our_digest exists, delete everything from acks_group that doesn't match it
             if let Some(digest) = our_digest {

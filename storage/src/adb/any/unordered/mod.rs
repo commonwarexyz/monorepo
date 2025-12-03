@@ -18,7 +18,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 pub mod fixed;
@@ -36,7 +36,7 @@ pub trait Operation: Committable + Keyed {
     fn new_delete(key: Self::Key) -> Self;
 
     /// Return a new commit-floor operation variant.
-    fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
+    fn new_commit_floor(metadata: Option<Self::Value>, loc: Location) -> Self;
 }
 
 /// An indexed, authenticated log of [Keyed] database operations.
@@ -111,7 +111,7 @@ impl<
     }
 
     /// Whether the snapshot currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -331,7 +331,9 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    pub(crate) const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -452,6 +454,15 @@ impl<
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
+    async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
     async fn update(
         &mut self,
         key: <C::Item as Keyed>::Key,
@@ -477,14 +488,23 @@ impl<
             .map(|o| o.is_some())
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(
+        &mut self,
+        metadata: Option<<C::Item as Keyed>::Value>,
+    ) -> Result<Range<Location>, Error> {
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
-            .await
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
+            .await?;
+
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -526,7 +546,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::{FixedConfig, VariableConfig},
+            any::test::{fixed_db_config, variable_db_config},
             verify_proof,
         },
         mmr::{mem::Mmr as MemMmr, Proof, StandardHasher},
@@ -535,48 +555,10 @@ pub(super) mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::PoolRef,
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
     use core::{future::Future, pin::Pin};
-
-    // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
-
-    pub(crate) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
-        FixedConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        }
-    }
-
-    pub(crate) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
-        VariableConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        }
-    }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
     type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
@@ -608,6 +590,7 @@ pub(super) mod test {
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+        assert!(db.get_metadata().await.unwrap().is_none());
         let empty_root = db.root();
         let mut hasher = StandardHasher::<Sha256>::new();
         assert_eq!(
@@ -636,14 +619,19 @@ pub(super) mod test {
         ));
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
-        db.commit().await.unwrap();
+        let metadata = Sha256::fill(3u8);
+        let range = db.commit(Some(metadata)).await.unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 1);
         assert_eq!(db.op_count(), 1); // commit op added
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
         // Empty proof should no longer verify.
@@ -659,7 +647,7 @@ pub(super) mod test {
         // non-empty db.
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(db.op_count() - db.inactivity_floor_loc() <= 3);
@@ -667,7 +655,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
@@ -730,7 +718,7 @@ pub(super) mod test {
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(d1, v1).await.unwrap());
@@ -748,7 +736,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 11); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
 
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
         assert_eq!(db.op_count(), 12); // only commit should remain.
 
@@ -762,7 +750,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 12);
 
         // Make sure closing/reopening gets us back to the same state.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 13);
         let root = db.root();
         db.close().await.unwrap();
@@ -778,7 +766,7 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 22);
@@ -791,7 +779,7 @@ pub(super) mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         assert!(db.root() != root);
 

@@ -65,7 +65,7 @@ where
     ) -> (Self, Mailbox<C, S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Reporter {
+            Self {
                 rng,
                 mailbox: receiver,
                 namespace: namespace.to_vec(),

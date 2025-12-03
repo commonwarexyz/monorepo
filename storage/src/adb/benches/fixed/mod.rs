@@ -34,14 +34,14 @@ enum Variant {
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            Variant::Store => "store",
-            Variant::AnyUnordered => "any::fixed::unordered",
-            Variant::AnyOrdered => "any::fixed::ordered",
-            Variant::Variable => "any::variable",
-            Variant::CurrentUnordered => "current::unordered",
-            Variant::CurrentOrdered => "current::ordered",
+            Self::Store => "store",
+            Self::AnyUnordered => "any::fixed::unordered",
+            Self::AnyOrdered => "any::fixed::ordered",
+            Self::Variable => "any::variable",
+            Self::CurrentUnordered => "current::unordered",
+            Self::CurrentOrdered => "current::ordered",
         }
     }
 }
@@ -241,12 +241,12 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Dig
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
             }
         }
     }
 
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db
 }
 
@@ -283,7 +283,7 @@ async fn gen_random_kv_batched<
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
                 db.write_batch(iter).await.unwrap();
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
                 batch = db.start_batch();
             }
         }
@@ -291,6 +291,6 @@ async fn gen_random_kv_batched<
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db
 }

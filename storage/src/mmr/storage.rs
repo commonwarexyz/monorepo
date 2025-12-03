@@ -24,6 +24,6 @@ where
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        Ok(CleanMmr::get_node(self, position))
+        Ok(Self::get_node(self, position))
     }
 }

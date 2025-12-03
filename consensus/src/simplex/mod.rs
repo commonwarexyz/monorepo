@@ -229,7 +229,7 @@ use commonware_codec::Encode;
 use signing_scheme::SeededScheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 
@@ -274,11 +274,10 @@ where
         !participants.is_empty(),
         "no participants to select leader from"
     );
-    let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
-    } else {
-        (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len()
-    };
+    let idx = seed.map_or_else(
+        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
+        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
+    );
     let leader = participants[idx].clone();
 
     (leader, idx as u32)
@@ -998,12 +997,12 @@ mod tests {
                 result
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(180))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             // Check if we should exit
             if complete {
@@ -3749,7 +3748,7 @@ mod tests {
         run_1k(ed25519);
     }
 
-    fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
+    fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
     where
         S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -3862,14 +3861,23 @@ mod tests {
             context.sleep(Duration::from_millis(1000)).await;
             assert!(is_running("engine"));
 
-            // Abort engine and ensure children stop
-            handle.abort();
-            let _ = handle.await; // ensure parent tear-down runs
+            // Shutdown engine and ensure children stop
+            let metrics_after = if graceful {
+                let metrics_context = context.clone();
+                let result = context.stop(0, Some(Duration::from_secs(5))).await;
+                assert!(
+                    result.is_ok(),
+                    "graceful shutdown should complete: {result:?}"
+                );
+                metrics_context.encode()
+            } else {
+                handle.abort();
+                let _ = handle.await; // ensure parent tear-down runs
 
-            // Give the runtime a tick to process aborts
-            context.sleep(Duration::from_millis(1000)).await;
-
-            let metrics_after = context.encode();
+                // Give the runtime a tick to process aborts
+                context.sleep(Duration::from_millis(1000)).await;
+                context.encode()
+            };
             let is_stopped = |name: &str| -> bool {
                 // Either the gauge is 0, or the entry is absent (both imply not running)
                 metrics_after.lines().any(|line| {
@@ -3888,11 +3896,20 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        children_shutdown_on_engine_abort(bls12381_threshold::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls12381_threshold::<MinSig, _>);
-        children_shutdown_on_engine_abort(bls12381_multisig::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls12381_multisig::<MinSig, _>);
-        children_shutdown_on_engine_abort(ed25519);
+        engine_shutdown(bls12381_threshold::<MinPk, _>, false);
+        engine_shutdown(bls12381_threshold::<MinSig, _>, false);
+        engine_shutdown(bls12381_multisig::<MinPk, _>, false);
+        engine_shutdown(bls12381_multisig::<MinSig, _>, false);
+        engine_shutdown(ed25519, false);
+    }
+
+    #[test_traced]
+    fn test_graceful_shutdown() {
+        engine_shutdown(bls12381_threshold::<MinPk, _>, true);
+        engine_shutdown(bls12381_threshold::<MinSig, _>, true);
+        engine_shutdown(bls12381_multisig::<MinPk, _>, true);
+        engine_shutdown(bls12381_multisig::<MinSig, _>, true);
+        engine_shutdown(ed25519, true);
     }
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)

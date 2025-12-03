@@ -22,7 +22,7 @@ impl Read for Unit {
     type Cfg = ();
 
     fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        Ok(Unit)
+        Ok(Self)
     }
 }
 
