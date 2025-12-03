@@ -558,6 +558,50 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
+    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
+{
+    type Digest = H::Digest;
+    type Operation = C::Item;
+    type Dirty = IndexedLog<E, C, I, H, Dirty>;
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+
+    fn root(&self) -> Self::Digest {
+        self.log.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        let size = self.op_count();
+        self.log
+            .historical_proof(size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
         S: State<DigestOf<H>>,
     > LogStore for IndexedLog<E, C, I, H, S>
 {
@@ -617,50 +661,6 @@ impl<
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
-{
-    type Digest = H::Digest;
-    type Operation = C::Item;
-    type Dirty = IndexedLog<E, C, I, H, Dirty>;
-
-    fn root(&self) -> Self::Digest {
-        self.log.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        let size = self.op_count();
-        self.log
-            .historical_proof(size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    fn into_dirty(self) -> Self::Dirty {
-        self.into_dirty()
     }
 }
 
