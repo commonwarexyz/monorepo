@@ -96,9 +96,7 @@ macro_rules! hex {
 }
 
 /// Macro for converting sequence of string literals containing hex-encoded data
-/// into a [`FixedBytes`] type.
-///
-/// [FixedBytes]: crate::sequence::FixedBytes
+/// into a [`FixedBytes`](crate::sequence::FixedBytes) type.
 #[macro_export]
 macro_rules! fixed_bytes {
     ($s:tt) => {
