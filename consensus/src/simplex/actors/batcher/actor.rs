@@ -459,6 +459,7 @@ impl<
                 }
             }
             let Some((view, voters, failed)) = selected else {
+                timer.cancel();
                 trace!(
                     %current,
                     %finalized,
@@ -490,27 +491,27 @@ impl<
             }
 
             // Try to construct and forward certificates
-            if let Some(notarization) =
-                self.recover_latency
-                    .time_some(|| round.try_construct_notarization(&self.scheme))
+            if let Some(notarization) = self
+                .recover_latency
+                .time_some(|| round.try_construct_notarization(&self.scheme))
             {
                 debug!(%view, "constructed notarization, forwarding to voter");
                 voter
                     .recovered(Certificate::Notarization(notarization))
                     .await;
             }
-            if let Some(nullification) =
-                self.recover_latency
-                    .time_some(|| round.try_construct_nullification(&self.scheme))
+            if let Some(nullification) = self
+                .recover_latency
+                .time_some(|| round.try_construct_nullification(&self.scheme))
             {
                 debug!(%view, "constructed nullification, forwarding to voter");
                 voter
                     .recovered(Certificate::Nullification(nullification))
                     .await;
             }
-            if let Some(finalization) =
-                self.recover_latency
-                    .time_some(|| round.try_construct_finalization(&self.scheme))
+            if let Some(finalization) = self
+                .recover_latency
+                .time_some(|| round.try_construct_finalization(&self.scheme))
             {
                 debug!(%view, "constructed finalization, forwarding to voter");
                 voter
