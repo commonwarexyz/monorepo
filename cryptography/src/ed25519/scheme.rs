@@ -4,7 +4,7 @@ cfg_if::cfg_if! {
         use crate::BatchVerifier;
         use std::borrow::{Cow, ToOwned};
     } else {
-        use alloc::borrow::ToOwned;
+        use alloc::borrow::{Cow, ToOwned};
     }
 }
 use bytes::{Buf, BufMut};
