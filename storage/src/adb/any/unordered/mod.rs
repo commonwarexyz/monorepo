@@ -254,8 +254,7 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<bool, Error> {
-        self.create_key(key, value).await?;
-        Ok(true)
+        self.create_key(key, value).await
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
