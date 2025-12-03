@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{AnyCleanStore, AnyDb, AnyDirtyStore},
+        any::{AnyCleanStore, AnyDirtyStore},
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
         store::LogStore,
@@ -566,70 +566,6 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyDb<C::Item, H::Digest> for IndexedLog<E, C, I, H>
-{
-    type Value = <C::Item as Keyed>::Value;
-
-    /// Returns the root of the authenticated log.
-    fn root(&self) -> H::Digest {
-        self.log.root()
-    }
-
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        let size = self.op_count();
-        self.historical_proof(size, start_loc, max_ops).await
-    }
-
-    /// Returns a proof of inclusion of all operations in the range starting at (and including)
-    /// location `start_loc`, and ending at the first of either:
-    /// - the last operation performed, or
-    /// - the operation `max_ops` from the start.
-    ///
-    /// Also returns a vector of operations corresponding to this range.
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn commit(
-        &mut self,
-        metadata: Option<<C::Item as Keyed>::Value>,
-    ) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
     > LogStore for IndexedLog<E, C, I, H>
 {
     type Value = <C::Item as Keyed>::Value;
@@ -905,16 +841,12 @@ pub(super) mod test {
             .unwrap()
     }
 
-    async fn test_any_db_empty<O, D>(
+    async fn test_any_db_empty<D>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) where
-        O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
-            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>
-            + LogStore<Value = Digest>,
+        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -931,13 +863,13 @@ pub(super) mod test {
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
-        db.set(k1, v1).await.unwrap();
+        db.update(k1, v1).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 0);
         assert_eq!(db.root(), empty_root);
 
         let empty_proof = Proof::default();
-        let empty_ops: [O; 0] = [];
+        let empty_ops: Vec<u8> = vec![];
         assert!(verify_proof(
             &mut hasher,
             &empty_proof,
@@ -973,7 +905,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
-        db.set(k1, v1).await.unwrap();
+        db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
             db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
@@ -1008,15 +940,12 @@ pub(super) mod test {
         });
     }
 
-    async fn test_any_db_basic<O, D>(
+    async fn test_any_db_basic<D>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
-            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
+        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
@@ -1040,10 +969,10 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.set(d1, v2).await.unwrap();
+        db.update(d1, v2).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        db.set(d2, v1).await.unwrap();
+        db.update(d2, v1).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
@@ -1088,11 +1017,11 @@ pub(super) mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        db.set(d1, v1).await.unwrap();
-        db.set(d2, v2).await.unwrap();
+        db.update(d1, v1).await.unwrap();
+        db.update(d2, v2).await.unwrap();
         db.delete(d1).await.unwrap();
-        db.set(d2, v1).await.unwrap();
-        db.set(d1, v2).await.unwrap();
+        db.update(d2, v1).await.unwrap();
+        db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
         db.commit(None).await.unwrap();

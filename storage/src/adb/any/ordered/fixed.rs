@@ -81,7 +81,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 mod test {
     use super::*;
     use crate::{
-        adb::{any::AnyDb as _, store::batch_tests, verify_proof},
+        adb::{
+            store::{batch_tests, CleanStore as _},
+            verify_proof,
+        },
         index::Unordered as _,
         mmr::{mem::Mmr, Position, StandardHasher as Standard},
         translator::{OneCap, TwoCap},

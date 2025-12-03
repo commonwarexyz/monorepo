@@ -5,18 +5,18 @@
 use crate::{
     adb::{
         operation::{Committable, Keyed},
-        store::{CleanStore, DirtyStore, LogStore},
+        store::{CleanStore, DirtyStore},
         Error,
     },
     journal::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     translator::Translator,
 };
 use commonware_codec::{Codec, CodecFixed};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
 use std::{
@@ -27,51 +27,6 @@ use std::{
 
 pub mod ordered;
 pub mod unordered;
-
-/// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
-/// associated with a key.
-pub trait AnyDb<O: Keyed, D: Digest>: LogStore {
-    type Value: Codec;
-
-    fn root(&self) -> D;
-
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
-
-    /// Analagous to `proof`, but with respect to the state of the database when it had
-    /// `historical_size` operations.
-    fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    fn commit(
-        &mut self,
-        metadata: Option<O::Value>,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-}
 
 /// Extension trait for Any ADBs in a clean (merkleized) state.
 ///

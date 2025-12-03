@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{AnyCleanStore, AnyDb, AnyDirtyStore},
+        any::{AnyCleanStore, AnyDirtyStore},
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
         store::LogStore,
@@ -905,9 +905,17 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyDb<C::Item, H::Digest> for IndexedLog<E, C, I, H>
+    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
 {
-    type Value = Value<C::Item>;
+    type Digest = H::Digest;
+
+    type Operation = C::Item;
+
+    type Dirty = IndexedLog<E, C, I, H, Dirty>;
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
 
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -952,13 +960,13 @@ impl<
             .map_err(Into::into)
     }
 
-    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
+    // async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
+    //     self.commit(metadata).await
+    // }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
+    // async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    //     self.prune(prune_loc).await
+    // }
 }
 
 impl<
@@ -1024,50 +1032,6 @@ impl<
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
-{
-    type Digest = H::Digest;
-    type Operation = C::Item;
-    type Dirty = IndexedLog<E, C, I, H, Dirty>;
-
-    fn root(&self) -> Self::Digest {
-        self.log.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        let size = self.op_count();
-        self.log
-            .historical_proof(size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    fn into_dirty(self) -> Self::Dirty {
-        self.into_dirty()
     }
 }
 
@@ -1205,10 +1169,7 @@ impl<
 mod test {
     use super::*;
     use crate::{
-        adb::{
-            any::test::{fixed_db_config, variable_db_config},
-            operation::Keyed,
-        },
+        adb::any::test::{fixed_db_config, variable_db_config},
         mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
@@ -1240,15 +1201,12 @@ mod test {
             .unwrap()
     }
 
-    async fn test_ordered_any_db_empty<O, D>(
+    async fn test_ordered_any_db_empty<D>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>
-            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>
-            + LogStore<Value = Digest>,
+        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
     {
         let mut hasher = Standard::<Sha256>::new();
         assert_eq!(db.op_count(), 0);
@@ -1264,7 +1222,7 @@ mod test {
         let d1 = Sha256::fill(1u8);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
-        db.set(d1, d2).await.unwrap();
+        db.update(d1, d2).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 0);
@@ -1312,15 +1270,12 @@ mod test {
         });
     }
 
-    async fn test_ordered_any_db_basic<O, D>(
+    async fn test_ordered_any_db_basic<D>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
-            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
+        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
@@ -1345,10 +1300,10 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.set(key1, new_val).await.unwrap();
+        db.update(key1, new_val).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.set(key2, new_val).await.unwrap();
+        db.update(key2, new_val).await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
@@ -1389,11 +1344,11 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        db.set(key1, val1).await.unwrap();
-        db.set(key2, val2).await.unwrap();
+        db.update(key1, val1).await.unwrap();
+        db.update(key2, val2).await.unwrap();
         db.delete(key1).await.unwrap();
-        db.set(key2, val1).await.unwrap();
-        db.set(key1, val2).await.unwrap();
+        db.update(key2, val1).await.unwrap();
+        db.update(key1, val2).await.unwrap();
 
         db.commit(None).await.unwrap();
 

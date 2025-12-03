@@ -2,10 +2,7 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{
         self,
-        any::{
-            unordered::{fixed::Any, IndexedLog},
-            AnyDb,
-        },
+        any::unordered::{fixed::Any, IndexedLog},
         operation::fixed::unordered::Operation,
     },
     index::unordered::Index,
@@ -104,7 +101,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        AnyDb::root(self)
+        self.log.root()
     }
 
     async fn resize_journal(
@@ -265,17 +262,15 @@ mod tests {
     use crate::{
         adb::{
             self,
-            any::{
-                unordered::fixed::{
-                    test::{
-                        any_db_config, apply_ops, create_test_config, create_test_db,
-                        create_test_ops, AnyTest,
-                    },
-                    Any,
+            any::unordered::fixed::{
+                test::{
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest,
                 },
-                AnyDb,
+                Any,
             },
             operation::{fixed::unordered::Operation, Keyed as _},
+            store::CleanStore as _,
             sync::{
                 self,
                 engine::{Config, NextStep},

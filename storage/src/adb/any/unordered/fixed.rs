@@ -80,7 +80,9 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::AnyDb, operation::fixed::unordered::Operation, store::batch_tests, verify_proof,
+            operation::fixed::unordered::Operation,
+            store::{batch_tests, CleanStore as _},
+            verify_proof,
         },
         index::Unordered as _,
         mmr::{Position, StandardHasher},

@@ -23,7 +23,7 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [Store::prune].
 //!
 //! # Example
 //!
@@ -194,6 +194,7 @@ pub trait CleanStore: Sized {
     /// Generate a proof of all operations in the range starting at `start_loc`.
     ///
     /// Returns both the proof and the operations corresponding to the leaves in this range.
+    #[allow(clippy::type_complexity)]
     fn proof(
         &self,
         start_loc: Location,
@@ -201,6 +202,7 @@ pub trait CleanStore: Sized {
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
 
     /// Generate a historical proof with respect to when the database had `historical_size` operations.
+    #[allow(clippy::type_complexity)]
     fn historical_proof(
         &self,
         historical_size: Location,

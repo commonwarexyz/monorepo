@@ -1,11 +1,12 @@
 use crate::{
     adb::{
         self,
-        any::{unordered::fixed::Any, AnyDb},
+        any::unordered::fixed::Any,
         immutable::Immutable,
         operation::{
             fixed::unordered::Operation as Fixed, variable::immutable::Operation as ImmutableOp,
         },
+        store::CleanStore as _,
     },
     mmr::{Location, Proof},
     translator::Translator,

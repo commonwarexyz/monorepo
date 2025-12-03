@@ -96,7 +96,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::{any::AnyDb, store::batch_tests, verify_proof},
+        adb::{
+            store::{batch_tests, CleanStore as _},
+            verify_proof,
+        },
         index::Unordered as _,
         mmr::StandardHasher,
         translator::TwoCap,
