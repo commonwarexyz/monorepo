@@ -388,6 +388,12 @@ impl<K, V> Map<K, V> {
         &mut self.values
     }
 
+    /// Truncates the map to at most `len` entries.
+    pub fn truncate(&mut self, len: usize) {
+        self.keys.0.truncate(len);
+        self.values.truncate(len);
+    }
+
     /// Returns a zipped iterator over keys and values.
     pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
         self.keys.iter().zip(self.values.iter())

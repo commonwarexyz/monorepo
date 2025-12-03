@@ -7,13 +7,12 @@ use commonware_cryptography::bls12381::{
             Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
             SCALAR_LENGTH,
         },
-        poly::{compute_weights, Eval, Poly, Weight},
+        poly::{Eval, Poly},
         variant::{MinPk, MinSig, Variant},
     },
     tle::{Block, Ciphertext},
 };
 use rand::{rngs::StdRng, SeedableRng};
-use std::{collections::BTreeMap, num::NonZeroU32};
 
 #[allow(unused)]
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -229,38 +228,6 @@ pub fn arbitrary_vec_pending_minsig(
     (0..len)
         .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?, arbitrary_g1(u)?)))
         .collect()
-}
-
-#[allow(unused)]
-pub fn arbitrary_weights(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<BTreeMap<u32, Weight>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    if len == 0 {
-        return Ok(BTreeMap::new());
-    }
-
-    let mut indices = Vec::new();
-    for _ in 0..len {
-        let index = u.int_in_range(1..=100)?;
-        if !indices.contains(&index) {
-            indices.push(index);
-        }
-    }
-
-    if indices.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    indices.sort();
-    compute_weights(
-        Default::default(),
-        NonZeroU32::try_from(indices.len() as u32).unwrap(),
-        indices,
-    )
-    .or_else(|_| Ok(BTreeMap::new()))
 }
 
 #[allow(unused)]

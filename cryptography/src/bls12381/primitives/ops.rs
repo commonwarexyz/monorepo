@@ -9,23 +9,34 @@
 
 use super::{
     group::{self, Element, Point, Scalar, Share, DST},
-    poly::{Eval, PartialSignature, Weight},
+    poly::{Eval, PartialSignature},
     variant::Variant,
     Error,
 };
-use crate::bls12381::primitives::{
-    poly::{compute_weights, prepare_evaluations},
-    sharing::Sharing,
-};
+use crate::bls12381::primitives::sharing::Sharing;
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_utils::union_unique;
+use commonware_math::poly::Interpolator;
+use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
 #[cfg(feature = "std")]
-use std::{borrow::Cow, collections::BTreeMap};
+use std::borrow::Cow;
+
+fn prepare_evaluations<'a, V: Variant>(
+    threshold: u32,
+    partials: impl IntoIterator<Item = &'a PartialSignature<V>>,
+) -> Result<Map<u32, V::Signature>, Error> {
+    let mut out = Map::from_iter_dedup(partials.into_iter().map(|eval| (eval.index, eval.value)));
+    let t = threshold as usize;
+    out.truncate(t);
+    if out.len() < t {
+        return Err(Error::NotEnoughPartialSignatures(t, out.len()));
+    }
+    Ok(out)
+}
 
 /// Computes the public key from the private key.
 pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
@@ -356,55 +367,6 @@ where
     }
 }
 
-/// Interpolate the value of some [Point] with precomputed Barycentric Weights
-/// and multi-scalar multiplication (MSM).
-pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
-where
-    P: Point + 'a,
-    I: IntoIterator<Item = &'a Eval<P>>,
-{
-    // Populate points and scalars
-    let mut points = Vec::with_capacity(weights.len());
-    let mut scalars = Vec::with_capacity(weights.len());
-    for e in evals {
-        points.push(e.value.clone());
-        scalars.push(
-            weights
-                .get(&e.index)
-                .ok_or(Error::InvalidIndex)?
-                .as_scalar()
-                .clone(),
-        );
-    }
-
-    // Perform multi-scalar multiplication
-    Ok(P::msm(&points, &scalars))
-}
-
-/// Recovers a signature from `threshold` partial signatures.
-///
-/// # Determinism
-///
-/// Signatures recovered by this function are deterministic and are safe
-/// to use in a consensus-critical context.
-///
-/// # Warning
-///
-/// This function assumes that each partial signature is unique and that
-/// that there exists exactly one partial signature for each index in
-/// the `weights` map.
-pub fn threshold_signature_recover_with_weights<'a, V, I>(
-    weights: &BTreeMap<u32, Weight>,
-    partials: I,
-) -> Result<V::Signature, Error>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
-{
-    msm_interpolate(weights, partials)
-}
-
 /// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
@@ -424,18 +386,11 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    // Prepare evaluations
-    let evals = prepare_evaluations(sharing.required(), partials)?;
-
-    // Compute weights
-    let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
-    let weights = compute_weights(sharing.mode(), sharing.total(), indices)?;
-
-    // Perform interpolation with the precomputed weights.
-    //
-    // We call this function instead of `poly::recover_with_weights` because
-    // it will use multi-scalar multiplication (MSM) to recover the signature.
-    threshold_signature_recover_with_weights::<V, _>(&weights, evals)
+    let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
+    let interpolator = Interpolator::new(evals.iter().map(|&i| (i, Scalar::from_index(i))));
+    interpolator
+        .interpolate(&evals, 1)
+        .ok_or(Error::InvalidRecovery)
 }
 
 /// Recovers multiple signatures from multiple sets of at least `threshold`
@@ -452,7 +407,7 @@ where
 /// each set of partial signatures has the same indices.
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     sharing: &Sharing<V>,
-    mut many_evals: Vec<I>,
+    many_evals: Vec<I>,
     #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
@@ -460,73 +415,53 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let threshold = sharing.required();
-    // Process first set of evaluations
-    let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
-    let evals = prepare_evaluations(threshold, evals)?;
-    let mut prepared_evals = vec![evals];
-
-    // Prepare other evaluations and ensure they have the same indices
-    for evals in many_evals {
-        let evals = evals.into_iter().collect::<Vec<_>>();
-        let evals = prepare_evaluations(threshold, evals)?;
-        for (i, e) in prepared_evals[0].iter().enumerate() {
-            if e.index != evals[i].index {
-                return Err(Error::InvalidIndex);
-            }
-        }
-        prepared_evals.push(evals);
+    let prepared_evals = many_evals
+        .into_iter()
+        .map(|evals| prepare_evaluations::<V>(sharing.required(), evals))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(first_eval) = prepared_evals.first() else {
+        return Ok(Vec::new());
+    };
+    if !prepared_evals
+        .iter()
+        .skip(1)
+        .all(|other_eval| other_eval.keys() == first_eval.keys())
+    {
+        return Err(Error::InvalidIndex);
     }
 
-    // Compute weights
-    let indices = prepared_evals[0]
-        .iter()
-        .map(|e| e.index)
-        .collect::<Vec<_>>();
-    let weights = compute_weights(sharing.mode(), sharing.total(), indices)?;
-
-    #[cfg(not(feature = "std"))]
-    return prepared_evals
-        .into_iter()
-        .map(|evals| {
-            threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
-        })
-        .collect();
-
+    let interpolator = Interpolator::new(first_eval.iter().map(|&i| (i, Scalar::from_index(i))));
     #[cfg(feature = "std")]
     {
         let concurrency = core::cmp::min(concurrency, prepared_evals.len());
-        if concurrency == 1 {
-            return prepared_evals
-                .into_iter()
-                .map(|evals| {
-                    threshold_signature_recover_with_weights::<V, _>(
-                        &weights,
-                        evals.iter().cloned(),
-                    )
-                })
-                .collect();
+        if concurrency != 1 {
+            // Build a thread pool with the specified concurrency
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("Unable to build thread pool");
+
+            // Recover signatures
+            return pool.install(move || {
+                prepared_evals
+                    .par_iter()
+                    .map(|evals| {
+                        interpolator
+                            .interpolate(evals, 1)
+                            .ok_or(Error::InvalidRecovery)
+                    })
+                    .collect()
+            });
         }
-
-        // Build a thread pool with the specified concurrency
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // Recover signatures
-        pool.install(move || {
-            prepared_evals
-                .par_iter()
-                .map(|evals| {
-                    threshold_signature_recover_with_weights::<V, _>(
-                        &weights,
-                        evals.iter().cloned(),
-                    )
-                })
-                .collect()
-        })
     }
+    prepared_evals
+        .into_iter()
+        .map(|evals| {
+            interpolator
+                .interpolate(&evals, 1)
+                .ok_or(Error::InvalidRecovery)
+        })
+        .collect()
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
@@ -696,10 +631,7 @@ mod tests {
     use super::*;
     use crate::bls12381::{
         dkg,
-        primitives::{
-            poly,
-            variant::{MinPk, MinSig},
-        },
+        primitives::variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
@@ -1352,17 +1284,8 @@ mod tests {
             .map(|s| partial_sign_message::<V>(s, None, b"payload"))
             .collect();
 
-        // Compute barycentric weights once.
-        let indices = partials.iter().map(|e| e.index).collect::<Vec<_>>();
-        let weights = compute_weights(sharing.mode(), sharing.total(), indices).unwrap();
-
         // Path-1: generic recover
         let sig1 = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
-
-        // Path-2: recover with *pre-computed* weights
-        let sig2 = threshold_signature_recover_with_weights::<V, _>(&weights, &partials).unwrap();
-
-        assert_eq!(sig1, sig2);
 
         // Verify with the aggregated public key.
         verify_message::<V>(sharing.public(), None, b"payload", &sig1).unwrap();
@@ -1404,121 +1327,6 @@ mod tests {
     fn test_threshold_signature_recover_multiple() {
         threshold_signature_recover_multiple::<MinPk>();
         threshold_signature_recover_multiple::<MinSig>();
-    }
-
-    fn msm_interpolate_vs_poly_recover<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(4242);
-        let degree = 5;
-        let threshold = degree + 1;
-        let poly_scalar = poly::Private::new(&mut rng, degree);
-
-        // Commit to Signature group
-        let poly_g1 = poly::Poly::<V::Signature>::commit(poly_scalar);
-
-        // Generate evaluations (enough to meet threshold)
-        let evals: Vec<_> = (0..threshold)
-            .map(|i| Eval {
-                index: i,
-                value: poly_g1.eval(&Scalar::from_index(i)),
-            })
-            .collect();
-        let eval_refs: Vec<_> = evals.iter().collect(); // Get references
-
-        // Compute weights
-        let indices: Vec<u32> = eval_refs.iter().map(|e| e.index).collect();
-        let weights = poly::compute_weights(Default::default(), NZU32!(3 * degree), indices)
-            .expect("Failed to compute weights");
-
-        // Calculate using original polynomial recovery (naive interpolation)
-        let expected_result = {
-            let points = evals.iter().map(|e| e.value).collect::<Vec<_>>();
-            let weights = weights
-                .values()
-                .map(|w| w.as_scalar().clone())
-                .collect::<Vec<_>>();
-            <V::Signature as Space<Scalar>>::msm(points.as_slice(), &weights, 1)
-        };
-
-        // Calculate using MSM interpolation
-        let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
-
-        // Compare results
-        assert_eq!(
-            expected_result, msm_result,
-            "MSM interpolation result differs from polynomial recovery"
-        );
-
-        // Also check against the known constant term
-        assert_eq!(
-            expected_result,
-            *poly_g1.constant(),
-            "Recovered value does not match original constant term"
-        );
-    }
-
-    #[test]
-    fn test_msm_interpolate_vs_poly_recover() {
-        msm_interpolate_vs_poly_recover::<MinPk>();
-        msm_interpolate_vs_poly_recover::<MinSig>();
-    }
-
-    fn msm_interpolate_invalid_index<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(5555);
-        let degree = 2;
-        let threshold = degree + 1;
-        let poly_scalar = poly::Private::new(&mut rng, degree);
-        let poly_g2 = poly::Poly::<V::Public>::commit(poly_scalar);
-
-        // Generate threshold evaluations
-        let evals: Vec<_> = (0..threshold)
-            .map(|i| Eval {
-                index: i,
-                value: poly_g2.eval(&Scalar::from_index(i)),
-            })
-            .collect();
-        let eval_refs: Vec<_> = evals.iter().collect();
-
-        // Compute weights for *different* indices
-        let wrong_indices: Vec<u32> = (threshold..threshold * 2).collect();
-        let weights = poly::compute_weights(Default::default(), NZU32!(3 * degree), wrong_indices)
-            .expect("Failed to compute weights");
-
-        // Try to interpolate with mismatched weights/evals
-        let result = msm_interpolate::<V::Public, _>(&weights, eval_refs);
-
-        // Expect InvalidIndex error
-        assert!(
-            matches!(result, Err(Error::InvalidIndex)),
-            "Expected InvalidIndex error for mismatched weights"
-        );
-    }
-
-    #[test]
-    fn test_msm_interpolate_invalid_index() {
-        msm_interpolate_invalid_index::<MinPk>();
-        msm_interpolate_invalid_index::<MinSig>();
-    }
-
-    fn msm_interpolate_empty<V: Variant>() {
-        let weights: BTreeMap<u32, Weight> = BTreeMap::new();
-        let evals: Vec<Eval<V::Public>> = Vec::new();
-        let eval_refs: Vec<&Eval<V::Public>> = evals.iter().collect();
-
-        // Interpolate with empty inputs
-        let result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed on empty");
-
-        // Expect identity element
-        assert_eq!(
-            result,
-            V::Public::zero(),
-            "Expected G2 identity for empty interpolation"
-        );
-    }
-
-    #[test]
-    fn test_msm_interpolate_empty() {
-        msm_interpolate_empty::<MinPk>();
-        msm_interpolate_empty::<MinSig>();
     }
 
     fn partial_aggregate_signature_correct<V: Variant>() {

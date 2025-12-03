@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, sharing::Mode},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
 //! use commonware_utils::NZU32;

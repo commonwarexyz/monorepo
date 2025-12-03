@@ -562,7 +562,8 @@ mod test {
             prop_assume!(f.required().get() < F::MAX as u32);
             let points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let recovered = interpolator.interpolate(&Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate()), 1);
+            let evals = Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate());
+            let recovered = interpolator.interpolate(&evals, 1);
             assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
 

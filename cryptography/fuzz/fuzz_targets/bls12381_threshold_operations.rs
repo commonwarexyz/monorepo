@@ -4,15 +4,13 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::*,
-    poly::{Eval, Weight},
+    poly::Eval,
     sharing::Sharing,
     variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::BTreeMap;
 
 mod common;
-use crate::common::arbitrary_weights;
 use common::{
     arbitrary_bytes, arbitrary_eval_g1, arbitrary_eval_g2, arbitrary_messages,
     arbitrary_optional_bytes, arbitrary_share, arbitrary_vec_eval_g1, arbitrary_vec_eval_g2,
@@ -69,28 +67,12 @@ enum FuzzOperation {
         message: Vec<u8>,
         partials: Vec<(u32, G1)>,
     },
-    MsmInterpolateG1 {
-        weights: BTreeMap<u32, Weight>,
-        evals: Vec<Eval<G1>>,
-    },
-    MsmInterpolateG2 {
-        weights: BTreeMap<u32, Weight>,
-        evals: Vec<Eval<G2>>,
-    },
     ThresholdSignatureRecoverMinPk {
         sharing: Sharing<MinPk>,
         partials: Vec<Eval<G2>>,
     },
     ThresholdSignatureRecoverMinSig {
         sharing: Sharing<MinSig>,
-        partials: Vec<Eval<G1>>,
-    },
-    ThresholdSignatureRecoverWithWeightsMinPk {
-        weights: BTreeMap<u32, Weight>,
-        partials: Vec<Eval<G2>>,
-    },
-    ThresholdSignatureRecoverWithWeightsMinSig {
-        weights: BTreeMap<u32, Weight>,
         partials: Vec<Eval<G1>>,
     },
     ThresholdSignatureRecoverMultipleMinPk {
@@ -117,7 +99,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=19)?;
+        let choice = u.int_in_range(0..=15)?;
 
         match choice {
             0 => Ok(FuzzOperation::PartialSignProofOfPossessionMinPk {
@@ -166,46 +148,30 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g1(u, 0, 10)?,
             }),
-            10 => Ok(FuzzOperation::MsmInterpolateG1 {
-                weights: arbitrary_weights(u, 0, 10)?,
-                evals: arbitrary_vec_eval_g1(u, 0, 10)?,
-            }),
-            11 => Ok(FuzzOperation::MsmInterpolateG2 {
-                weights: arbitrary_weights(u, 0, 10)?,
-                evals: arbitrary_vec_eval_g2(u, 0, 10)?,
-            }),
-            12 => Ok(FuzzOperation::ThresholdSignatureRecoverMinPk {
-                sharing: u.arbitrary()?,
-                partials: arbitrary_vec_eval_g2(u, 0, 20)?,
-            }),
-            13 => Ok(FuzzOperation::ThresholdSignatureRecoverMinSig {
+            10 => Ok(FuzzOperation::ThresholdSignatureRecoverMinSig {
                 sharing: u.arbitrary()?,
                 partials: arbitrary_vec_eval_g1(u, 0, 20)?,
             }),
-            14 => Ok(FuzzOperation::ThresholdSignatureRecoverWithWeightsMinPk {
-                weights: arbitrary_weights(u, 0, 10)?,
+            11 => Ok(FuzzOperation::ThresholdSignatureRecoverMinPk {
+                sharing: u.arbitrary()?,
                 partials: arbitrary_vec_eval_g2(u, 0, 20)?,
             }),
-            15 => Ok(FuzzOperation::ThresholdSignatureRecoverWithWeightsMinSig {
-                weights: arbitrary_weights(u, 0, 10)?,
-                partials: arbitrary_vec_eval_g1(u, 0, 20)?,
-            }),
-            16 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
+            12 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_eval_g2(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
-            17 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinSig {
+            13 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinSig {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_eval_g1(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
-            18 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinPk {
+            14 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinPk {
                 sharing: u.arbitrary()?,
                 partials_1: arbitrary_vec_eval_g2(u, 0, 10)?,
                 partials_2: arbitrary_vec_eval_g2(u, 0, 10)?,
             }),
-            19 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinSig {
+            15 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinSig {
                 sharing: u.arbitrary()?,
                 partials_1: arbitrary_vec_eval_g1(u, 0, 10)?,
                 partials_2: arbitrary_vec_eval_g1(u, 0, 10)?,
@@ -353,28 +319,12 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::MsmInterpolateG1 { weights, evals } => {
-            let _ = msm_interpolate::<G1, _>(&weights, &evals);
-        }
-
-        FuzzOperation::MsmInterpolateG2 { weights, evals } => {
-            let _ = msm_interpolate::<G2, _>(&weights, &evals);
-        }
-
         FuzzOperation::ThresholdSignatureRecoverMinPk { sharing, partials } => {
             let _ = threshold_signature_recover::<MinPk, _>(&sharing, &partials);
         }
 
         FuzzOperation::ThresholdSignatureRecoverMinSig { sharing, partials } => {
             let _ = threshold_signature_recover::<MinSig, _>(&sharing, &partials);
-        }
-
-        FuzzOperation::ThresholdSignatureRecoverWithWeightsMinPk { weights, partials } => {
-            let _ = threshold_signature_recover_with_weights::<MinPk, _>(&weights, &partials);
-        }
-
-        FuzzOperation::ThresholdSignatureRecoverWithWeightsMinSig { weights, partials } => {
-            let _ = threshold_signature_recover_with_weights::<MinSig, _>(&weights, &partials);
         }
 
         FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
