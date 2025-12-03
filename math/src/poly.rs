@@ -371,15 +371,16 @@ impl<G: CryptoGroup> Poly<G> {
 ///
 /// ```
 /// # use commonware_math::{fields::goldilocks::F, poly::{Poly, Interpolator}};
+/// # use commonware_utils::ordered::Map;
 /// # fn example(f: Poly<F>, g: Poly<F>, p0: F, p1: F) {
 ///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
 ///     assert_eq!(
 ///         Some(*f.constant()),
-///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().collect(), 1)
+///         interpolator.interpolate(&Map::from_iter_dedup([(0, f.eval(&p0)), (1, f.eval(&p1))]), 1)
 ///     );
 ///     assert_eq!(
 ///         Some(*g.constant()),
-///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().collect(), 1)
+///         interpolator.interpolate(&Map::from_iter_dedup([(1, g.eval(&p1)), (0, g.eval(&p0))]), 1)
 ///     );
 /// # }
 /// ```
@@ -544,7 +545,8 @@ mod test {
             prop_assume!(f.required().get() < F::MAX as u32);
             let points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let recovered = interpolator.interpolate(&Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate()), 1);
+            let evals = Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate());
+            let recovered = interpolator.interpolate(&evals, 1);
             assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
 

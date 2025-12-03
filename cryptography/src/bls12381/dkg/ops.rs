@@ -9,7 +9,7 @@ use crate::bls12381::{
     },
 };
 use commonware_math::{
-    algebra::{Additive as _, Random, Space},
+    algebra::{Additive as _, Random},
     poly::Interpolator,
 };
 use commonware_utils::{ordered::Map, TryCollect};
@@ -109,43 +109,6 @@ pub fn construct_public<'a, V: Variant>(
         return Err(Error::InsufficientDealings);
     }
     Ok(public)
-}
-
-/// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials using precomputed Barycentric Weights.
-///
-/// It is assumed that the required number of commitments are provided.
-pub fn recover_public_with_weights<V: Variant>(
-    previous: &poly::Public<V>,
-    commitments: &BTreeMap<u32, poly::Public<V>>,
-    weights: &BTreeMap<u32, poly::Weight>,
-    _threshold: u32,
-    concurrency: usize,
-) -> Result<poly::Public<V>, Error> {
-    // Ensure we have enough commitments to interpolate
-    let required = previous.required();
-    if commitments.len() < required.get() as usize {
-        return Err(Error::InsufficientDealings);
-    }
-    if commitments.keys().any(|i| !weights.contains_key(i)) {
-        return Err(Error::InsufficientDealings);
-    }
-    if weights.keys().any(|i| !commitments.contains_key(i)) {
-        return Err(Error::InsufficientDealings);
-    }
-    let commitments = commitments.values().cloned().collect::<Vec<_>>();
-    let weights = weights
-        .values()
-        .map(|w| w.as_scalar())
-        .cloned()
-        .collect::<Vec<_>>();
-    let new = poly::Public::<V>::msm(&commitments, &weights, concurrency);
-
-    // Ensure public key matches
-    if previous.constant() != new.constant() {
-        return Err(Error::ReshareMismatch);
-    }
-    Ok(new)
 }
 
 /// Recover public polynomial by interpolating coefficient-wise all
