@@ -526,6 +526,46 @@ impl<
     }
 }
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::store::Store for IndexedLog<E, C, I, H>
+{
+    type Key = <C::Item as Keyed>::Key;
+    type Value = <C::Item as Keyed>::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        Db::get(self, key).await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::store::StoreMut for IndexedLog<E, C, I, H>
+{
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        Db::update(self, key, value).await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
+{
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        Db::delete(self, key).await
+    }
+}
+
 // pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
 pub(super) mod test {

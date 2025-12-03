@@ -452,6 +452,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+    crate::store::Store for Immutable<E, K, V, H, T, Clean<H::Digest>>
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(key).await
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;

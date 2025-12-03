@@ -504,6 +504,63 @@ where
     }
 }
 
+impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(key).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        Db::update(self, key, value).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        Db::delete(self, key).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        Db::commit(self, None).await?;
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        Db::destroy(self).await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
