@@ -1,6 +1,6 @@
 use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use std::{
+use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };

@@ -1,9 +1,9 @@
 use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
+use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 #[cfg(test)]
 use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
-use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -35,8 +35,8 @@ impl Read for F {
     }
 }
 
-impl std::fmt::Debug for F {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for F {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:016X}", self.0)
     }
 }

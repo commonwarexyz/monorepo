@@ -1,13 +1,15 @@
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::ordered::{Map, Set};
-use rand_core::CryptoRngCore;
-use std::{
+use core::{
     fmt::Debug,
     iter,
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use rand_core::CryptoRngCore;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -146,7 +148,7 @@ impl<K> Poly<K> {
 }
 
 impl<K: Debug> Debug for Poly<K> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Poly(")?;
         for (i, c) in self.coeffs.iter().enumerate() {
             if i > 0 {
