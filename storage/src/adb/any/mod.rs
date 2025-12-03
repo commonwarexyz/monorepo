@@ -29,23 +29,14 @@ pub mod ordered;
 pub mod unordered;
 
 /// Extension trait for Any ADBs in a clean (merkleized) state.
-///
-/// Provides read access, mutations, commit, and lifecycle operations beyond what `CleanStore`
-/// and `LogStore` provide. Log info methods come from `LogStore` supertrait.
-/// Use `into_dirty()` (from `CleanStore`) to transition to `AnyDirtyStore` for batched
-/// MMR operations.
 pub trait AnyCleanStore:
     CleanStore<Dirty: AnyDirtyStore<Key = Self::Key, Value = Self::Value, Clean = Self>>
 {
     /// The key type for this database.
     type Key: Array;
 
-    // Read access
-
     /// Get the value for a given key, or None if it has no value.
     fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
-
-    // Commit
 
     /// Commit pending operations to the database, ensuring durability.
     /// Returns the location range of committed operations.
@@ -53,8 +44,6 @@ pub trait AnyCleanStore:
         &mut self,
         metadata: Option<Self::Value>,
     ) -> impl Future<Output = Result<Range<Location>, Error>>;
-
-    // Lifecycle
 
     /// Sync all database state to disk.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
@@ -70,20 +59,12 @@ pub trait AnyCleanStore:
 }
 
 /// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
-///
-/// Provides read access and mutations while in dirty state. Log info methods come from
-/// `LogStore` supertrait. Use `merkleize()` (from `DirtyStore`) to compute the root and
-/// transition back to `AnyCleanStore`.
 pub trait AnyDirtyStore: DirtyStore {
     /// The key type for this database.
     type Key: Array;
 
-    // Read access (still need to read while dirty)
-
     /// Get the value for a given key, or None if it has no value.
     fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
-
-    // Mutations
 
     /// Update `key` to have value `value`. Subject to rollback until next `commit`.
     fn update(

@@ -154,10 +154,7 @@ pub trait LogStore {
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 }
 
-/// A trait for authenticated stores in a "dirty" state with uncommitted operations.
-///
-/// Dirty stores have pending changes that have not yet been merkleized. Use `merkleize()`
-/// to compute the root digest and transition to a `CleanStore`.
+/// A trait for authenticated stores in a "dirty" state with unmerkleized operations.
 pub trait DirtyStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
@@ -180,9 +177,6 @@ pub trait DirtyStore: LogStore {
 }
 
 /// A trait for authenticated stores in a "clean" state where the MMR root is computed.
-///
-/// Clean stores can generate proofs and access the root digest. Use `into_dirty()` to
-/// transition to a `DirtyStore` for batched updates.
 pub trait CleanStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
