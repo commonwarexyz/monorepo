@@ -1041,4 +1041,151 @@ mod tests {
         proposal_forwarded_before_leader_set(bls12381_multisig::<MinSig, _>);
         proposal_forwarded_before_leader_set(ed25519);
     }
+
+    /// Test that leader activity detection works correctly:
+    /// 1. Early views (before skip_timeout) always return active
+    /// 2. With enough recent views, activity is determined by leader's votes
+    /// 3. With gaps in recent views (insufficient data), defaults to active
+    fn leader_activity_detection<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let skip_timeout = 5u64;
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(skip_timeout),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Register leader (participant 1) on the network
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let leader_pk = participants[1].clone();
+            let (mut leader_sender, _leader_receiver) =
+                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+            oracle
+                .add_link(leader_pk.clone(), me.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Start the batcher
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Test 1: Early views (before skip_timeout) should always return active
+            // Views 1 through skip_timeout-1 are before the threshold
+            let leader = 1u32;
+            for v in 1..skip_timeout {
+                let view = View::new(v);
+                let active = batcher_mailbox.update(view, leader, View::zero()).await;
+                assert!(active, "view {v} should be active (before skip_timeout)");
+            }
+
+            // Test 2: At view skip_timeout, we now have skip_timeout entries (views 1-5)
+            // and the leader hasn't voted, so they should be marked inactive
+            let view = View::new(skip_timeout);
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(
+                !active,
+                "view {skip_timeout} should be inactive (leader hasn't voted in {skip_timeout} views)"
+            );
+
+            // Test 3: Send a vote from the leader for the current view (view 5)
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal).unwrap();
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(leader_vote).encode().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            // Give network time to deliver
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Test 4: Advance to view skip_timeout + 1 (view 6)
+            // Leader voted in view 5, which is in the recent window, so should be active
+            let view = View::new(skip_timeout + 1);
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(
+                active,
+                "view {} should be active (leader voted in view {})",
+                skip_timeout + 1,
+                skip_timeout
+            );
+
+            // Test 5: Jump far ahead to create a gap in recent views
+            // Skip from view 6 to view 100 - this creates a gap where we don't have
+            // data for views 7-99. With insufficient recent data, should default to active.
+            let view = View::new(100);
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(
+                active,
+                "view 100 should be active (insufficient recent history due to gap)"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_leader_activity_detection() {
+        leader_activity_detection(bls12381_multisig::<MinPk, _>);
+        leader_activity_detection(bls12381_multisig::<MinSig, _>);
+        leader_activity_detection(ed25519);
+    }
 }
