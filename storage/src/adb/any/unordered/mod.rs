@@ -334,7 +334,15 @@ impl<
             active_keys,
         })
     }
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H, Dirty>
+{
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -357,7 +365,7 @@ impl<
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N>,
+        status: &mut AuthenticatedBitMap<D, N, Dirty>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
@@ -380,7 +388,7 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, Dirty>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,

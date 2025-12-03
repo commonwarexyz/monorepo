@@ -12,9 +12,10 @@ use crate::{
         store::LogStore,
         Error,
     },
+    bitmap::CleanBitMap,
     mmr::{
         grafting::Storage as GraftingStorage,
-        mem::{Clean, Mmr as MemMmr, State},
+        mem::{Clean, Dirty, Mmr as MemMmr, State},
         verification, Location, Position, Proof, StandardHasher,
     },
     translator::Translator,
@@ -48,7 +49,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H::Digest, N>,
+    status: BitMap<H::Digest, N, S>,
 
     context: E,
 
@@ -91,6 +92,134 @@ pub enum ExclusionProofInfo<K: Array, V: Value, const N: usize> {
     /// The DbEmpty variant is similar to Commit, only specifically for the case where the DB is
     /// completely empty (having no operations at all against which to prove).
     DbEmpty,
+}
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+        S: State<DigestOf<H>>,
+    > Current<E, K, V, H, T, N, S>
+{
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    pub fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub const fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.any.get(key).await
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.any.get_metadata().await
+    }
+
+    /// Whether the db currently has no active keys.
+    pub const fn is_empty(&self) -> bool {
+        self.any.is_empty()
+    }
+
+    /// Get the level of the base MMR into which we are grafting.
+    ///
+    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
+    /// 2, we compute this from trailing_zeros.
+    const fn grafting_height() -> u32 {
+        CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+    }
+
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the provided `root`.
+    pub fn verify_key_value_proof(
+        hasher: &mut H,
+        proof: &Proof<H::Digest>,
+        info: KeyValueProofInfo<K, V, N>,
+        root: &H::Digest,
+    ) -> bool {
+        let element = Operation::Update(KeyData {
+            key: info.key,
+            value: info.value,
+            next_key: info.next_key,
+        });
+
+        verify_key_value_proof(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            info.loc,
+            &info.chunk,
+            root,
+            element,
+        )
+    }
+
+    /// Get the operation that currently defines the span whose range contains `key`, or None if the
+    /// DB is empty.
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        self.any.get_span(key).await
+    }
+
+    /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
+    /// provided `root`.
+    pub fn verify_exclusion_proof(
+        hasher: &mut H,
+        proof: &Proof<H::Digest>,
+        key: &K,
+        info: ExclusionProofInfo<K, V, N>,
+        root: &H::Digest,
+    ) -> bool {
+        let (loc, chunk, element) = match info {
+            ExclusionProofInfo::KeyValue(info) => {
+                if info.key == *key {
+                    // The provided `key` is in the DB if it matches the start of the span.
+                    return false;
+                }
+                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
+                    return false;
+                }
+
+                let element = Operation::Update(KeyData {
+                    key: info.key,
+                    value: info.value,
+                    next_key: info.next_key,
+                });
+
+                (info.loc, info.chunk, element)
+            }
+            ExclusionProofInfo::Commit((loc, metadata, chunk)) => {
+                // Handle the case where the proof shows the db is empty, hence any key is proven
+                // excluded.
+                let op = Operation::<K, V>::CommitFloor(metadata, loc);
+                (loc, chunk, op)
+            }
+            ExclusionProofInfo::DbEmpty => {
+                // Handle the case where the proof shows the db has 0 operations, hence any key is
+                // proven excluded.
+                let empty_root = MemMmr::empty_mmr_root(hasher);
+                return proof.size == Position::new(0) && *root == empty_root;
+            }
+        };
+
+        super::verify_key_value_proof(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            loc,
+            &chunk,
+            root,
+            element,
+        )
+    }
 }
 
 impl<
@@ -156,38 +285,6 @@ impl<
             context,
             bitmap_metadata_partition,
         })
-    }
-
-    /// Whether the db currently has no active keys.
-    pub const fn is_empty(&self) -> bool {
-        self.any.is_empty()
-    }
-
-    /// Get the level of the base MMR into which we are grafting.
-    ///
-    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
-    /// 2, we compute this from trailing_zeros.
-    const fn grafting_height() -> u32 {
-        BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
-    }
-
-    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
-    /// function.
-    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Inactivate the current commit operation.
-        if let Some(last_commit_loc) = self.any.last_commit {
-            self.status.set_bit(*last_commit_loc, false);
-        }
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
-
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
-
-        self.any.apply_commit_op(commit_op).await
     }
 
     /// Return the root of the db.
@@ -280,7 +377,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -359,96 +456,13 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
 
         Ok((proof, proof_info))
-    }
-
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the provided `root`.
-    pub fn verify_key_value_proof(
-        hasher: &mut H,
-        proof: &Proof<H::Digest>,
-        info: KeyValueProofInfo<K, V, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let element = Operation::Update(KeyData {
-            key: info.key,
-            value: info.value,
-            next_key: info.next_key,
-        });
-
-        verify_key_value_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            info.loc,
-            &info.chunk,
-            root,
-            element,
-        )
-    }
-
-    /// Get the operation that currently defines the span whose range contains `key`, or None if the
-    /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
-        self.any.get_span(key).await
-    }
-
-    /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
-    /// provided `root`.
-    pub fn verify_exclusion_proof(
-        hasher: &mut H,
-        proof: &Proof<H::Digest>,
-        key: &K,
-        info: ExclusionProofInfo<K, V, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let (loc, chunk, element) = match info {
-            ExclusionProofInfo::KeyValue(info) => {
-                if info.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
-                    return false;
-                }
-
-                let element = Operation::Update(KeyData {
-                    key: info.key,
-                    value: info.value,
-                    next_key: info.next_key,
-                });
-
-                (info.loc, info.chunk, element)
-            }
-            ExclusionProofInfo::Commit((loc, metadata, chunk)) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded.
-                let op = Operation::<K, V>::CommitFloor(metadata, loc);
-                (loc, chunk, op)
-            }
-            ExclusionProofInfo::DbEmpty => {
-                // Handle the case where the proof shows the db has 0 operations, hence any key is
-                // proven excluded.
-                let empty_root = MemMmr::empty_mmr_root(hasher);
-                return proof.size == Position::new(0) && *root == empty_root;
-            }
-        };
-
-        super::verify_key_value_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            loc,
-            &chunk,
-            root,
-            element,
-        )
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -459,7 +473,7 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        BitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -482,7 +496,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -506,28 +520,72 @@ impl<
         self.commit_ops(None).await
     }
 
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    pub fn op_count(&self) -> Location {
-        self.any.op_count()
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+        let start_loc = self
+            .any
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+
+        self.commit_ops(metadata).await?; // recovery is ensured after this returns
+
+        // Merkleize the new bitmap entries.
+        let hasher = &mut self.any.log.hasher;
+        let mmr = &self.any.log.mmr;
+        let empty_status = CleanBitMap::<H::Digest, N>::new(hasher, None);
+        let status = std::mem::replace(&mut self.status, empty_status).into_dirty();
+        self.status =
+            merkleize_grafted_bitmap(hasher, status, mmr, Self::grafting_height()).await?;
+
+        // Prune bits that are no longer needed because they precede the inactivity floor.
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
+
+        Ok(start_loc..self.op_count())
     }
 
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
+    /// Sync all database state to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.any.get(key).await
-    }
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        self.any.get_metadata().await
+        self.any.prune(prune_loc).await
     }
+}
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Current<E, K, V, H, T, N, Dirty>
+{
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -573,60 +631,23 @@ impl<
         Ok(r)
     }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = self
-            .any
-            .last_commit
-            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
+    /// function.
+    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        // Inactivate the current commit operation.
+        if let Some(last_commit_loc) = self.any.last_commit {
+            self.status.set_bit(*last_commit_loc, false);
+        }
 
-        self.commit_ops(metadata).await?; // recovery is ensured after this returns
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
 
-        // Merkleize the new bitmap entries.
-        let hasher = &mut self.any.log.hasher;
-        let mmr = &self.any.log.mmr;
-        let empty_status = BitMap::<H::Digest, N>::new(hasher, None);
-        let status = std::mem::replace(&mut self.status, empty_status).into_dirty();
-        self.status =
-            merkleize_grafted_bitmap(hasher, status, mmr, Self::grafting_height()).await?;
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        self.status.push(true);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
-        // Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
-
-        Ok(start_loc..self.op_count())
-    }
-
-    /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
-
-        self.any.prune(prune_loc).await
+        self.any.apply_commit_op(commit_op).await
     }
 }
 
@@ -697,7 +718,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::Store for Current<E, K, V, H, T, N>
+        S: State<DigestOf<H>>,
+    > crate::store::Store for Current<E, K, V, H, T, N, S>
 {
     type Key = K;
     type Value = V;
@@ -715,7 +737,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Current<E, K, V, H, T, N>
+    > crate::store::StoreMut for Current<E, K, V, H, T, N, Dirty>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -729,7 +751,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Current<E, K, V, H, T, N>
+    > crate::store::StoreDeletable for Current<E, K, V, H, T, N, Dirty>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -1023,8 +1045,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                BitMap::<Digest, 32>::leaf_pos(*active_loc),
-                BitMap::<Digest, 32>::leaf_pos(*info.loc)
+                CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
+                CleanBitMap::<Digest, 32>::leaf_pos(*info.loc)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;

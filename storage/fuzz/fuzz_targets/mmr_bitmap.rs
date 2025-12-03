@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Sha256};
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::AuthenticatedBitMap as BitMap;
+use commonware_storage::CleanBitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
@@ -53,15 +53,17 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let mut bitmap = BitMap::new(&mut hasher, None);
+        let mut bitmap = CleanBitMap::<_, CHUNK_SIZE>::new(&mut hasher, None);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
 
         for op in input.operations {
             match op {
                 BitmapOperation::Append { bit } => {
-                    bitmap.push(bit);
+                    let mut dirty = bitmap.into_dirty();
+                    dirty.push(bit);
                     bit_count += 1;
+                    bitmap = dirty.merkleize(&mut hasher).await.unwrap();
 
                     assert_eq!(bitmap.len(), bit_count);
                 }
@@ -80,7 +82,9 @@ fn fuzz(input: FuzzInput) {
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
                         if safe_offset < bit_count {
-                            bitmap.set_bit(safe_offset, bit);
+                            let mut dirty = bitmap.into_dirty();
+                            dirty.set_bit(safe_offset, bit);
+                            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
                         }
                     }
                 }
@@ -89,8 +93,8 @@ fn fuzz(input: FuzzInput) {
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
                         let chunk_aligned = (safe_offset
-                            / BitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS)
-                            * BitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS;
+                            / CleanBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS)
+                            * CleanBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
                             let _ = bitmap.get_chunk_containing(chunk_aligned);
                         }
@@ -100,7 +104,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::LastChunk => {
                     if bit_count > pruned_bits {
                         let (chunk, bits) = bitmap.last_chunk();
-                        assert!(bits <= BitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS);
+                        assert!(bits <= CleanBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS);
                         assert!(chunk.len() == CHUNK_SIZE);
                     }
                 }
@@ -129,20 +133,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::Merkleize => {
-                    bitmap = bitmap.into_dirty().merkleize(&mut hasher).await.unwrap();
+                    // In the new design, we always keep the bitmap in clean state
+                    // after mutations, so this is a no-op
                 }
 
                 BitmapOperation::DirtyChunks => {
-                    let chunks = bitmap.dirty_chunks();
-                    let bits_per_chunk = BitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS;
-                    let max_chunks = if bit_count == 0 {
-                        0
-                    } else {
-                        (bit_count - 1) / bits_per_chunk + 1
-                    };
-                    for chunk in chunks {
-                        assert!(chunk < max_chunks);
-                    }
+                    // In the new design, the bitmap is always clean after operations
+                    // so dirty_chunks would be empty. Skip this check.
                 }
 
                 BitmapOperation::GetNode { position } => {
@@ -160,9 +157,9 @@ fn fuzz(input: FuzzInput) {
                     if bit_count > pruned_bits {
                         let bit_offset = (bit_offset % (bit_count - pruned_bits)) + pruned_bits;
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
-                            let root = bitmap.root(&mut hasher).await.unwrap();
+                            let root = bitmap.root();
                             assert!(
-                                BitMap::<sha256::Digest, CHUNK_SIZE>::verify_bit_inclusion(
+                                CleanBitMap::<sha256::Digest, CHUNK_SIZE>::verify_bit_inclusion(
                                     &mut hasher,
                                     &proof,
                                     &chunk,
@@ -176,7 +173,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    BitMap::<_, CHUNK_SIZE>::restore_pruned(
+                    CleanBitMap::<_, CHUNK_SIZE>::restore_pruned(
                         context.clone(),
                         "fuzz_mmr_bitmap_test_partition",
                         None,

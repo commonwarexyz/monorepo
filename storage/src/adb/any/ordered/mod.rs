@@ -712,7 +712,7 @@ impl<
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N>,
+        status: &mut AuthenticatedBitMap<D, N, Dirty>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
