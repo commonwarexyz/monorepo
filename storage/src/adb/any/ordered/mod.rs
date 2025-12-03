@@ -1094,18 +1094,6 @@ impl<
         self.get(key).await
     }
 
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
-        self.delete(key).await
-    }
-
     async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
     }
@@ -1141,13 +1129,30 @@ impl<
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        self.update_with_callback(key, value, |_| {}).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
+        self.create_with_callback(key, value, |_| {}).await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
+        let mut r = false;
+        self.delete_with_callback(key, |_, _| r = true).await?;
+        Ok(r)
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        adb::any::test::{fixed_db_config, variable_db_config},
+        adb::{
+            any::test::{fixed_db_config, variable_db_config},
+            store::DirtyStore as _,
+        },
         mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
@@ -1200,6 +1205,7 @@ mod test {
         let d1 = Sha256::fill(1u8);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
+        let mut db = db.into_dirty();
         db.update(d1, d2).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.root(), root);
@@ -1250,7 +1256,7 @@ mod test {
 
     async fn test_ordered_any_db_basic<D>(
         context: Context,
-        mut db: D,
+        db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
@@ -1265,6 +1271,7 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
+        let mut db = db.into_dirty();
         assert!(db.create(key1, val1).await.unwrap());
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
@@ -1287,7 +1294,9 @@ mod test {
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
         assert_eq!(db.op_count(), 8);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
+        let mut db = db.into_dirty();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(key1, val1).await.unwrap());
@@ -1299,14 +1308,18 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
         let root = db.root();
 
         // Multiple deletions of the same key should be a no-op.
         let prev_op_count = db.op_count();
+        let mut db = db.into_dirty();
         assert!(!db.delete(key1).await.unwrap());
         assert_eq!(db.op_count(), prev_op_count);
+        let db = db.merkleize();
         assert_eq!(db.root(), root);
+        let mut db = db.into_dirty();
 
         // Deletions of non-existent keys should be a no-op.
         let key3 = Sha256::fill(6u8);
@@ -1314,12 +1327,14 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
         let op_count = db.op_count();
         let root = db.root();
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
+        let mut db = db.into_dirty();
 
         // Re-activate the keys by updating them.
         db.update(key1, val1).await.unwrap();
@@ -1328,6 +1343,7 @@ mod test {
         db.update(key2, val1).await.unwrap();
         db.update(key1, val2).await.unwrap();
 
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.

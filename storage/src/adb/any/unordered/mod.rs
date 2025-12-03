@@ -730,18 +730,6 @@ impl<
         self.get(key).await
     }
 
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
-        self.delete(key).await
-    }
-
     async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
     }
@@ -777,6 +765,23 @@ impl<
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        self.update_key_with_op(C::Item::new_update(key, value))
+            .await
+            .map(|_| ())
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
+        self.create_key_with_op(C::Item::new_update(key, value))
+            .await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
+        self.delete_key(C::Item::new_delete(key))
+            .await
+            .map(|o| o.is_some())
+    }
 }
 
 // pub(super) so helpers can be used by the sync module.
@@ -786,6 +791,7 @@ pub(super) mod test {
     use crate::{
         adb::{
             any::test::{fixed_db_config, variable_db_config},
+            store::DirtyStore as _,
             verify_proof,
         },
         mmr::{mem::Mmr as MemMmr, Proof, StandardHasher},
@@ -841,6 +847,7 @@ pub(super) mod test {
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
+        let mut db = db.into_dirty();
         db.update(k1, v1).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 0);
@@ -867,7 +874,7 @@ pub(super) mod test {
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -883,9 +890,12 @@ pub(super) mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
+        let mut db = db.into_dirty();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            db.commit(None).await.unwrap();
+            let mut clean_db = db.merkleize();
+            clean_db.commit(None).await.unwrap();
+            db = clean_db.into_dirty();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(db.op_count() - db.inactivity_floor_loc() <= 3);
@@ -893,6 +903,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
@@ -920,11 +931,13 @@ pub(super) mod test {
 
     async fn test_any_db_basic<D>(
         context: Context,
-        mut db: D,
+        db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
     {
+        let mut db = db.into_dirty();
+
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
         let d1 = Sha256::fill(1u8);
@@ -955,7 +968,9 @@ pub(super) mod test {
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
+        let mut db = db.into_dirty();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(d1, v1).await.unwrap());
@@ -973,7 +988,9 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 11); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
 
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
+        let mut db = db.into_dirty();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
         assert_eq!(db.op_count(), 12); // only commit should remain.
 
@@ -987,12 +1004,14 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 12);
 
         // Make sure closing/reopening gets us back to the same state.
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 13);
         let root = db.root();
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 13);
         assert_eq!(db.root(), root);
+        let mut db = db.into_dirty();
 
         // Re-activate the keys by updating them.
         db.update(d1, v1).await.unwrap();
@@ -1002,6 +1021,7 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
+        let mut db = db.merkleize();
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.

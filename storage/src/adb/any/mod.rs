@@ -34,7 +34,9 @@ pub mod unordered;
 /// and `LogStore` provide. Log info methods come from `LogStore` supertrait.
 /// Use `into_dirty()` (from `CleanStore`) to transition to `AnyDirtyStore` for batched
 /// MMR operations.
-pub trait AnyCleanStore: CleanStore {
+pub trait AnyCleanStore:
+    CleanStore<Dirty: AnyDirtyStore<Key = Self::Key, Value = Self::Value, Clean = Self>>
+{
     /// The key type for this database.
     type Key: Array;
 
@@ -42,27 +44,6 @@ pub trait AnyCleanStore: CleanStore {
 
     /// Get the value for a given key, or None if it has no value.
     fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
-
-    // Mutations
-
-    /// Update `key` to have value `value`. Subject to rollback until next `commit`.
-    fn update(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>>;
-
-    /// Create a new key-value pair. Returns true if created, false if key already existed.
-    /// Subject to rollback until next `commit`.
-    fn create(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value. Returns true if deleted, false if already inactive.
-    /// Subject to rollback until next `commit`.
-    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Error>>;
 
     // Commit
 
@@ -90,8 +71,9 @@ pub trait AnyCleanStore: CleanStore {
 
 /// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
 ///
-/// Provides read access while in dirty state. Log info methods come from `LogStore` supertrait.
-/// Use `merkleize()` (from `DirtyStore`) to compute the root and transition back to `AnyCleanStore`.
+/// Provides read access and mutations while in dirty state. Log info methods come from
+/// `LogStore` supertrait. Use `merkleize()` (from `DirtyStore`) to compute the root and
+/// transition back to `AnyCleanStore`.
 pub trait AnyDirtyStore: DirtyStore {
     /// The key type for this database.
     type Key: Array;
@@ -100,6 +82,27 @@ pub trait AnyDirtyStore: DirtyStore {
 
     /// Get the value for a given key, or None if it has no value.
     fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+
+    // Mutations
+
+    /// Update `key` to have value `value`. Subject to rollback until next `commit`.
+    fn update(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>>;
+
+    /// Create a new key-value pair. Returns true if created, false if key already existed.
+    /// Subject to rollback until next `commit`.
+    fn create(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<bool, Error>>;
+
+    /// Delete `key` and its value. Returns true if deleted, false if already inactive.
+    /// Subject to rollback until next `commit`.
+    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
