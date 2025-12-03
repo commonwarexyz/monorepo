@@ -141,11 +141,7 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable: Store<Error = Error> + StoreMut + StoreDeletable
-where
-    Self::Key: Array,
-    Self::Value: Codec + Clone,
-{
+pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
