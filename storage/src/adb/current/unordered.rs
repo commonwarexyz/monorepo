@@ -364,8 +364,7 @@ impl<
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let op = Operation::Update(key, value);
-        if let Some(old_loc) = self.any.update_key_with_op(op).await? {
+        if let Some(old_loc) = self.any.update_key(key, value).await? {
             self.status.set_bit(*old_loc, false);
         }
         self.status.push(true);
@@ -389,7 +388,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let Some(loc) = self.any.delete_key(Operation::Delete(key)).await? else {
+        let Some(loc) = self.any.delete_key(key).await? else {
             return Ok(false);
         };
 
