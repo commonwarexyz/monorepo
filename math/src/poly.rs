@@ -18,25 +18,6 @@ pub struct Poly<K> {
     coeffs: Vec<K>,
 }
 
-/// An equality test taking into account high 0 coefficients.
-///
-/// Without this behavior, the additive test suite does not past, because
-/// `x - x` may result in a polynomial with extra 0 coefficients.
-impl<K: Additive> PartialEq for Poly<K> {
-    fn eq(&self, other: &Self) -> bool {
-        let zero = K::zero();
-        let max_len = self.len().max(other.len());
-        let self_then_zeros = self.coeffs.iter().chain(iter::repeat(&zero));
-        let other_then_zeros = other.coeffs.iter().chain(iter::repeat(&zero));
-        self_then_zeros
-            .zip(other_then_zeros)
-            .take(max_len.get() as usize)
-            .all(|(a, b)| a == b)
-    }
-}
-
-impl<K: Additive> Eq for Poly<K> {}
-
 impl<K> Poly<K> {
     fn len(&self) -> NonZeroU32 {
         self.coeffs
@@ -77,6 +58,9 @@ impl<K> Poly<K> {
         self.len().get() - 1
     }
 
+    /// Return the number of evaluation points required to recover this polynomial.
+    ///
+    /// In other words, [`Self::degree`] + 1.
     pub fn required(&self) -> NonZeroU32 {
         self.len()
     }
@@ -160,6 +144,21 @@ impl<K> Poly<K> {
     }
 }
 
+impl<K: Debug> Debug for Poly<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Poly(")?;
+        for (i, c) in self.coeffs.iter().enumerate() {
+            if i > 0 {
+                write!(f, " + {c:?} X^{i}")?;
+            } else {
+                write!(f, "{c:?}")?;
+            }
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
+
 impl<K: Random> Poly<K> {
     // Returns a new polynomial of the given degree where each coefficient is
     // sampled at random from the provided RNG.
@@ -176,6 +175,25 @@ impl<K: Random> Poly<K> {
         )
     }
 }
+
+/// An equality test taking into account high 0 coefficients.
+///
+/// Without this behavior, the additive test suite does not past, because
+/// `x - x` may result in a polynomial with extra 0 coefficients.
+impl<K: Additive> PartialEq for Poly<K> {
+    fn eq(&self, other: &Self) -> bool {
+        let zero = K::zero();
+        let max_len = self.len().max(other.len());
+        let self_then_zeros = self.coeffs.iter().chain(iter::repeat(&zero));
+        let other_then_zeros = other.coeffs.iter().chain(iter::repeat(&zero));
+        self_then_zeros
+            .zip(other_then_zeros)
+            .take(max_len.get() as usize)
+            .all(|(a, b)| a == b)
+    }
+}
+
+impl<K: Additive> Eq for Poly<K> {}
 
 impl<K: Additive> Poly<K> {
     fn merge_with(&mut self, rhs: &Self, f: impl Fn(&mut K, &K)) {
@@ -200,21 +218,6 @@ impl<K: Additive> Poly<K> {
         // The saturation is critical, otherwise you get a negative number for
         // the zero polynomial.
         self.degree().saturating_sub(lz_u32)
-    }
-}
-
-impl<K: Debug> Debug for Poly<K> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Poly(")?;
-        for (i, c) in self.coeffs.iter().enumerate() {
-            if i > 0 {
-                write!(f, " + {c:?} X^{i}")?;
-            } else {
-                write!(f, "{c:?}")?;
-            }
-        }
-        write!(f, ")")?;
-        Ok(())
     }
 }
 
