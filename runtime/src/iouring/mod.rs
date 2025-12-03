@@ -18,9 +18,9 @@
 //! ## Operation Flow
 //!
 //! ```text
-//! Client Code ─[Op]→ MPSC Channel ─→ Event Loop ─[SQE]→ `io_uring` Kernel
+//! Client Code ─[Op]→ MPSC Channel ─→ Event Loop ─[SQE]→ io_uring Kernel
 //!      ↑                                                 ↓
-//! Oneshot Channel ←─ Waiter Tracking ←[CQE]─ `io_uring` Kernel
+//! Oneshot Channel ←─ Waiter Tracking ←[CQE]─ io_uring Kernel
 //! ```
 //!
 //! ## Work Tracking
@@ -34,8 +34,8 @@
 //!
 //! ## Timeout Handling
 //!
-//! Operations can be configured with timeouts using `Config::`op_timeout``. When enabled:
-//! - Each operation is linked to a timeout using `io_uring`'s ``IOSQE_IO_LINK`` flag
+//! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
+//! - Each operation is linked to a timeout using `io_uring`'s `IOSQE_IO_LINK` flag
 //! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
 //! - Reserved work IDs distinguish timeout completions from regular operations
 //!
@@ -62,7 +62,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use `io_uring`::{
+use io_uring::{
     cqueue::Entry as CqueueEntry,
     opcode::LinkTimeout,
     squeue::Entry as SqueueEntry,
@@ -70,7 +70,7 @@ use `io_uring`::{
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
-use std::{collections::`HashMap`, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -80,7 +80,7 @@ const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
 /// alive until the kernel finishes touching it, and when `op_timeout` is enabled,
 /// the boxed `Timespec` used when we link in an `IOSQE_IO_LINK` timeout.
-type Waiters = `HashMap`<
+type Waiters = HashMap<
     u64,
     (
         oneshot::Sender<(i32, Option<StableBuf>)>,
@@ -107,7 +107,7 @@ impl Metrics {
         };
         registry.register(
             "pending_operations",
-            "Number of operations submitted to the `io_uring` whose CQEs haven't yet been processed",
+            "Number of operations submitted to the io_uring whose CQEs haven't yet been processed",
             metrics.pending_operations.clone(),
         );
         metrics
@@ -116,7 +116,7 @@ impl Metrics {
 
 #[derive(Clone, Debug)]
 /// Configuration for an `io_uring` instance.
-/// See `man `io_uring``.
+/// See `man io_uring`.
 pub struct Config {
     /// Size of the ring.
     pub size: u32,
@@ -128,7 +128,7 @@ pub struct Config {
     /// work to it. Since the `run` event loop is a future that may move
     /// between threads, this means in practice that `single_issuer` should
     /// only be used in a single-threaded context.
-    /// See `IORING_SETUP_SINGLE_ISSUER` in <https://man7.org/linux/man-pages/man2/`io_uring`_setup.2.html>.
+    /// See `IORING_SETUP_SINGLE_ISSUER` in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// In the `io_uring` event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the `io_ring`. This
@@ -137,17 +137,17 @@ pub struct Config {
     /// setting this to very low values, or the loop may burn CPU by waking
     /// continuously even when no completions are available.
     pub force_poll: Duration,
-    /// If None, operations submitted to the ``io_uring`` will not time out.
+    /// If None, operations submitted to the `io_uring` will not time out.
     /// In this case, the caller should be careful to ensure that the
-    /// operations submitted to the ``io_uring`` will eventually complete.
+    /// operations submitted to the `io_uring` will eventually complete.
     /// If Some, each submitted operation will time out after this duration.
     /// If an operation times out, its result will be -[`libc::ETIMEDOUT`].
-    pub `op_timeout`: Option<Duration>,
-    /// The maximum time the ``io_uring`` event loop will wait for in-flight operations
+    pub op_timeout: Option<Duration>,
+    /// The maximum time the `io_uring` event loop will wait for in-flight operations
     /// to complete before abandoning them during shutdown.
     /// If None, the event loop will wait indefinitely for in-flight operations
     /// to complete before shutting down. In this case, the caller should be careful
-    /// to ensure that the operations submitted to the ``io_uring`` will eventually complete.
+    /// to ensure that the operations submitted to the `io_uring` will eventually complete.
     pub shutdown_timeout: Option<Duration>,
 }
 
@@ -158,7 +158,7 @@ impl Default for Config {
             io_poll: false,
             single_issuer: false,
             force_poll: Duration::from_secs(1),
-            `op_timeout`: None,
+            op_timeout: None,
             shutdown_timeout: None,
         }
     }
@@ -171,26 +171,26 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     }
     if cfg.single_issuer {
         builder = builder.setup_single_issuer();
-        // Enable `DEFER_TASKRUN` to defer work processing until ``io_uring`_enter` is
-        // called with `IORING_ENTER_GETEVENTS`. By default, `io_uring` processes work at
+        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
+        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
         // the end of any system call or thread interrupt, which can delay application
         // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
         // requested, reducing overhead and improving CPU cache locality.
         //
         // This is safe in our implementation since we always call `submit_and_wait()`
         // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
-        // ``IORING_SETUP_SINGLE_ISSUER`` here, which is a pre-requisite.
+        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
         //
         // This is available since kernel 6.1.
         //
-        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/`io_uring`_setup.2.html>.
+        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
         builder = builder.setup_defer_taskrun();
     }
 
-    // When ``op_timeout`` is set, each operation uses 2 SQ entries (op + linked
+    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
     // timeout). We double the ring size to ensure users get the number of
     // concurrent operations they configured.
-    let ring_size = if cfg.`op_timeout`.is_some() {
+    let ring_size = if cfg.op_timeout.is_some() {
         cfg.size * 2
     } else {
         cfg.size
@@ -199,7 +199,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(ring_size)
 }
 
-/// An operation submitted to the ``io_uring`` event loop which will be processed
+/// An operation submitted to the `io_uring` event loop which will be processed
 /// asynchronously by the event loop in `run`.
 pub struct Op {
     /// The submission queue entry to be submitted to the ring.
@@ -222,13 +222,13 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     match work_id {
         TIMEOUT_WORK_ID => {
             assert!(
-                cfg.`op_timeout`.is_some(),
-                "received TIMEOUT_WORK_ID with `op_timeout` disabled"
+                cfg.op_timeout.is_some(),
+                "received TIMEOUT_WORK_ID with op_timeout disabled"
             );
         }
         _ => {
             let result = cqe.result();
-            let result = if result == -libc::ECANCELED && cfg.`op_timeout`.is_some() {
+            let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
                 // This operation timed out
                 -libc::ETIMEDOUT
             } else {
@@ -241,11 +241,11 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     }
 }
 
-/// Creates a new ``io_uring`` instance that listens for incoming work on `receiver`.
+/// Creates a new `io_uring` instance that listens for incoming work on `receiver`.
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
 pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
-    let mut ring = new_ring(&cfg).expect("unable to create `io_uring` instance");
+    let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
     // and the buffer used for the operation.
@@ -261,7 +261,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
         // Stop if we are at the max number of processing work.
         //
         // NOTE: We can safely use `cfg.size` directly as the limit here, even
-        // when ``op_timeout`` is enabled, because we already doubled the ring
+        // when `op_timeout` is enabled, because we already doubled the ring
         // size in `new_ring()` to account for the fact that each operation
         // needs 2 SQ entries (op + timeout). This ensures users get the number
         // of concurrent operations they configured.
@@ -308,9 +308,9 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             work = work.user_data(work_id);
 
             // Submit the operation to the ring, with timeout if configured
-            let timespec = if let Some(timeout) = &cfg.`op_timeout` {
+            let timespec = if let Some(timeout) = &cfg.op_timeout {
                 // Link the operation to the (following) timeout
-                work = work.flags(`io_uring`::squeue::Flags::IO_LINK);
+                work = work.flags(io_uring::squeue::Flags::IO_LINK);
 
                 // The timespec needs to be allocated on the heap and kept alive
                 // for the duration of the operation so that the pointer stays
@@ -378,9 +378,9 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
 /// indefinitely.
 fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
-    // When `op_timeout` is set, each operation uses 2 SQ entries
+    // When op_timeout is set, each operation uses 2 SQ entries
     // (op + linked timeout).
-    let pending = if cfg.`op_timeout`.is_some() {
+    let pending = if cfg.op_timeout.is_some() {
         waiters.len() * 2
     } else {
         waiters.len()
@@ -450,7 +450,7 @@ mod tests {
         executor::block_on,
         SinkExt as _,
     };
-    use `io_uring`::{
+    use io_uring::{
         opcode,
         types::{Fd, Timespec},
     };
@@ -462,7 +462,7 @@ mod tests {
     };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
-        // Create a new `io_uring` instance
+        // Create a new io_uring instance
         let (mut submitter, receiver) = channel(0);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
@@ -547,9 +547,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout() {
-        // Create an `io_uring` instance
+        // Create an io_uring instance
         let cfg = super::Config {
-            `op_timeout`: Some(std::time::Duration::from_secs(1)),
+            op_timeout: Some(std::time::Duration::from_secs(1)),
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
@@ -579,7 +579,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_no_timeout() {
-        // Create an `io_uring` instance with shutdown timeout disabled
+        // Create an io_uring instance with shutdown timeout disabled
         let cfg = super::Config {
             shutdown_timeout: None,
             ..Default::default()
@@ -601,7 +601,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Drop submission channel to trigger `io_uring` shutdown
+        // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
         // Wait for the operation `timeout` to fire.
@@ -612,7 +612,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
-        // Create an `io_uring` instance with shutdown timeout enabled
+        // Create an io_uring instance with shutdown timeout enabled
         let cfg = super::Config {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
@@ -637,7 +637,7 @@ mod tests {
         // Give the event loop a chance to enter the blocking submit and wait before shutdown
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Drop submission channel to trigger `io_uring` shutdown
+        // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
         // The event loop should shut down before the `timeout` fires,
@@ -655,7 +655,7 @@ mod tests {
         // both.
         let cfg = super::Config {
             size: 8,
-            `op_timeout`: Some(Duration::from_millis(5)),
+            op_timeout: Some(Duration::from_millis(5)),
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(8);
@@ -701,7 +701,7 @@ mod tests {
         let (mut sender, receiver) = channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
 
-        // Run `io_uring` in a dedicated thread
+        // Run io_uring in a dedicated thread
         let uring_thread = std::thread::spawn(move || block_on(super::run(cfg, metrics, receiver)));
 
         // Submit a no-op

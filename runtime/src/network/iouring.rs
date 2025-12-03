@@ -29,7 +29,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use `io_uring`::types::Fd;
+use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
@@ -70,7 +70,7 @@ impl Network {
     /// Each ongoing send/recv to/from each connection will consume a slot in the `io_uring`.
     /// The `io_uring` `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(mut cfg: Config, registry: &mut Registry) -> Result<Self, crate::Error> {
-        // Create an `io_uring` instance to handle send operations.
+        // Create an io_uring instance to handle send operations.
         let (send_submitter, rx) = mpsc::channel(cfg.iouring_config.size as usize);
 
         // Optimize performance by hinting the kernel that a single task will
@@ -86,7 +86,7 @@ impl Network {
             move || block_on(iouring::run(cfg.iouring_config, metrics, rx))
         });
 
-        // Create an `io_uring` instance to handle receive operations.
+        // Create an io_uring instance to handle receive operations.
         let (recv_submitter, rx) = mpsc::channel(cfg.iouring_config.size as usize);
         let registry = registry.sub_registry_with_prefix("iouring_receiver");
         let metrics = Arc::new(iouring::Metrics::new(registry));
@@ -125,10 +125,10 @@ impl crate::Network for Network {
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
-        // Set `TCP_NODELAY` if configured
+        // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set `TCP_NODELAY`");
+                warn!(?err, "failed to set TCP_NODELAY");
             }
         }
 
@@ -178,10 +178,10 @@ impl crate::Listener for Listener {
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
-        // Set `TCP_NODELAY` if configured
+        // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set `TCP_NODELAY`");
+                warn!(?err, "failed to set TCP_NODELAY");
             }
         }
 
@@ -243,15 +243,15 @@ impl crate::Sink for Sink {
                 )
             };
 
-            // Create the `io_uring` send operation
-            let op = `io_uring`::opcode::Send::new(
+            // Create the io_uring send operation
+            let op = io_uring::opcode::Send::new(
                 self.as_raw_fd(),
                 remaining.as_ptr(),
                 remaining.len() as u32,
             )
             .build();
 
-            // Submit the operation to the `io_uring` event loop
+            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
                 .send(crate::iouring::Op {
@@ -281,7 +281,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [`crate::Stream`] for an io-uring [Network].
+/// Implementation of [`crate::Stream`] for an `io_uring` [Network].
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the `io_uring` event loop.
@@ -313,15 +313,15 @@ impl crate::Stream for Stream {
                 )
             };
 
-            // Create the `io_uring` recv operation
-            let op = `io_uring`::opcode::Recv::new(
+            // Create the io_uring recv operation
+            let op = io_uring::opcode::Recv::new(
                 self.as_raw_fd(),
                 remaining.as_mut_ptr(),
                 remaining.len() as u32,
             )
             .build();
 
-            // Submit the operation to the `io_uring` event loop
+            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
                 .send(crate::iouring::Op {
@@ -375,7 +375,7 @@ mod tests {
                 },
                 &mut Registry::default(),
             )
-            .expect("Failed to start `io_uring`")
+            .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -395,7 +395,7 @@ mod tests {
                 },
                 &mut Registry::default(),
             )
-            .expect("Failed to start `io_uring`")
+            .expect("Failed to start io_uring")
         })
         .await;
     }
