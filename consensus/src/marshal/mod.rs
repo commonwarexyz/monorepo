@@ -29,6 +29,10 @@
 //! to a potential block in the chain. The actor will only finalize a block (and its ancestors)
 //! if it has a corresponding finalization from consensus.
 //!
+//! _It is possible that there may exist multiple finalizations for the same block in different views. Marshal
+//! only concerns itself with verifying a valid finalization exists for a block, not that a specific finalization
+//! exists. This means different Marshals may have different finalizations for the same block persisted to disk._
+//!
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
@@ -37,23 +41,24 @@
 //!
 //! ## Storage
 //!
-//! The actor uses a combination of prunable and immutable storage to store blocks and
-//! finalizations. Prunable storage is used to store data that is only needed for a short
-//! period of time, such as unverified blocks or notarizations. Immutable storage is used to
+//! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
+//! to store blocks and finalizations. Internal storage is used to store data that is only needed for a short
+//! period of time, such as unverified blocks or notarizations. External storage is used to
 //! store data that needs to be persisted indefinitely, such as finalized blocks.
 //!
 //! Marshal will store all blocks after a configurable starting height (or, floor) onward.
-//! This allows for state sync from a specific height rather than from genesis. However,
-//! all blocks that were in the archive prior to updating the starting height will be
-//! retained.
+//! This allows for state sync from a specific height rather than from genesis. When
+//! updating the starting height, marshal will attempt to prune blocks in external storage
+//! that are no longer needed.
+//!
+//! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
+//! feature is only recommended for applications that support state sync (i.e., those that don't require full
+//! block history to participate in consensus)._
 //!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
-//! - Does not prune blocks that exist in the immutable archive below the sync floor. Although these
-//!   blocks are no longer needed, the structure does not allow for it. This requires indefinite amounts
-//!   of disk space.
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
