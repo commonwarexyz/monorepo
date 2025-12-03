@@ -11,7 +11,7 @@ use crate::{
         contiguous::{MutableContiguous, PersistableContiguous},
     },
     mmr::{
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Proof,
     },
     AuthenticatedBitMap,
@@ -490,6 +490,38 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
+    }
+
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
+        IndexedLog {
+            log: self.log.into_dirty(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H, Dirty>
+{
+    /// Merkleize the database and compute the root digest.
+    pub fn merkleize(self) -> IndexedLog<E, C, I, H, Clean<H::Digest>> {
+        IndexedLog {
+            log: self.log.merkleize(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+        }
     }
 }
 

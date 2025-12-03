@@ -299,6 +299,16 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     }
 }
 
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Dirty> {
+    /// Merkleize the database and compute the root digest.
+    pub fn merkleize(self) -> Keyless<E, V, H, Clean<H::Digest>> {
+        Keyless {
+            journal: self.journal.merkleize(),
+            last_commit_loc: self.last_commit_loc,
+        }
+    }
+}
+
 impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::CleanStore
     for Keyless<E, V, H, Clean<H::Digest>>
 {
