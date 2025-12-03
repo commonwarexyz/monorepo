@@ -29,6 +29,10 @@
 //! to a potential block in the chain. The actor will only finalize a block (and its ancestors)
 //! if it has a corresponding finalization from consensus.
 //!
+//! _It is possible that there may exist multiple finalizations for the same block in different views. Marshal
+//! only concerns itself with verifying a valid finalization exists for a block, not that a specific finalization
+//! exists. This means different Marshals may have different finalizations for the same block persisted to disk._
+//!
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
@@ -37,23 +41,24 @@
 //!
 //! ## Storage
 //!
-//! The actor uses a combination of prunable and immutable storage to store blocks and
-//! finalizations. Prunable storage is used to store data that is only needed for a short
-//! period of time, such as unverified blocks or notarizations. Immutable storage is used to
+//! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
+//! to store blocks and finalizations. Internal storage is used to store data that is only needed for a short
+//! period of time, such as unverified blocks or notarizations. External storage is used to
 //! store data that needs to be persisted indefinitely, such as finalized blocks.
 //!
 //! Marshal will store all blocks after a configurable starting height (or, floor) onward.
-//! This allows for state sync from a specific height rather than from genesis. However,
-//! all blocks that were in the archive prior to updating the starting height will be
-//! retained.
+//! This allows for state sync from a specific height rather than from genesis. When
+//! updating the starting height, marshal will attempt to prune blocks in external storage
+//! that are no longer needed.
+//!
+//! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
+//! feature is only recommended for applications that support state sync (i.e., those that don't require full
+//! block history to participate in consensus)._
 //!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
-//! - Does not prune blocks that exist in the immutable archive below the sync floor. Although these
-//!   blocks are no longer needed, the structure does not allow for it. This requires indefinite amounts
-//!   of disk space.
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
@@ -1575,6 +1580,118 @@ mod tests {
                 !verify.await.unwrap(),
                 "Byzantine block with mismatched parent commitment should be rejected"
             );
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_same_height_different_views() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Set up two validators
+            let mut actors = Vec::new();
+            for (i, validator) in participants.iter().enumerate().take(2) {
+                let (_app, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    validator.clone(),
+                    schemes[i].clone().into(),
+                )
+                .await;
+                actors.push(actor);
+            }
+
+            // Create block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+
+            // Both validators verify the block
+            actors[0]
+                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+            actors[1]
+                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+
+            // Validator 0: Finalize with view 1
+            let proposal_v1 = Proposal {
+                round: Round::new(Epoch::new(0), View::new(1)),
+                parent: View::new(0),
+                payload: commitment,
+            };
+            let notarization_v1 = make_notarization(proposal_v1.clone(), &schemes, QUORUM);
+            let finalization_v1 = make_finalization(proposal_v1.clone(), &schemes, QUORUM);
+            actors[0]
+                .report(Activity::Notarization(notarization_v1.clone()))
+                .await;
+            actors[0]
+                .report(Activity::Finalization(finalization_v1.clone()))
+                .await;
+
+            // Validator 1: Finalize with view 2 (simulates receiving finalization from different view)
+            // This could happen during epoch transitions where the same block gets finalized
+            // with different views by different validators.
+            let proposal_v2 = Proposal {
+                round: Round::new(Epoch::new(0), View::new(2)), // Different view
+                parent: View::new(0),
+                payload: commitment, // Same block
+            };
+            let notarization_v2 = make_notarization(proposal_v2.clone(), &schemes, QUORUM);
+            let finalization_v2 = make_finalization(proposal_v2.clone(), &schemes, QUORUM);
+            actors[1]
+                .report(Activity::Notarization(notarization_v2.clone()))
+                .await;
+            actors[1]
+                .report(Activity::Finalization(finalization_v2.clone()))
+                .await;
+
+            // Wait for finalization processing
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify both validators stored the block correctly
+            let block0 = actors[0].get_block(1).await.unwrap();
+            let block1 = actors[1].get_block(1).await.unwrap();
+            assert_eq!(block0, block);
+            assert_eq!(block1, block);
+
+            // Verify both validators have finalizations stored
+            let fin0 = actors[0].get_finalization(1).await.unwrap();
+            let fin1 = actors[1].get_finalization(1).await.unwrap();
+
+            // Verify the finalizations have the expected different views
+            assert_eq!(fin0.proposal.payload, block.commitment());
+            assert_eq!(fin0.round().view(), View::new(1));
+            assert_eq!(fin1.proposal.payload, block.commitment());
+            assert_eq!(fin1.round().view(), View::new(2));
+
+            // Both validators can retrieve block by height
+            assert_eq!(actors[0].get_info(1).await, Some((1, commitment)));
+            assert_eq!(actors[1].get_info(1).await, Some((1, commitment)));
+
+            // Test that a validator receiving BOTH finalizations handles it correctly
+            // (the second one should be ignored since archive ignores duplicates for same height)
+            actors[0]
+                .report(Activity::Finalization(finalization_v2.clone()))
+                .await;
+            actors[1]
+                .report(Activity::Finalization(finalization_v1.clone()))
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Validator 0 should still have the original finalization (v1)
+            let fin0_after = actors[0].get_finalization(1).await.unwrap();
+            assert_eq!(fin0_after.round().view(), View::new(1));
+
+            // Validator 1 should still have the original finalization (v2)
+            let fin0_after = actors[1].get_finalization(1).await.unwrap();
+            assert_eq!(fin0_after.round().view(), View::new(2));
         })
     }
 }

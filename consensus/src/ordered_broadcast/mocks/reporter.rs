@@ -51,7 +51,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
     ) -> (Self, Mailbox<C, V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Reporter {
+            Self {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,

@@ -54,12 +54,12 @@ impl Epoch {
     }
 
     /// Returns the underlying u64 value.
-    pub fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Returns true if this is epoch zero.
-    pub fn is_zero(self) -> bool {
+    pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
 
@@ -69,7 +69,7 @@ impl Epoch {
     ///
     /// Panics if the epoch would overflow u64::MAX. In practice, this is extremely unlikely
     /// to occur during normal operation.
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         Self(self.0.checked_add(1).expect("epoch overflow"))
     }
 
@@ -83,7 +83,7 @@ impl Epoch {
     }
 
     /// Adds a delta to this epoch, saturating at u64::MAX.
-    pub fn saturating_add(self, delta: EpochDelta) -> Self {
+    pub const fn saturating_add(self, delta: EpochDelta) -> Self {
         Self(self.0.saturating_add(delta.0))
     }
 
@@ -93,7 +93,7 @@ impl Epoch {
     }
 
     /// Subtracts a delta from this epoch, saturating at zero.
-    pub fn saturating_sub(self, delta: EpochDelta) -> Self {
+    pub const fn saturating_sub(self, delta: EpochDelta) -> Self {
         Self(self.0.saturating_sub(delta.0))
     }
 }
@@ -127,7 +127,7 @@ impl EncodeSize for Epoch {
 
 impl From<Epoch> for U64 {
     fn from(epoch: Epoch) -> Self {
-        U64::from(epoch.get())
+        Self::from(epoch.get())
     }
 }
 
@@ -150,12 +150,12 @@ impl View {
     }
 
     /// Returns the underlying u64 value.
-    pub fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Returns true if this is view zero.
-    pub fn is_zero(self) -> bool {
+    pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
 
@@ -165,7 +165,7 @@ impl View {
     ///
     /// Panics if the view would overflow u64::MAX. In practice, this is extremely unlikely
     /// to occur during normal operation.
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         Self(self.0.checked_add(1).expect("view overflow"))
     }
 
@@ -179,19 +179,19 @@ impl View {
     }
 
     /// Adds a view delta, saturating at u64::MAX.
-    pub fn saturating_add(self, delta: ViewDelta) -> Self {
+    pub const fn saturating_add(self, delta: ViewDelta) -> Self {
         Self(self.0.saturating_add(delta.0))
     }
 
     /// Subtracts a view delta, saturating at zero.
-    pub fn saturating_sub(self, delta: ViewDelta) -> Self {
+    pub const fn saturating_sub(self, delta: ViewDelta) -> Self {
         Self(self.0.saturating_sub(delta.0))
     }
 
     /// Returns an iterator over the range [start, end).
     ///
     /// If start >= end, returns an empty range.
-    pub fn range(start: View, end: View) -> ViewRange {
+    pub const fn range(start: Self, end: Self) -> ViewRange {
         ViewRange {
             inner: start.get()..end.get(),
         }
@@ -227,7 +227,7 @@ impl EncodeSize for View {
 
 impl From<View> for U64 {
     fn from(view: View) -> Self {
-        U64::from(view.get())
+        Self::from(view.get())
     }
 }
 
@@ -253,12 +253,12 @@ impl<T> Delta<T> {
     }
 
     /// Returns the underlying u64 value.
-    pub fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Returns true if this delta is zero.
-    pub fn is_zero(self) -> bool {
+    pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
 }
@@ -298,17 +298,17 @@ impl Round {
     }
 
     /// Returns round zero, i.e. epoch zero and view zero.
-    pub const fn zero() -> Round {
-        Round::new(Epoch::zero(), View::zero())
+    pub const fn zero() -> Self {
+        Self::new(Epoch::zero(), View::zero())
     }
 
     /// Returns the epoch of this round.
-    pub fn epoch(self) -> Epoch {
+    pub const fn epoch(self) -> Epoch {
         self.epoch
     }
 
     /// Returns the view of this round.
-    pub fn view(self) -> View {
+    pub const fn view(self) -> View {
         self.view
     }
 }

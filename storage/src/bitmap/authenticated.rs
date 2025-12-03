@@ -78,7 +78,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
 
     /// Return a new empty bitmap.
     pub fn new(hasher: &mut impl Hasher<D>, pool: Option<ThreadPool>) -> Self {
-        BitMap {
+        Self {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
             mmr: CleanMmr::new(hasher),
@@ -203,19 +203,19 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.bitmap.len()
     }
 
     /// Returns true if the bitmap is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Return the number of bits that have been pruned from this bitmap.
     #[inline]
-    pub fn pruned_bits(&self) -> u64 {
+    pub const fn pruned_bits(&self) -> u64 {
         self.bitmap.pruned_bits()
     }
 
@@ -302,7 +302,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     #[inline]
     /// Get the value of a bit from its chunk.
     /// `bit` is an index into the entire bitmap, not just the chunk.
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+    pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
         PrunableBitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 

@@ -169,7 +169,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pub fn pruned_to_pos(&self) -> Position {
+    pub const fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
@@ -387,7 +387,7 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Get the root digest of the MMR.
-    pub fn root(&self) -> &D {
+    pub const fn root(&self) -> &D {
         &self.state.root
     }
 

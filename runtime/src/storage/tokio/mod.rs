@@ -38,7 +38,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(storage_directory: PathBuf, maximum_buffer_size: usize) -> Self {
+    pub const fn new(storage_directory: PathBuf, maximum_buffer_size: usize) -> Self {
         Self {
             storage_directory,
             maximum_buffer_size,

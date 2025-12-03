@@ -395,12 +395,12 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// Get the public polynomial associated with this output.
     ///
     /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
-    pub fn public(&self) -> &Public<V> {
+    pub const fn public(&self) -> &Public<V> {
         &self.public
     }
 
     /// Return the players who participated in this round of the DKG, and should have shares.
-    pub fn players(&self) -> &Ordered<P> {
+    pub const fn players(&self) -> &Ordered<P> {
         &self.players
     }
 }
@@ -591,7 +591,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Return the round number for this round.
     ///
     /// Round numbers should increase sequentially.
-    pub fn round(&self) -> u64 {
+    pub const fn round(&self) -> u64 {
         self.round
     }
 }
@@ -719,7 +719,7 @@ enum AckOrReveal<P: PublicKey> {
 }
 
 impl<P: PublicKey> AckOrReveal<P> {
-    fn is_reveal(&self) -> bool {
+    const fn is_reveal(&self) -> bool {
         matches!(*self, Self::Reveal(_))
     }
 }
@@ -727,8 +727,8 @@ impl<P: PublicKey> AckOrReveal<P> {
 impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            AckOrReveal::Ack(x) => write!(f, "Ack({:?})", x),
-            AckOrReveal::Reveal(_) => write!(f, "Reveal(REDACTED)"),
+            Self::Ack(x) => write!(f, "Ack({:?})", x),
+            Self::Reveal(_) => write!(f, "Reveal(REDACTED)"),
         }
     }
 }
@@ -1039,7 +1039,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
         let share = info.unwrap_or_random_share(&mut rng, share.map(|x| x.private))?;
-        let my_poly = new_with_constant(info.degree(), &mut rng, share.clone());
+        let my_poly = new_with_constant(info.degree(), &mut rng, share);
         let priv_msgs = info
             .players
             .iter()
@@ -1312,13 +1312,15 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .view
                     .get(dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| match log.get_reveal(&self.me_pub) {
-                        Some(priv_msg) => priv_msg.share.clone(),
-                        _ => {
-                            unreachable!(
-                                "select didn't check dealer reveal, or we're not a player?"
-                            )
-                        }
+                    .unwrap_or_else(|| {
+                        log.get_reveal(&self.me_pub).map_or_else(
+                            || {
+                                unreachable!(
+                                    "select didn't check dealer reveal, or we're not a player?"
+                                )
+                            },
+                            |priv_msg| priv_msg.share.clone(),
+                        )
                     });
                 let index = if let Some(previous) = self.info.previous.as_ref() {
                     previous
@@ -1653,7 +1655,7 @@ mod test_plan {
     }
 
     impl Plan {
-        pub fn new(num_participants: NonZeroU32) -> Self {
+        pub const fn new(num_participants: NonZeroU32) -> Self {
             Self {
                 num_participants,
                 rounds: Vec::new(),
@@ -2298,7 +2300,7 @@ mod test {
                 sk.clone(),
                 None,
             )?;
-            let mut player = Player::new(info.clone(), sk.clone())?;
+            let mut player = Player::new(info.clone(), sk)?;
             let ack = player
                 .dealer_message(pk.clone(), pub_msg, priv_msgs[0].1.clone())
                 .unwrap();

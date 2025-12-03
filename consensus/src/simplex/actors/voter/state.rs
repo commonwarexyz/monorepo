@@ -125,22 +125,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Returns the epoch managed by this state machine.
-    pub fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 
     /// Returns the view currently being driven.
-    pub fn current_view(&self) -> View {
+    pub const fn current_view(&self) -> View {
         self.view
     }
 
     /// Returns the highest finalized view we have observed.
-    pub fn last_finalized(&self) -> View {
+    pub const fn last_finalized(&self) -> View {
         self.last_finalized
     }
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
-    pub fn min_active(&self) -> View {
+    pub const fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
     }
 
@@ -215,6 +215,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
+        #[allow(clippy::option_if_let_else)]
         let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
             Some(Voter::Finalization(finalization))
         } else if let Some(notarization) = self.notarization(entry_view).cloned() {
@@ -808,7 +809,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
-                scheme: local_scheme.clone(),
+                scheme: local_scheme,
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -1221,7 +1222,7 @@ mod tests {
             let round = Rnd::new(epoch, view);
             let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
             let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
-            let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a.clone()).unwrap();
+            let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a).unwrap();
 
             // Add local vote and replay
             state.add_verified_notarize(local_vote.clone());
@@ -1246,7 +1247,7 @@ mod tests {
                 context,
                 Config {
                     scheme: local_scheme,
-                    namespace: namespace.clone(),
+                    namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),

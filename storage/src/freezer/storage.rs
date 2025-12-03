@@ -118,7 +118,7 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     /// Initialize a new [Checkpoint].
-    fn init(table_size: u32) -> Self {
+    const fn init(table_size: u32) -> Self {
         Self {
             table_size,
             epoch: 0,
@@ -201,7 +201,7 @@ impl Entry {
     }
 
     /// Check if this entry is empty (all zeros).
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.section == 0 && self.offset == 0 && self.crc == 0
     }
 
@@ -253,7 +253,7 @@ struct Record<K: Array, V: Codec> {
 
 impl<K: Array, V: Codec> Record<K, V> {
     /// Create a new [Record].
-    fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
+    const fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
         Self { key, value, next }
     }
 }
@@ -325,7 +325,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
-    fn table_offset(table_index: u32) -> u64 {
+    const fn table_offset(table_index: u32) -> u64 {
         table_index as u64 * Entry::FULL_SIZE as u64
     }
 
@@ -446,7 +446,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
-    fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> u64 {
+    const fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> u64 {
         // If either entry matches the current epoch, overwrite it
         if !entry1.is_empty() && entry1.epoch == epoch {
             return 0;
@@ -705,7 +705,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Determine if the table should be resized.
-    fn should_resize(&self) -> bool {
+    const fn should_resize(&self) -> bool {
         self.resizable as u64 >= self.table_resize_threshold
     }
 
@@ -1008,13 +1008,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// Returns `None` if the [Freezer] is not resizing.
     #[cfg(test)]
-    pub fn resizing(&self) -> Option<u32> {
+    pub const fn resizing(&self) -> Option<u32> {
         self.resize_progress
     }
 
     /// Get the number of resizable entries.
     #[cfg(test)]
-    pub fn resizable(&self) -> u32 {
+    pub const fn resizable(&self) -> u32 {
         self.resizable
     }
 }
