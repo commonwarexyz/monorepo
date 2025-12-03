@@ -2,10 +2,12 @@ use crate::{
     algebra::{Additive as _, Ring},
     fields::goldilocks::F,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
+use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
-use std::ops::{Index, IndexMut};
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -209,8 +211,8 @@ impl Read for Matrix {
     }
 }
 
-impl std::fmt::Debug for Matrix {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Matrix {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for i in 0..self.rows {
             let row_i = &self[i];
             for &row_i_j in row_i {
