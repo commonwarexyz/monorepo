@@ -584,9 +584,9 @@ impl Share {
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        let mut public = V::Public::one();
-        public.mul(&self.private);
-        public
+        let mut out = <V::Public as Element>::one();
+        Element::mul(&mut out, &self.private);
+        out
     }
 }
 
