@@ -703,6 +703,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
+    use commonware_math::algebra::Space;
     use commonware_utils::{from_hex_formatted, quorum, NZU32};
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
@@ -1409,13 +1410,18 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(4242);
         let degree = 5;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(&mut rng, degree);
+        let poly_scalar = poly::Private::new(&mut rng, degree);
 
         // Commit to Signature group
         let poly_g1 = poly::Poly::<V::Signature>::commit(poly_scalar);
 
         // Generate evaluations (enough to meet threshold)
-        let evals: Vec<_> = (0..threshold).map(|i| poly_g1.evaluate(i)).collect();
+        let evals: Vec<_> = (0..threshold)
+            .map(|i| Eval {
+                index: i,
+                value: poly_g1.eval(&Scalar::from_index(i)),
+            })
+            .collect();
         let eval_refs: Vec<_> = evals.iter().collect(); // Get references
 
         // Compute weights
@@ -1424,9 +1430,14 @@ mod tests {
             .expect("Failed to compute weights");
 
         // Calculate using original polynomial recovery (naive interpolation)
-        let expected_result =
-            poly::Signature::<V>::recover_with_weights(&weights, eval_refs.clone())
-                .expect("poly::recover_with_weights failed");
+        let expected_result = {
+            let points = evals.iter().map(|e| e.value).collect::<Vec<_>>();
+            let weights = weights
+                .values()
+                .map(|w| w.as_scalar().clone())
+                .collect::<Vec<_>>();
+            <V::Signature as Space<Scalar>>::msm(points.as_slice(), &weights, 1)
+        };
 
         // Calculate using MSM interpolation
         let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
@@ -1455,11 +1466,16 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5555);
         let degree = 2;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(&mut rng, degree);
+        let poly_scalar = poly::Private::new(&mut rng, degree);
         let poly_g2 = poly::Poly::<V::Public>::commit(poly_scalar);
 
         // Generate threshold evaluations
-        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let evals: Vec<_> = (0..threshold)
+            .map(|i| Eval {
+                index: i,
+                value: poly_g2.eval(&Scalar::from_index(i)),
+            })
+            .collect();
         let eval_refs: Vec<_> = evals.iter().collect();
 
         // Compute weights for *different* indices
@@ -2430,7 +2446,7 @@ mod tests {
 
             // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
-            let derived = <V as Variant>::Signature::msm(&points, &scalars);
+            let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &scalars, 1);
             let derived = Eval {
                 index: target,
                 value: derived,

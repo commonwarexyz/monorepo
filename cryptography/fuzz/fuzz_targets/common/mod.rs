@@ -12,6 +12,7 @@ use commonware_cryptography::bls12381::{
     },
     tle::{Block, Ciphertext},
 };
+use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 #[allow(unused)]
@@ -118,8 +119,10 @@ pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> 
 #[allow(unused)]
 pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
-    let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
+    let seed: [u8; 32] = u.arbitrary()?;
+    let constant = arbitrary_scalar(u)?;
+    let mut rng = StdRng::from_seed(seed);
+    Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
 
 #[allow(unused)]

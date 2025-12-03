@@ -8,7 +8,7 @@
 
 use super::variant::Variant;
 use crate::bls12381::primitives::{
-    group::{self, Element, Point, Scalar},
+    group::{self, Element, Scalar},
     sharing::Mode,
     Error,
 };
@@ -17,11 +17,9 @@ use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
-};
-use core::{hash::Hash, iter, num::NonZeroU32};
-use rand_core::CryptoRngCore;
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+pub use commonware_math::poly::Poly;
+use core::{hash::Hash, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
@@ -66,66 +64,6 @@ impl<C: Element> EncodeSize for Eval<C> {
     fn encode_size(&self) -> usize {
         UInt(self.index).encode_size() + C::SIZE
     }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<C: Element> arbitrary::Arbitrary<'_> for Eval<C>
-where
-    C: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            index: u.arbitrary::<u32>()?,
-            value: u.arbitrary::<C>()?,
-        })
-    }
-}
-
-/// A polynomial that is using a scalar for the variable x and a generic
-/// element for the coefficients.
-///
-/// The coefficients must be able to multiply the type of the variable,
-/// which is always a scalar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-// Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
-pub struct Poly<C>(Vec<C>);
-
-#[cfg(feature = "arbitrary")]
-impl<C: Element> arbitrary::Arbitrary<'_> for Poly<C>
-where
-    C: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let degree = (u.arbitrary::<u32>()? % 10).max(1);
-        let coeffs = (0..=degree)
-            .map(|_| u.arbitrary::<C>())
-            .collect::<arbitrary::Result<Vec<C>>>()?;
-        Ok(Self(coeffs))
-    }
-}
-
-// Returns a new scalar polynomial of the given degree where each coefficient is
-// sampled at random from the provided RNG.
-///
-/// In the context of secret sharing, the threshold is the degree + 1.
-pub fn new_from<R: CryptoRngCore>(rng: &mut R, degree: u32) -> Poly<Scalar> {
-    // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
-    let coeffs = (0..=degree).map(|_| Scalar::from_rand(rng));
-    Poly::from_iter(coeffs)
-}
-
-/// Returns a new scalar polynomial with a particular value for the constant coefficient.
-///
-/// This does the same thing as [new_from] otherwise.
-pub fn new_with_constant(
-    degree: u32,
-    mut rng: impl CryptoRngCore,
-    constant: Scalar,
-) -> Poly<Scalar> {
-    // (Use skip to avoid an empty range complaint)
-    Poly::from_iter(
-        iter::once(constant).chain((0..=degree).skip(1).map(|_| Scalar::from_rand(&mut rng))),
-    )
 }
 
 /// A Barycentric Weight for interpolation at x=0.
@@ -213,6 +151,17 @@ pub fn compute_weights(
     }
     Ok(weights)
 }
+
+/*
+/// A polynomial that is using a scalar for the variable x and a generic
+/// element for the coefficients.
+///
+/// The coefficients must be able to multiply the type of the variable,
+/// which is always a scalar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
+pub struct Poly<C>(Vec<C>);
+
 
 impl<C> FromIterator<C> for Poly<C> {
     fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
@@ -631,3 +580,4 @@ pub mod tests {
         }
     }
 }
+*/

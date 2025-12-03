@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{
-    group::G1,
-    poly::{self, Poly},
+    group::{Scalar, G1},
+    poly::Poly,
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -14,12 +14,12 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut rng = StdRng::seed_from_u64(0);
-                    let polynomial: Poly<G1> = Poly::commit(poly::new_from(&mut rng, t - 1));
+                    let polynomial: Poly<G1> = Poly::commit(Poly::new(&mut rng, t - 1));
                     (rng, polynomial)
                 },
                 |(mut rng, polynomial)| {
                     let idx = rng.gen_range(0..n);
-                    black_box(polynomial.evaluate(idx));
+                    black_box(polynomial.eval(&Scalar::from_index(idx)));
                 },
                 BatchSize::SmallInput,
             );

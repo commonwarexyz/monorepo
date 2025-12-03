@@ -282,9 +282,8 @@
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
-        group::{Element, Scalar},
-        ops::msm_interpolate,
-        poly::{self, new_with_constant, Eval, Poly, Public, Weight},
+        group::Scalar,
+        poly::{self, Poly, Public},
         sharing::{Mode, Sharing},
         variant::Variant,
     },
@@ -292,16 +291,13 @@ use crate::{
     Digest, PublicKey, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_math::{algebra::Additive, poly::Interpolator};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     quorum, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
-use rayon::{
-    iter::{IntoParallelIterator, ParallelIterator as _},
-    ThreadPoolBuilder,
-};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -328,51 +324,6 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
-}
-
-/// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials using precomputed Barycentric Weights.
-///
-/// It is assumed that the required number of commitments are provided.
-fn recover_public_with_weights<V: Variant>(
-    commitments: &BTreeMap<u32, poly::Public<V>>,
-    weights: &BTreeMap<u32, poly::Weight>,
-    threshold: u32,
-    concurrency: usize,
-) -> poly::Public<V> {
-    let work = |coeff| {
-        // Extract evaluations for this coefficient from all commitments
-        let evals = commitments
-            .iter()
-            .map(|(dealer, commitment)| poly::Eval {
-                index: *dealer,
-                value: commitment.get(coeff),
-            })
-            .collect::<Vec<_>>();
-
-        // Use precomputed weights for interpolation
-        msm_interpolate(weights, &evals).expect("interpolation should not fail")
-    };
-    let range = 0..threshold;
-    if concurrency <= 1 || threshold <= 1 {
-        range.map(work).collect()
-    } else {
-        // Build a thread pool with the specified concurrency
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // Recover signatures
-        pool.install(move || {
-            range
-                .into_par_iter()
-                .map(work)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .collect()
-        })
-    }
 }
 
 /// The output of a successful DKG.
@@ -468,7 +419,6 @@ where
 pub struct Info<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
-    mode: Mode,
     dealers: Set<P>,
     players: Set<P>,
     summary: Summary,
@@ -501,10 +451,6 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     fn degree(&self) -> u32 {
         self.players.quorum().saturating_sub(1)
-    }
-
-    fn threshold(&self) -> u32 {
-        self.degree() + 1
     }
 
     fn required_commitments(&self) -> u32 {
@@ -614,7 +560,6 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         Ok(Self {
             round,
             previous,
-            mode,
             dealers,
             players,
             summary,
@@ -644,7 +589,7 @@ impl<V: Variant> Eq for DealerPubMsg<V> {}
 
 impl<V: Variant> DealerPubMsg<V> {
     fn check_share(&self, share: &Share) -> bool {
-        self.commitment.evaluate(share.index).value == share.public::<V>()
+        self.commitment.eval_msm(&Scalar::from_index(share.index)) == share.public::<V>()
     }
 }
 
@@ -668,7 +613,7 @@ impl<V: Variant> Read for DealerPubMsg<V> {
         &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            commitment: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_size))?,
+            commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_size), ()))?,
         })
     }
 }
@@ -1178,7 +1123,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
         let share = info.unwrap_or_random_share(&mut rng, share.map(|x| x.private))?;
-        let my_poly = new_with_constant(info.degree(), &mut rng, share);
+        let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
             .iter()
@@ -1187,7 +1132,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                 (
                     pk.clone(),
                     DealerPrivMsg {
-                        share: my_poly.evaluate(i as u32).value,
+                        share: my_poly.eval_msm(&Scalar::from_index(i as u32)),
                     },
                 )
             })
@@ -1261,7 +1206,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
 fn select<V: Variant, P: PublicKey>(
     info: &Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-) -> Result<Vec<(P, DealerLog<V, P>)>, Error> {
+) -> Result<Map<P, DealerLog<V, P>>, Error> {
     let required_commitments = info.required_commitments() as usize;
     let transcript = transcript_for_round(info);
     let out = logs
@@ -1296,7 +1241,8 @@ fn select<V: Variant, P: PublicKey>(
             Some((dealer, log))
         })
         .take(required_commitments)
-        .collect::<Vec<_>>();
+        .try_collect::<Map<_, _>>()
+        .expect("logs has at most one entry per dealer");
     if out.len() < required_commitments {
         return Err(Error::DkgFailed);
     }
@@ -1305,44 +1251,38 @@ fn select<V: Variant, P: PublicKey>(
 
 struct ObserveInner<V: Variant, P: PublicKey> {
     output: Output<V, P>,
-    weights: Option<BTreeMap<u32, Weight>>,
+    weights: Option<Interpolator<P, Scalar>>,
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon(
         info: Info<V, P>,
-        selected: Vec<(P, DealerLog<V, P>)>,
+        selected: Map<P, DealerLog<V, P>>,
         concurrency: usize,
     ) -> Result<Self, Error> {
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
-            let (indices, commitments) = selected
+            let weights = Interpolator::new(selected.iter().filter_map(|dealer| {
+                Some((
+                    dealer.clone(),
+                    Scalar::from_index(previous.players.index(dealer)?),
+                ))
+            }));
+            let commitments = selected
                 .into_iter()
-                .map(|(dealer, log)| {
-                    let index = previous
-                        .players()
-                        .index(&dealer)
-                        .expect("select checks that dealer exists, via our signature");
-                    (index, (index, log.pub_msg.commitment))
-                })
-                .collect::<(Vec<_>, BTreeMap<_, _>)>();
-
-            let weights =
-                poly::compute_weights(info.mode, NZU32!(previous.players.len() as u32), indices)
-                    .expect("should be able to compute weights");
-            let public = recover_public_with_weights::<V>(
-                &commitments,
-                &weights,
-                info.threshold(),
-                concurrency,
-            );
+                .map(|(dealer, log)| (dealer, log.pub_msg.commitment))
+                .try_collect::<Map<_, _>>()
+                .expect("Map should have unique keys");
+            let public = weights
+                .interpolate(&commitments, concurrency)
+                .expect("select checks that enough points have been provided");
             if previous.public().public() != public.constant() {
                 return Err(Error::DkgFailed);
             }
             (public, Some(weights))
         } else {
             let mut public = Poly::zero();
-            for (_, log) in selected.iter() {
-                public.add(&log.pub_msg.commitment);
+            for log in selected.values() {
+                public += &log.pub_msg.commitment;
             }
             (public, None)
         };
@@ -1448,7 +1388,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.info, logs)?;
         let dealings = selected
-            .iter()
+            .iter_pairs()
             .map(|(dealer, log)| {
                 let share = self
                     .view
@@ -1464,34 +1404,26 @@ impl<V: Variant, S: Signer> Player<V, S> {
                             |priv_msg| priv_msg.share.clone(),
                         )
                     });
-                let index = if let Some(previous) = self.info.previous.as_ref() {
-                    previous
-                        .players
-                        .index(dealer)
-                        .expect("select should check dealer")
-                } else {
-                    self.info
-                        .dealer_index(dealer)
-                        .expect("select should check dealer")
-                };
-                Eval {
-                    index,
-                    value: share,
-                }
+                (dealer.clone(), share)
             })
-            .collect::<Vec<_>>();
+            .try_collect::<Map<_, _>>()
+            .expect("select produces at most one entry per dealer");
         let ObserveInner { output, weights } =
             ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, concurrency)?;
-        let private = if let Some(weights) = weights {
-            poly::Private::recover_with_weights(&weights, dealings.iter())
-                .expect("should be able to recover share")
-        } else {
-            let mut out = Scalar::zero();
-            for s in dealings {
-                out.add(&s.value);
-            }
-            out
-        };
+        let private = weights.map_or_else(
+            || {
+                let mut out = <Scalar as Additive>::zero();
+                for s in dealings.values() {
+                    out += s;
+                }
+                out
+            },
+            |weights| {
+                weights
+                    .interpolate(&dealings, concurrency)
+                    .expect("select ensures that we can recover")
+            },
+        );
         let share = Share {
             index: self.index,
             private,
@@ -1514,15 +1446,15 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     }
     let n = players.len() as u32;
     let t = quorum(n);
-    let private = poly::new_from(&mut rng, t - 1);
+    let private = Poly::new(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let eval = private.evaluate(i as u32);
+            let eval = private.eval_msm(&Scalar::from_index(i as u32));
             let share = Share {
-                index: eval.index,
-                private: eval.value,
+                index: i as u32,
+                private: eval,
             };
             (p.clone(), share)
         })
@@ -1916,7 +1848,7 @@ mod test_plan {
                                 .unwrap_or_random_share(&mut rng, share.map(|s| s.private))
                                 .expect("Failed to generate dealer share");
 
-                            let my_poly = poly::new_with_constant(degree, &mut rng, share);
+                            let my_poly = Poly::new_with_constant(&mut rng, degree, share);
                             let priv_msgs = info
                                 .players
                                 .iter()
@@ -1925,7 +1857,7 @@ mod test_plan {
                                     (
                                         pk.clone(),
                                         DealerPrivMsg {
-                                            share: my_poly.evaluate(i as u32).value,
+                                            share: my_poly.eval_msm(&Scalar::from_index(i as u32)),
                                         },
                                     )
                                 })
@@ -2050,7 +1982,7 @@ mod test_plan {
                 // Make sure that bad dealers are not selected.
                 if let Ok(selection) = select(&info, dealer_logs.clone()) {
                     let good_pks = selection
-                        .iter()
+                        .iter_pairs()
                         .map(|(pk, _)| pk.clone())
                         .collect::<BTreeSet<_>>();
                     for &i_dealer in &round.dealers {

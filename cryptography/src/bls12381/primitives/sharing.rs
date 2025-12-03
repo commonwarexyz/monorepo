@@ -1,9 +1,4 @@
-use crate::bls12381::primitives::{
-    group::Scalar,
-    poly::{eval_msm, Public},
-    variant::Variant,
-    Error,
-};
+use crate::bls12381::primitives::{group::Scalar, poly::Public, variant::Variant, Error};
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec, vec::Vec};
 use cfg_if::cfg_if;
@@ -137,7 +132,7 @@ impl<V: Variant> Sharing<V> {
             .iter()
             .zip(self.all_scalars())
             .for_each(|(e, s)| {
-                e.get_or_init(|| eval_msm::<V>(&self.poly, s));
+                e.get_or_init(|| self.poly.eval_msm(&s));
             })
     }
 
@@ -150,7 +145,7 @@ impl<V: Variant> Sharing<V> {
                 self.evals
                     .get(i as usize)
                     .map(|e| {
-                        *e.get_or_init(|| eval_msm::<V>(&self.poly, self.scalar(i).expect("i < total")))
+                        *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total")))
                     })
                     .ok_or(Error::InvalidIndex)
             } else {
@@ -202,7 +197,7 @@ impl<V: Variant> Read for Sharing<V> {
             // This will not panic, because we checked != 0 above.
             NZU32!(out)
         };
-        let poly = Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=*cfg))?;
+        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*cfg), ()))?;
         Ok(Self::new(mode, total, poly))
     }
 }
@@ -210,7 +205,7 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::poly::{new_from, Poly};
+    use crate::bls12381::primitives::poly::Poly;
     use arbitrary::Arbitrary;
     use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
@@ -229,7 +224,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = new_from(&mut StdRng::seed_from_u64(seed), quorum(total) - 1);
+            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),
