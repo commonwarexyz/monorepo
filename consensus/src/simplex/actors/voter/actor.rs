@@ -387,7 +387,7 @@ impl<
             return;
         };
 
-        // Inform the verifier so it can aggregate our vote with others.
+        // Inform the batcher so it can aggregate our vote with others.
         batcher.constructed(Vote::Notarize(notarize.clone())).await;
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
@@ -497,7 +497,7 @@ impl<
             return;
         };
 
-        // Provide the vote to the verifier pipeline.
+        // Provide the vote to the batcher pipeline.
         batcher.constructed(Vote::Finalize(finalize.clone())).await;
         // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
@@ -917,7 +917,7 @@ impl<
             // we no longer need
             self.prune_views().await;
 
-            // Update the verifier if we have moved to a new view
+            // Update the batcher if we have moved to a new view
             let current_view = self.state.current_view();
             if current_view > start {
                 let leader = self
