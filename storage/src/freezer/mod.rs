@@ -10,7 +10,7 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
+//! The [Freezer] uses a two-level architecture: an extendable hash table (written in a single [commonware_runtime::Blob])
 //! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
 //!
 //! ```text
@@ -101,7 +101,7 @@
 //! insertions since the last resize, triggering table growth when 50% of entries have had
 //! `table_resize_frequency` items added (since the last resize).
 //!
-//! # Extendible Hashing
+//! # Extendable Hashing
 //!
 //! The [Freezer] uses bit-based indexing to grow the on-disk hash table without rehashing existing entries:
 //!
