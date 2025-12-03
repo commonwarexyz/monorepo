@@ -409,7 +409,7 @@ impl<
             // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
                 if let Some(me) = self.scheme.me() {
-                    if let Some(proposal) = round.get_proposal_to_forward(me) {
+                    if let Some(proposal) = round.forward_proposal(me) {
                         voter.proposal(proposal).await;
                     }
                 }

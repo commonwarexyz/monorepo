@@ -291,7 +291,7 @@ impl<
     /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.
     /// 3. We are not the leader (leaders don't need to forward their own proposal).
-    pub fn get_proposal_to_forward(&mut self, me: u32) -> Option<Proposal<D>> {
+    pub fn forward_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
