@@ -199,7 +199,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -215,7 +215,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -229,7 +229,7 @@ pub mod tests {
         batch.update(key.clone(), D::Value::from_seed(9)).await?;
         assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(9)));
 
-        db.destroy().await?;
+        db.destroy().await.unwrap();
         Ok(())
     }
 
@@ -237,7 +237,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -260,7 +260,7 @@ pub mod tests {
                 .await?
         );
 
-        db.destroy().await?;
+        db.destroy().await.unwrap();
         Ok(())
     }
 
@@ -268,7 +268,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -297,7 +297,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -314,7 +314,7 @@ pub mod tests {
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.destroy().await?;
+        db.destroy().await.unwrap();
         Ok(())
     }
 
@@ -322,7 +322,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + crate::store::StorePersistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -354,7 +354,7 @@ pub mod tests {
         db.write_batch(delete_batch.into_iter()).await?;
         assert_eq!(Store::get(&db, &existing).await?, None);
 
-        db.destroy().await?;
+        db.destroy().await.unwrap();
         Ok(())
     }
 

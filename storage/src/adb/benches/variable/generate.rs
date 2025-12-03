@@ -92,7 +92,7 @@ async fn test_db<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePersistable<Error = Error>
         + LogStorePrunable<Value = Vec<u8>>,
 {
     let start = Instant::now();

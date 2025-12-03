@@ -66,6 +66,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
+                            let db = db.merkleize().await.unwrap();
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
@@ -74,6 +75,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
+                            let db = db.merkleize().await.unwrap();
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }

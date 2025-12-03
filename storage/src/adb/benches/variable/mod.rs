@@ -112,7 +112,7 @@ where
             Value = Vec<u8>,
             Error: std::fmt::Debug,
         > + LogStorePrunable
-        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePersistable<Error: std::fmt::Debug>
         + commonware_storage::store::StoreDeletable,
 {
     // Insert a random value for every possible element into the db.
@@ -151,7 +151,7 @@ async fn gen_random_kv_batched<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePersistable<Error: std::fmt::Debug>
         + LogStorePrunable<Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
@@ -177,14 +177,14 @@ where
         if rng.next_u32() % commit_frequency == 0 {
             let iter = batch.into_iter();
             db.write_batch(iter).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             batch = db.start_batch();
         }
     }
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db

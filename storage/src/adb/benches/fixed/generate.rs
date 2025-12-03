@@ -138,9 +138,8 @@ where
     A: commonware_storage::store::Store<
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
-        > + commonware_storage::store::StorePersistable
-        + LogStore<Value = <Sha256 as Hasher>::Digest>
-        + LogStorePrunable
+        > + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>
+        + LogStorePrunable<Value = <Sha256 as Hasher>::Digest>
         + Batchable,
 {
     let start = Instant::now();

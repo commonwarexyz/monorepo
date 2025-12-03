@@ -14,6 +14,7 @@ use commonware_storage::{
         },
         store::{Batchable, Config as SConfig, Store},
     },
+    mmr::mem::Dirty,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -89,6 +90,7 @@ type UCurrentDb = UCurrent<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Dirty,
 >;
 type OCurrentDb = OCurrent<
     Context,
@@ -97,6 +99,7 @@ type OCurrentDb = OCurrent<
     Sha256,
     EightCap,
     CHUNK_SIZE,
+    Dirty,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type VariableAnyDb =
@@ -227,7 +230,7 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
         > + Batchable
-        + commonware_storage::store::StorePersistable,
+        + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -268,7 +271,7 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
         > + Batchable
-        + commonware_storage::store::StorePersistable,
+        + commonware_storage::store::StorePersistable<Error = commonware_storage::adb::Error>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -294,7 +297,7 @@ where
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
                 db.write_batch(iter).await.unwrap();
-                db.commit().await.unwrap();
+                db.commit().await?;
                 batch = db.start_batch();
             }
         }
