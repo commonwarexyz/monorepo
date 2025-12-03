@@ -147,41 +147,31 @@ impl<
 
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not a delete operation.
-    pub(crate) async fn delete_key(&mut self, op: C::Item) -> Result<Option<Location>, Error> {
-        assert!(op.is_delete(), "delete operation expected");
-        let key = op.key().expect("delete operations should have a key");
-        let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
+    pub(crate) async fn delete_key(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+    ) -> Result<Option<Location>, Error> {
+        let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
             return Ok(None);
         };
-
-        self.log.append(op).await?;
+        self.log.append(C::Item::new_delete(key)).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
         Ok(Some(loc))
     }
 
-    /// Appends the provided update operation to the log, returning the old location of the key if
+    /// Appends the provided update to the log, returning the old location of the key if
     /// it was previously assigned some value, and None otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not an update operation.
-    pub(crate) async fn update_key_with_op(
+    pub(crate) async fn update_key(
         &mut self,
-        op: C::Item,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
     ) -> Result<Option<Location>, Error> {
-        assert!(op.is_update(), "update operation expected");
-
         let new_loc = self.op_count();
-        let key = op.key().expect("update operations should have a key");
-        let res = self.update_loc(key, new_loc).await?;
+        let res = self.update_loc(&key, new_loc).await?;
 
-        self.log.append(op).await?;
+        self.log.append(C::Item::new_update(key, value)).await?;
         if res.is_some() {
             self.steps += 1;
         } else {
@@ -192,16 +182,17 @@ impl<
     }
 
     /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key_with_op(&mut self, op: C::Item) -> Result<bool, Error> {
-        assert!(op.is_update(), "update operation expected");
-
-        let key = op.key().expect("update operations should have a key");
+    pub(crate) async fn create_key(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<bool, Error> {
         let new_loc = self.op_count();
-        if !create_key(&mut self.snapshot, &self.log, key, new_loc).await? {
+        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
         }
 
-        self.log.append(op).await?;
+        self.log.append(C::Item::new_update(key, value)).await?;
         self.active_keys += 1;
 
         Ok(true)
@@ -468,9 +459,7 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<(), Error> {
-        self.update_key_with_op(C::Item::new_update(key, value))
-            .await
-            .map(|_| ())
+        self.update_key(key, value).await.map(|_| ())
     }
 
     async fn create(
@@ -478,14 +467,11 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<bool, Error> {
-        self.create_key_with_op(C::Item::new_update(key, value))
-            .await
+        self.create_key(key, value).await
     }
 
     async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
-        self.delete_key(C::Item::new_delete(key))
-            .await
-            .map(|o| o.is_some())
+        self.delete_key(key).await.map(|o| o.is_some())
     }
 
     async fn commit(
