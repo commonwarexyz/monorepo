@@ -42,7 +42,7 @@ pub struct Actor<
     reporter: R,
 
     activity_timeout: ViewDelta,
-    skip_timeout: ViewDelta,
+    skip_timeout: usize,
     epoch: Epoch,
     namespace: Vec<u8>,
 
@@ -114,7 +114,8 @@ impl<
                 reporter: cfg.reporter,
 
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
+                skip_timeout: usize::try_from(cfg.skip_timeout.get())
+                    .expect("skip_timeout is too large"),
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
@@ -194,17 +195,12 @@ impl<
 
                             // Check if the leader has been active recently
                             let is_active =
-                                // Not enough views have passed to judge activity
-                                current < View::new(self.skip_timeout.get())
-                                // Check leader activity in recent window
-                                || {
-                                    // Not enough recent history to judge (assume active)
-                                    let min_view = current.saturating_sub(self.skip_timeout);
-                                    let recent: Vec<_> = work.range(min_view..).collect();
-                                    (recent.len() as u64) < self.skip_timeout.get()
-                                    // Leader was active in at least one recent round
-                                    || recent.iter().any(|(_, round)| round.is_active(leader))
-                                };
+                                // Ensure we have enough data to judge activity (none of this
+                                // data may be in the last skip_timeout views if we jumped ahead
+                                // to a new view)
+                                work.len() < self.skip_timeout
+                                // Leader active in at least one recent round
+                                || work.iter().rev().take(self.skip_timeout).any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {
