@@ -1189,4 +1189,163 @@ mod tests {
         leader_activity_detection(bls12381_multisig::<MinSig, _>);
         leader_activity_detection(ed25519);
     }
+
+    /// Regression test for liveness bug: when the local node is the leader and sends
+    /// its constructed vote BEFORE set_leader is called (which can happen when jumping
+    /// ahead in views), the batcher must still be able to construct a certificate.
+    ///
+    /// This tests the scenario where:
+    /// 1. Leader's own vote arrives via `constructed()` before `update()` sets the leader
+    /// 2. Other votes arrive from the network
+    /// 3. The batcher should still find the leader's vote, set leader_proposal, and
+    ///    construct a certificate once quorum is reached
+    fn constructed_before_set_leader_produces_certificate<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor as participant 0 (who will be the leader)
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Register other participants on the network and set up links
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::new();
+            for (i, pk) in participants.iter().enumerate() {
+                if i == 0 {
+                    // Batcher/leader is participant 0, skip
+                    participant_senders.push(None);
+                    continue;
+                }
+                let (sender, _receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                oracle
+                    .add_link(pk.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            // Start the batcher - but DON'T call update yet (simulating the race condition)
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Build proposal - participant 0 (us) is the leader
+            let view = View::new(1);
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"leader_payload"));
+
+            // KEY PART OF THE TEST: Send our own (leader's) vote via constructed() BEFORE
+            // calling update() to set the leader. This simulates the race condition where
+            // the voter sends constructed() before the batcher receives the update().
+            let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Notarize(our_vote))
+                .await;
+
+            // Give time for the constructed message to be processed
+            context.sleep(Duration::from_millis(10)).await;
+
+            // NOW call update to set participant 0 as the leader
+            // At this point, the leader's vote is already in the verifier
+            let leader = 0u32; // We (participant 0) are the leader
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(active);
+
+            // Give time for update to be processed
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Send votes from other participants (1 through quorum_size-1)
+            // We need quorum_size - 1 more votes (we already have 1 from the leader)
+            for i in 1..quorum_size {
+                let vote = Notarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Vote::Notarize(vote).encode().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Give network time to deliver and batcher time to process
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Should receive a notarization certificate - this is the key assertion!
+            // If the bug exists, we would NOT receive a certificate because:
+            // 1. The leader's vote (sent via constructed) wouldn't be found by set_leader
+            // 2. leader_proposal would never be set
+            // 3. ready_notarizes() would always return false
+            let output = voter_receiver.next().await.unwrap();
+            assert!(
+                matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view),
+                "Expected notarization certificate when leader's constructed vote arrives before set_leader"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_constructed_before_set_leader_produces_certificate() {
+        constructed_before_set_leader_produces_certificate(bls12381_multisig::<MinPk, _>);
+        constructed_before_set_leader_produces_certificate(bls12381_multisig::<MinSig, _>);
+        constructed_before_set_leader_produces_certificate(ed25519);
+    }
 }
