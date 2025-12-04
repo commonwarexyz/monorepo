@@ -226,6 +226,9 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .unwrap();
+                    // Update tracking variables to match restored state
+                    bit_count = bitmap.len();
+                    pruned_bits = bitmap.pruned_bits();
                     Bitmap::Clean(bitmap)
                 }
 
