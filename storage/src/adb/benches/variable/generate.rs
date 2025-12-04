@@ -97,16 +97,14 @@ where
         + LogStorePrunable,
 {
     let start = Instant::now();
-    let mut db = if use_batch {
+    let db = if use_batch {
         gen_random_kv_batched(db, elements, operations, commit_frequency).await
     } else {
         gen_random_kv(db, elements, operations, commit_frequency).await
     };
-    db.prune(db.inactivity_floor_loc()).await?;
-    let res = start.elapsed();
-    db.destroy().await?; // don't time destroy
-
-    Ok(res)
+    let elapsed = start.elapsed();
+    db.destroy().await?;
+    Ok(elapsed)
 }
 
 criterion_group! {

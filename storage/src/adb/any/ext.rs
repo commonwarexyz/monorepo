@@ -3,38 +3,6 @@
 //! The [AnyExt] wrapper provides a traditional mutable key-value store interface over Any
 //! databases, automatically handling Clean/Dirty state transitions. This eliminates the need for
 //! manual state management while maintaining the performance benefits of deferred merkleization.
-//!
-//! # Example
-//!
-//! ```rust
-//! use commonware_storage::adb::any::{AnyExt, unordered::fixed::Any};
-//! use commonware_runtime::{deterministic, Runner as _};
-//! use commonware_storage::store::{Store as _, StoreMut, StoreDeletable, StorePersistable};
-//!
-//! let executor = deterministic::Runner::default();
-//! executor.start(|context| async move {
-//!     // Initialize Any database
-//!     let db = Any::init(context, config).await.unwrap();
-//!
-//!     // Wrap for simple mutable interface
-//!     let mut db = AnyExt::new(db);
-//!
-//!     // Use like a traditional database - state transitions are automatic
-//!     db.update(key1, value1).await.unwrap();  // Transitions to Dirty
-//!     db.update(key2, value2).await.unwrap();  // Stays Dirty
-//!     db.commit().await.unwrap();              // Merkleizes to Clean, commits
-//!     db.delete(key1).await.unwrap();          // Transitions back to Dirty
-//!     db.commit().await.unwrap();              // Merkleizes to Clean, commits
-//!
-//!     db.destroy().await.unwrap();
-//! });
-//! ```
-//!
-//! # When to Use
-//!
-//! Use [AnyExt] when you want a simple mutable interface without manually managing Clean/Dirty
-//! state transitions. For fine-grained control over merkleization timing, use [CleanAny] and
-//! [DirtyAny] directly.
 
 use super::{CleanAny, DirtyAny};
 use crate::{
@@ -47,12 +15,9 @@ use crate::{
 };
 
 /// An extension wrapper for [CleanAny] databases that provides a traditional mutable key-value
-/// store interface with automatic state transitions.
-///
-/// This wrapper handles Clean/Dirty state transitions transparently:
-/// - Mutations (update/delete) automatically transition to Dirty state
-/// - Operations requiring Clean state (commit/prune) automatically merkleize first
+/// store interface by internally handling Clean/Dirty state transitions.
 pub struct AnyExt<A: CleanAny> {
+    // Invariant: always Some
     inner: Option<State<A>>,
 }
 

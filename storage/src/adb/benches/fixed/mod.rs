@@ -100,9 +100,9 @@ type OCurrentDb = OCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
+type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 
 /// Configuration for any ADB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -167,12 +167,6 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
     }
 }
 
-/// Get a Store instance.
-async fn get_store(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
-    Store::init(ctx, cfg).await.unwrap()
-}
-
 /// Get an unordered any ADB instance.
 async fn get_unordered_any(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
@@ -207,6 +201,12 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
+}
+
+/// Get a Store instance.
+async fn get_store(ctx: Context) -> StoreDb {
+    let cfg = store_cfg();
+    Store::init(ctx, cfg).await.unwrap()
 }
 
 async fn get_variable_any(ctx: Context) -> VariableAnyDb {

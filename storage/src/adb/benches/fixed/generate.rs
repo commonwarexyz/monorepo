@@ -154,6 +154,7 @@ where
     } else {
         gen_random_kv(db, elements, operations, Some(commit_frequency)).await
     };
+    db.commit().await?;
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
     db.destroy().await?; // don't time destroy

@@ -86,8 +86,8 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 }
 
 async fn get_store(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
-    Store::init(ctx, cfg).await.unwrap()
+    let store_cfg = store_cfg();
+    Store::init(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_any(ctx: Context) -> AnyDb {
@@ -134,7 +134,6 @@ where
             db.commit().await.unwrap();
         }
     }
-
     db.commit().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
     db
