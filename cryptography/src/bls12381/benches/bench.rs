@@ -6,6 +6,7 @@ mod aggregate_verify_multiple_messages;
 mod aggregate_verify_multiple_public_keys;
 mod batch_verify_multiple_messages;
 mod batch_verify_multiple_public_keys;
+mod dkg;
 mod evaluate_point;
 mod partial_verify_multiple_public_keys;
 mod partial_verify_multiple_public_keys_precomputed;
@@ -16,6 +17,7 @@ mod tle_decrypt;
 mod tle_encrypt;
 
 criterion_main!(
+    dkg::benches,
     threshold_signature_recover::benches,
     aggregate_public_keys::benches,
     aggregate_signatures::benches,
