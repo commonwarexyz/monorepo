@@ -34,11 +34,14 @@ fn bench_variable_init(c: &mut Criterion) {
                 runner.start(|ctx| async move {
                     match variant {
                         Variant::Store => {
+                            todo!()
+                            /*
                             let db = get_store(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
+                             */
                         }
                         Variant::Any => {
                             let db = get_any(ctx.clone()).await;

@@ -10,10 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::{
-    any::CleanAny,
-    store::{Batchable, LogStore, LogStorePrunable},
-};
+use commonware_storage::adb::{any::CleanAny, store::Batchable};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -70,6 +67,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::Store => {
+                                            todo!()
+                                            /*
                                             let db = get_store(ctx.clone()).await;
                                             test_db(
                                                 db,
@@ -80,6 +79,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             )
                                             .await
                                             .unwrap()
+                                            */
                                         }
                                         Variant::Variable => {
                                             let db = get_variable_any(ctx.clone()).await;
@@ -138,7 +138,8 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, commonware_storage::adb::Error>
 where
-    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     let start = Instant::now();
     let mut db = if use_batch {

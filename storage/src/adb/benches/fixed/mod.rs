@@ -7,14 +7,13 @@ use commonware_storage::{
         any::{
             ordered::fixed::Any as OAny,
             unordered::{fixed::Any as UAny, variable::Any as VariableAny},
-            CleanAny, FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
+            CleanAny, DirtyAny as _, FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Batchable, Config as SConfig, Store},
+        store::{Batchable, Config as SConfig, DirtyStore as _, Store},
     },
-    mmr::mem::Dirty,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -90,7 +89,6 @@ type UCurrentDb = UCurrent<
     Sha256,
     EightCap,
     CHUNK_SIZE,
-    Dirty,
 >;
 type OCurrentDb = OCurrent<
     Context,
@@ -99,7 +97,6 @@ type OCurrentDb = OCurrent<
     Sha256,
     EightCap,
     CHUNK_SIZE,
-    Dirty,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type VariableAnyDb =
@@ -192,7 +189,6 @@ async fn get_unordered_current(ctx: Context) -> UCurrentDb {
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
-        .into_dirty()
 }
 
 /// Get an ordered current ADB instance.
@@ -202,7 +198,6 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
-        .into_dirty()
 }
 
 async fn get_store(ctx: Context) -> StoreDb {
@@ -222,15 +217,16 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
 /// database is committed after every `commit_frequency` operations (if Some), or at the end (if
 /// None).
 async fn gen_random_kv<A>(
-    mut db: A,
+    db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
+    let mut db = db.into_dirty();
+
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
@@ -250,13 +246,16 @@ where
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit(None).await.unwrap();
+                let mut clean_db = db.merkleize().await;
+                clean_db.commit(None).await.unwrap();
+                db = clean_db.into_dirty();
             }
         }
     }
 
-    db.commit(None).await.unwrap();
-    db
+    let mut clean_db = db.merkleize().await;
+    clean_db.commit(None).await.unwrap();
+    clean_db
 }
 
 async fn gen_random_kv_batched<A>(

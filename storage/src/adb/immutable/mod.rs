@@ -534,7 +534,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     type Operation = Operation<K, V>;
     type Clean = Immutable<E, K, V, H, T, Clean<H::Digest>>;
 
-    fn merkleize(self) -> Self::Clean {
+    async fn merkleize(self) -> Self::Clean {
         self.merkleize()
     }
 }

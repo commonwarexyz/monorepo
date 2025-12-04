@@ -14,9 +14,8 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
-    AuthenticatedBitMap,
 };
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
@@ -336,6 +335,7 @@ impl<
     }
 }
 
+/*
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Operation>,
@@ -395,6 +395,7 @@ impl<
         }
     }
 }
+    */
 
 impl<
         E: Storage + Clock + Metrics,
@@ -690,7 +691,7 @@ impl<
     type Operation = C::Item;
     type Clean = IndexedLog<E, C, I, H>;
 
-    fn merkleize(self) -> Self::Clean {
+    async fn merkleize(self) -> Self::Clean {
         self.merkleize()
     }
 }
@@ -864,7 +865,7 @@ pub(super) mod test {
         let mut db = db.into_dirty();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let mut clean_db = db.merkleize();
+            let mut clean_db = db.merkleize().await;
             clean_db.commit(None).await.unwrap();
             db = clean_db.into_dirty();
             // Distance should equal 3 after the second commit, with inactivity_floor
@@ -874,7 +875,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await;
         db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
@@ -939,7 +940,7 @@ pub(super) mod test {
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await;
         db.commit(None).await.unwrap();
         let mut db = db.into_dirty();
 
@@ -959,7 +960,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 11); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
 
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await;
         db.commit(None).await.unwrap();
         let mut db = db.into_dirty();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
@@ -975,7 +976,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 12);
 
         // Make sure closing/reopening gets us back to the same state.
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await;
         db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 13);
         let root = db.root();
@@ -992,7 +993,7 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await;
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.

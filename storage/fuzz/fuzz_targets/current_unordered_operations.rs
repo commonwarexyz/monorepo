@@ -175,7 +175,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let _root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
@@ -188,7 +188,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                        let current_root = db.root();
 
                         // Adjust start_loc and max_ops to be within the valid range
                         let start_loc = Location::new(start_loc % *current_op_count).unwrap();
@@ -228,7 +228,7 @@ fn fuzz(data: FuzzInput) {
                     };
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let root = db.root();
 
                     if let Ok(res) = db
                         .range_proof(hasher.inner(), start_loc, *max_ops)
@@ -256,7 +256,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let current_root = db.root();
 
                     match db.key_value_proof(hasher.inner(), k).await {
                         Ok((proof, info)) => {

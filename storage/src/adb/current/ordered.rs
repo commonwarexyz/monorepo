@@ -3,13 +3,13 @@
 
 use crate::{
     adb::{
-        any::ordered::fixed::Any,
+        any::{ordered::fixed::Any, CleanAny, DirtyAny},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{
             fixed::{ordered::Operation, Value},
             Committable as _, KeyData, Keyed as _,
         },
-        store::LogStore,
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     bitmap::CleanBitMap,
@@ -54,6 +54,9 @@ pub struct Current<
     context: E,
 
     bitmap_metadata_partition: String,
+
+    /// Cached root digest. Only valid when in Clean state.
+    cached_root: Option<H::Digest>,
 }
 
 /// The information required to verify a key value proof from a Current adb.
@@ -279,27 +282,21 @@ impl<
         let height = Self::grafting_height();
         let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, height).await?;
 
+        // Compute and cache the root
+        let cached_root = Some(super::root(&mut hasher, height, &status, &any.log.mmr).await?);
+
         Ok(Self {
             any,
             status,
             context,
             bitmap_metadata_partition,
+            cached_root,
         })
     }
 
-    /// Return the root of the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
-    pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
-        super::root(
-            hasher,
-            Self::grafting_height(),
-            &self.status,
-            &self.any.log.mmr,
-        )
-        .await
+    /// Return the cached root of the db.
+    pub const fn root(&self) -> H::Digest {
+        self.cached_root.expect("Clean state must have cached root")
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -575,16 +572,16 @@ impl<
 
         // Merkleize the new bitmap entries.
         let mmr = &self.any.log.mmr;
-        self.status = merkleize_grafted_bitmap(
-            &mut self.any.log.hasher,
-            status,
-            mmr,
-            Self::grafting_height(),
-        )
-        .await?;
+        let height = Self::grafting_height();
+        self.status =
+            merkleize_grafted_bitmap(&mut self.any.log.hasher, status, mmr, height).await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
+
+        // Refresh cached root after commit
+        self.cached_root =
+            Some(super::root(&mut self.any.log.hasher, height, &self.status, mmr).await?);
 
         Ok(start_loc..self.op_count())
     }
@@ -627,6 +624,7 @@ impl<
             status: self.status.into_dirty(),
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root: None,
         }
     }
 }
@@ -694,19 +692,20 @@ impl<
 
         // Now use the clean MMR for bitmap merkleization
         let mut hasher = StandardHasher::<H>::new();
-        let status = merkleize_grafted_bitmap(
-            &mut hasher,
-            self.status,
-            &clean_any.log.mmr,
-            Self::grafting_height(),
-        )
-        .await?;
+        let height = Self::grafting_height();
+        let status =
+            merkleize_grafted_bitmap(&mut hasher, self.status, &clean_any.log.mmr, height).await?;
+
+        // Compute and cache the root
+        let cached_root =
+            Some(super::root(&mut hasher, height, &status, &clean_any.log.mmr).await?);
 
         Ok(Current {
             any: clean_any,
             status,
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root,
         })
     }
 }
@@ -752,7 +751,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > LogStore for Current<E, K, V, H, T, N>
+        S: State<DigestOf<H>>,
+    > LogStore for Current<E, K, V, H, T, N, S>
 {
     type Value = V;
 
@@ -820,6 +820,129 @@ impl<
     }
 }
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > CleanStore for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Dirty = Current<E, K, V, H, T, N, Dirty>;
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > DirtyStore for Current<E, K, V, H, T, N, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Clean = Current<E, K, V, H, T, N, Clean<DigestOf<H>>>;
+
+    async fn merkleize(self) -> Self::Clean {
+        self.merkleize().await.expect("merkleize should not fail")
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > CleanAny for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+{
+    type Key = K;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get(key).await
+    }
+
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > DirtyAny for Current<E, K, V, H, T, N, Dirty>
+{
+    type Key = K;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        self.get(key).await
+    }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
+        self.create(key, value).await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
+        self.delete(key).await
+    }
+}
+
 #[cfg(test)]
 pub mod test {
     use super::*;
@@ -880,12 +1003,12 @@ pub mod test {
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            let root0 = db.root(&mut hasher).await.unwrap();
+            let root0 = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
+            assert_eq!(db.root(), root0);
             assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
@@ -898,12 +1021,12 @@ pub mod test {
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             assert!(db.get_metadata().await.unwrap().is_none());
-            let root1 = db.root(&mut hasher).await.unwrap();
+            let root1 = db.root();
             assert!(root1 != root0);
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 3);
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
+            assert_eq!(db.root(), root1);
 
             // Create of same key should fail.
             let mut db = db.into_dirty();
@@ -918,13 +1041,13 @@ pub mod test {
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
-            let root2 = db.root(&mut hasher).await.unwrap();
+            let root2 = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
+            assert_eq!(db.root(), root2);
 
             // Repeated delete of same key should fail.
             let mut db = db.into_dirty();
@@ -948,7 +1071,6 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone(), "build_big").await.into_dirty();
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -995,10 +1117,10 @@ pub mod test {
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), "build_big").await;
-            assert_eq!(root, db.root(&mut hasher).await.unwrap());
+            assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4240);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3382));
             assert_eq!(db.any.snapshot.items(), 857);
@@ -1048,7 +1170,7 @@ pub mod test {
                 loc: op.1,
                 chunk: proof.3,
             };
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
             // Proof should be verifiable against current root.
             assert!(CurrentTest::verify_key_value_proof(
                 hasher.inner(),
@@ -1085,7 +1207,7 @@ pub mod test {
             db.commit(None).await.unwrap();
 
             // Proof should not be verifiable against the new root.
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
@@ -1210,7 +1332,7 @@ pub mod test {
             let db = apply_random_ops(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
@@ -1244,7 +1366,7 @@ pub mod test {
             let db = apply_random_ops(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
@@ -1317,19 +1439,18 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await.into_dirty();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
 
             // Close the db, then replay its operations with a bitmap.
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
             // Create a bitmap based on the current db's pruned/inactive state.
             db.close().await.unwrap();
 
             let db = open_db(context, partition).await;
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -1361,7 +1482,7 @@ pub mod test {
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 db = dirty_db.merkleize().await.unwrap();
                 db.commit(None).await.unwrap();
-                let root = db.root(&mut hasher).await.unwrap();
+                let root = db.root();
 
                 // Create a proof for the current value of k.
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -1399,12 +1520,11 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await.into_dirty();
             let mut db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let committed_root = db.root(&mut hasher).await.unwrap();
+            let committed_root = db.root();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc();
             db.prune(committed_inactivity_floor).await.unwrap();
@@ -1418,7 +1538,7 @@ pub mod test {
             // state of the DB should be as of the last commit.
             db.simulate_commit_failure_before_any_writes();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
+            assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
@@ -1435,7 +1555,7 @@ pub mod test {
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
             let db = open_db(context.clone(), partition).await;
-            let scenario_2_root = db.root(&mut hasher).await.unwrap();
+            let scenario_2_root = db.root();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
@@ -1451,7 +1571,7 @@ pub mod test {
             db.commit(None).await.unwrap();
             db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
+            assert_eq!(db.root(), scenario_2_root);
 
             db.destroy().await.unwrap();
         });
@@ -1461,8 +1581,6 @@ pub mod test {
     pub fn test_current_db_different_pruning_delays_same_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-
             // Create two databases that are identical other than how they are pruned.
             let db_config_no_pruning = current_db_config("no_pruning_test");
 
@@ -1509,8 +1627,8 @@ pub mod test {
             db_pruning.commit(None).await.unwrap();
 
             // Get roots from both databases
-            let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();
-            let root_pruning = db_pruning.root(&mut hasher).await.unwrap();
+            let root_no_pruning = db_no_pruning.root();
+            let root_pruning = db_pruning.root();
 
             // Verify they generate the same roots
             assert_eq!(root_no_pruning, root_pruning);
@@ -1532,8 +1650,8 @@ pub mod test {
             );
 
             // Get roots after restart
-            let root_no_pruning_restart = db_no_pruning.root(&mut hasher).await.unwrap();
-            let root_pruning_restart = db_pruning.root(&mut hasher).await.unwrap();
+            let root_no_pruning_restart = db_no_pruning.root();
+            let root_pruning_restart = db_pruning.root();
 
             // Ensure roots still match after restart
             assert_eq!(root_no_pruning, root_no_pruning_restart);
@@ -1556,7 +1674,7 @@ pub mod test {
             let key_exists_1 = Sha256::fill(0x10);
 
             // We should be able to prove exclusion for any key against an empty db.
-            let empty_root = db.root(&mut hasher).await.unwrap();
+            let empty_root = db.root();
             let (empty_proof, empty_info) = db
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
@@ -1575,7 +1693,7 @@ pub mod test {
             db.update(key_exists_1, v1).await.unwrap();
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
             let result = db.exclusion_proof(hasher.inner(), &key_exists_1).await;
@@ -1641,7 +1759,7 @@ pub mod test {
             db.update(key_exists_2, v2).await.unwrap();
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
             // on our use of OneCap translator.
@@ -1751,7 +1869,7 @@ pub mod test {
             let mut db = db.merkleize().await.unwrap();
             db.sync().await.unwrap();
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher).await.unwrap();
+            let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
