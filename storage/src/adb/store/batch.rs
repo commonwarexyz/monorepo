@@ -198,7 +198,7 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -245,7 +245,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -267,7 +267,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -298,7 +298,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -327,7 +327,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -352,7 +352,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable<Error = Error>,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
