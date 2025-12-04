@@ -27,19 +27,19 @@ pub enum Inbound<D: Digest> {
 impl<D: Digest> Write for Inbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Inbound::PutBlock(block) => {
+            Self::PutBlock(block) => {
                 buf.put_u8(0);
                 block.write(buf);
             }
-            Inbound::GetBlock(block) => {
+            Self::GetBlock(block) => {
                 buf.put_u8(1);
                 block.write(buf);
             }
-            Inbound::PutFinalization(finalization) => {
+            Self::PutFinalization(finalization) => {
                 buf.put_u8(2);
                 finalization.write(buf);
             }
-            Inbound::GetFinalization(finalization) => {
+            Self::GetFinalization(finalization) => {
                 buf.put_u8(3);
                 finalization.write(buf);
             }
@@ -55,19 +55,19 @@ impl<D: Digest> Read for Inbound<D> {
         match tag {
             0 => {
                 let block = PutBlock::read_cfg(buf, &())?;
-                Ok(Inbound::PutBlock(block))
+                Ok(Self::PutBlock(block))
             }
             1 => {
                 let block = GetBlock::<D>::read_cfg(buf, &())?;
-                Ok(Inbound::GetBlock(block))
+                Ok(Self::GetBlock(block))
             }
             2 => {
                 let finalization = PutFinalization::read_cfg(buf, &())?;
-                Ok(Inbound::PutFinalization(finalization))
+                Ok(Self::PutFinalization(finalization))
             }
             3 => {
                 let finalization = GetFinalization::read_cfg(buf, &())?;
-                Ok(Inbound::GetFinalization(finalization))
+                Ok(Self::GetFinalization(finalization))
             }
             _ => Err(Error::InvalidEnum(tag)),
         }
@@ -77,10 +77,10 @@ impl<D: Digest> Read for Inbound<D> {
 impl<D: Digest> EncodeSize for Inbound<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Inbound::PutBlock(block) => block.encode_size(),
-            Inbound::GetBlock(block) => block.encode_size(),
-            Inbound::PutFinalization(finalization) => finalization.encode_size(),
-            Inbound::GetFinalization(finalization) => finalization.encode_size(),
+            Self::PutBlock(block) => block.encode_size(),
+            Self::GetBlock(block) => block.encode_size(),
+            Self::PutFinalization(finalization) => finalization.encode_size(),
+            Self::GetFinalization(finalization) => finalization.encode_size(),
         }
     }
 }
@@ -107,7 +107,7 @@ impl<D: Digest> Read for PutBlock<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = <MinSig as Variant>::Public::read(buf)?;
         let block = BlockFormat::<D>::read(buf)?;
-        Ok(PutBlock { network, block })
+        Ok(Self { network, block })
     }
 }
 
@@ -139,7 +139,7 @@ impl<D: Digest> Read for GetBlock<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = <MinSig as Variant>::Public::read(buf)?;
         let digest = D::read(buf)?;
-        Ok(GetBlock { network, digest })
+        Ok(Self { network, digest })
     }
 }
 
@@ -169,7 +169,7 @@ impl<D: Digest> Read for PutFinalization<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = <MinSig as Variant>::Public::read(buf)?;
         let finalization = Finalization::read(buf)?;
-        Ok(PutFinalization {
+        Ok(Self {
             network,
             finalization,
         })
@@ -200,7 +200,7 @@ impl Read for GetFinalization {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = <MinSig as Variant>::Public::read(buf)?;
-        Ok(GetFinalization { network })
+        Ok(Self { network })
     }
 }
 

@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::fixed::{ordered::Any, Config},
+        any::{ordered::fixed::Any, AnyDb as _, FixedConfig as Config},
         store::Db as _,
         verify_proof,
     },
@@ -132,7 +132,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 AdbOperation::Commit => {
-                    adb.commit().await.expect("commit should not fail");
+                    adb.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
                     last_known_op_count = adb.op_count();
                     uncommitted_ops = 0; // Reset uncommitted operations counter
@@ -141,11 +141,11 @@ fn fuzz(data: FuzzInput) {
                 AdbOperation::Root => {
                     // root requires all operations to be committed
                     if uncommitted_ops > 0 {
-                        adb.commit().await.expect("commit should not fail");
+                        adb.commit(None).await.expect("commit should not fail");
                         last_known_op_count = adb.op_count();
                         uncommitted_ops = 0;
                     }
-                    adb.root(&mut hasher);
+                    adb.root();
                 }
 
                 AdbOperation::Proof { start_loc, max_ops } => {
@@ -155,12 +155,12 @@ fn fuzz(data: FuzzInput) {
                     if actual_op_count > 0 {
                         // Ensure all operations are committed before generating proof
                         if uncommitted_ops > 0 {
-                            adb.commit().await.expect("commit should not fail");
+                            adb.commit(None).await.expect("commit should not fail");
                             last_known_op_count = adb.op_count();
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = adb.root(&mut hasher);
+                        let current_root = adb.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
@@ -194,12 +194,12 @@ fn fuzz(data: FuzzInput) {
                     // Only generate proof if ADB has operations and valid parameters
                     if actual_op_count > 0 {
                         if uncommitted_ops > 0 {
-                            adb.commit().await.expect("commit should not fail");
+                            adb.commit(None).await.expect("commit should not fail");
                             last_known_op_count = adb.op_count();
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = adb.root(&mut hasher);
+                        let current_root = adb.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
                         if let Ok(res) = adb
@@ -250,7 +250,7 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all operations are persisted
         if uncommitted_ops > 0 {
-            adb.commit().await.expect("final commit should not fail");
+            adb.commit(None).await.expect("final commit should not fail");
         }
 
         // Comprehensive final verification - check ALL keys ever touched

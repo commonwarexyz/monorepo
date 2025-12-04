@@ -16,7 +16,7 @@ pub struct Sender<P: PublicKey> {
 }
 
 impl<P: PublicKey> Sender<P> {
-    pub(super) fn new(channel: Channel, max_size: usize, messenger: Messenger<P>) -> Self {
+    pub(super) const fn new(channel: Channel, max_size: usize, messenger: Messenger<P>) -> Self {
         Self {
             channel,
             max_size,
@@ -75,7 +75,7 @@ pub struct Receiver<P: PublicKey> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
+    pub(super) const fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
         Self { receiver }
     }
 }
@@ -105,7 +105,7 @@ pub struct Channels<P: PublicKey> {
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
+    pub const fn new(messenger: Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,
             max_size,

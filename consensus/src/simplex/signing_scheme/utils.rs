@@ -38,7 +38,7 @@ impl Signers {
 
     /// Returns the length of the bitmap (the size of the participant set).
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.bitmap.len() as usize
     }
 
@@ -130,6 +130,6 @@ mod tests {
         // Exact participant bound succeeds.
         assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
         // Less participants than expected succeeds (upper bound).
-        assert!(Signers::decode_cfg(encoded.clone(), &10).is_ok());
+        assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 }

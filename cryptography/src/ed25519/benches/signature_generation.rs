@@ -18,7 +18,7 @@ fn benchmark_signature_generation(c: &mut Criterion) {
             b.iter_batched(
                 || ed25519::PrivateKey::from_rng(&mut thread_rng()),
                 |private_key| {
-                    black_box(private_key.sign(Some(namespace), &msg));
+                    black_box(private_key.sign(namespace, &msg));
                 },
                 BatchSize::SmallInput,
             );

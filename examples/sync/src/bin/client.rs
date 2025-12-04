@@ -8,12 +8,13 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::{
-    adb::{store::Db as _, sync},
-    mmr::StandardHasher,
-};
+use commonware_storage::adb::{store::Db as _, sync};
 use commonware_sync::{
-    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+    any, crate_version,
+    databases::{DatabaseType, Syncable},
+    immutable,
+    net::Resolver,
+    Digest, Error, Key,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;
@@ -153,7 +154,7 @@ where
             };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut StandardHasher::new());
+        let got_root = database.root();
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -214,7 +215,7 @@ where
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut StandardHasher::new());
+        let got_root = database.root();
         info!(
             sync_iteration = iteration,
             root = %got_root,

@@ -40,7 +40,7 @@ pub struct Cursor<'a, K, V: Eq> {
 }
 
 impl<'a, K, V: Eq> Cursor<'a, K, V> {
-    fn new(
+    const fn new(
         entry: OccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
@@ -91,7 +91,7 @@ pub struct Index<T: Translator, V: Eq> {
 
 impl<T: Translator, V: Eq> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<T::Key, Record<V>>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(Record {
@@ -99,20 +99,12 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
-}
 
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T::Key, V>
-    where
-        Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
+    /// Create a new index with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-
             keys: Gauge::default(),
             items: Gauge::default(),
             pruned: Counter::default(),
@@ -126,6 +118,14 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         s
     }
+}
+
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where

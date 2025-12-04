@@ -28,6 +28,7 @@ cfg_if::cfg_if! {
         pub mod metadata;
         pub mod ordinal;
         pub mod rmap;
+        pub mod store;
         pub mod translator;
     }
 }

@@ -9,6 +9,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
@@ -101,10 +102,20 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        while let Some(msg) = self.receiver.next().await {
-            self.handle_msg(msg).await;
+        let mut shutdown = self.context.stopped();
+        select_loop! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping tracker");
+                break;
+            },
+            msg = self.receiver.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping tracker");
+                    break;
+                };
+                self.handle_msg(msg).await;
+            }
         }
-        debug!("tracker shutdown");
     }
 
     /// Handle a [`Message`].

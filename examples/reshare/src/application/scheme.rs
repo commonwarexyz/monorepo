@@ -86,24 +86,27 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        if let Some(share) = transition.share.as_ref() {
-            ThresholdScheme::new(
-                transition.dealers.clone(),
-                transition
-                    .poly
-                    .as_ref()
-                    .expect("group polynomial must exist"),
-                share.clone(),
-            )
-        } else {
-            ThresholdScheme::verifier(
-                transition.dealers.clone(),
-                transition
-                    .poly
-                    .as_ref()
-                    .expect("group polynomial must exist"),
-            )
-        }
+        transition.share.as_ref().map_or_else(
+            || {
+                ThresholdScheme::verifier(
+                    transition.dealers.clone(),
+                    transition
+                        .poly
+                        .as_ref()
+                        .expect("group polynomial must exist"),
+                )
+            },
+            |share| {
+                ThresholdScheme::new(
+                    transition.dealers.clone(),
+                    transition
+                        .poly
+                        .as_ref()
+                        .expect("group polynomial must exist"),
+                    share.clone(),
+                )
+            },
+        )
     }
 }
 

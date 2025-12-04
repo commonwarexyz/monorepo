@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"
 documentation = "https://docs.rs/commonware-log"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true

@@ -12,6 +12,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -108,67 +109,81 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
-        while let Some(msg) = self.receiver.next().await {
-            match msg {
-                Message::Spawn {
-                    peer,
-                    connection,
-                    reservation,
-                } => {
-                    // Mark peer as connected
-                    self.connections.inc();
+        let mut shutdown = self.context.stopped();
+        select_loop! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping spawner");
+                break;
+            },
+            msg = self.receiver.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping spawner");
+                    break;
+                };
 
-                    // Spawn peer
-                    self.context.with_label("peer").spawn({
-                        let connections = self.connections.clone();
-                        let sent_messages = self.sent_messages.clone();
-                        let received_messages = self.received_messages.clone();
-                        let rate_limited = self.rate_limited.clone();
-                        let mut tracker = tracker.clone();
-                        let mut router = router.clone();
-                        let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-                        let info_verifier = self.info_verifier.clone();
-                        move |context| async move {
-                            // Create peer
-                            debug!(?peer, "peer started");
-                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                context,
-                                peer::Config {
-                                    sent_messages,
-                                    received_messages,
-                                    rate_limited,
-                                    mailbox_size: self.mailbox_size,
-                                    gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                    allowed_bit_vec_rate: self.allowed_bit_vec_rate,
-                                    max_peer_set_size: self.max_peer_set_size,
-                                    allowed_peers_rate: self.allowed_peers_rate,
-                                    peer_gossip_max_count: self.peer_gossip_max_count,
-                                    info_verifier,
-                                },
-                            );
+                match msg {
+                    Message::Spawn {
+                        peer,
+                        connection,
+                        reservation,
+                    } => {
+                        // Mark peer as connected
+                        self.connections.inc();
 
-                            // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                        // Spawn peer
+                        self.context.with_label("peer").spawn({
+                            let connections = self.connections.clone();
+                            let sent_messages = self.sent_messages.clone();
+                            let received_messages = self.received_messages.clone();
+                            let rate_limited = self.rate_limited.clone();
+                            let mut tracker = tracker.clone();
+                            let mut router = router.clone();
+                            let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
+                            let info_verifier = self.info_verifier.clone();
+                            move |context| async move {
+                                // Create peer
+                                debug!(?peer, "peer started");
+                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                    context,
+                                    peer::Config {
+                                        sent_messages,
+                                        received_messages,
+                                        rate_limited,
+                                        mailbox_size: self.mailbox_size,
+                                        gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                        allowed_bit_vec_rate: self.allowed_bit_vec_rate,
+                                        max_peer_set_size: self.max_peer_set_size,
+                                        allowed_peers_rate: self.allowed_peers_rate,
+                                        peer_gossip_max_count: self.peer_gossip_max_count,
+                                        info_verifier,
+                                    },
+                                );
 
-                            // Register peer with tracker
-                            tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
+                                // Register peer with the router
+                                let channels = router.ready(peer.clone(), messenger).await;
 
-                            // Run peer
-                            let e = peer_actor
-                                .run(peer.clone(), connection, tracker, channels)
-                                .await;
-                            connections.dec();
+                                // Register peer with tracker
+                                tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
 
-                            // Let the router know the peer has exited
-                            debug!(error = ?e, ?peer, "peer shutdown");
-                            router.release(peer).await;
-                            // Release the reservation
-                            drop(reservation);
-                        }
-                    });
+                                // Run peer
+                                let result = peer_actor
+                                    .run(peer.clone(), connection, tracker, channels)
+                                    .await;
+                                connections.dec();
+
+                                // Let the router know the peer has exited
+                                match result {
+                                    Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                    Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                                }
+                                router.release(peer).await;
+                                // Release the reservation
+                                drop(reservation);
+                            }
+                        });
+                    }
                 }
             }
         }
-        debug!("supervisor shutdown");
     }
 }

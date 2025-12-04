@@ -85,7 +85,7 @@ pub enum Threshold {
 // =============================================================================
 
 /// Returns the version of the crate.
-pub fn crate_version() -> &'static str {
+pub const fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -209,21 +209,24 @@ fn parse_single_command(line: &str) -> Command {
             Command::Reply(id, size)
         }
         "collect" | "wait" => {
-            let thresh = if let Some(thresh_str) = parsed_args.get("threshold") {
-                if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                }
-            } else {
-                panic!("Missing threshold for {command}");
-            };
+            let thresh = parsed_args.get("threshold").map_or_else(
+                || {
+                    panic!("Missing threshold for {command}");
+                },
+                |thresh_str| {
+                    if thresh_str.ends_with('%') {
+                        let p = thresh_str
+                            .trim_end_matches('%')
+                            .parse::<f64>()
+                            .expect("Invalid percent")
+                            / 100.0;
+                        Threshold::Percent(p)
+                    } else {
+                        let c = thresh_str.parse::<usize>().expect("Invalid count");
+                        Threshold::Count(c)
+                    }
+                },
+            );
 
             let delay = parsed_args.get("delay").map(|delay_str| {
                 let delay_str = delay_str.trim_matches('(').trim_matches(')');
@@ -275,7 +278,7 @@ struct ExpressionParser<'a> {
 }
 
 impl<'a> ExpressionParser<'a> {
-    fn new(input: &'a str) -> Self {
+    const fn new(input: &'a str) -> Self {
         Self { input, position: 0 }
     }
 
@@ -416,7 +419,7 @@ impl<'a> ExpressionParser<'a> {
     }
 
     /// Check if we are at the end of the input string
-    fn is_at_end(&self) -> bool {
+    const fn is_at_end(&self) -> bool {
         self.position >= self.input.len()
     }
 }

@@ -43,12 +43,14 @@ jobs:
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        additional-cache-key: ${{ matrix.flags || 'default' }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0
     - name: Fmt
-      run: just check-fmt +${{ env.NIGHTLY_VERSION }}
+      run: just check-fmt
     - name: Lint
       run: just clippy ${{ matrix.flags }}
     - name: Check docs
@@ -87,6 +89,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -117,6 +121,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        additional-cache-key: ${{ matrix.flags || 'default' }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -162,7 +168,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: just udeps +${{ env.NIGHTLY_VERSION }}
+      run: just udeps
 
   Lock:
     runs-on: ubuntu-latest
@@ -208,12 +214,12 @@ jobs:
     - name: Check docs unchanged
       run: |
         if ! git diff --exit-code docs/; then
-          echo "ERROR: Generated HTML files in docs/ were modified during build!"
-          echo "This suggests that the generated HTML files in the repository are not up to date."
+          echo "ERROR: Generated docs assets (HTML or sitemap) were modified during build!"
+          echo "This suggests that the generated files in docs/ are not up to date."
           echo "Please run 'make' in the docs directory locally and commit the updated files."
           exit 1
         fi
-        echo "✓ Generated docs remained unchanged after running make"
+        echo "✓ Generated docs assets remained unchanged after running make"
 
   WASM:
     runs-on: ubuntu-latest

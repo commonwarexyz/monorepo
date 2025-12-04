@@ -14,7 +14,7 @@
 //! let mut signer = ed25519::PrivateKey::from_rng(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = &b"demo"[..];
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message

@@ -72,7 +72,7 @@ struct FuzzInput {
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        let mut index = Index::init(context.clone(), TwoCap);
+        let mut index = Index::new(context.clone(), TwoCap);
 
         for op in input.operations.iter() {
             match op {

@@ -69,7 +69,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         PrivateKeyExt as _, Signer as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         buffer::PoolRef,
@@ -475,12 +475,12 @@ mod tests {
                 *shutdowns.lock().unwrap() += 1;
             };
 
-            let (_, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(45))
-            }
-            .start_and_recover(f);
+            let (_, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(45)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             prev_checkpoint = Some(checkpoint);
         }
@@ -552,8 +552,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_network_partition() {
         network_partition::<MinPk>();
         network_partition::<MinSig>();
@@ -623,8 +623,8 @@ mod tests {
         slow_and_lossy_links::<MinSig>(0);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -915,7 +915,7 @@ mod tests {
                     Config {
                         crypto: sequencer.clone(),
                         relay: automaton.clone(),
-                        automaton: automaton.clone(),
+                        automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(Epoch::new(111)),
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![
@@ -1020,14 +1020,14 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_min_pk() {
         run_1k::<MinPk>();
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_min_sig() {
         run_1k::<MinSig>();
     }

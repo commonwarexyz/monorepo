@@ -145,7 +145,7 @@ pub struct Mailbox<S: Scheme, B: Block> {
 
 impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
     }
 
@@ -166,13 +166,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get info message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get info: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block info: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -193,13 +190,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get block message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get block: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
@@ -220,13 +214,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get finalization message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get finalization: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get finalization: receiver dropped");
+            None
+        })
     }
 
     /// A request to retrieve a block by its commitment.
@@ -312,6 +303,21 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .is_err()
         {
             error!("failed to send set sync floor message to actor: receiver dropped");
+        }
+    }
+
+    /// Notifies the actor of a verified [`Finalization`].
+    ///
+    /// This is a trusted call that injects a finalization directly into marshal. The
+    /// finalization is expected to have already been verified by the caller.
+    pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
+        if self
+            .sender
+            .send(Message::Finalization { finalization })
+            .await
+            .is_err()
+        {
+            error!("failed to send finalization message to actor: receiver dropped");
         }
     }
 }

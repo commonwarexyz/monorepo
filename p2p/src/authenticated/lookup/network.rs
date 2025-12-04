@@ -21,7 +21,7 @@ use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, net::IpAddr};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
@@ -177,33 +177,29 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
 
+        let mut shutdown = self.context.stopped();
+
         // Wait for first actor to exit
         info!("network started");
-        let err = select! {
+        select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping network");
+            },
             tracker = &mut tracker_task => {
-                debug!("tracker exited");
-                tracker
+                panic!("tracker exited unexpectedly: {tracker:?}");
             },
             router = &mut router_task => {
-                debug!("router exited");
-                router
+                panic!("router exited unexpectedly: {router:?}");
             },
             spawner = &mut spawner_task => {
-                debug!("spawner exited");
-                spawner
+                panic!("spawner exited unexpectedly: {spawner:?}");
             },
             listener = &mut listener_task => {
-                debug!("listener exited");
-                listener
+                panic!("listener exited unexpectedly: {listener:?}");
             },
             dialer = &mut dialer_task => {
-                debug!("dialer exited");
-                dialer
+                panic!("dialer exited unexpectedly: {dialer:?}");
             },
         }
-        .unwrap_err();
-
-        // Log error
-        warn!(error=?err, "network shutdown");
     }
 }

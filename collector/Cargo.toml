@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/collector"
 documentation = "https://docs.rs/commonware-collector"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true

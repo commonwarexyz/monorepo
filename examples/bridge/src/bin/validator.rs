@@ -2,7 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
-use commonware_codec::{Decode, DecodeExt};
+use commonware_codec::{Decode, DecodeExt, RangeCfg};
 use commonware_consensus::{
     simplex::{self, Engine},
     types::{Epoch, ViewDelta},
@@ -18,7 +18,11 @@ use commonware_cryptography::{
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, quorum, set::Ordered, union, NZUsize, NZU32};
+use commonware_utils::{
+    from_hex,
+    set::{Ordered, OrderedQuorum},
+    union, NZUsize, NZU32,
+};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -113,13 +117,14 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32) as usize;
+    let threshold = validators.quorum();
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
+        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
+            .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
@@ -147,7 +152,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
@@ -161,7 +166,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer.clone(),
+        signer,
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -200,12 +205,12 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (pending_sender, pending_receiver) = network.register(
+        let (vote_sender, vote_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (recovered_sender, recovered_receiver) = network.register(
+        let (certificate_sender, certificate_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
@@ -262,8 +267,8 @@ fn main() {
         // Start consensus
         network.start();
         engine.start(
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
 
