@@ -14,7 +14,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 #[derive(PartialEq, Eq)]
 pub(super) struct Record<V: Eq> {
     pub(super) value: V,
-    pub(super) next: Option<Box<Record<V>>>,
+    pub(super) next: Option<Box<Self>>,
 }
 
 pub(super) trait IndexEntry<V: Eq> {

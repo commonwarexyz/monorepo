@@ -2,12 +2,12 @@
 
 use crate::{
     adb::Error,
-    store::{Store, StoreDeletable, StoreMut},
+    store::{Store, StoreDeletable},
 };
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use core::future::Future;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A trait for getting values from a keyed database.
 pub trait Getter<K, V> {
@@ -42,7 +42,9 @@ where
     ///
     /// If the value is Some, the key is being created or updated.
     /// If the value is None, the key is being deleted.
-    diff: HashMap<K, Option<V>>,
+    ///
+    /// We use a BTreeMap instead of HashMap to allow for a deterministic iteration order.
+    diff: BTreeMap<K, Option<V>>,
 }
 
 impl<'a, K, V, D> Batch<'a, K, V, D>
@@ -52,10 +54,10 @@ where
     D: Getter<K, V>,
 {
     /// Returns a new batch of changes that may be written to the database.
-    pub fn new(db: &'a D) -> Self {
+    pub const fn new(db: &'a D) -> Self {
         Self {
             db,
-            diff: HashMap::new(),
+            diff: BTreeMap::new(),
         }
     }
 
@@ -133,7 +135,7 @@ where
     D: Getter<K, V>,
 {
     type Item = (K, Option<V>);
-    type IntoIter = std::collections::hash_map::IntoIter<K, Option<V>>;
+    type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.diff.into_iter()
@@ -149,7 +151,7 @@ pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Er
     {
         Batch {
             db: self,
-            diff: HashMap::new(),
+            diff: BTreeMap::new(),
         }
     }
 
@@ -171,19 +173,15 @@ pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Er
     }
 }
 
-/// Default implementation of [Batchable] for all databases.
-impl<D> Batchable for D
-where
-    D: Store<Error = Error> + StoreMut + StoreDeletable,
-    D::Key: Array,
-    D::Value: Codec + Clone,
-{
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::store::StorePersistable;
     use commonware_cryptography::{blake3, sha256};
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Runner as _,
+    };
     use core::{fmt::Debug, future::Future};
 
     pub trait TestKey: Array {
@@ -194,20 +192,52 @@ pub mod tests {
         fn from_seed(seed: u8) -> Self;
     }
 
-    /// Run the shared batch test suite against a database factory.
-    pub async fn run_batch_tests<D, F, Fut>(mut new_db: F) -> Result<(), Error>
+    /// Run the batch test suite against a database factory within a deterministic executor twice,
+    /// and test the auditor output for equality.
+    pub fn test_batch<D, F, Fut>(mut new_db: F)
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
-        test_overlay_reads(&mut new_db).await?;
-        test_create(&mut new_db).await?;
-        test_delete(&mut new_db).await?;
-        test_delete_unchecked(&mut new_db).await?;
-        test_write_batch(&mut new_db).await?;
+        let executor = deterministic::Runner::default();
+        let mut new_db_clone = new_db.clone();
+        let state1 = executor.start(|context| async move {
+            let ctx = context.clone();
+            run_batch_tests::<D, _, Fut>(&mut || new_db_clone(ctx.clone()))
+                .await
+                .unwrap();
+            ctx.auditor().state()
+        });
+
+        let executor = deterministic::Runner::default();
+        let state2 = executor.start(|context| async move {
+            let ctx = context.clone();
+            run_batch_tests::<D, _, Fut>(&mut || new_db(ctx.clone()))
+                .await
+                .unwrap();
+            ctx.auditor().state()
+        });
+
+        assert_eq!(state1, state2);
+    }
+
+    /// Run the shared batch test suite against a database factory.
+    pub async fn run_batch_tests<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
+    {
+        test_overlay_reads(new_db).await?;
+        test_create(new_db).await?;
+        test_delete(new_db).await?;
+        test_delete_unchecked(new_db).await?;
+        test_write_batch(new_db).await?;
         Ok(())
     }
 
@@ -215,7 +245,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -237,7 +267,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -268,7 +298,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -297,7 +327,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -322,7 +352,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StorePersistable,
+        D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {

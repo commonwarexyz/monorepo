@@ -1,10 +1,10 @@
 use crate::{
     adb::{
         any::{CleanAny, DirtyAny},
-        build_snapshot_from_log, create_key, delete_key,
+        build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable, Keyed},
-        store::LogStore,
-        update_key, Error, FloorHelper, Index,
+        store::{Batchable, LogStore},
+        update_key, update_known_loc, Error, FloorHelper, Index,
     },
     journal::{
         authenticated,
@@ -19,12 +19,16 @@ use crate::{
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::try_join_all;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 pub mod fixed;
 pub mod sync;
 pub mod variable;
 
+type Key<T> = <T as Keyed>::Key;
+type Value<T> = <T as Keyed>::Value;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// A trait implemented by the unordered Any db operation type.
@@ -120,7 +124,7 @@ impl<
     /// Returns the active operation for `key` with its location, or None if the key is not active.
     pub(crate) async fn get_key_op_loc(
         &self,
-        key: &<C::Item as Keyed>::Key,
+        key: &Key<C::Item>,
     ) -> Result<Option<(C::Item, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
@@ -151,7 +155,7 @@ impl<
     /// reflect the deletion.
     pub(crate) async fn delete_key(
         &mut self,
-        key: <C::Item as Keyed>::Key,
+        key: Key<C::Item>,
     ) -> Result<Option<Location>, Error> {
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
             return Ok(None);
@@ -167,8 +171,8 @@ impl<
     /// it was previously assigned some value, and None otherwise.
     pub(crate) async fn update_key(
         &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
+        key: Key<C::Item>,
+        value: Value<C::Item>,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
         let res = self.update_loc(&key, new_loc).await?;
@@ -186,8 +190,8 @@ impl<
     /// Creates a new key with the given operation, or returns false if the key already exists.
     pub(crate) async fn create_key(
         &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
+        key: Key<C::Item>,
+        value: Value<C::Item>,
     ) -> Result<bool, Error> {
         let new_loc = self.op_count();
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
@@ -204,7 +208,7 @@ impl<
     /// of the key if any was found.
     pub(crate) async fn update_loc(
         &mut self,
-        key: &<C::Item as Keyed>::Key,
+        key: &Key<C::Item>,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
@@ -617,8 +621,8 @@ impl<
         H: Hasher,
     > crate::store::Store for IndexedLog<E, C, I, H>
 {
-    type Key = <C::Item as Keyed>::Key;
-    type Value = <C::Item as Keyed>::Value;
+    type Key = Key<C::Item>;
+    type Value = Value<C::Item>;
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
@@ -723,6 +727,67 @@ impl<
 
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
         self.delete(key).await
+    }
+}
+
+impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistableContiguous<Item: Operation>,
+    I: Index<Value = Location>,
+    H: Hasher,
+{
+    async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
+    ) -> Result<(), Error> {
+        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
+        let mut updates = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            updates.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // Process the deletes & updates of existing keys, which must appear in the results.
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key");
+            let Some(update) = updates.remove(key) else {
+                continue; // translated key collision
+            };
+
+            let new_loc = self.op_count();
+            if let Some(value) = update {
+                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
+                self.log
+                    .append(C::Item::new_update(key.clone(), value))
+                    .await?;
+            } else {
+                delete_known_loc(&mut self.snapshot, key, old_loc);
+                self.log.append(C::Item::new_delete(key.clone())).await?;
+                self.active_keys -= 1;
+            }
+            self.steps += 1;
+        }
+
+        // Process the creates.
+        for (key, value) in updates {
+            let Some(value) = value else {
+                continue; // attempt to delete a non-existent key
+            };
+            self.snapshot.insert(&key, self.op_count());
+            self.log.append(C::Item::new_update(key, value)).await?;
+            self.active_keys += 1;
+        }
+
+        Ok(())
     }
 }
 

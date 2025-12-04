@@ -3,8 +3,8 @@ use crate::{
         any::{CleanAny, DirtyAny},
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::LogStore,
-        Error, FloorHelper,
+        store::{Batchable, LogStore},
+        update_known_loc, Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
     journal::{
@@ -288,20 +288,6 @@ impl<
         self.log.pruning_boundary()
     }
 
-    /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
-    /// its location to `new_loc`.
-    fn update_known_loc(&mut self, key: &Key<C::Item>, old_loc: Location, new_loc: Location) {
-        let mut cursor = self
-            .snapshot
-            .get_mut(key)
-            .expect("key should be known to exist");
-        assert!(
-            cursor.find(|&loc| *loc == old_loc),
-            "prev_key with given old_loc should have been found"
-        );
-        cursor.update(new_loc);
-    }
-
     /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
     /// the previous key does not share the same translated key, returning an UpdateLocResult
     /// indicating the specific outcome.
@@ -319,7 +305,7 @@ impl<
         let iter = self.snapshot.prev_translated_key(key);
         if let Some((loc, prev_key)) = self.last_key_in_iter(iter).await? {
             callback(Some(loc));
-            self.update_known_loc(&prev_key.key, loc, next_loc);
+            update_known_loc(&mut self.snapshot, &prev_key.key, loc, next_loc);
             return Ok(UpdateLocResult::NotExists(prev_key));
         }
 
@@ -329,7 +315,7 @@ impl<
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
         callback(Some(loc));
-        self.update_known_loc(&last_key.key, loc, next_loc);
+        update_known_loc(&mut self.snapshot, &last_key.key, loc, next_loc);
 
         Ok(UpdateLocResult::NotExists(last_key))
     }
@@ -589,7 +575,7 @@ impl<
 
         let loc = self.op_count();
         callback(true, Some(prev_key.0));
-        self.update_known_loc(&prev_key.1, prev_key.0, loc);
+        update_known_loc(&mut self.snapshot, &prev_key.1, prev_key.0, loc);
 
         let op = C::Item::new_update(prev_key.1, prev_key.2, next_key);
         self.log.append(op).await?;
@@ -1074,6 +1060,15 @@ impl<
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
         self.delete(key).await
     }
+}
+
+impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistableContiguous<Item: Operation>,
+    I: Index<Value = Location>,
+    H: Hasher,
+{
 }
 
 #[cfg(test)]

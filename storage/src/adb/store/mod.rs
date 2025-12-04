@@ -102,7 +102,7 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Digest;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{future::Future, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -116,7 +116,7 @@ pub use batch::{Batch, Batchable, Getter};
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [`RStorage`] partition used to persist the log of operations.
+    /// The name of the [`Storage`] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the [Journal].
@@ -250,7 +250,7 @@ pub trait CleanStore: LogStore {
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -287,7 +287,7 @@ type FloorHelperState<'a, E, K, V, T> =
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -551,7 +551,7 @@ where
 
 impl<E, K, V, T> LogStorePrunable for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -563,7 +563,7 @@ where
 
 impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -579,7 +579,7 @@ where
 
 impl<E, K, V, T> LogStore for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -605,7 +605,7 @@ where
 
 impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -621,7 +621,7 @@ where
 
 impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -633,7 +633,7 @@ where
 
 impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Value,
     T: Translator,
@@ -641,6 +641,15 @@ where
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
     }
+}
+
+impl<E, K, V, T> Batchable for Store<E, K, V, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
 }
 
 #[cfg(test)]
@@ -1110,14 +1119,8 @@ mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let ctx = context.clone();
-                async move { create_test_store(ctx.with_label("batch")).await }
-            })
-            .await
-            .unwrap();
-        });
+        batch_tests::test_batch(
+            |ctx| async move { create_test_store(ctx.with_label("batch")).await },
+        );
     }
 }
