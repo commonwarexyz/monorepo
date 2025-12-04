@@ -25,7 +25,7 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Metrics::default();
+        let metrics = Self::default();
         context.register(
             "tracked",
             "Total number of unique peers in all peer sets being tracked",

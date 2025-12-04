@@ -68,18 +68,18 @@ impl<B: Blob> Read<B> {
     }
 
     /// Returns how many valid bytes are remaining in the buffer.
-    pub fn buffer_remaining(&self) -> usize {
+    pub const fn buffer_remaining(&self) -> usize {
         self.buffer_valid_len - self.buffer_position
     }
 
     /// Returns how many bytes remain in the blob from the current position.
-    pub fn blob_remaining(&self) -> u64 {
+    pub const fn blob_remaining(&self) -> u64 {
         self.blob_size
             .saturating_sub(self.blob_position + self.buffer_position as u64)
     }
 
     /// Returns the number of bytes in the blob, as provided at construction.
-    pub fn blob_size(&self) -> u64 {
+    pub const fn blob_size(&self) -> u64 {
         self.blob_size
     }
 
@@ -162,12 +162,12 @@ impl<B: Blob> Read<B> {
     }
 
     /// Returns the current absolute position in the blob.
-    pub fn position(&self) -> u64 {
+    pub const fn position(&self) -> u64 {
         self.blob_position + self.buffer_position as u64
     }
 
     /// Repositions the buffer to read from the specified position in the blob.
-    pub fn seek_to(&mut self, position: u64) -> Result<(), Error> {
+    pub const fn seek_to(&mut self, position: u64) -> Result<(), Error> {
         // Check if the seek position is valid
         if position > self.blob_size {
             return Err(Error::BlobInsufficientLength);

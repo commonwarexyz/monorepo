@@ -769,7 +769,7 @@ impl<
     // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `index`.
-    fn get_journal_section(&self, index: Index) -> u64 {
+    const fn get_journal_section(&self, index: Index) -> u64 {
         index / self.journal_heights_per_section
     }
 
@@ -829,14 +829,12 @@ impl<
         for (index, mut acks_group) in acks_by_index {
             // Check if we have our own ack (which means we've verified the digest)
             let our_share = self.validators.share(self.epoch);
-            let our_digest = if let Some(share) = our_share {
+            let our_digest = our_share.and_then(|share| {
                 acks_group
                     .iter()
                     .find(|ack| ack.epoch == self.epoch && ack.signature.index == share.index)
                     .map(|ack| ack.item.digest)
-            } else {
-                None
-            };
+            });
 
             // If our_digest exists, delete everything from acks_group that doesn't match it
             if let Some(digest) = our_digest {

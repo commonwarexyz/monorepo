@@ -105,7 +105,7 @@ where
     D: Digest,
 {
     // Encode operations for verification
-    let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
+    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
     // Create ProofStore by verifying the proof and extracting all digests
     ProofStore::new(hasher, proof, &elements, start_loc, root)

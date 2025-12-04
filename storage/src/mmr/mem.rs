@@ -169,7 +169,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pub fn pruned_to_pos(&self) -> Position {
+    pub const fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
@@ -387,7 +387,7 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Get the root digest of the MMR.
-    pub fn root(&self) -> &D {
+    pub const fn root(&self) -> &D {
         &self.state.root
     }
 
@@ -507,7 +507,7 @@ impl<D: Digest> DirtyMmr<D> {
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
             self.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
+                .push_back(<H::Inner as commonware_cryptography::Hasher>::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }

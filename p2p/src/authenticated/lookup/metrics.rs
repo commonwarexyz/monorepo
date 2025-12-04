@@ -24,11 +24,11 @@ pub enum MessageType {
 }
 
 impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            MessageType::Data(channel) => encoder.write_str(&format!("data_{channel}")),
-            MessageType::Invalid => encoder.write_str("invalid"),
-            MessageType::Ping => encoder.write_str("ping"),
+            Self::Data(channel) => encoder.write_str(&format!("data_{channel}")),
+            Self::Invalid => encoder.write_str("invalid"),
+            Self::Ping => encoder.write_str("ping"),
         }
     }
 }

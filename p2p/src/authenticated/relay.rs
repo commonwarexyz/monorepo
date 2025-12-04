@@ -7,7 +7,7 @@ pub struct Relay<T> {
 }
 
 impl<T> Relay<T> {
-    pub fn new(low: mpsc::Sender<T>, high: mpsc::Sender<T>) -> Self {
+    pub const fn new(low: mpsc::Sender<T>, high: mpsc::Sender<T>) -> Self {
         Self { low, high }
     }
 

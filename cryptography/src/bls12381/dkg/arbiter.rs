@@ -102,9 +102,18 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
     }
 
-    /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
-    pub fn disqualify(&mut self, participant: P) {
-        self.disqualified.insert(participant);
+    /// Disqualify a dealer from the DKG for external reason (i.e. sending invalid messages).
+    ///
+    /// # Warning
+    ///
+    /// If the [Arbiter] is being run by all participants, all participants must disqualify the
+    /// same public keys (or else will derive different group polynomials).
+    pub fn disqualify(&mut self, dealer: P) -> Result<(), Error> {
+        if self.dealers.index(&dealer).is_none() {
+            return Err(Error::DealerInvalid);
+        }
+        self.disqualified.insert(dealer);
+        Ok(())
     }
 
     /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.

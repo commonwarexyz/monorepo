@@ -87,6 +87,11 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping round");
+                return None;
+            },
             _ = self.context.sleep_until(t_signature) => {
                 debug!(round, "signature timeout");
                 break;
@@ -146,13 +151,13 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         }
 
         // Aggregate partial signatures
-        match ops::threshold_signature_recover::<MinSig, _>(self.threshold, &partials) {
-            Ok(signature) => Some(signature),
-            Err(_) => {
+        ops::threshold_signature_recover::<MinSig, _>(self.threshold, &partials).map_or_else(
+            |_| {
                 warn!(round, "failed to aggregate partial signatures");
                 None
-            }
-        }
+            },
+            Some,
+        )
     }
 
     pub fn start(

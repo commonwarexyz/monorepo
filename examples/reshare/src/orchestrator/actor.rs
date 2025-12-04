@@ -144,11 +144,11 @@ where
 
     async fn run(
         mut self,
-        (pending_sender, pending_receiver): (
+        (vote_sender, vote_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        (recovered_sender, recovered_receiver): (
+        (certificate_sender, certificate_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -164,8 +164,8 @@ where
         // Start muxers for each physical channel used by consensus
         let (mux, mut pending_mux, mut pending_backup) = Muxer::builder(
             self.context.with_label("pending_mux"),
-            pending_sender,
-            pending_receiver,
+            vote_sender,
+            vote_receiver,
             self.muxer_size,
         )
         .with_backup()
@@ -173,8 +173,8 @@ where
         mux.start();
         let (mux, mut recovered_mux) = Muxer::builder(
             self.context.with_label("recovered_mux"),
-            recovered_sender,
-            recovered_receiver,
+            certificate_sender,
+            certificate_receiver,
             self.muxer_size,
         )
         .build();
@@ -199,6 +199,10 @@ where
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping orchestrator");
+            },
             message = pending_backup.next() => {
                 // If a message is received in an unregistered sub-channel in the pending network,
                 // attempt to forward the orchestrator for the epoch.

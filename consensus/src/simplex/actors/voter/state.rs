@@ -4,44 +4,27 @@ use crate::{
         interesting, min_active,
         signing_scheme::Scheme,
         types::{
-            Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            Proposal, Voter,
+            Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
     Viewable,
 };
 use commonware_cryptography::Digest;
-use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::{self, Buckets},
-        status::GaugeExt,
-    },
-    Clock, Metrics,
-};
-use commonware_utils::set::OrderedQuorum;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
     mem::replace,
-    sync::{atomic::AtomicI64, Arc},
+    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
-
-/// Action to take after processing a message.
-pub enum Action {
-    /// Skip processing the message.
-    Skip,
-    /// Block the peer from sending any more messages.
-    Block,
-    /// Process the message.
-    Process,
-}
 
 /// Configuration for initializing [`State`].
 pub struct Config<S: Scheme> {
@@ -56,13 +39,8 @@ pub struct Config<S: Scheme> {
 
 /// Per-[Epoch] state machine.
 ///
-/// # Vote Tracking Semantics
-///
-/// Votes that conflict with the first leader proposal we observe for a view are discarded once an
-/// equivocation is detected. This relies on the [crate::simplex::actors::batcher] to enforce that honest replicas only emit
-/// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
-/// additional conflicting votes are ignored because they can never form a quorum under the batcher
-/// invariants, so retaining them would just waste memory.
+/// Tracks proposals and certificates for each view. Vote aggregation and verification
+/// is handled by the [crate::simplex::actors::batcher].
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
@@ -80,7 +58,6 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
-    recover_latency: histogram::Timed<E>,
 }
 
 impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
@@ -88,16 +65,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
-        context.register(
-            "recover_latency",
-            "certificate recover latency",
-            recover_latency.clone(),
-        );
-        let clock = Arc::new(context.clone());
         Self {
             context,
             scheme: cfg.scheme,
@@ -114,7 +84,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             current_view,
             tracked_views,
             skipped_views,
-            recover_latency: histogram::Timed::new(recover_latency, clock),
         }
     }
 
@@ -125,22 +94,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Returns the epoch managed by this state machine.
-    pub fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 
     /// Returns the view currently being driven.
-    pub fn current_view(&self) -> View {
+    pub const fn current_view(&self) -> View {
         self.view
     }
 
     /// Returns the highest finalized view we have observed.
-    pub fn last_finalized(&self) -> View {
+    pub const fn last_finalized(&self) -> View {
         self.last_finalized
     }
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
-    pub fn min_active(&self) -> View {
+    pub const fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
     }
 
@@ -200,7 +169,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Handle a timeout event for the current view.
     /// Returns the nullify vote and optionally an entry certificate for the previous view
     /// (if this is a retry timeout and we can construct one).
-    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Voter<S, D>>) {
+    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
         let view = self.view;
         let Some(retry) = self.create_round(view).construct_nullify() else {
             return (false, None, None);
@@ -215,12 +184,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
+        #[allow(clippy::option_if_let_else)]
         let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
-            Some(Voter::Finalization(finalization))
+            Some(Certificate::Finalization(finalization))
         } else if let Some(notarization) = self.notarization(entry_view).cloned() {
-            Some(Voter::Notarization(notarization))
+            Some(Certificate::Notarization(notarization))
         } else if let Some(nullification) = self.nullification(entry_view).cloned() {
-            Some(Voter::Nullification(nullification))
+            Some(Certificate::Nullification(nullification))
         } else {
             warn!(%entry_view, "entry certificate not found during timeout");
             None
@@ -228,26 +198,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         (retry, nullify, cert)
     }
 
-    /// Creates (if necessary) the round for this view and inserts the notarize vote.
-    pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
-        self.create_round(notarize.view())
-            .add_verified_notarize(notarize)
-    }
-
-    /// Creates (if necessary) the round for this view and inserts the nullify vote.
-    pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
-        self.create_round(nullify.view())
-            .add_verified_nullify(nullify);
-    }
-
-    /// Creates (if necessary) the round for this view and inserts the finalize vote.
-    pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
-        self.create_round(finalize.view())
-            .add_verified_finalize(finalize)
-    }
-
     /// Inserts a notarization certificate and advances into the next view.
-    pub fn add_verified_notarization(
+    pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -255,28 +207,24 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let seed = self
             .scheme
             .seed(notarization.round(), &notarization.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_notarization(notarization);
+        let added = self.create_round(view).add_notarization(notarization);
         self.enter_view(view.next(), seed);
         added
     }
 
     /// Inserts a nullification certificate and advances into the next view.
-    pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
+    pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let seed = self
             .scheme
             .seed(nullification.round(), &nullification.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_nullification(nullification);
+        let added = self.create_round(view).add_nullification(nullification);
         self.enter_view(view.next(), seed);
         added
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
-    pub fn add_verified_finalization(
+    pub fn add_finalization(
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -289,29 +237,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let seed = self
             .scheme
             .seed(finalization.round(), &finalization.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_finalization(finalization);
+        let added = self.create_round(view).add_finalization(finalization);
         self.enter_view(view.next(), seed);
         added
-    }
-
-    fn has_broadcast_notarization(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_notarization())
-    }
-
-    fn has_broadcast_nullification(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_nullification())
-    }
-
-    fn has_broadcast_finalization(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_finalization())
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.
@@ -339,18 +267,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a notarization certificate once the round has quorum.
-    pub fn construct_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        let notarization = self
-            .views
+    pub fn broadcast_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.notarizable());
-        if notarization.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        notarization
+            .and_then(|round| round.broadcast_notarization())
     }
 
     /// Return a notarization certificate, if one exists.
@@ -370,112 +290,23 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.views.get(&view).and_then(|round| round.finalization())
     }
 
-    /// Verifies whether a notarization is sound and still helpful for local progress.
-    pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
-        // Check if we are still in a view where this notarization could help
-        let view = notarization.view();
-        if !self.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast notarization for this view (in which
-        // case we can ignore this message)
-        //
-        // Once we've broadcast a notarization for this view, any additional notarizations
-        // must be identical unless a safety failure already occurred (conflicting certificates
-        // cannot exist otherwise). We therefore skip re-processing to reduce work.
-        if self.has_broadcast_notarization(view) {
-            return Action::Skip;
-        }
-
-        // Verify notarization
-        if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
-    }
-
     /// Construct a nullification certificate once the round has quorum.
-    pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
-        let mut timer = self.recover_latency.timer();
-        let nullification = self
-            .views
+    pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S>> {
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable());
-        if nullification.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        nullification
-    }
-
-    /// Verifies whether a nullification is sound and still useful.
-    pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
-        // Check if we are still in a view where this nullification could help
-        if !self.is_interesting(nullification.view(), true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast nullification for this view (in which
-        // case we can ignore this message)
-        //
-        // Additional nullifications after we've already broadcast ours would imply a safety
-        // failure (conflicting certificates), so there is nothing useful to do with them.
-        if self.has_broadcast_nullification(nullification.view()) {
-            return Action::Skip;
-        }
-
-        // Verify nullification
-        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
+            .and_then(|round| round.broadcast_nullification())
     }
 
     /// Construct a finalization certificate once the round has quorum.
-    pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        let finalization = self
-            .views
+    pub fn broadcast_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.finalizable());
-        if finalization.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        finalization
+            .and_then(|round| round.broadcast_finalization())
     }
 
-    /// Verifies whether a finalization proof is valid and still relevant.
-    pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
-        // Check if we are still in a view where this finalization could help
-        let view = finalization.view();
-        if !self.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast finalization for this view (in which
-        // case we can ignore this message)
-        //
-        // After we broadcast a finalization certificate there should never be a conflicting one
-        // unless the protocol safety has already been violated (equivocation at certificate level),
-        // so we skip redundant processing.
-        if self.has_broadcast_finalization(view) {
-            return Action::Skip;
-        }
-
-        // Verify finalization
-        if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
-    }
-
-    /// Replays a journaled message into the appropriate round during recovery.
-    pub fn replay(&mut self, message: &Voter<S, D>) {
-        self.create_round(message.view()).replay(message);
+    /// Replays a journaled artifact into the appropriate round during recovery.
+    pub fn replay(&mut self, artifact: &Artifact<S, D>) {
+        self.create_round(artifact.view()).replay(artifact);
     }
 
     /// Returns the leader index for `view` if we already entered it.
@@ -547,6 +378,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .unwrap_or(false)
     }
 
+    /// Sets a proposal received from the batcher (leader's first notarize vote).
+    ///
+    /// Returns true if the proposal should trigger verification, false otherwise.
+    pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
+        self.create_round(view).set_proposal(proposal)
+    }
+
     /// Attempt to verify a proposed block.
     ///
     /// Unlike during proposal, we don't use a verification opportunity
@@ -587,8 +425,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         removed
     }
 
-    /// Returns the quorum payload for a view, checking certificates first,
-    /// then falling back to checking if we have quorum votes.
+    /// Returns the quorum payload for a view if we have a certificate (notarization or finalization).
     fn quorum_payload(&self, view: View) -> Option<&D> {
         // Special case for genesis view
         if view == GENESIS_VIEW {
@@ -604,11 +441,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return Some(payload);
         }
 
-        // Check votes
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
-            return Some(payload);
-        }
         None
     }
 
@@ -622,8 +454,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.participants().quorum() as usize;
-        round.nullification().is_some() || round.len_nullifies() >= quorum
+        round.nullification().is_some()
     }
 
     /// Finds the parent payload for a given view by walking backwards through
@@ -675,7 +506,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
     /// in the provided view (regardless of whether we built a proposal).
-    pub fn emit_floor(&mut self, view: View) -> Option<Voter<S, D>> {
+    pub fn emit_floor(&mut self, view: View) -> Option<Certificate<S, D>> {
         // Check if we were the leader in the provided view.
         let leader = self.leader_index(view)?;
         if self.scheme.me().is_none_or(|me| me != leader) {
@@ -688,10 +519,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 continue;
             };
             if let Some(finalization) = round.finalization() {
-                return Some(Voter::Finalization(finalization.clone()));
+                return Some(Certificate::Finalization(finalization.clone()));
             }
             if let Some(notarization) = round.notarization() {
-                return Some(Voter::Notarization(notarization.clone()));
+                return Some(Certificate::Notarization(notarization.clone()));
             }
         }
         None
@@ -703,9 +534,7 @@ mod tests {
     use super::*;
     use crate::simplex::{
         mocks::fixtures::{ed25519, Fixture},
-        types::{
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal, Voter,
-        },
+        types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_runtime::{deterministic, Runner};
@@ -750,11 +579,11 @@ mod tests {
                 .collect();
             let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
                 .expect("notarization");
-            state.add_verified_notarization(notarization);
+            state.add_notarization(notarization);
 
             // Produce candidate once
-            assert!(state.construct_notarization(notarize_view).is_some());
-            assert!(state.construct_notarization(notarize_view).is_none());
+            assert!(state.broadcast_notarization(notarize_view).is_some());
+            assert!(state.broadcast_notarization(notarize_view).is_none());
             assert!(state.notarization(notarize_view).is_some());
 
             // Add nullification
@@ -769,11 +598,11 @@ mod tests {
                 .collect();
             let nullification =
                 Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
-            state.add_verified_nullification(nullification);
+            state.add_nullification(nullification);
 
             // Produce candidate once
-            assert!(state.construct_nullification(nullify_view).is_some());
-            assert!(state.construct_nullification(nullify_view).is_none());
+            assert!(state.broadcast_nullification(nullify_view).is_some());
+            assert!(state.broadcast_nullification(nullify_view).is_none());
             assert!(state.nullification(nullify_view).is_some());
 
             // Add finalization
@@ -789,11 +618,11 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Produce candidate once
-            assert!(state.construct_finalization(finalize_view).is_some());
-            assert!(state.construct_finalization(finalize_view).is_none());
+            assert!(state.broadcast_finalization(finalize_view).is_some());
+            assert!(state.broadcast_finalization(finalize_view).is_none());
             assert!(state.finalization(finalize_view).is_some());
         });
     }
@@ -808,7 +637,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
-                scheme: local_scheme.clone(),
+                scheme: local_scheme,
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -837,12 +666,12 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(notarization.clone());
+            state.add_notarization(notarization.clone());
 
             // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
             let emitted = state.emit_floor(View::new(2)).unwrap();
             match emitted {
-                Voter::Notarization(emitted) => {
+                Certificate::Notarization(emitted) => {
                     assert_eq!(emitted, notarization);
                 }
                 _ => panic!("unexpected emitted message"),
@@ -871,12 +700,12 @@ mod tests {
                 .collect();
             let future_notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(future_notarization.clone());
+            state.add_notarization(future_notarization.clone());
 
             // Emitted returns the same certificate
             let emitted = state.emit_floor(View::new(2)).unwrap();
             match emitted {
-                Voter::Notarization(emitted) => {
+                Certificate::Notarization(emitted) => {
                     assert_eq!(emitted, future_notarization);
                 }
                 _ => panic!("unexpected emitted message"),
@@ -978,7 +807,7 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Update last finalize to be in the future
             let removed = state.prune();
@@ -1000,11 +829,13 @@ mod tests {
     fn parent_payload_returns_parent_digest() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
-                scheme: local_scheme.clone(),
+                scheme: local_scheme,
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -1023,14 +854,8 @@ mod tests {
                 GENESIS_VIEW,
                 parent_payload,
             );
-            {
-                let parent_round = state.create_round(parent_view);
-                parent_round.add_verified_notarize(
-                    Notarize::sign(&local_scheme, &namespace, parent_proposal.clone()).unwrap(),
-                );
-            }
 
-            // Attempt to get parent payload
+            // Attempt to get parent payload without certificate
             let proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), View::new(2)),
                 parent_view,
@@ -1038,14 +863,14 @@ mod tests {
             );
             assert!(state.parent_payload(&proposal).is_none());
 
-            // Add notarize votes
-            {
-                let parent_round = state.create_round(parent_view);
-                for scheme in &schemes[1..] {
-                    let vote = Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap();
-                    parent_round.add_verified_notarize(vote);
-                }
-            }
+            // Add notarization certificate
+            let notarization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            state.add_notarization(notarization);
 
             // Get parent
             let digest = state.parent_payload(&proposal).expect("parent payload");
@@ -1062,7 +887,7 @@ mod tests {
             } = ed25519(&mut context, 4);
             let namespace = b"ns".to_vec();
             let cfg = Config {
-                scheme: verifier,
+                scheme: verifier.clone(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -1073,18 +898,20 @@ mod tests {
             let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            // Create parent proposal
+            // Create parent proposal and certificate
             let parent_view = View::new(1);
             let parent_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), parent_view),
                 GENESIS_VIEW,
                 Sha256Digest::from([2u8; 32]),
             );
-            let parent_round = state.create_round(parent_view);
-            for scheme in &schemes {
-                let vote = Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap();
-                parent_round.add_verified_notarize(vote);
-            }
+            let notarization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            state.add_notarization(notarization);
             state.create_round(View::new(2));
 
             // Attempt to get parent payload
@@ -1106,7 +933,7 @@ mod tests {
             } = ed25519(&mut context, 4);
             let namespace = b"ns".to_vec();
             let cfg = Config {
-                scheme: verifier,
+                scheme: verifier.clone(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -1117,8 +944,8 @@ mod tests {
             let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            // Add nullify votes
-            let votes: Vec<_> = schemes
+            // Add nullification certificate for view 1
+            let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
                     Nullify::sign::<Sha256Digest>(
@@ -1129,12 +956,8 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            {
-                let round = state.create_round(View::new(1));
-                for vote in votes {
-                    round.add_verified_nullify(vote);
-                }
-            }
+            let nullification = Nullification::from_nullifies(&verifier, &nullify_votes).unwrap();
+            state.add_nullification(nullification);
 
             // Get genesis payload
             let proposal = Proposal::new(
@@ -1180,7 +1003,7 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Attempt to verify before finalized
             let proposal = Proposal::new(
@@ -1221,13 +1044,12 @@ mod tests {
             let round = Rnd::new(epoch, view);
             let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
             let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
-            let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a.clone()).unwrap();
+            let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a).unwrap();
 
-            // Add local vote and replay
-            state.add_verified_notarize(local_vote.clone());
-            state.replay(&Voter::Notarize(local_vote.clone()));
+            // Replay local notarize vote
+            state.replay(&Artifact::Notarize(local_vote.clone()));
 
-            // Add conflicting notarization and replay
+            // Add conflicting notarization certificate and replay
             let votes_b: Vec<_> = other_schemes
                 .iter()
                 .take(3)
@@ -1235,10 +1057,10 @@ mod tests {
                 .collect();
             let conflicting =
                 Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
-            state.add_verified_notarization(conflicting.clone());
-            state.replay(&Voter::Notarization(conflicting.clone()));
+            state.add_notarization(conflicting.clone());
+            state.replay(&Artifact::Notarization(conflicting.clone()));
 
-            // No finalize candidate (conflict detected)
+            // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(state.construct_finalize(view).is_none());
 
             // Restart state and replay
@@ -1246,7 +1068,7 @@ mod tests {
                 context,
                 Config {
                     scheme: local_scheme,
-                    namespace: namespace.clone(),
+                    namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
@@ -1255,12 +1077,11 @@ mod tests {
                 },
             );
             restarted.set_genesis(test_genesis());
-            restarted.add_verified_notarize(local_vote.clone());
-            restarted.replay(&Voter::Notarize(local_vote));
-            restarted.add_verified_notarization(conflicting.clone());
-            restarted.replay(&Voter::Notarization(conflicting));
+            restarted.replay(&Artifact::Notarize(local_vote));
+            restarted.add_notarization(conflicting.clone());
+            restarted.replay(&Artifact::Notarization(conflicting));
 
-            // No finalize candidate (conflict detected)
+            // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
         });
     }
@@ -1273,7 +1094,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                namespace: namespace.clone(),
+                namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
@@ -1284,36 +1105,22 @@ mod tests {
             state.set_genesis(test_genesis());
             let view = state.current_view();
 
-            // Get notarize from another leader
+            // Set proposal
             let proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), view),
                 GENESIS_VIEW,
                 Sha256Digest::from([1u8; 32]),
             );
-            let notarize = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
-            state.add_verified_notarize(notarize);
+            state.set_proposal(view, proposal);
 
-            // Attempt to verify
-            assert!(matches!(state.try_verify(), Some((_, p)) if p == proposal));
+            // We should not want to verify (already timeout)
+            assert!(state.try_verify().is_some());
             assert!(state.verified(view));
 
-            // Check if willing to notarize
-            assert!(matches!(
-                state.construct_notarize(view),
-                Some(n) if n.proposal == proposal
-            ));
-
-            // Handle timeout (not a retry)
+            // Handle timeout
             assert!(!state.handle_timeout().0);
-            let nullify = Nullify::sign::<Sha256Digest>(
-                &schemes[1],
-                &namespace,
-                Rnd::new(Epoch::new(1), view),
-            )
-            .unwrap();
-            state.add_verified_nullify(nullify);
 
-            // Attempt to notarize
+            // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());
         });
     }

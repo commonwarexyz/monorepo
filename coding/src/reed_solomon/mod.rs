@@ -56,7 +56,7 @@ pub struct Chunk<H: Hasher> {
 
 impl<H: Hasher> Chunk<H> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
+    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
         Self {
             shard,
             index,
@@ -836,7 +836,7 @@ mod tests {
         let min = u16::MAX / 2 - 1;
 
         // Encode data
-        let result = encode::<Sha256>(total, min, data.clone(), CONCURRENCY);
+        let result = encode::<Sha256>(total, min, data, CONCURRENCY);
         assert!(matches!(
             result,
             Err(Error::ReedSolomon(

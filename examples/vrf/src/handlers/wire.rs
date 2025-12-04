@@ -108,19 +108,19 @@ pub enum Payload<S: Signature> {
 impl<S: Signature> Write for Payload<S> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::Start { group } => {
+            Self::Start { group } => {
                 buf.put_u8(0);
                 group.write(buf);
             }
-            Payload::Share(share) => {
+            Self::Share(share) => {
                 buf.put_u8(1);
                 share.write(buf);
             }
-            Payload::Ack(ack) => {
+            Self::Ack(ack) => {
                 buf.put_u8(2);
                 ack.write(buf);
             }
-            Payload::Commitment {
+            Self::Commitment {
                 commitment,
                 acks,
                 reveals,
@@ -130,7 +130,7 @@ impl<S: Signature> Write for Payload<S> {
                 acks.write(buf);
                 reveals.write(buf);
             }
-            Payload::Success {
+            Self::Success {
                 commitments,
                 reveals,
             } => {
@@ -138,7 +138,7 @@ impl<S: Signature> Write for Payload<S> {
                 commitments.write(buf);
                 reveals.write(buf);
             }
-            Payload::Abort => {
+            Self::Abort => {
                 buf.put_u8(5);
             }
         }
@@ -152,18 +152,18 @@ impl<S: Signature> Read for Payload<S> {
         let tag = u8::read(buf)?;
         let t = quorum(u32::try_from(*p).expect("participant count exceeds u32")); // threshold
         let result = match tag {
-            0 => Payload::Start {
+            0 => Self::Start {
                 group: Option::<poly::Public<MinSig>>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
             },
-            1 => Payload::Share(Share::read_cfg(buf, &(*p as u32))?),
-            2 => Payload::Ack(Ack::read(buf)?),
+            1 => Self::Share(Share::read_cfg(buf, &(*p as u32))?),
+            2 => Self::Ack(Ack::read(buf)?),
             3 => {
                 let commitment =
                     poly::Public::<MinSig>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?;
                 let acks = Vec::<Ack<S>>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
-                Payload::Commitment {
+                Self::Commitment {
                     commitment,
                     acks,
                     reveals,
@@ -175,12 +175,12 @@ impl<S: Signature> Read for Payload<S> {
                     &((..=*p).into(), ((), RangeCfg::exact(NZU32!(t)))),
                 )?;
                 let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
-                Payload::Success {
+                Self::Success {
                     commitments,
                     reveals,
                 }
             }
-            5 => Payload::Abort,
+            5 => Self::Abort,
             _ => return Err(Error::InvalidEnum(tag)),
         };
         Ok(result)
@@ -189,19 +189,19 @@ impl<S: Signature> Read for Payload<S> {
 impl<S: Signature> EncodeSize for Payload<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Payload::Start { group } => group.encode_size(),
-            Payload::Share(share) => share.encode_size(),
-            Payload::Ack(ack) => ack.encode_size(),
-            Payload::Commitment {
+            Self::Start { group } => group.encode_size(),
+            Self::Share(share) => share.encode_size(),
+            Self::Ack(ack) => ack.encode_size(),
+            Self::Commitment {
                 commitment,
                 acks,
                 reveals,
             } => commitment.encode_size() + acks.encode_size() + reveals.encode_size(),
-            Payload::Success {
+            Self::Success {
                 commitments,
                 reveals,
             } => commitments.encode_size() + reveals.encode_size(),
-            Payload::Abort => 0,
+            Self::Abort => 0,
         }
     }
 }
@@ -349,9 +349,9 @@ mod tests {
         let original: Dkg<Signature> = Dkg {
             round: 1,
             payload: Payload::Commitment {
-                commitment: commitment.clone(),
-                acks: acks.clone(),
-                reveals: reveals_vec.clone(),
+                commitment,
+                acks,
+                reveals: reveals_vec,
             },
         };
         let encoded = original.encode();

@@ -105,6 +105,10 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// expected to receive traffic.
     pub async fn run(mut self) -> Result<(), R::Error> {
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping muxer");
+            },
             // Prefer control messages because network messages will
             // already block when full (providing backpressure).
             control = self.control_rx.next() => {
@@ -171,6 +175,8 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                 }
             }
         }
+
+        Ok(())
     }
 }
 
@@ -282,7 +288,7 @@ pub struct GlobalSender<S: Sender> {
 
 impl<S: Sender> GlobalSender<S> {
     /// Create a new [GlobalSender] wrapping the given [Sender].
-    pub fn new(inner: S) -> Self {
+    pub const fn new(inner: S) -> Self {
         Self { inner }
     }
 
