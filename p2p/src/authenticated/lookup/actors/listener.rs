@@ -180,11 +180,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
         // Loop over incoming connections
         let mut accepted = 0;
-        let mut shutdown = self.context.stopped();
         select_loop! {
-            _ = &mut shutdown => {
+            self.context,
+            on_stopped => {
                 debug!("context shutdown, stopping listener");
-                break;
             },
             update = self.mailbox.next() => {
                 let Some(registered_ips) = update else {

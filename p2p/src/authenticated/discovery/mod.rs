@@ -227,7 +227,7 @@ mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_macros::{select, test_group, test_traced};
+    use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
@@ -897,16 +897,12 @@ mod tests {
                         complete_sender.send(()).await.unwrap();
 
                         // Keep receiving messages until shutdown
-                        loop {
-                            select! {
-                                result = receiver.recv() => {
-                                    if result.is_err() {
-                                        // Channel closed due to shutdown
-                                        break;
-                                    }
-                                },
-                                _ = context.stopped() => {
-                                    // Graceful shutdown signal received
+                        select_loop! {
+                            context,
+                            on_stopped => {},
+                            result = receiver.recv() => {
+                                if result.is_err() {
+                                    // Channel closed due to shutdown
                                     break;
                                 }
                             }

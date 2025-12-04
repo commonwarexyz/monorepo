@@ -115,6 +115,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
 
                 // Enter into the main loop
                 select_loop! {
+                    context,
+                    on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer
                         Self::send(
@@ -149,6 +151,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             .await?;
                     }
                 }
+
+                Ok(())
             }
         });
         let mut receive_handler: Handle<Result<(), Error>> = self
