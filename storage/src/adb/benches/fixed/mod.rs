@@ -49,10 +49,10 @@ impl Variant {
     /// Current ADBs don't support batching because their type-state pattern
     /// separates mutation (Dirty) from commit (Clean).
     pub const fn supports_batching(&self) -> bool {
-        match self {
-            Self::CurrentUnordered | Self::CurrentOrdered | Self::Store => false,
-            _ => true,
-        }
+        !matches!(
+            self,
+            Self::CurrentUnordered | Self::CurrentOrdered | Self::Store
+        )
     }
 
     /// Returns whether this variant supports the CleanAny/DirtyAny pattern.
