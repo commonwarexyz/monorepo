@@ -58,7 +58,7 @@ type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
 fn store_cfg() -> StoreConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     StoreConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-        log_partition: format!("store_{PARTITION_SUFFIX}"),
+        log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),

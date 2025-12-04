@@ -140,7 +140,7 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
 /// Configuration for Store.
 fn store_cfg() -> StoreConfig<EightCap, ()> {
     StoreConfig::<EightCap, ()> {
-        log_partition: format!("store_{PARTITION_SUFFIX}"),
+        log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         log_codec_config: (),
