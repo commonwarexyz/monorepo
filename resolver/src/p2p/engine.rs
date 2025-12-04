@@ -229,7 +229,13 @@ impl<
                         return;
                     };
                     match msg {
-                        Message::Fetch { keys } => {
+                        Message::Fetch { keys, hints } => {
+                            // Add all hints first (we guarantee by construction that all hint keys are in `keys`)
+                            for (key, peers) in hints {
+                                self.fetcher.hint(key, peers);
+                            }
+
+                            // Then process all keys
                             for key in keys {
                                 trace!(?key, "mailbox: fetch");
 
@@ -277,8 +283,13 @@ impl<
                             }
                         }
                         Message::Hint { key, peer } => {
-                            trace!(?key, ?peer, "mailbox: hint");
-                            self.fetcher.hint(key, peer);
+                            // Only add hint if key is being fetched
+                            if self.fetch_timers.contains_key(&key) {
+                                trace!(?key, ?peer, "mailbox: hint");
+                                self.fetcher.hint(key, [peer]);
+                            } else {
+                                trace!(?key, ?peer, "mailbox: hint ignored (no active fetch)");
+                            }
                         }
                     }
                 },

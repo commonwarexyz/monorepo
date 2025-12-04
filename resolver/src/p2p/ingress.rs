@@ -7,8 +7,11 @@ type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
 /// Messages that can be sent to the peer actor.
 pub enum Message<K, P> {
-    /// Initiate a fetch request by key.
-    Fetch { keys: Vec<K> },
+    /// Initiate a fetch request by key, optionally with hints.
+    Fetch {
+        keys: Vec<K>,
+        hints: Vec<(K, Vec<P>)>,
+    },
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
@@ -19,7 +22,7 @@ pub enum Message<K, P> {
     /// Cancel all fetch requests that do not satisfy the predicate.
     Retain { predicate: Predicate<K> },
 
-    /// Add a hint peer for a key.
+    /// Add a hint peer for a key (only effective if key is being fetched).
     Hint { key: K, peer: P },
 }
 
@@ -45,7 +48,10 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Panics if the send fails.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch { keys: vec![key] })
+            .send(Message::Fetch {
+                keys: vec![key],
+                hints: Vec::new(),
+            })
             .await
             .expect("Failed to send fetch");
     }
@@ -55,7 +61,10 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Panics if the send fails.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
         self.sender
-            .send(Message::Fetch { keys })
+            .send(Message::Fetch {
+                keys,
+                hints: Vec::new(),
+            })
             .await
             .expect("Failed to send fetch_all");
     }
@@ -94,15 +103,57 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
 }
 
 impl<K: Span, P: PublicKey> Mailbox<K, P> {
-    /// Register a peer as likely having data for a key.
+    /// Send a fetch request with initial hints for which peers likely have the data.
+    ///
+    /// Hinted peers are tried first. If a hinted peer fails (timeout, error response,
+    /// or send failure), only that peer is removed from hints. As hints deplete through
+    /// failures, the resolver naturally falls back to trying all peers.
+    ///
+    /// Hints are automatically cleared when:
+    /// - The fetch succeeds (data received)
+    /// - The fetch is canceled
+    /// - All hinted peers fail (empty hints trigger fallback to all peers)
+    ///
+    /// Panics if the send fails.
+    pub async fn fetch_hinted(&mut self, key: K, hints: Vec<P>) {
+        self.sender
+            .send(Message::Fetch {
+                keys: vec![key.clone()],
+                hints: vec![(key, hints)],
+            })
+            .await
+            .expect("Failed to send fetch_hinted");
+    }
+
+    /// Send fetch requests for multiple keys, each with their own hints.
+    ///
+    /// See [`fetch_hinted`](Self::fetch_hinted) for details on hint behavior.
+    ///
+    /// Panics if the send fails.
+    pub async fn fetch_all_hinted(&mut self, keys_hinted: Vec<(K, Vec<P>)>) {
+        let keys = keys_hinted.iter().map(|(k, _)| k.clone()).collect();
+        self.sender
+            .send(Message::Fetch {
+                keys,
+                hints: keys_hinted,
+            })
+            .await
+            .expect("Failed to send fetch_all_hinted");
+    }
+
+    /// Add a hint peer for an **ongoing** fetch.
+    ///
+    /// This only has an effect if a fetch is already in progress for this key.
+    /// To provide hints when starting a fetch, use [`fetch_hinted`](Self::fetch_hinted)
+    /// or [`fetch_all_hinted`](Self::fetch_all_hinted) instead.
     ///
     /// When fetching this key, hinted peers are tried first. If a hinted peer
     /// fails (timeout, error response, or send failure), only that peer is
     /// removed from hints. As hints deplete through failures, the resolver
     /// naturally falls back to trying all peers.
     ///
-    /// Multiple hints can be registered for the same key. Hints can be added
-    /// before or after calling `fetch()` - new hints will be used on retry.
+    /// Multiple hints can be registered for the same key. New hints will be
+    /// used on retry.
     ///
     /// Hints are automatically cleared when:
     /// - The fetch succeeds (data received)

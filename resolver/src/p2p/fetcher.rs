@@ -354,7 +354,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.block(peer);
     }
 
-    /// Register a peer as likely having data for a key.
+    /// Register peers as likely having data for a key.
     ///
     /// Hinted peers are tried first when fetching. If a hinted peer fails
     /// (timeout, error response, or send failure), only that peer is removed.
@@ -362,8 +362,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     ///
     /// Multiple hints can be registered for the same key. Hints can be added
     /// before or after the fetch starts - new hints will be used on retry.
-    pub fn hint(&mut self, key: Key, peer: P) {
-        self.hints.entry(key).or_default().insert(peer);
+    pub fn hint(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
+        self.hints.entry(key).or_default().extend(peers);
     }
 
     /// Clear all hints for a key.
@@ -1099,12 +1099,12 @@ mod tests {
             assert!(fetcher.hints.is_empty());
 
             // Add hint for a key
-            fetcher.hint(MockKey(1), peer1.clone());
+            fetcher.hint(MockKey(1), [peer1.clone()]);
             assert_eq!(fetcher.hints.len(), 1);
             assert!(fetcher.hints.get(&MockKey(1)).unwrap().contains(&peer1));
 
             // Add another hint for the same key
-            fetcher.hint(MockKey(1), peer2.clone());
+            fetcher.hint(MockKey(1), [peer2.clone()]);
             assert_eq!(fetcher.hints.len(), 1);
             let hints = fetcher.hints.get(&MockKey(1)).unwrap();
             assert_eq!(hints.len(), 2);
@@ -1112,12 +1112,12 @@ mod tests {
             assert!(hints.contains(&peer2));
 
             // Add hint for a different key
-            fetcher.hint(MockKey(2), peer1.clone());
+            fetcher.hint(MockKey(2), [peer1.clone()]);
             assert_eq!(fetcher.hints.len(), 2);
             assert!(fetcher.hints.get(&MockKey(2)).unwrap().contains(&peer1));
 
             // Adding duplicate hint is idempotent
-            fetcher.hint(MockKey(1), peer1);
+            fetcher.hint(MockKey(1), [peer1]);
             assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
         });
     }
@@ -1131,8 +1131,8 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
             // cancel() clears hints for key
-            fetcher.hint(MockKey(1), peer1.clone());
-            fetcher.hint(MockKey(2), peer1.clone());
+            fetcher.hint(MockKey(1), [peer1.clone()]);
+            fetcher.hint(MockKey(2), [peer1.clone()]);
             fetcher.add_retry(MockKey(1));
             fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.hints.len(), 2);
@@ -1145,20 +1145,20 @@ mod tests {
             assert!(fetcher.hints.is_empty());
 
             // clear() clears all hints
-            fetcher.hint(MockKey(1), peer1.clone());
-            fetcher.hint(MockKey(1), peer2.clone());
-            fetcher.hint(MockKey(2), peer1.clone());
-            fetcher.hint(MockKey(3), peer2);
+            fetcher.hint(MockKey(1), [peer1.clone()]);
+            fetcher.hint(MockKey(1), [peer2.clone()]);
+            fetcher.hint(MockKey(2), [peer1.clone()]);
+            fetcher.hint(MockKey(3), [peer2]);
             assert_eq!(fetcher.hints.len(), 3);
 
             fetcher.clear();
             assert!(fetcher.hints.is_empty());
 
             // retain() filters hints
-            fetcher.hint(MockKey(1), peer1.clone());
-            fetcher.hint(MockKey(2), peer1.clone());
-            fetcher.hint(MockKey(10), peer1.clone());
-            fetcher.hint(MockKey(20), peer1);
+            fetcher.hint(MockKey(1), [peer1.clone()]);
+            fetcher.hint(MockKey(2), [peer1.clone()]);
+            fetcher.hint(MockKey(10), [peer1.clone()]);
+            fetcher.hint(MockKey(20), [peer1]);
             assert_eq!(fetcher.hints.len(), 4);
 
             fetcher.retain(|key| key.0 <= 5);
@@ -1180,11 +1180,11 @@ mod tests {
             let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
 
             // Add hints for multiple keys with various peers
-            fetcher.hint(MockKey(1), peer1.clone());
-            fetcher.hint(MockKey(1), peer2.clone());
-            fetcher.hint(MockKey(2), peer1.clone());
-            fetcher.hint(MockKey(2), peer3.clone());
-            fetcher.hint(MockKey(3), peer2.clone());
+            fetcher.hint(MockKey(1), [peer1.clone()]);
+            fetcher.hint(MockKey(1), [peer2.clone()]);
+            fetcher.hint(MockKey(2), [peer1.clone()]);
+            fetcher.hint(MockKey(2), [peer3.clone()]);
+            fetcher.hint(MockKey(3), [peer2.clone()]);
 
             // Verify initial state
             assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
@@ -1240,7 +1240,7 @@ mod tests {
             let mut sender = WrappedSender::new(FailMockSender {});
 
             // Hints filter peer selection
-            fetcher.hint(MockKey(1), peer3.clone());
+            fetcher.hint(MockKey(1), [peer3.clone()]);
             assert!(fetcher.hints.get(&MockKey(1)).unwrap().contains(&peer3));
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender).await;
@@ -1250,8 +1250,8 @@ mod tests {
             fetcher.cancel(&MockKey(1));
 
             // Send failure removes only the tried peer from hints
-            fetcher.hint(MockKey(2), peer1.clone());
-            fetcher.hint(MockKey(2), peer2.clone());
+            fetcher.hint(MockKey(2), [peer1.clone()]);
+            fetcher.hint(MockKey(2), [peer2.clone()]);
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.hints.get(&MockKey(2)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
@@ -1273,8 +1273,8 @@ mod tests {
             let mut sender = WrappedSender::new(SuccessMockSender {});
 
             // Timeout removes hint
-            fetcher.hint(MockKey(1), peer1.clone());
-            fetcher.hint(MockKey(1), peer2.clone());
+            fetcher.hint(MockKey(1), [peer1.clone()]);
+            fetcher.hint(MockKey(1), [peer2.clone()]);
             fetcher.add_ready(MockKey(1));
             assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
@@ -1285,7 +1285,7 @@ mod tests {
             fetcher.hints.clear();
 
             // Error response removes hint
-            fetcher.hint(MockKey(2), peer1.clone());
+            fetcher.hint(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
@@ -1297,7 +1297,7 @@ mod tests {
 
             // Data response preserves hints
             // (caller must clear hints after data validation)
-            fetcher.hint(MockKey(3), peer1.clone());
+            fetcher.hint(MockKey(3), [peer1.clone()]);
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
@@ -1324,7 +1324,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1, peer2]);
 
             // Hint peer3, which is NOT in the peer set (disconnected)
-            fetcher.hint(MockKey(1), peer3);
+            fetcher.hint(MockKey(1), [peer3]);
             assert!(fetcher.hints.contains_key(&MockKey(1)));
 
             // Add key to pending

@@ -904,18 +904,17 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Hint both peer 2 (invalid data) and peer 3 (valid data)
+            // Start fetch with hints for both peer 2 (invalid data) and peer 3 (valid data)
             // When peer 2 returns invalid data, only peer 2 should be removed from hints
             // Peer 3 should still be tried as a hint and succeed
-            mailbox1.hint(key.clone(), peers[1].clone()).await;
-            mailbox1.hint(key.clone(), peers[2].clone()).await;
+            mailbox1
+                .fetch_hinted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .await;
 
-            // Verify hints are registered before fetch
+            // Verify hints are registered
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
             assert!(metrics.contains("_hints_active 2"));
-
-            mailbox1.fetch(key.clone()).await;
 
             // Should eventually succeed from peer 3
             let event = cons_out1.next().await.unwrap();
@@ -1011,20 +1010,19 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Hint peers 2 and 3 (both don't have data), but not peer 4 (which has data)
+            // Start fetch with hints for peers 2 and 3 (both don't have data), but not peer 4 (which has data)
             // The resolver should:
             // 1. Try hinted peer 2 or 3, get error, remove from hints
             // 2. Try the other hinted peer, get error, remove from hints (hints now empty)
             // 3. Fall back to all peers, eventually try peer 4, succeed
-            mailbox1.hint(key.clone(), peers[1].clone()).await;
-            mailbox1.hint(key.clone(), peers[2].clone()).await;
+            mailbox1
+                .fetch_hinted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .await;
 
-            // Verify hints are registered before fetch
+            // Verify hints are registered
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
             assert!(metrics.contains("_hints_active 2"));
-
-            mailbox1.fetch(key.clone()).await;
 
             // Should eventually succeed by falling back to peer 4
             let event = cons_out1.next().await.unwrap();
@@ -1042,6 +1040,95 @@ mod tests {
             assert!(metrics.contains("_hint_miss_total 2"));
             // hint_hit should be 0 since peer 4 wasn't hinted
             assert!(metrics.contains("_hint_hit_total 0"));
+            assert!(metrics.contains("_hints_active 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_hint_requires_active_fetch() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(1);
+
+            // Only peer 3 has the data
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), Bytes::from("data from peer 3"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Hint before fetch should be ignored
+            mailbox1.hint(key.clone(), peers[1].clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(metrics.contains("_hints_active 0")); // Hint was ignored
+
+            // Start fetch without hints
+            mailbox1.fetch(key.clone()).await;
+
+            // Now hint should work (fetch is active)
+            mailbox1.hint(key.clone(), peers[2].clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(metrics.contains("_hints_active 1")); // Hint was registered
+
+            // Should succeed from peer 3 (the hinted peer)
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data from peer 3"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Verify the hint was used (hint hit)
+            let metrics = context.encode();
+            assert!(metrics.contains("_hint_hit_total 1"));
             assert!(metrics.contains("_hints_active 0"));
         });
     }
