@@ -242,6 +242,33 @@ where
     Ok(None)
 }
 
+/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// its location to `new_loc`.
+fn update_known_loc<I: Index<Value = Location>>(
+    snapshot: &mut I,
+    key: &[u8],
+    old_loc: Location,
+    new_loc: Location,
+) {
+    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    assert!(
+        cursor.find(|&loc| *loc == old_loc),
+        "prev_key with given old_loc should have been found"
+    );
+    cursor.update(new_loc);
+}
+
+/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
+/// it from the snapshot.
+fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], old_loc: Location) {
+    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    assert!(
+        cursor.find(|&loc| *loc == old_loc),
+        "prev_key with given old_loc should have been found"
+    );
+    cursor.delete();
+}
+
 /// A wrapper of DB state required for implementing inactivity floor management.
 pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguous<Item: Keyed>> {
     pub snapshot: &'a mut I,

@@ -1,10 +1,10 @@
 use crate::{
     adb::{
         any::{CleanAny, DirtyAny},
-        build_snapshot_from_log, create_key, delete_key,
+        build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable, Keyed},
         store::{Batchable, LogStore},
-        update_key, Error, FloorHelper, Index,
+        update_key, update_known_loc, Error, FloorHelper, Index,
     },
     journal::{
         authenticated,
@@ -764,12 +764,12 @@ where
 
             let new_loc = self.op_count();
             if let Some(value) = update {
-                update_known_loc(key, old_loc, new_loc);
+                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
                     .append(C::Item::new_update(key.clone(), value))
                     .await?;
             } else {
-                delete_known_loc(key, old_loc);
+                delete_known_loc(&mut self.snapshot, key, old_loc);
                 self.log.append(C::Item::new_delete(key.clone())).await?;
             }
         }
@@ -777,7 +777,7 @@ where
         // Process the creates.
         for (key, value) in updates {
             let Some(value) = value else {
-                continue;
+                continue; // attempt to delete a non-existent key
             };
             self.snapshot.insert(&key, self.op_count());
             self.log.append(C::Item::new_update(key, value)).await?;
