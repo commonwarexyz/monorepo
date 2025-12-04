@@ -839,4 +839,210 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_hints() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(1);
+            let invalid_data = Bytes::from("invalid data");
+            let valid_data = Bytes::from("valid data");
+
+            // Peer 2 has invalid data, peer 3 has valid data
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), invalid_data.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_data.clone());
+
+            // Consumer expects only valid_data
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key.clone(), valid_data.clone());
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Hint both peer 2 (invalid data) and peer 3 (valid data)
+            // When peer 2 returns invalid data, only peer 2 should be removed from hints
+            // Peer 3 should still be tried as a hint and succeed
+            mailbox1.hint(key.clone(), peers[1].clone()).await;
+            mailbox1.hint(key.clone(), peers[2].clone()).await;
+
+            // Verify hints are registered before fetch
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(metrics.contains("_hints_active 2"));
+
+            mailbox1.fetch(key.clone()).await;
+
+            // Should eventually succeed from peer 3
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_data);
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Verify peer 2 was blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
+
+            // Verify hint metrics: only peer 3 was a hint hit (valid data), peer 2 was not
+            // (peer 2 returned data but consumer rejected it, so not a hint hit)
+            let metrics = context.encode();
+            assert!(metrics.contains("_hint_hit_total 1"));
+            assert!(metrics.contains("_hints_active 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_hints_gradual_depletion() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+
+            let key = Key(1);
+
+            // Only peer 4 has the data, peers 2 and 3 don't
+            let mut prod4 = Producer::default();
+            prod4.insert(key.clone(), Bytes::from("data from peer 4"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox4 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod4,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Hint peers 2 and 3 (both don't have data), but not peer 4 (which has data)
+            // The resolver should:
+            // 1. Try hinted peer 2 or 3, get error, remove from hints
+            // 2. Try the other hinted peer, get error, remove from hints (hints now empty)
+            // 3. Fall back to all peers, eventually try peer 4, succeed
+            mailbox1.hint(key.clone(), peers[1].clone()).await;
+            mailbox1.hint(key.clone(), peers[2].clone()).await;
+
+            // Verify hints are registered before fetch
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(metrics.contains("_hints_active 2"));
+
+            mailbox1.fetch(key.clone()).await;
+
+            // Should eventually succeed by falling back to peer 4
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data from peer 4"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Verify hint metrics: both hinted peers returned errors (hint misses),
+            // peer 4 succeeded but wasn't hinted so no hint hit
+            let metrics = context.encode();
+            assert!(metrics.contains("_hint_miss_total 2"));
+            // hint_hit should be 0 since peer 4 wasn't hinted
+            assert!(metrics.contains("_hint_hit_total 0"));
+            assert!(metrics.contains("_hints_active 0"));
+        });
+    }
 }
