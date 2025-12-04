@@ -85,13 +85,13 @@ where
     }
 
     fn get_mutation(&mut self) -> Mutation {
-        let buf = self.fuzz_input.get_next_random(8);
-        Mutation::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Mutation::All)
+        let buf = self.fuzz_input.get_next_random_byte();
+        Mutation::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Mutation::All)
     }
 
     fn random_message(&mut self) -> Message {
-        let buf = self.fuzz_input.get_next_random(8);
-        Message::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Message::Random)
+        let buf = self.fuzz_input.get_next_random_byte();
+        Message::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Message::Random)
     }
 
     fn random_view(&mut self, current_view: u64) -> u64 {
@@ -99,143 +99,86 @@ where
         let lnz = self.last_notarized;
         let lnf = self.last_nullified;
 
-        let choice = self.fuzz_input.get_next_random(1)[0] % 7;
+        let choice = self.fuzz_input.get_next_random_byte() % 7;
         match choice {
-            // 0) Too old (pre-finalized) — should be filtered.
+            // Too old (pre-finalized) — should be filtered.
             0 => {
                 if lf == 0 {
                     0
                 } else {
-                    let lo = 0u64;
-                    let hi = lf.saturating_sub(1);
-                    if lo >= hi {
-                        lo
-                    } else {
-                        lo + (self
-                            .fuzz_input
-                            .get_next_random(8)
-                            .iter()
-                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                            % (hi - lo + 1))
-                    }
+                    self.fuzz_input.get_next_random_u64() % lf
                 }
             }
 
-            // 1) Active past: [last_finalized, current_view]
+            // Active past: [last_finalized, current_view]
             1 => {
-                let lo = lf.min(current_view);
-                let hi = current_view;
-                if lo >= hi {
-                    lo
+                if current_view <= lf {
+                    lf
                 } else {
-                    lo + (self
-                        .fuzz_input
-                        .get_next_random(8)
-                        .iter()
-                        .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                        % (hi - lo + 1))
+                    lf + (self.fuzz_input.get_next_random_u64() % (current_view - lf + 1))
                 }
             }
 
-            // 2) Active band: [last_finalized, min(last_notarized, current_view)]
+            // Active band: [last_finalized, min(last_notarized, current_view)]
             2 => {
-                let lo = lf;
-                let hi = lnz.min(current_view).max(lo);
-                if lo >= hi {
-                    lo
-                } else {
-                    lo + (self
-                        .fuzz_input
-                        .get_next_random(8)
-                        .iter()
-                        .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                        % (hi - lo + 1))
-                }
+                let hi = lnz.min(current_view).max(lf);
+                lf + (self.fuzz_input.get_next_random_u64() % (hi - lf + 1))
             }
 
-            // 3) Near future (strictly ahead): [current_view+1, current_view+4]
-            3 => {
-                let start = current_view.saturating_add(1);
-                let end = current_view.saturating_add(4);
-                if start >= end {
-                    start
-                } else {
-                    start
-                        + (self
-                            .fuzz_input
-                            .get_next_random(8)
-                            .iter()
-                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                            % (end - start + 1))
-                }
-            }
+            // Near future (strictly ahead): [current_view+1, current_view+4]
+            3 => current_view + 1 + (self.fuzz_input.get_next_random_byte() as u64 % 4),
 
-            // 4) Moderate future: [current_view+5, current_view+10]
+            // Moderate future: [current_view+5, current_view+10]
             4 => {
-                let start = current_view.saturating_add(5);
-                let end = current_view.saturating_add(10);
-                if start >= end {
-                    start
-                } else {
-                    start
-                        + (self
-                            .fuzz_input
-                            .get_next_random(8)
-                            .iter()
-                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                            % (end - start + 1))
-                }
+                current_view.saturating_add(5 + (self.fuzz_input.get_next_random_byte() as u64 % 6))
             }
 
-            // 5) Nullification-based future:
+            // Nullification-based future:
             // start just after max(current_view, last_nullified), span ~10 views
             5 => {
                 let base = current_view.max(lnf);
-                let start = base.saturating_add(1);
-                let end = base.saturating_add(10);
-                if start >= end {
-                    start
-                } else {
-                    start
-                        + (self
-                            .fuzz_input
-                            .get_next_random(8)
-                            .iter()
-                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
-                            % (end - start + 1))
-                }
+                base.saturating_add(1 + (self.fuzz_input.get_next_random_byte() as u64 % 10))
             }
 
-            // 6) Pure random:
-            _ => self
-                .fuzz_input
-                .get_next_random(8)
-                .iter()
-                .fold(0u64, |acc, &x| (acc << 8) | x as u64),
+            // Pure random:
+            _ => self.fuzz_input.get_next_random_u64(),
         }
     }
 
     fn random_parent(&mut self) -> u64 {
-        let buf = self.fuzz_input.get_next_random(8);
-        let mut unstructured = Unstructured::new(&buf);
-        u64::arbitrary(&mut unstructured).unwrap_or(0)
+        self.fuzz_input.get_next_random_u64()
     }
 
     fn random_payload(&mut self) -> Sha256Digest {
         let bytes = self.fuzz_input.get_next_random(32);
-        // Convert Vec<u8> to [u8; 32]
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes[..32.min(bytes.len())]);
         Sha256Digest::from(arr)
     }
 
     fn random_bytes(&mut self) -> Vec<u8> {
-        // First get a byte to determine length
-        let len_byte = self.fuzz_input.get_next_random(2);
-        let len = ((len_byte[0] as usize) << 8 | len_byte[1] as usize) % 1025;
+        let len = self.fuzz_input.get_next_random_byte();
+        self.fuzz_input.get_next_random(len as usize)
+    }
 
-        // Now get the actual random bytes
-        self.fuzz_input.get_next_random(len)
+    fn mutate_bytes(&mut self, input: &[u8]) -> Vec<u8> {
+        if input.is_empty() {
+            return vec![0];
+        }
+
+        let mut result = input.to_vec();
+        let mutation_type = self.fuzz_input.get_next_random_byte() % 5;
+        let mutation_pos = (self.fuzz_input.get_next_random_byte() as usize) % result.len();
+
+        match mutation_type {
+            0 => result[mutation_pos] = result[mutation_pos].wrapping_add(1), // Increment byte
+            1 => result[mutation_pos] = result[mutation_pos].wrapping_sub(1), // Decrement byte
+            2 => result[mutation_pos] ^= 0xFF,                                // Flip all bits
+            3 => result[mutation_pos] = 0,                                    // Zero byte
+            _ => result[mutation_pos] = 0xFF,                                 // Max byte
+        }
+
+        result
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
@@ -248,7 +191,7 @@ where
 
         loop {
             // Send a random message each 10 loop
-            if self.fuzz_input.get_next_random(1)[0] % 100 < 10 {
+            if self.fuzz_input.get_next_random_byte() % 100 < 10 {
                 self.send_random_message(&mut sender).await;
             }
 
@@ -278,8 +221,8 @@ where
         _sender_id: impl std::fmt::Debug,
         msg: Vec<u8>,
     ) {
-        // just mirror the message
-        if self.fuzz_input.get_next_random(1)[0] % 100 < 10 {
+        // just mirror the message and send it
+        if self.fuzz_input.get_next_random_bool() {
             sender
                 .send(Recipients::All, Bytes::from(msg.clone()), true)
                 .await
@@ -299,25 +242,28 @@ where
 
         // Process message based on type
         match msg {
-            Artifact::Finalization(finalization) => {
+            Artifact::Finalization(ref finalization) => {
                 self.last_finalized = finalization.view().get();
-                let malformed_bytes = self.random_bytes();
+                let encoded_msg = msg.encode();
+                let malformed_bytes = self.mutate_bytes(&encoded_msg);
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await
                     .unwrap();
             }
-            Artifact::Nullification(nullification) => {
+            Artifact::Nullification(ref nullification) => {
                 self.last_nullified = nullification.view().get();
-                let malformed_bytes = self.random_bytes();
+                let encoded_msg = msg.encode();
+                let malformed_bytes = self.mutate_bytes(&encoded_msg);
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await
                     .unwrap();
             }
-            Artifact::Notarization(notarization) => {
+            Artifact::Notarization(ref notarization) => {
                 self.last_notarized = notarization.view().get();
-                let malformed_bytes = self.random_bytes();
+                let encoded_msg = msg.encode();
+                let malformed_bytes = self.mutate_bytes(&encoded_msg);
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await

@@ -37,7 +37,9 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner,
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
+    cell::RefCell,
     num::NonZeroUsize,
     panic,
     sync::{
@@ -130,35 +132,57 @@ pub struct FuzzInput {
     pub seed: u64, // Seed for deterministic runtime
     pub partition: PartitionStrategy,
     pub configuration: (u32, u32, u32), // (all nodes, correct nodes, faulty nodes)
-    pub raw_bytes: Vec<u8>,             // Raw fuzzer input for byte generation
-    pub offset: std::cell::RefCell<usize>, // Current offset in raw_bytes (RefCell for interior mutability)
+    pub raw_bytes: Vec<u8>,             // Raw fuzzer input for message mutation
+    offset: RefCell<usize>, // Current offset in raw_bytes (RefCell for interior mutability)
+    rng: RefCell<StdRng>, // PRNG for generating random bytes if there are no fuzz input bytes left
 }
 
 impl FuzzInput {
     pub fn get_next_random(&self, n: usize) -> Vec<u8> {
-        let mut offset = self.offset.borrow_mut();
-        let mut result = Vec::with_capacity(n);
-        for _ in 0..n {
-            if *offset < self.raw_bytes.len() {
-                result.push(self.raw_bytes[*offset]);
-                *offset += 1;
-            } else if !self.raw_bytes.is_empty() {
-                // Wrap around if we run out of bytes
-                *offset = *offset % self.raw_bytes.len();
-                result.push(self.raw_bytes[*offset]);
-                *offset += 1;
-            } else {
-                // If no raw bytes available, use zeros
-                result.push(0);
-            }
+        if n == 0 {
+            return Vec::new();
         }
-        result
+
+        let mut offset = self.offset.borrow_mut();
+        let remaining = self.raw_bytes.len().saturating_sub(*offset);
+
+        if remaining >= n {
+            // Have enough real bytes
+            let result = self.raw_bytes[*offset..*offset + n].to_vec();
+            *offset += n;
+            result
+        } else {
+            // Take what's left from real bytes
+            let mut result = Vec::with_capacity(n);
+            if remaining > 0 {
+                result.extend_from_slice(&self.raw_bytes[*offset..]);
+                *offset = self.raw_bytes.len();
+            }
+
+            // Generate the rest from PRNG
+            let needed = n - result.len();
+            let mut extra = vec![0u8; needed];
+            self.rng.borrow_mut().fill_bytes(&mut extra);
+            result.extend(extra);
+            result
+        }
+    }
+
+    pub fn get_next_random_byte(&self) -> u8 {
+        self.get_next_random(1)[0]
+    }
+
+    pub fn get_next_random_bool(&self) -> bool {
+        self.get_next_random_byte() < 128
+    }
+
+    pub fn get_next_random_u64(&self) -> u64 {
+        u64::from_le_bytes(self.get_next_random(8).try_into().unwrap())
     }
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // (all nodes, correct nodes, faulty nodes)
         let test_cases = [(3, 2, 1), (4, 3, 1)];
 
         let seed = u.arbitrary()?;
@@ -169,18 +193,29 @@ impl Arbitrary<'_> for FuzzInput {
             test_cases[index]
         };
 
-        // Capture remaining raw bytes for random data generation
-        // Read up to 1024 bytes of arbitrary data
-        let raw_bytes = (0..1024)
-            .map(|_| u.arbitrary::<u8>().unwrap_or(0))
-            .collect();
+        // Extract up to 4KB of arbitrary data for mutations
+        let mut raw_bytes = Vec::new();
+        for _ in 0..4096 {
+            if let Ok(byte) = u.arbitrary::<u8>() {
+                raw_bytes.push(byte);
+            } else {
+                break;
+            }
+        }
+
+        // Seed PRNG from raw_bytes for deterministic fallback
+        let mut prng_seed = [0u8; 32];
+        for (i, &b) in raw_bytes.iter().enumerate() {
+            prng_seed[i % 32] ^= b;
+        }
 
         Ok(Self {
             seed,
             partition,
             configuration,
             raw_bytes,
-            offset: std::cell::RefCell::new(0),
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed(prng_seed)),
         })
     }
 }
