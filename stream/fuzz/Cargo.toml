@@ -9,16 +9,16 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-stream = { workspace = true}
-commonware-runtime = { workspace = true }
-commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
-futures = { workspace = true }
-libfuzzer-sys = { workspace = true }
 chacha20poly1305 = { workspace = true, default-features = false, features = ["std", "getrandom"] }
-rand_core = { workspace = true }
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand_core.workspace = true
 
 [[bin]]
 name = "transport"

@@ -8,8 +8,8 @@ use crate::{
     PublicKey, Signature, Signer,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_utils::quorum;
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_utils::{quorum, NZU32};
 
 /// A [Share] sent by a [Dealer] node to a [Player] node.
 ///
@@ -33,7 +33,7 @@ pub struct Share<V: Variant> {
 
 impl<V: Variant> Share<V> {
     /// Create a new [Share] message.
-    pub fn new(commitment: Public<V>, share: group::Share) -> Self {
+    pub const fn new(commitment: Public<V>, share: group::Share) -> Self {
         Self { commitment, share }
     }
 }
@@ -54,10 +54,10 @@ impl<V: Variant> EncodeSize for Share<V> {
 impl<V: Variant> Read for Share<V> {
     type Cfg = u32;
 
-    fn read_cfg(buf: &mut impl Buf, t: &u32) -> Result<Self, commonware_codec::Error> {
-        let q = quorum(*t);
+    fn read_cfg(buf: &mut impl Buf, n: &u32) -> Result<Self, commonware_codec::Error> {
+        let t = quorum(*n);
         Ok(Self {
-            commitment: Public::<V>::read_cfg(buf, &(q as usize))?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
             share: group::Share::read(buf)?,
         })
     }
@@ -98,7 +98,7 @@ impl<S: Signature> Ack<S> {
         V: Variant,
     {
         let payload = Self::signature_payload::<V, C::PublicKey>(round, dealer, commitment);
-        let signature = signer.sign(Some(namespace), &payload);
+        let signature = signer.sign(namespace, &payload);
         Self { player, signature }
     }
 
@@ -112,7 +112,7 @@ impl<S: Signature> Ack<S> {
         commitment: &Public<V>,
     ) -> bool {
         let payload = Self::signature_payload::<V, P>(round, dealer, commitment);
-        public_key.verify(Some(namespace), &payload, &self.signature)
+        public_key.verify(namespace, &payload, &self.signature)
     }
 
     /// Create a signature payload for acking a secret.
@@ -201,7 +201,7 @@ mod test {
         let (commitment, identities) = generate_identities(NUM_PARTICIPANTS);
         let (_, share) = &identities[0];
 
-        let share = Share::<MinSig>::new(commitment.clone(), share.clone());
+        let share = Share::<MinSig>::new(commitment, share.clone());
 
         let mut buf = Vec::with_capacity(share.encode_size());
         share.write(&mut buf);

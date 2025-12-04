@@ -34,12 +34,12 @@ pub struct Ordered<T>(Vec<T>);
 
 impl<T> Ordered<T> {
     /// Returns the size of the ordered collection.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns `true` if the collection is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -174,6 +174,57 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
     }
 }
 
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedQuorum {
+    /// The type of items in this set.
+    type Item: Ord;
+
+    /// Returns the quorum value (2f+1) for this participant set.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the number of participants exceeds `u32::MAX`.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the number of participants exceeds `u32::MAX`.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&Self::Item>;
+
+    /// Returns the index for the given participant key, if present.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the participant index exceeds `u32::MAX`.
+    fn index(&self, key: &Self::Item) -> Option<u32>;
+}
+
+impl<T: Ord> OrderedQuorum for Ordered<T> {
+    type Item = T;
+
+    fn quorum(&self) -> u32 {
+        crate::quorum(u32::try_from(self.len()).expect("too many participants"))
+    }
+
+    fn max_faults(&self) -> u32 {
+        crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
+    }
+
+    fn key(&self, index: u32) -> Option<&Self::Item> {
+        self.get(index as usize)
+    }
+
+    fn index(&self, key: &Self::Item) -> Option<u32> {
+        self.position(key)
+            .map(|position| u32::try_from(position).expect("too many participants"))
+    }
+}
+
 /// An ordered, deduplicated slice of items each paired with some associated value.
 ///
 /// Like [`Ordered`], the contained [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the
@@ -189,12 +240,12 @@ pub struct OrderedAssociated<K, V> {
 
 impl<K, V> OrderedAssociated<K, V> {
     /// Returns the number of entries in the map.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.keys.len()
     }
 
     /// Returns `true` if the map is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 
@@ -212,7 +263,7 @@ impl<K, V> OrderedAssociated<K, V> {
     }
 
     /// Returns the ordered keys as an [`Ordered`] reference.
-    pub fn keys(&self) -> &Ordered<K> {
+    pub const fn keys(&self) -> &Ordered<K> {
         &self.keys
     }
 
@@ -234,9 +285,23 @@ impl<K, V> OrderedAssociated<K, V> {
         self.position(key).and_then(|index| self.values.get(index))
     }
 
+    /// Returns a mutable reference to the associated value for `key`, if it exists.
+    pub fn get_value_mut(&mut self, key: &K) -> Option<&mut V>
+    where
+        K: Ord,
+    {
+        self.position(key)
+            .and_then(|index| self.values.get_mut(index))
+    }
+
     /// Returns the associated values.
     pub fn values(&self) -> &[V] {
         &self.values
+    }
+
+    /// Returns a mutable reference to the associated values
+    pub fn values_mut(&mut self) -> &mut [V] {
+        &mut self.values
     }
 
     /// Returns a zipped iterator over keys and values.
@@ -740,6 +805,15 @@ mod test {
             .collect();
         let keys = map.into_keys();
         assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_values_mut() {
+        let mut map: OrderedAssociated<u8, u8> = [(1, 10), (2, 20)].into_iter().collect();
+        for value in map.values_mut() {
+            *value += 1;
+        }
+        assert_eq!(map.values(), &[11, 21]);
     }
 
     #[test]

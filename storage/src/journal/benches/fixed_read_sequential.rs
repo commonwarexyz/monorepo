@@ -5,8 +5,9 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::contiguous::fixed::Journal;
 use commonware_utils::{sequence::FixedBytes, NZU64};
-use criterion::{black_box, criterion_group, Criterion};
+use criterion::{criterion_group, Criterion};
 use std::{
+    hint::black_box,
     num::NonZeroU64,
     time::{Duration, Instant},
 };
@@ -40,7 +41,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                     let mut j = get_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
                     append_random_data::<ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size().await;
+                    let sz = j.size();
                     assert_eq!(sz, items);
 
                     // Run the benchmark

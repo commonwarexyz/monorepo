@@ -5,7 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::variable::{Any, Config},
+        any::{unordered::variable::Any, AnyDb as _, VariableConfig as Config},
+        store::Db as _,
         verify_proof,
     },
     mmr::{self, hasher::Standard, MAX_LOCATION},
@@ -36,12 +37,6 @@ enum Operation {
     Get {
         key: [u8; 32],
     },
-    GetLoc {
-        loc_offset: u32,
-    },
-    GetKeyLoc {
-        key: [u8; 32],
-    },
     GetMetadata,
     Proof {
         start_loc: Location,
@@ -53,21 +48,18 @@ enum Operation {
         max_ops: NonZeroU64,
     },
     Sync,
-    OldestRetainedLoc,
     InactivityFloorLoc,
     OpCount,
     Root,
     SimulateFailure {
         sync_log: bool,
-        sync_mmr: bool,
-        write_limit: u8,
     },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 17 {
+        match choice % 14 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -95,23 +87,15 @@ impl<'a> Arbitrary<'a> for Operation {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
             }
-            5 => {
-                let loc_offset = u.arbitrary()?;
-                Ok(Operation::GetLoc { loc_offset })
-            }
+            5 => Ok(Operation::GetMetadata),
             6 => {
-                let key = u.arbitrary()?;
-                Ok(Operation::GetKeyLoc { key })
-            }
-            7 => Ok(Operation::GetMetadata),
-            8 => {
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
             }
-            9 => {
+            7 => {
                 let size = u.arbitrary()?;
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
@@ -123,20 +107,13 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            10 => Ok(Operation::Sync),
-            11 => Ok(Operation::OldestRetainedLoc),
-            12 => Ok(Operation::InactivityFloorLoc),
-            13 => Ok(Operation::OpCount),
-            14 => Ok(Operation::Root),
-            15 | 16 => {
+            8 => Ok(Operation::Sync),
+            9 => Ok(Operation::InactivityFloorLoc),
+            10 => Ok(Operation::OpCount),
+            11 => Ok(Operation::Root),
+            12 | 13 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_mmr: bool = u.arbitrary()?;
-                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                })
+                Ok(Operation::SimulateFailure { sync_log })
             }
             _ => unreachable!(),
         }
@@ -167,7 +144,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
         log_partition: format!("{test_name}_log"),
-        log_items_per_section: NZU64!(3),
+        log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=100000).into(), ()),
@@ -216,7 +193,7 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    historical_roots.insert(db.op_count(), db.root(&mut hasher));
+                    historical_roots.insert(db.op_count(), db.root());
                     has_uncommitted = false;
                 }
 
@@ -230,28 +207,13 @@ fn fuzz(input: FuzzInput) {
                     let _ = db.get(&Key::new(*key)).await;
                 }
 
-                Operation::GetLoc { loc_offset } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 {
-                        let loc = *loc_offset as u64 % *op_count;
-                        let loc = Location::new(loc).unwrap();
-                        let _ = db.get_loc(loc).await;
-                    }
-                }
-
-                Operation::GetKeyLoc { key } => {
-                    let _ = db.get_key_loc(&Key::new(*key)).await;
-                }
-
                 Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
                     let op_count = db.op_count();
-                    let oldest_retained_loc = db
-                        .oldest_retained_loc()
-                        .unwrap_or(Location::new(0).unwrap());
+                    let oldest_retained_loc = db.inactivity_floor_loc();
                     if op_count > 0 && !has_uncommitted {
                         if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
                             continue;
@@ -259,7 +221,7 @@ fn fuzz(input: FuzzInput) {
 
                         db.sync().await.expect("Sync should not fail");
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
@@ -292,10 +254,6 @@ fn fuzz(input: FuzzInput) {
                     db.sync().await.expect("Sync should not fail");
                 }
 
-                Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
-                }
-
                 Operation::InactivityFloorLoc => {
                     let _ = db.inactivity_floor_loc();
                 }
@@ -306,17 +264,12 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let mut hasher = Standard::<Sha256>::new();
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
 
-                Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                } => {
-                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                Operation::SimulateFailure { sync_log } => {
+                    db.simulate_failure(*sync_log)
                         .await
                         .expect("Simulate failure should not fail");
 

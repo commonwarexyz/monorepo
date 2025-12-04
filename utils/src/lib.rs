@@ -10,7 +10,7 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use core::{
@@ -20,6 +20,10 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
+#[cfg(feature = "std")]
+pub mod acknowledgement;
+#[cfg(feature = "std")]
+pub use acknowledgement::Acknowledgement;
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
@@ -48,6 +52,9 @@ pub use stable_buf::StableBuf;
 #[cfg(feature = "std")]
 pub mod concurrency;
 
+/// Alias for boxed errors that are `Send` and `Sync`.
+pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
+
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
@@ -75,7 +82,7 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
 }
 
 #[inline]
-fn decode_hex_digit(byte: u8) -> Option<u8> {
+const fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -94,7 +101,7 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
 
 /// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
 /// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
-pub fn max_faults(n: u32) -> u32 {
+pub const fn max_faults(n: u32) -> u32 {
     n.saturating_sub(1) / 3
 }
 
@@ -230,7 +237,7 @@ impl NonZeroDuration {
     }
 
     /// Returns the wrapped `Duration`.
-    pub fn get(self) -> Duration {
+    pub const fn get(self) -> Duration {
         self.0
     }
 }
@@ -255,6 +262,7 @@ mod tests {
     use super::*;
     use num_bigint::BigUint;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rstest::rstest;
 
     #[test]
     fn test_hex() {
@@ -354,38 +362,36 @@ mod tests {
         quorum(0);
     }
 
-    #[test]
-    fn test_quorum_and_max_faults() {
-        // n, expected_f, expected_q
-        let test_cases = [
-            (1, 0, 1),
-            (2, 0, 2),
-            (3, 0, 3),
-            (4, 1, 3),
-            (5, 1, 4),
-            (6, 1, 5),
-            (7, 2, 5),
-            (8, 2, 6),
-            (9, 2, 7),
-            (10, 3, 7),
-            (11, 3, 8),
-            (12, 3, 9),
-            (13, 4, 9),
-            (14, 4, 10),
-            (15, 4, 11),
-            (16, 5, 11),
-            (17, 5, 12),
-            (18, 5, 13),
-            (19, 6, 13),
-            (20, 6, 14),
-            (21, 6, 15),
-        ];
-
-        for (n, ef, eq) in test_cases {
-            assert_eq!(max_faults(n), ef);
-            assert_eq!(quorum(n), eq);
-            assert_eq!(n, ef + eq);
-        }
+    #[rstest]
+    #[case(1, 0, 1)]
+    #[case(2, 0, 2)]
+    #[case(3, 0, 3)]
+    #[case(4, 1, 3)]
+    #[case(5, 1, 4)]
+    #[case(6, 1, 5)]
+    #[case(7, 2, 5)]
+    #[case(8, 2, 6)]
+    #[case(9, 2, 7)]
+    #[case(10, 3, 7)]
+    #[case(11, 3, 8)]
+    #[case(12, 3, 9)]
+    #[case(13, 4, 9)]
+    #[case(14, 4, 10)]
+    #[case(15, 4, 11)]
+    #[case(16, 5, 11)]
+    #[case(17, 5, 12)]
+    #[case(18, 5, 13)]
+    #[case(19, 6, 13)]
+    #[case(20, 6, 14)]
+    #[case(21, 6, 15)]
+    fn test_quorum_and_max_faults(
+        #[case] n: u32,
+        #[case] expected_f: u32,
+        #[case] expected_q: u32,
+    ) {
+        assert_eq!(max_faults(n), expected_f);
+        assert_eq!(quorum(n), expected_q);
+        assert_eq!(n, expected_f + expected_q);
     }
 
     #[test]

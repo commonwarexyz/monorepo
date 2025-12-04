@@ -162,7 +162,7 @@ pub mod player;
 pub use player::Player;
 pub mod types;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum Error {
     #[error("unexpected polynomial")]
     UnexpectedPolynomial,
@@ -227,7 +227,10 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{
+        quorum,
+        set::{Ordered, OrderedQuorum},
+    };
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
@@ -406,11 +409,7 @@ mod tests {
         );
 
         // Send misdirected share to player
-        let result = player.share(
-            contributors[0].clone(),
-            commitment.clone(),
-            shares[1].clone(),
-        );
+        let result = player.share(contributors[0].clone(), commitment, shares[1].clone());
         assert!(matches!(result, Err(Error::MisdirectedShare)));
     }
 
@@ -444,8 +443,7 @@ mod tests {
         assert!(matches!(result, Err(Error::DealerInvalid)));
 
         // Create arbiter
-        let mut arb =
-            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+        let mut arb = Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors, 1);
 
         // Send commitment from invalid dealer
         let result = arb.commitment(dealer, commitment, vec![0, 1, 2, 3], Vec::new());
@@ -700,7 +698,7 @@ mod tests {
             Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
 
         // Disqualify dealer
-        arb.disqualify(contributors[0].clone());
+        arb.disqualify(contributors[0].clone()).unwrap();
 
         // Add valid commitment to arbiter after disqualified
         let result = arb.commitment(
@@ -710,6 +708,43 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(result, Err(Error::DealerDisqualified)));
+    }
+
+    #[test]
+    fn test_disqualify_unknown() {
+        // Initialize test
+        let n = 5;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create contributors (must be in sorted order)
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Ordered<_>>();
+
+        // Create arbiter
+        let mut arb =
+            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Create a unknown public key
+        let unknown = PrivateKey::from_seed(n as u64).public_key();
+
+        // Disqualifying an unknown public key should be ignored
+        assert_eq!(arb.disqualify(unknown).unwrap_err(), Error::DealerInvalid);
+
+        // Add commitments from all dealers
+        for con in &contributors {
+            let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+            arb.commitment(con.clone(), commitment, vec![0, 1, 2, 3, 4], Vec::new())
+                .unwrap();
+        }
+
+        // Finalize should not panic
+        let (result, disqualified) = arb.finalize();
+        result.expect("finalize should succeed");
+        assert!(
+            disqualified.is_empty(),
+            "unknown public key should not be in disqualified set"
+        );
     }
 
     #[test]
@@ -1003,7 +1038,7 @@ mod tests {
             .collect::<Ordered<_>>();
 
         // Create dealer
-        let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
 
         // Ack invalid player
         let player = PrivateKey::from_seed(n as u64).public_key();
@@ -1045,8 +1080,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
@@ -1087,7 +1121,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::MissingShare)));
@@ -1163,8 +1197,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[1].clone());
@@ -1248,8 +1281,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         let mut share = shares[1].clone();
@@ -1293,8 +1325,7 @@ mod tests {
 
         // Finalize player with equivocating reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
 
         // Add commitments
@@ -1344,7 +1375,7 @@ mod tests {
 
         // Finalize player with equivocating reveal
         let last = (q - 1) as u32;
-        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
 
         // Finalize player with equivocating reveal
@@ -1430,12 +1461,13 @@ mod tests {
                     "round {round_idx} must include at least one player",
                 );
                 let player_set = participants(&round.players);
-                let dealer_candidates = if let Some(ref registry) = share_holders {
-                    registry.clone()
-                } else {
-                    // If no previous share holders, use all players as dealers
-                    player_set.clone()
-                };
+                let dealer_candidates = share_holders.as_ref().map_or_else(
+                    || {
+                        // If no previous share holders, use all players as dealers
+                        player_set.clone()
+                    },
+                    |registry| registry.clone(),
+                );
                 assert!(
                     !dealer_candidates.is_empty(),
                     "round {round_idx} must have at least one dealer",
@@ -1449,17 +1481,18 @@ mod tests {
                         "round {round_idx} absent dealer not in committee"
                     );
                 }
-                let dealer_registry = if let Some(ref registry) = share_holders {
-                    for dealer in dealer_candidates.iter() {
-                        assert!(
-                            registry.position(dealer).is_some(),
-                            "round {round_idx} dealer not in previous committee",
-                        );
-                    }
-                    registry.clone()
-                } else {
-                    dealer_candidates.clone()
-                };
+                let dealer_registry = share_holders.as_ref().map_or_else(
+                    || dealer_candidates.clone(),
+                    |registry| {
+                        for dealer in dealer_candidates.iter() {
+                            assert!(
+                                registry.position(dealer).is_some(),
+                                "round {round_idx} dealer not in previous committee",
+                            );
+                        }
+                        registry.clone()
+                    },
+                );
                 let mut active_dealers = Vec::new();
                 for dealer in dealer_candidates.iter() {
                     if absent_dealers.position(dealer).is_some() {
@@ -1468,10 +1501,10 @@ mod tests {
                     active_dealers.push(dealer.clone());
                 }
                 let active_len = active_dealers.len();
-                let min_dealers = match current_public.as_ref() {
-                    None => quorum(player_set.len() as u32),
-                    Some(previous) => previous.required(),
-                } as usize;
+                let min_dealers = current_public
+                    .as_ref()
+                    .map_or_else(|| player_set.quorum(), |previous| previous.required())
+                    as usize;
                 assert!(
                     active_len >= min_dealers,
                     "round {} requires at least {} active dealers for {} players, got {}",
@@ -1616,7 +1649,7 @@ mod tests {
                         "reveals present for unselected dealer {dealer_idx} in round {round_idx}",
                     );
                 }
-                let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
+                let expected_commitments = dealer_registry.quorum() as usize;
                 assert_eq!(
                     output.commitments.len(),
                     expected_commitments,
@@ -1650,7 +1683,7 @@ mod tests {
                 }
 
                 // Check recovered shares by constructing a proof-of-possession
-                let threshold = quorum(player_set.len() as u32);
+                let threshold = player_set.quorum();
                 let partials = round_results
                     .iter()
                     .map(|res| partial_sign_proof_of_possession::<V>(&res.public, &res.share))

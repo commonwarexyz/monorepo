@@ -1,7 +1,7 @@
 use super::types::{Activity, Context};
 use crate::{
     simplex::signing_scheme::Scheme,
-    types::{Epoch, View},
+    types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -85,20 +85,17 @@ pub struct Config<
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
-    pub activity_timeout: View,
+    pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many views.
+    /// for this many recent known views (we ignore views we don't have data for).
     ///
     /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking).
-    pub skip_timeout: View,
+    /// many views we are tracking below the finalized tip).
+    pub skip_timeout: ViewDelta,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
-
-    /// Maximum number of notarizations/nullifications to request/respond with at once.
-    pub max_fetch_count: usize,
 
     /// Maximum rate of requests to send to a given peer.
     ///
@@ -142,11 +139,11 @@ impl<
             "nullify retry broadcast must be greater than zero"
         );
         assert!(
-            self.activity_timeout > 0,
+            !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
         );
         assert!(
-            self.skip_timeout > 0,
+            !self.skip_timeout.is_zero(),
             "skip timeout must be greater than zero"
         );
         assert!(
@@ -156,10 +153,6 @@ impl<
         assert!(
             self.fetch_timeout > Duration::default(),
             "fetch timeout must be greater than zero"
-        );
-        assert!(
-            self.max_fetch_count > 0,
-            "it must be possible to fetch at least one container per request"
         );
         assert!(
             self.fetch_concurrent > 0,

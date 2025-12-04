@@ -98,10 +98,8 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
-                activity_timeout: cfg.activity_timeout,
-                fetch_timeout: cfg.fetch_timeout,
                 fetch_concurrent: cfg.fetch_concurrent,
-                max_fetch_count: cfg.max_fetch_count,
+                fetch_timeout: cfg.fetch_timeout,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
@@ -124,52 +122,88 @@ impl<
     /// Start the `simplex` consensus engine.
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
+    ///
+    /// # Network Channels
+    ///
+    /// The engine requires three separate network channels, each carrying votes or
+    /// certificates to help drive the consensus engine.
+    ///
+    /// ## `vote_network`
+    ///
+    /// Carries **individual votes**:
+    /// - [`Notarize`](super::types::Notarize): Vote to notarize a proposal
+    /// - [`Nullify`](super::types::Nullify): Vote to skip a view
+    /// - [`Finalize`](super::types::Finalize): Vote to finalize a notarized proposal
+    ///
+    /// These messages are sent to the batcher, which performs batch signature
+    /// verification before forwarding valid votes to the voter for aggregation.
+    ///
+    /// ## `certificate_network`
+    ///
+    /// Carries **certificates**:
+    /// - [`Notarization`](super::types::Notarization): Proof that a proposal was notarized
+    /// - [`Nullification`](super::types::Nullification): Proof that a view was skipped
+    /// - [`Finalization`](super::types::Finalization): Proof that a proposal was finalized
+    ///
+    /// Certificates are broadcast on this channel as soon as they are constructed
+    /// from collected votes. We separate this from the `vote_network` to optimistically
+    /// allow for certificate processing to short-circuit vote processing (if we receive
+    /// a certificate before processing pending votes, we can skip them).
+    ///
+    /// ## `resolver_network`
+    ///
+    /// Used for request-response certificate fetching. When a node needs to
+    /// catch up on a view it missed (e.g., to verify a proposal's parent), it
+    /// uses this channel to request certificates from peers. The resolver handles
+    /// rate limiting, retries, and peer selection for these requests.
     pub fn start(
         mut self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending_network, recovered_network, resolver_network)
+            self.run(vote_network, certificate_network, resolver_network)
                 .await
         )
     }
 
     async fn run(
         self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Start the batcher
-        let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
+        // Start the batcher (receives votes via vote_network, certificates via certificate_network)
+        // Batcher sends proposals/certificates to voter via voter_mailbox
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
+        let mut batcher_task = self.batcher.start(
+            self.voter_mailbox.clone(),
+            vote_receiver,
+            certificate_receiver,
+        );
 
-        // Start the resolver
+        // Start the resolver (sends certificates to voter via voter_mailbox)
         let (resolver_sender, resolver_receiver) = resolver_network;
         let mut resolver_task =
             self.resolver
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Start the voter
-        let (recovered_sender, recovered_receiver) = recovered_network;
         let mut voter_task = self.voter.start(
             self.batcher_mailbox,
             self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
+            vote_sender,
+            certificate_sender,
         );
 
         // Wait for the resolver or voter to finish
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
-                debug!("shutdown");
+                debug!("context shutdown, stopping engine");
             },
             _ = &mut voter_task => {
                 panic!("voter should not finish");

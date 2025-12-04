@@ -253,6 +253,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
+    use rstest::rstest;
 
     fn key(i: u64) -> PublicKey {
         PrivateKey::from_seed(i).public_key()
@@ -419,63 +420,32 @@ mod tests {
         assert_eq!(safe_tip.tips, initial_tips);
     }
 
-    #[test]
-    fn test_edge_cases_for_f() {
-        struct TestCase {
-            n: usize,
-            f: usize,
-            description: &'static str,
-        }
+    #[rstest]
+    #[case::single_validator_no_faults_possible(1, 0)]
+    #[case::two_validators_no_faults_possible(2, 0)]
+    #[case::three_validators_no_faults_possible(3, 0)]
+    #[case::four_validators_one_fault_possible(4, 1)]
+    #[case::seven_validators_two_faults_possible(7, 2)]
+    fn test_edge_cases_for_f(#[case] n: usize, #[case] f: usize) {
+        let (mut safe_tip, validators) = setup_safe_tip(n);
 
-        let test_cases = [
-            TestCase {
-                n: 1,
-                f: 0,
-                description: "single validator, no faults possible",
-            },
-            TestCase {
-                n: 2,
-                f: 0,
-                description: "two validators, no faults possible",
-            },
-            TestCase {
-                n: 3,
-                f: 0,
-                description: "three validators, no faults possible",
-            },
-            TestCase {
-                n: 4,
-                f: 1,
-                description: "four validators, 1 fault possible",
-            },
-            TestCase {
-                n: 7,
-                f: 2,
-                description: "seven validators, 2 faults possible",
-            },
-        ];
+        // Initial state checks
+        assert_eq!(safe_tip.get(), 0);
 
-        for case in test_cases {
-            let (mut safe_tip, validators) = setup_safe_tip(case.n);
+        if f == 0 {
+            assert_eq!(safe_tip.hi.len(), 0,);
+            assert_eq!(safe_tip.lo.len(), 1,);
 
-            // Initial state checks
-            assert_eq!(safe_tip.get(), 0, "Failed for {}", case.description);
+            // When f=0, updates should immediately change safe tip
+            safe_tip.update(validators[0].clone(), 10);
+            assert_eq!(safe_tip.get(), 10,);
+        } else {
+            assert_eq!(safe_tip.hi.len(), 1,);
+            assert_eq!(safe_tip.lo.len(), 1,);
 
-            if case.f == 0 {
-                assert_eq!(safe_tip.hi.len(), 0,);
-                assert_eq!(safe_tip.lo.len(), 1,);
-
-                // When f=0, updates should immediately change safe tip
-                safe_tip.update(validators[0].clone(), 10);
-                assert_eq!(safe_tip.get(), 10,);
-            } else {
-                assert_eq!(safe_tip.hi.len(), 1,);
-                assert_eq!(safe_tip.lo.len(), 1,);
-
-                if case.n == 7 && case.f == 2 {
-                    assert_eq!(safe_tip.hi.get(&0), Some(&2),);
-                    assert_eq!(safe_tip.lo.get(&0), Some(&5),);
-                }
+            if n == 7 && f == 2 {
+                assert_eq!(safe_tip.hi.get(&0), Some(&2),);
+                assert_eq!(safe_tip.lo.get(&0), Some(&5),);
             }
         }
     }

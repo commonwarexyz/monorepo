@@ -5,7 +5,7 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Manager, Receiver, Sender};
+use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
@@ -14,12 +14,15 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P: PublicKey, C: Manager<PublicKey = P>> {
+pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey = P>> {
     /// The public key to identify this node.
     pub public_key: P,
 
     /// The provider of peers that can be consulted for fetching data.
     pub manager: C,
+
+    /// The blocker that will be used to block peers that send invalid responses.
+    pub blocker: B,
 
     /// The size of the request mailbox backlog.
     pub mailbox_size: usize,
@@ -38,9 +41,9 @@ pub struct Config<P: PublicKey, C: Manager<PublicKey = P>> {
 }
 
 /// Initialize a P2P resolver.
-pub fn init<E, C, B, S, R, P>(
+pub fn init<E, C, Bl, B, S, R, P>(
     ctx: &E,
-    config: Config<P, C>,
+    config: Config<P, C, Bl>,
     backfill: (S, R),
 ) -> (
     mpsc::Receiver<handler::Message<B>>,
@@ -49,6 +52,7 @@ pub fn init<E, C, B, S, R, P>(
 where
     E: Rng + Spawner + Clock + GClock + Metrics,
     C: Manager<PublicKey = P>,
+    Bl: Blocker<PublicKey = P>,
     B: Block,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
@@ -60,6 +64,7 @@ where
         ctx.with_label("resolver"),
         p2p::Config {
             manager: config.manager,
+            blocker: config.blocker,
             consumer: handler.clone(),
             producer: handler,
             mailbox_size: config.mailbox_size,

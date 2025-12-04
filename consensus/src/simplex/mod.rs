@@ -43,9 +43,6 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
@@ -130,6 +127,25 @@
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
+//! ### Fetching Missing Certificates
+//!
+//! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
+//! nullifications for all views from the last notarized/finalized view to the current view. This technique, however,
+//! is not sufficient to guarantee progress.
+//!
+//! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
+//! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
+//! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
+//!
+//! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
+//! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
+//!
+//! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
+//! notarization/finalization certificate after nullification, it would impose significant overhead under normal network
+//! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
+//! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
+//! be observed following severe network degradation)._
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
@@ -207,12 +223,12 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 pub mod mocks;
 
-use crate::types::{Round, View};
+use crate::types::{Round, View, ViewDelta};
 use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
+pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 
@@ -220,7 +236,7 @@ pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
 /// of both `min_active` and whether or not the view is too far
 /// in the future (based on the view we are currently in).
 pub(crate) fn interesting(
-    activity_timeout: View,
+    activity_timeout: ViewDelta,
     last_finalized: View,
     current: View,
     pending: View,
@@ -229,7 +245,7 @@ pub(crate) fn interesting(
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
-    if !allow_future && pending > current + 1 {
+    if !allow_future && pending > current.next() {
         return false;
     }
     true
@@ -256,11 +272,10 @@ where
         !participants.is_empty(),
         "no participants to select leader from"
     );
-    let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
-    } else {
-        (round.epoch().wrapping_add(round.view())) as usize % participants.len()
-    };
+    let idx = seed.map_or_else(
+        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
+        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
+    );
     let leader = participants[idx].clone();
 
     (leader, idx as u32)
@@ -271,39 +286,70 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            signing_scheme::seed_namespace,
+            mocks::{
+                fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
+                twins::Strategy,
+            },
+            signing_scheme::bls12381_threshold::Seedable,
+            types::{
+                Certificate, Finalization as TFinalization, Finalize as TFinalize,
+                Notarization as TNotarization, Notarize as TNotarize,
+                Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
+            },
         },
-        types::Round,
-        Monitor,
+        types::{Epoch, Round},
+        Monitor, Viewable,
     };
-    use commonware_codec::Encode;
+    use bytes::Bytes;
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
-        bls12381::{
-            primitives::variant::{MinPk, MinSig, Variant},
-            tle::{decrypt, encrypt, Block},
-        },
-        ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        ed25519,
+        sha256::Digest as D,
+        Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
-    use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
+    use commonware_macros::{select, test_group, test_traced};
+    use commonware_p2p::{
+        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
+        Recipients, Sender as _,
+    };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZUsize, NZU32};
+    use commonware_utils::{max_faults, quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, warn};
+    use tracing::{debug, info, warn};
     use types::Activity;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    /// Register a validator with the oracle.
+    async fn register_validator<P: PublicKey>(
+        oracle: &mut Oracle<P>,
+        validator: P,
+    ) -> (
+        (Sender<P>, Receiver<P>),
+        (Sender<P>, Receiver<P>),
+        (Sender<P>, Receiver<P>),
+    ) {
+        let mut control = oracle.control(validator.clone());
+        let (vote_sender, vote_receiver) = control.register(0).await.unwrap();
+        let (certificate_sender, certificate_receiver) = control.register(1).await.unwrap();
+        let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
+        (
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
+            (resolver_sender, resolver_receiver),
+        )
+    }
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: PublicKey>(
@@ -319,18 +365,8 @@ mod tests {
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let mut control = oracle.control(validator.clone());
-            let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
-            let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
-            registrations.insert(
-                validator.clone(),
-                (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
-                    (resolver_sender, resolver_receiver),
-                ),
-            );
+            let registration = register_validator(oracle, validator.clone()).await;
+            registrations.insert(validator.clone(), registration);
         }
         registrations
     }
@@ -396,10 +432,10 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let quorum = quorum(n) as usize;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -470,7 +506,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -478,9 +514,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -507,7 +542,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check reporters for correct activity
-            let latest_complete = required_containers - activity_timeout;
+            let latest_complete = required_containers.saturating_sub(activity_timeout);
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
@@ -524,7 +559,7 @@ mod tests {
                 // Ensure seeds for all views
                 {
                     let seeds = reporter.seeds.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure seed for every view
                         if !seeds.contains_key(&view) {
                             panic!("view: {view}");
@@ -537,7 +572,7 @@ mod tests {
                 let mut finalized = HashMap::new();
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
                             continue;
@@ -548,7 +583,7 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < quorum as usize {
+                        if notarizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -557,7 +592,7 @@ mod tests {
                 }
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
                             continue;
@@ -570,7 +605,7 @@ mod tests {
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
                             continue;
@@ -587,7 +622,7 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < quorum as usize {
+                        if finalizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -609,7 +644,7 @@ mod tests {
                 }
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
                             continue;
@@ -644,9 +679,9 @@ mod tests {
     {
         // Create context
         let n_active = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -734,7 +769,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -742,9 +777,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -805,9 +839,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -893,7 +927,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -901,9 +935,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -930,7 +963,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -962,12 +995,12 @@ mod tests {
                 result
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(60))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             // Check if we should exit
             if complete {
@@ -978,6 +1011,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
@@ -994,9 +1028,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(720));
         executor.start(|mut context| async move {
@@ -1078,7 +1112,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1086,9 +1120,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1, // force many fetches
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(4)),
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1197,7 +1230,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: me.to_string(),
                 mailbox_size: 1024,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1205,9 +1238,8 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1248,10 +1280,10 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let quorum = quorum(n) as usize;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1334,7 +1366,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1342,9 +1374,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1434,7 +1465,7 @@ mod tests {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
-                        if nullifies < quorum as usize {
+                        if nullifies < quorum {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }
@@ -1465,7 +1496,7 @@ mod tests {
             let mut skipped_views = 0;
             let mut nodes_skipping = 0;
             for line in lines {
-                if line.contains("_engine_voter_skipped_views_total") {
+                if line.contains("_skipped_views_total") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let Some(number_str) = parts.last() {
                         if let Ok(number) = number_str.parse::<u64>() {
@@ -1507,9 +1538,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -1590,7 +1621,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1598,9 +1629,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1641,27 +1671,31 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
+                // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
+                let mut observed = false;
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
+                    for (_, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
+                    for (_, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
+                assert!(observed);
             }
 
             // Ensure no blocked connections
@@ -1686,9 +1720,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 2;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(2);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|mut context| async move {
@@ -1759,7 +1793,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1767,9 +1801,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1809,7 +1842,7 @@ mod tests {
             context.sleep(Duration::from_secs(60)).await;
 
             // Get latest view
-            let mut latest = 0;
+            let mut latest = View::zero();
             for reporter in reporters.iter() {
                 let nullifies = reporter.nullifies.lock().unwrap();
                 let max = nullifies.keys().max().unwrap();
@@ -1860,12 +1893,15 @@ mod tests {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for i in latest..latest + activity_timeout {
-                        if finalizations.contains_key(&i) {
+                    for view in View::range(latest, latest.saturating_add(activity_timeout)) {
+                        if finalizations.contains_key(&view) {
                             found += 1;
                         }
                     }
-                    assert!(found >= activity_timeout - 2, "found: {found}");
+                    assert!(
+                        found >= activity_timeout.get().saturating_sub(2),
+                        "found: {found}"
+                    );
                 }
             }
 
@@ -1891,9 +1927,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -1964,7 +2000,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1972,9 +2008,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2042,7 +2077,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                let required = latest + required_containers;
+                let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
                         latest = monitor.next().await.expect("event missing");
@@ -2072,8 +2107,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_partition() {
         partition(bls12381_threshold::<MinPk, _>);
         partition(bls12381_threshold::<MinSig, _>);
@@ -2089,9 +2124,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2171,7 +2206,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2179,9 +2214,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2239,8 +2273,8 @@ mod tests {
         slow_and_lossy_links(0, ed25519);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -2278,7 +2312,7 @@ mod tests {
                 assert_ne!(
                     pair[0].1, pair[1].1,
                     "state {} equals state {}",
-                    pair[0].0, pair[0].0
+                    pair[0].0, pair[1].0
                 );
             }
         }
@@ -2291,9 +2325,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2382,7 +2416,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2390,9 +2424,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2456,8 +2489,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
             conflicter(seed, bls12381_threshold::<MinPk, _>);
@@ -2475,9 +2508,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2557,7 +2590,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: engine_namespace,
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2565,9 +2598,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2623,8 +2655,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_invalid() {
         for seed in 0..5 {
             invalid(seed, bls12381_threshold::<MinPk, _>);
@@ -2642,9 +2674,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2733,7 +2765,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2741,9 +2773,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2791,8 +2822,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_impersonator() {
         for seed in 0..5 {
             impersonator(seed, bls12381_threshold::<MinPk, _>);
@@ -2803,6 +2834,250 @@ mod tests {
         }
     }
 
+    fn equivocator<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 7;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Create engines
+            let mut engines = Vec::new();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", *validator));
+
+                // Start engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone().into(),
+                    scheme: schemes[idx_scheme].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::equivocator::Config {
+                        namespace: namespace.clone(),
+                        scheme: schemes[idx_scheme].clone(),
+                        epoch: Epoch::new(333),
+                        relay: relay.clone(),
+                        hasher: Sha256::default(),
+                    };
+
+                    let engine: mocks::equivocator::Equivocator<_, _, Sha256> =
+                        mocks::equivocator::Equivocator::new(
+                            context.with_label("byzantine_engine"),
+                            cfg,
+                        );
+                    engines.push(engine.start(pending, recovered));
+                } else {
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx_scheme].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engines.push(engine.start(pending, recovered, resolver));
+                }
+            }
+
+            // Wait for all engines to hit required containers
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut().skip(1) {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Abort a validator
+            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let validator = &participants[idx];
+            let handle = engines.remove(idx);
+            handle.abort();
+            let _ = handle.await;
+            reporters.remove(idx);
+            info!(idx, ?validator, "aborted validator");
+
+            // Wait for all engines to hit required containers
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut().skip(1) {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < View::new(required_containers.get() * 2) {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Recreate engine
+            info!(idx, ?validator, "restarting validator");
+            let context = context.with_label(&format!("validator-{}-restarted", *validator));
+
+            // Start engine
+            let reporter_config = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[idx].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let (pending, recovered, resolver) =
+                register_validator(&mut oracle, validator.clone()).await;
+            reporters.push(reporter.clone());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let blocker = oracle.control(validator.clone());
+            let cfg = config::Config {
+                scheme: schemes[idx].clone(),
+                blocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: validator.to_string(),
+                mailbox_size: 1024,
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                fetch_concurrent: 4,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let engine = Engine::new(context.with_label("engine"), cfg);
+            engine.start(pending, recovered, resolver);
+
+            // Wait for all engines to hit required containers
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut().skip(1) {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < View::new(required_containers.get() * 3) {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Ensure equivocator is blocked (we aren't guaranteed a fault will be produced
+            // because it may not be possible to extract a conflicting vote from the certificate
+            // we receive)
+            let byz = &participants[0];
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator() {
+        for seed in 0..5 {
+            equivocator(seed, bls12381_threshold::<MinPk, _>);
+            equivocator(seed, bls12381_threshold::<MinSig, _>);
+            equivocator(seed, bls12381_multisig::<MinPk, _>);
+            equivocator(seed, bls12381_multisig::<MinSig, _>);
+            equivocator(seed, ed25519);
+        }
+    }
+
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
@@ -2810,9 +3085,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2900,7 +3175,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2908,9 +3183,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2958,8 +3232,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_reconfigurer() {
         for seed in 0..5 {
             reconfigurer(seed, bls12381_threshold::<MinPk, _>);
@@ -2977,9 +3251,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3064,7 +3338,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3072,9 +3346,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3135,8 +3408,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
             nuller(seed, bls12381_threshold::<MinPk, _>);
@@ -3154,9 +3427,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3214,7 +3487,7 @@ mod tests {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
-                        view_delta: activity_timeout * 4,
+                        view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
@@ -3242,7 +3515,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3250,9 +3523,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3295,8 +3567,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
             outdated(seed, bls12381_threshold::<MinPk, _>);
@@ -3314,9 +3586,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 1_000;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(1_000);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -3388,7 +3660,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3396,9 +3668,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3445,37 +3716,37 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_bls12381_threshold_min_pk() {
         run_1k(bls12381_threshold::<MinPk, _>);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_bls12381_threshold_min_sig() {
         run_1k(bls12381_threshold::<MinSig, _>);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_bls12381_multisig_min_pk() {
         run_1k(bls12381_multisig::<MinPk, _>);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_bls12381_multisig_min_sig() {
         run_1k(bls12381_multisig::<MinSig, _>);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_ed25519() {
         run_1k(ed25519);
     }
 
-    fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
+    fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -3544,17 +3815,16 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_millis(50),
                 notarization_timeout: Duration::from_millis(100),
                 nullify_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
-                activity_timeout: 4,
-                skip_timeout: 2,
-                max_fetch_count: 1,
+                activity_timeout: ViewDelta::new(4),
+                skip_timeout: ViewDelta::new(2),
                 fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3589,14 +3859,23 @@ mod tests {
             context.sleep(Duration::from_millis(1000)).await;
             assert!(is_running("engine"));
 
-            // Abort engine and ensure children stop
-            handle.abort();
-            let _ = handle.await; // ensure parent tear-down runs
+            // Shutdown engine and ensure children stop
+            let metrics_after = if graceful {
+                let metrics_context = context.clone();
+                let result = context.stop(0, Some(Duration::from_secs(5))).await;
+                assert!(
+                    result.is_ok(),
+                    "graceful shutdown should complete: {result:?}"
+                );
+                metrics_context.encode()
+            } else {
+                handle.abort();
+                let _ = handle.await; // ensure parent tear-down runs
 
-            // Give the runtime a tick to process aborts
-            context.sleep(Duration::from_millis(1000)).await;
-
-            let metrics_after = context.encode();
+                // Give the runtime a tick to process aborts
+                context.sleep(Duration::from_millis(1000)).await;
+                context.encode()
+            };
             let is_stopped = |name: &str| -> bool {
                 // Either the gauge is 0, or the entry is absent (both imply not running)
                 metrics_after.lines().any(|line| {
@@ -3615,11 +3894,20 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        children_shutdown_on_engine_abort(bls12381_threshold::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls12381_threshold::<MinSig, _>);
-        children_shutdown_on_engine_abort(bls12381_multisig::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls12381_multisig::<MinSig, _>);
-        children_shutdown_on_engine_abort(ed25519);
+        engine_shutdown(bls12381_threshold::<MinPk, _>, false);
+        engine_shutdown(bls12381_threshold::<MinSig, _>, false);
+        engine_shutdown(bls12381_multisig::<MinPk, _>, false);
+        engine_shutdown(bls12381_multisig::<MinSig, _>, false);
+        engine_shutdown(ed25519, false);
+    }
+
+    #[test_traced]
+    fn test_graceful_shutdown() {
+        engine_shutdown(bls12381_threshold::<MinPk, _>, true);
+        engine_shutdown(bls12381_threshold::<MinSig, _>, true);
+        engine_shutdown(bls12381_multisig::<MinPk, _>, true);
+        engine_shutdown(bls12381_multisig::<MinSig, _>, true);
+        engine_shutdown(ed25519, true);
     }
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
@@ -3628,9 +3916,9 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
-        let required_containers = 10;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -3708,7 +3996,7 @@ mod tests {
                     reporter: attributable_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3716,9 +4004,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3817,12 +4104,381 @@ mod tests {
         attributable_reporter_filtering(ed25519);
     }
 
+    fn split_views_no_lockup<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Scenario:
+        // - View F: Finalization of B_1 seen by all participants.
+        // - View F+1:
+        //   - Nullification seen by honest (4..=6,7) and all 3 byzantines
+        //   - Notarization of B_2A seen by honest (1..=3)
+        // - View F+2:
+        //   - Nullification seen by honest (1..=3,7) and all 3 byzantines
+        //   - Notarization of B_2B seen by honest (4..=6)
+        // - View F+3: Nullification. Seen by all participants.
+        // - Then ensure progress resumes beyond F+3 after reconnecting
+
+        // Define participant types
+        enum ParticipantType {
+            Group1,    // receives notarization for f+1, nullification for f+2
+            Group2,    // receives nullification for f+1, notarization for f+2
+            Ignorant,  // receives nullification for f+1 and f+2
+            Byzantine, // nullify-only
+        }
+        let get_type = |idx: usize| -> ParticipantType {
+            match idx {
+                0..3 => ParticipantType::Group1,
+                3..6 => ParticipantType::Group2,
+                6 => ParticipantType::Ignorant,
+                7..10 => ParticipantType::Byzantine,
+                _ => unreachable!(),
+            }
+        };
+
+        // Create context
+        let n = 10;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 7);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // ========== Create engines ==========
+
+            // Do not link validators yet; we will inject certificates first, then link everyone.
+
+            // Create engines: 7 honest engines, 3 byzantine
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut honest_reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let participant_type = get_type(idx);
+                if matches!(participant_type, ParticipantType::Byzantine) {
+                    // Byzantine engines
+                    let cfg = mocks::nullify_only::Config {
+                        scheme: schemes[idx].clone(),
+                        namespace: namespace.clone(),
+                    };
+                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
+                        mocks::nullify_only::NullifyOnly::new(
+                            context.with_label(&format!("byzantine-{}", *validator)),
+                            cfg,
+                        );
+                    engine.start(pending);
+                    // Recovered/resolver channels are unused for byzantine actors.
+                    drop(recovered);
+                    drop(resolver);
+                } else {
+                    // Honest engines
+                    let reporter_config = mocks::reporter::Config {
+                        namespace: namespace.clone(),
+                        participants: participants.clone().into(),
+                        scheme: schemes[idx].clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label(&format!("reporter-{}", *validator)),
+                        reporter_config,
+                    );
+                    honest_reporters.push(reporter.clone());
+
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label(&format!("application-{}", *validator)),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(10),
+                        notarization_timeout: Duration::from_secs(10),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine =
+                        Engine::new(context.with_label(&format!("engine-{}", *validator)), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // ========== Build the certificates manually ==========
+
+            // Helper: assemble finalization from explicit signer indices
+            let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TFinalize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
+            };
+            // Helper: assemble notarization from explicit signer indices
+            let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TNotarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
+            };
+            let build_nullification = |round: Round| -> TNullification<_> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TNullify::sign::<D>(&schemes[i], &namespace, round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
+            };
+            // Choose F=1 and construct B_1, B_2A, B_2B
+            let f_view = 1;
+            let round_f = Round::new(Epoch::new(333), View::new(f_view));
+            let payload_b0 = Sha256::hash(b"B_F");
+            let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
+            let payload_b1a = Sha256::hash(b"B_G1");
+            let proposal_b1a = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 1)),
+                View::new(f_view),
+                payload_b1a,
+            );
+            let payload_b1b = Sha256::hash(b"B_G2");
+            let proposal_b1b = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 2)),
+                View::new(f_view),
+                payload_b1b,
+            );
+
+            // Build notarization and finalization for the first block
+            let b0_notarization = build_notarization(&proposal_b0);
+            let b0_finalization = build_finalization(&proposal_b0);
+            // Build notarizations for F+1 and F+2
+            let b1a_notarization = build_notarization(&proposal_b1a);
+            let b1b_notarization = build_notarization(&proposal_b1b);
+            // Build nullifications for F+1 and F+2
+            let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
+            let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
+
+            // Create an 11th non-participant injector and obtain senders
+            let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1)
+                .await
+                .unwrap();
+
+            // Create minimal one-way links from injector to all participants (not full mesh)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            for p in participants.iter() {
+                oracle
+                    .add_link(injector_pk.clone(), p.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            // ========== Broadcast certificates over recovered network. ==========
+
+            // Broadcasts are in reverse order of views to make the tests easier by preventing the
+            // proposer from making a proposal in F+1 or F+2, as it may panic when it proposes
+            // something but generates a certificate for a different proposal.
+
+            // View F+2:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group2 => notarization_msg.encode().into(),
+                    _ => nullification_msg.encode().into(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F+1:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group1 => notarization_msg.encode().into(),
+                    _ => nullification_msg.encode().into(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F:
+            let msg = Certificate::<_, D>::Notarization(b0_notarization)
+                .encode()
+                .into();
+            injector_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization)
+                .encode()
+                .into();
+            injector_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
+
+            // Wait for a while to let the certificates propagate, but not so long that we
+            // nullify view F+2.
+            debug!("waiting for certificates to propagate");
+            context.sleep(Duration::from_secs(5)).await;
+            debug!("certificates propagated");
+
+            // ========== Assert the exact certificates are seen in each view ==========
+
+            // Assert the exact certificates in view F
+            // All participants should have finalized B_0
+            let view = View::new(f_view);
+            for reporter in honest_reporters.iter() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(finalizations.contains_key(&view));
+            }
+
+            // Assert the exact certificates in view F+1
+            // Group 1 should have notarized B_1A only
+            // All other participants should have nullified F+1
+            let view = View::new(f_view + 1);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(!finalizations.contains_key(&view));
+                let nullifications = reporter.nullifications.lock().unwrap();
+                let notarizations = reporter.notarizations.lock().unwrap();
+                match get_type(i) {
+                    ParticipantType::Group1 => {
+                        assert!(notarizations.contains_key(&view));
+                        assert!(!nullifications.contains_key(&view));
+                    }
+                    _ => {
+                        assert!(nullifications.contains_key(&view));
+                        assert!(!notarizations.contains_key(&view));
+                    }
+                }
+            }
+
+            // Assert the exact certificates in view F+2
+            // Group 2 should have notarized B_1B only
+            // All other participants should have nullified F+2
+            let view = View::new(f_view + 2);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(!finalizations.contains_key(&view));
+                let nullifications = reporter.nullifications.lock().unwrap();
+                let notarizations = reporter.notarizations.lock().unwrap();
+                match get_type(i) {
+                    ParticipantType::Group2 => {
+                        assert!(notarizations.contains_key(&view));
+                        assert!(!nullifications.contains_key(&view));
+                    }
+                    _ => {
+                        assert!(nullifications.contains_key(&view));
+                        assert!(!notarizations.contains_key(&view));
+                    }
+                }
+            }
+
+            // Assert no members have yet nullified view F+3
+            let next_view = View::new(f_view + 3);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let nullifies = reporter.nullifies.lock().unwrap();
+                assert!(!nullifies.contains_key(&next_view), "reporter {i}");
+            }
+
+            // ========== Reconnect all participants ==========
+
+            // Reconnect all participants fully using the helper
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            // Wait until all honest reporters finalize strictly past F+2 (e.g., at least F+3)
+            {
+                let target = View::new(f_view + 3);
+                let mut finalizers = Vec::new();
+                for reporter in honest_reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("resume-finalizer").spawn(
+                        move |_| async move {
+                            while latest < target {
+                                latest = monitor.next().await.expect("event missing");
+                            }
+                        },
+                    ));
+                }
+                join_all(finalizers).await;
+            }
+
+            // Sanity checks: no faults/invalid signatures, and no peers blocked
+            for reporter in honest_reporters.iter() {
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_split_views_no_lockup() {
+        split_views_no_lockup(bls12381_threshold::<MinPk, _>);
+        split_views_no_lockup(bls12381_threshold::<MinSig, _>);
+        split_views_no_lockup(bls12381_multisig::<MinPk, _>);
+        split_views_no_lockup(bls12381_multisig::<MinSig, _>);
+        split_views_no_lockup(ed25519);
+    }
+
     fn tle<V: Variant>() {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
-        let activity_timeout = 100;
-        let skip_timeout = 50;
+        let activity_timeout = ViewDelta::new(100);
+        let skip_timeout = ViewDelta::new(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -3898,7 +4554,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
@@ -3906,9 +4562,8 @@ mod tests {
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3923,18 +4578,11 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = Round::new(333, 10); // Encrypt for view 10
-            let message_content = b"Secret message for future view10"; // 32 bytes
-            let message = Block::new(*message_content);
+            let target = Round::new(Epoch::new(333), View::new(10)); // Encrypt for round (epoch 333, view 10)
+            let message = b"Secret message for future view10"; // 32 bytes
 
-            // Encrypt message for future view using threshold public key
-            let seed_namespace = seed_namespace(&namespace);
-            let ciphertext = encrypt::<_, V>(
-                &mut context,
-                *schemes[0].identity(),
-                (Some(&seed_namespace), &target.encode()),
-                &message,
-            );
+            // Encrypt message
+            let ciphertext = schemes[0].encrypt(&mut context, &namespace, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
@@ -3946,12 +4594,13 @@ mod tests {
                     continue;
                 };
 
-                // Decrypt the message using the seed signature
-                let seed_signature = notarization.certificate.seed_signature;
-                let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
+                // Decrypt the message using the seed
+                let seed = notarization.seed();
+                let decrypted = seed
+                    .decrypt(&ciphertext)
                     .expect("Decryption should succeed with valid seed signature");
                 assert_eq!(
-                    message.as_ref(),
+                    message,
                     decrypted.as_ref(),
                     "Decrypted message should match original message"
                 );
@@ -3964,5 +4613,759 @@ mod tests {
     fn test_tle() {
         tle::<MinPk>();
         tle::<MinSig>();
+    }
+
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 5;
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new().with_seed(seed);
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = BTreeMap::new();
+            let mut engine_handlers = BTreeMap::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", *validator));
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone().into(),
+                    scheme: schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.insert(idx, reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
+            }
+
+            // Run shutdowns
+            let mut target = View::zero();
+            for i in 0..shutdowns {
+                // Update target
+                target = target.saturating_add(interval);
+
+                // Wait for all engines to finish
+                let mut finalizers = Vec::new();
+                for (_, reporter) in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < target {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+                target = target.saturating_add(interval);
+
+                // Select a random engine to shutdown
+                let idx = context.gen_range(0..engine_handlers.len());
+                let validator = &participants[idx];
+                let handle = engine_handlers.remove(&idx).unwrap();
+                handle.abort();
+                let _ = handle.await;
+                let selected_reporter = reporters.remove(&idx).unwrap();
+                info!(idx, ?validator, "shutdown validator");
+
+                // Wait for all engines to finish
+                let mut finalizers = Vec::new();
+                for (_, reporter) in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < target {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+                target = target.saturating_add(interval);
+
+                // Recreate engine
+                info!(idx, ?validator, "restarting validator");
+                let context =
+                    context.with_label(&format!("validator-{}-restarted-{}", *validator, i));
+
+                // Start engine
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                reporters.insert(idx, selected_reporter.clone());
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: selected_reporter,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
+
+                // Wait for all engines to hit required containers
+                let mut finalizers = Vec::new();
+                for (_, reporter) in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < target {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+                info!(idx, ?validator, "validator recovered");
+            }
+
+            // Check reporters for correct activity
+            let latest_complete = target.saturating_sub(activity_timeout);
+            for (_, reporter) in reporters.iter() {
+                // Ensure no faults
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure no forks
+                let mut notarized = HashMap::new();
+                let mut finalized = HashMap::new();
+                {
+                    let notarizes = reporter.notarizes.lock().unwrap();
+                    for view in View::range(View::new(1), latest_complete) {
+                        // Ensure only one payload proposed per view
+                        let Some(payloads) = notarizes.get(&view) else {
+                            continue;
+                        };
+                        if payloads.len() > 1 {
+                            panic!("view: {view}");
+                        }
+                        let (digest, _) = payloads.iter().next().unwrap();
+                        notarized.insert(view, *digest);
+                    }
+                }
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    for view in View::range(View::new(1), latest_complete) {
+                        // Ensure notarization matches digest from notarizes
+                        let Some(notarization) = notarizations.get(&view) else {
+                            continue;
+                        };
+                        let Some(digest) = notarized.get(&view) else {
+                            continue;
+                        };
+                        assert_eq!(&notarization.proposal.payload, digest);
+                    }
+                }
+                {
+                    let finalizes = reporter.finalizes.lock().unwrap();
+                    for view in View::range(View::new(1), latest_complete) {
+                        // Ensure only one payload proposed per view
+                        let Some(payloads) = finalizes.get(&view) else {
+                            continue;
+                        };
+                        if payloads.len() > 1 {
+                            panic!("view: {view}");
+                        }
+                        let (digest, _) = payloads.iter().next().unwrap();
+                        finalized.insert(view, *digest);
+
+                        // Only check at views below timeout
+                        if view > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure no nullifies for any finalizers
+                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let Some(nullifies) = nullifies.get(&view) else {
+                            continue;
+                        };
+                        for (_, finalizers) in payloads.iter() {
+                            for finalizer in finalizers.iter() {
+                                if nullifies.contains(finalizer) {
+                                    panic!("should not nullify and finalize at same view");
+                                }
+                            }
+                        }
+                    }
+                }
+                {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    for view in View::range(View::new(1), latest_complete) {
+                        // Ensure finalization matches digest from finalizes
+                        let Some(finalization) = finalizations.get(&view) else {
+                            continue;
+                        };
+                        let Some(digest) = finalized.get(&view) else {
+                            continue;
+                        };
+                        assert_eq!(&finalization.proposal.payload, digest);
+                    }
+                }
+            }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+
+            // Return state for audit
+            context.auditor().state()
+        })
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_threshold_min_pk() {
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_threshold_min_sig() {
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_multisig_min_pk() {
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_multisig_min_sig() {
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_ed25519() {
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), ed25519),
+            hailstorm(0, 10, ViewDelta::new(15), ed25519)
+        );
+    }
+
+    /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
+    fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let faults = max_faults(n);
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(600)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let participants: Arc<[_]> = participants.into();
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest
+            // after receiving a vote (implicitly respecting the partitioning)
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+
+            // Create twin engines (f Byzantine twins)
+            for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
+                let (
+                    (vote_sender, vote_receiver),
+                    (certificate_sender, certificate_receiver),
+                    (resolver_sender, resolver_receiver),
+                ) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+
+                // Create forwarder closures for votes
+                let make_vote_forwarder = || {
+                    let participants = participants.clone();
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        let (primary, secondary) =
+                            strategy.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                // Create forwarder closures for certificates
+                let make_certificate_forwarder = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let (primary, secondary) =
+                            strategy.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                let make_drop_forwarder =
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
+
+                // Create router closures for votes
+                let make_vote_router = || {
+                    let participants = participants.clone();
+                    move |(sender, message): &(_, Bytes)| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        strategy.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                // Create router closures for certificates
+                let make_certificate_router = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    move |(sender, message): &(_, Bytes)| {
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        strategy.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
+
+                // Apply view-based forwarder and router to pending and recovered channel
+                let (vote_sender_primary, vote_sender_secondary) =
+                    vote_sender.split_with(make_vote_forwarder());
+                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                    context.with_label(&format!("pending-split-{idx}")),
+                    make_vote_router(),
+                );
+                let (certificate_sender_primary, certificate_sender_secondary) =
+                    certificate_sender.split_with(make_certificate_forwarder());
+                let (certificate_receiver_primary, certificate_receiver_secondary) =
+                    certificate_receiver.split_with(
+                        context.with_label(&format!("recovered-split-{idx}")),
+                        make_certificate_router(),
+                    );
+
+                // Prevent any resolver messages from being sent or received by twins (these messages aren't cleanly mapped to a view and allowing them to bypass partitions seems wrong)
+                let (resolver_sender_primary, resolver_sender_secondary) =
+                    resolver_sender.split_with(make_drop_forwarder());
+                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                    .split_with(
+                        context.with_label(&format!("resolver-split-{idx}")),
+                        make_drop_router(),
+                    );
+
+                for (twin_label, pending, recovered, resolver) in [
+                    (
+                        "primary",
+                        (vote_sender_primary, vote_receiver_primary),
+                        (certificate_sender_primary, certificate_receiver_primary),
+                        (resolver_sender_primary, resolver_receiver_primary),
+                    ),
+                    (
+                        "secondary",
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
+                    ),
+                ] {
+                    let label = format!("twin-{idx}-{twin_label}");
+                    let context = context.with_label(&label);
+
+                    let reporter_config = mocks::reporter::Config {
+                        namespace: namespace.clone(),
+                        participants: participants.as_ref().into(),
+                        scheme: schemes[idx].clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label("reporter"),
+                        reporter_config,
+                    );
+                    reporters.push(reporter.clone());
+
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: label,
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_rate_per_peer: Quota::per_hour(NZU32!(1)), // resolver networking is disabled, so let's prevent unnecessary task polling
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engine_handlers.push(engine.start(pending, recovered, resolver));
+                }
+            }
+
+            // Create honest engines
+            for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
+                let label = format!("honest-{idx}");
+                let context = context.with_label(&label);
+
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.as_ref().into(),
+                    scheme: schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: label,
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for progress (liveness check)
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Verify safety: no conflicting finalizations across honest reporters
+            let honest_start = faults as usize * 2; // Each twin produces 2 reporters
+            let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
+            for reporter in reporters.iter().skip(honest_start) {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                for (view, finalization) in finalizations.iter() {
+                    let digest = finalization.proposal.payload;
+                    if let Some(existing) = finalized_at_view.get(view) {
+                        assert_eq!(
+                            existing, &digest,
+                            "safety violation: conflicting finalizations at view {view}"
+                        );
+                    } else {
+                        finalized_at_view.insert(*view, digest);
+                    }
+                }
+            }
+
+            // Verify no invalid signatures were observed
+            for reporter in reporters.iter().skip(honest_start) {
+                let invalid = reporter.invalid.lock().unwrap();
+                assert_eq!(*invalid, 0, "invalid signatures detected");
+            }
+
+            // Ensure faults are attributable to twins
+            let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
+            for reporter in reporters.iter().skip(honest_start) {
+                let faults = reporter.faults.lock().unwrap();
+                for (faulter, _) in faults.iter() {
+                    assert!(
+                        twin_identities.contains(&faulter),
+                        "fault from non-twin participant"
+                    );
+                }
+            }
+
+            // Ensure blocked connections are attributable to twins
+            let blocked = oracle.blocked().await.unwrap();
+            for (_, faulter) in blocked.iter() {
+                assert!(
+                    twin_identities.contains(&faulter),
+                    "blocked connection from non-twin participant"
+                );
+            }
+        });
+    }
+
+    fn test_twins<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        for strategy in [
+            Strategy::View,
+            Strategy::Fixed(3),
+            Strategy::Isolate(4),
+            Strategy::Broadcast,
+            Strategy::Shuffle,
+        ] {
+            for link in [
+                Link {
+                    latency: Duration::from_millis(10),
+                    jitter: Duration::from_millis(1),
+                    success_rate: 1.0,
+                },
+                Link {
+                    latency: Duration::from_millis(200),
+                    jitter: Duration::from_millis(150),
+                    success_rate: 0.75,
+                },
+            ] {
+                twins(0, 5, strategy, link, |context, n| fixture(context, n));
+            }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_multisig_min_pk() {
+        test_twins(bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_multisig_min_sig() {
+        test_twins(bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_min_pk() {
+        test_twins(bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_min_sig() {
+        test_twins(bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_ed25519() {
+        test_twins(ed25519);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_large_view() {
+        twins(
+            0,
+            10,
+            Strategy::View,
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.75,
+            },
+            bls12381_threshold::<MinPk, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_large_shuffle() {
+        twins(
+            0,
+            10,
+            Strategy::Shuffle,
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.75,
+            },
+            bls12381_threshold::<MinPk, _>,
+        );
     }
 }

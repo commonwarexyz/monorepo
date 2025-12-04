@@ -5,16 +5,19 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
     spanned::Spanned,
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
+
+mod nextest;
 
 /// Run a test function asynchronously.
 ///
@@ -136,6 +139,48 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+/// Prefix a test name with a nextest filter group.
+///
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
+/// it easy to filter tests by group postfixes in nextest.
+#[proc_macro_attribute]
+pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return Error::new(
+            Span::call_site(),
+            "test_group requires a string literal filter group name",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let mut input = parse_macro_input!(item as ItemFn);
+    let group_literal = parse_macro_input!(attr as LitStr);
+
+    let group = match nextest::sanitize_group_literal(&group_literal) {
+        Ok(group) => group,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let groups = match configured_test_groups() {
+        Ok(groups) => groups,
+        Err(_) => {
+            // Don't fail the compilation if the file isn't found; just return the original input.
+            return TokenStream::from(quote!(#input));
+        }
+    };
+
+    if let Err(err) = nextest::ensure_group_known(groups, &group, group_literal.span()) {
+        return err.to_compile_error().into();
+    }
+
+    let original_name = input.sig.ident.to_string();
+    let new_ident = Ident::new(&format!("{original_name}_{group}_"), input.sig.ident.span());
+
+    input.sig.ident = new_ident;
+
+    TokenStream::from(quote!(#input))
 }
 
 /// Capture logs from a test run into an in-memory store.
@@ -265,11 +310,11 @@ struct Branch {
 }
 
 impl Parse for SelectInput {
-    fn parse(input: ParseStream) -> Result<Self> {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
-            let pattern: Pat = input.parse()?;
+            let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
@@ -288,7 +333,21 @@ impl Parse for SelectInput {
             }
         }
 
-        Ok(SelectInput { branches })
+        Ok(Self { branches })
+    }
+}
+
+impl ToTokens for SelectInput {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for branch in &self.branches {
+            let pattern = &branch.pattern;
+            let future = &branch.future;
+            let block = &branch.block;
+
+            tokens.extend(quote! {
+                #pattern = #future => #block,
+            });
+        }
     }
 }
 
@@ -368,6 +427,74 @@ pub fn select(input: TokenStream) -> TokenStream {
 
             futures::select_biased! {
                 #(#select_branches)*
+            }
+        }
+    }
+    .into()
+}
+
+/// Convenience macro to continuously [select!] over a set of futures in biased order. See
+/// [select!] for more details.
+///
+/// Expands to a `loop` containing a [select!] block. Rather than writing:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use commonware_macros::select;
+/// use futures::executor::block_on;
+/// use futures_timer::Delay;
+///
+/// async fn task() -> usize {
+///     42
+/// }
+//
+/// block_on(async move {
+///     loop {
+///         select! {
+///             _ = Delay::new(Duration::from_secs(1)) => {
+///                 println!("timeout fired");
+///             },
+///             v = task() => {
+///                 println!("task completed with value: {}", v);
+///                 break;
+///             },
+///         }
+///     }
+/// });
+/// ```
+///
+/// This macro allows writing:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use commonware_macros::select_loop;
+/// use futures::executor::block_on;
+/// use futures_timer::Delay;
+///
+/// async fn task() -> usize {
+///     42
+/// }
+//
+/// block_on(async move {
+///     select_loop! {
+///         _ = Delay::new(Duration::from_secs(1)) => {
+///             println!("timeout fired");
+///         },
+///         v = task() => {
+///             println!("task completed with value: {}", v);
+///             break;
+///         },
+///     }
+/// });
+/// ```
+#[proc_macro]
+pub fn select_loop(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as SelectInput);
+
+    quote! {
+        loop {
+            commonware_macros::select! {
+                #input
             }
         }
     }

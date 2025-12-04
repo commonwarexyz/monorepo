@@ -88,20 +88,19 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of rebroadcast attempts by status",
             rebroadcast.clone(),
         );
-        let verify_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
+        let verify_duration = Histogram::new(histogram::Buckets::LOCAL);
         context.register(
             "verify_duration",
             "Histogram of application verification durations",
             verify_duration.clone(),
         );
-        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
+        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK);
         context.register(
             "e2e_duration",
             "Histogram of time from new proposal to threshold signature generation",
             e2e_duration.clone(),
         );
-        // TODO(#1833): Shouldn't require another clone
-        let clock = Arc::new(context.clone());
+        let clock = Arc::new(context);
 
         Self {
             sequencer_heights,

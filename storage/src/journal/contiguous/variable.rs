@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous, PersistableContiguous},
         segmented::variable,
         Error,
     },
@@ -61,7 +61,7 @@ pub struct Config<C> {
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
-    /// All non-final sections will be full and synced.
+    /// All non-final sections will be full and persisted.
     pub items_per_section: NonZeroU64,
 
     /// Optional compression level for stored items.
@@ -98,7 +98,7 @@ impl<C> Config<C> {
 ///
 /// ## 1. Section Fullness
 ///
-/// All non-final sections are full (`items_per_section` items) and synced. This ensures
+/// All non-final sections are full (`items_per_section` items) and persisted. This ensures
 /// that on `init()`, we only need to replay the last section to determine the exact size.
 ///
 /// ## 2. Data Journal is Source of Truth
@@ -233,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::adb::any::fixed::sync::init_journal_at_size(
+        let offsets = crate::adb::any::unordered::sync::init_journal_at_size(
             context,
             fixed::Config {
                 partition: cfg.offsets_partition(),
@@ -282,7 +282,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
-    ) -> Result<Journal<E, V>, crate::adb::Error> {
+    ) -> Result<Self, crate::adb::Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -293,7 +293,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         );
 
         // Initialize contiguous journal
-        let mut journal = Journal::init(context.with_label("journal"), cfg.clone()).await?;
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
 
         let size = journal.size();
 
@@ -308,7 +308,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+                return Ok(Self::init_at_size(context, cfg, range.start).await?);
             }
         }
 
@@ -327,7 +327,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+            return Ok(Self::init_at_size(context, cfg, range.start).await?);
         }
 
         // Prune to lower bound if needed
@@ -347,15 +347,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
-    /// After rewinding to size N, the journal will contain exactly N items,
-    /// and the next append will receive position N.
+    /// After rewinding to size N, the journal will contain exactly N items, and the next append
+    /// will receive position N.
     ///
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     ///
-    /// Underlying storage operations may leave the journal in an inconsistent state.
-    /// The journal should be closed and reopened to trigger alignment in [Journal::init].
+    /// # Warning
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {
@@ -389,7 +390,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// The position returned is a stable, consecutively increasing value starting from 0.
     /// This position remains constant after pruning.
     ///
-    /// When a section becomes full, both the data journal and offsets journal are synced
+    /// When a section becomes full, both the data journal and offsets journal are persisted
     /// to maintain the invariant that all non-final sections are full and consistent.
     ///
     /// # Errors
@@ -414,7 +415,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let position = self.size;
         self.size += 1;
 
-        // Maintain invariant that all full sections are synced.
+        // Maintain invariant that all full sections are persisted.
         if self.size.is_multiple_of(self.items_per_section) {
             futures::try_join!(self.data.sync(section), self.offsets.sync())?;
         }
@@ -426,21 +427,25 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.size
     }
 
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
-    // TODO(#2056): Disambiguate between pruning boundary and oldest retained position.
-    pub fn oldest_retained_pos(&self) -> Option<u64> {
+    pub const fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
             None
         } else {
             Some(self.oldest_retained_pos)
         }
+    }
+
+    /// Returns the location before which all items have been pruned.
+    pub fn pruning_boundary(&self) -> u64 {
+        self.oldest_retained_pos().unwrap_or(self.size)
     }
 
     /// Prune items at positions strictly less than `min_position`.
@@ -544,35 +549,30 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.data.get(section, offset).await
     }
 
-    /// Sync only the data journal to storage, without syncing the offsets journal.
+    /// Durably persist the journal.
     ///
-    /// This is faster than `sync()` and can be used to ensure data durability without
-    /// the overhead of syncing the offsets journal.
-    ///
-    /// We call `sync` when appending to a section, so the offsets journal will eventually be
-    /// synced as well, maintaining the invariant that all nonfinal sections are fully synced.
-    /// In other words, the journal will remain in a consistent, recoverable state even if a crash
-    /// occurs after calling this method but before calling `sync`.
-    pub async fn sync_data(&mut self) -> Result<(), Error> {
+    /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
+    /// before the next call to `sync()`.
+    pub async fn commit(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         self.data.sync(section).await
     }
 
-    /// Sync all pending writes to storage.
+    /// Durably persist the journal and ensure recovery is not required on startup.
     ///
-    /// This syncs both the data journal and the offsets journal concurrently.
+    /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync only the current (final) section of the data journal.
-        // All non-final sections are already synced per Invariant #1.
+        // Persist only the current (final) section of the data journal.
+        // All non-final sections are already persisted per Invariant #1.
         let section = self.current_section();
 
-        // Sync both journals concurrently
+        // Persist both journals concurrently
         futures::try_join!(self.data.sync(section), self.offsets.sync())?;
 
         Ok(())
     }
 
-    /// Close the journal, syncing all pending writes.
+    /// Close the journal, persisting all pending writes.
     ///
     /// This closes both the data journal and the offsets journal.
     pub async fn close(mut self) -> Result<(), Error> {
@@ -629,7 +629,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
-            let size = offsets.size().await;
+            let size = offsets.size();
 
             if !data.blobs.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
@@ -649,7 +649,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
-            if let Some(oldest) = offsets.oldest_retained_pos().await? {
+            if let Some(oldest) = offsets.oldest_retained_pos() {
                 if oldest < size {
                     // Offsets has unpruned entries but data is gone - align by pruning
                     info!("crash repair: pruning offsets to {size} (prune-all crash)");
@@ -682,7 +682,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Align pruning state. We always prune the data journal before the offsets journal,
         // so we validate that invariant and repair crash faults or detect corruption.
-        match offsets.oldest_retained_pos().await? {
+        match offsets.oldest_retained_pos() {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
                 // Offsets behind on pruning -- prune to catch up
                 info!("crash repair: pruning offsets journal to {data_oldest_pos}");
@@ -698,10 +698,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
             None if data_oldest_pos > 0 => {
                 // Offsets journal is empty (size == oldest_retained_pos).
-                // This can happen if we pruned all data, then appended new data, synced the
-                // data journal, but crashed before syncing the offsets journal.
+                // This can happen if we pruned all data, then appended new data, persisted the
+                // data journal, but crashed before persisting the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
-                let offsets_size = offsets.size().await;
+                let offsets_size = offsets.size();
                 if offsets_size != data_oldest_pos {
                     return Err(Error::Corruption(format!(
                         "offsets journal empty: size ({offsets_size}) != data oldest pos ({data_oldest_pos})"
@@ -714,7 +714,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
         }
 
-        let offsets_size = offsets.size().await;
+        let offsets_size = offsets.size();
         if offsets_size > data_size {
             // We must have crashed after writing offsets but before writing data.
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
@@ -725,9 +725,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
         }
 
-        assert_eq!(offsets.size().await, data_size);
+        assert_eq!(offsets.size(), data_size);
         // Oldest retained position is always Some because the data journal is non-empty.
-        assert_eq!(offsets.oldest_retained_pos().await?, Some(data_oldest_pos));
+        assert_eq!(offsets.oldest_retained_pos(), Some(data_oldest_pos));
 
         offsets.sync().await?;
         Ok((data_oldest_pos, data_size))
@@ -756,7 +756,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Find where to start replaying
         let (start_section, resume_offset, skip_first) =
-            if let Some(oldest) = offsets.oldest_retained_pos().await? {
+            if let Some(oldest) = offsets.oldest_retained_pos() {
                 if oldest < offsets_size {
                     // Offsets has items -- resume from last indexed position
                     let last_offset = offsets.read(offsets_size - 1).await?;
@@ -804,20 +804,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     type Item = V;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
+    fn size(&self) -> u64 {
+        Self::size(self)
     }
 
-    async fn size(&self) -> u64 {
-        Journal::size(self)
+    fn oldest_retained_pos(&self) -> Option<u64> {
+        Self::oldest_retained_pos(self)
     }
 
-    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        Ok(Journal::oldest_retained_pos(self))
-    }
-
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
+    fn pruning_boundary(&self) -> u64 {
+        Self::pruning_boundary(self)
     }
 
     async fn replay(
@@ -825,30 +821,45 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Journal::replay(self, start_pos, buffer).await
+        Self::replay(self, start_pos, buffer).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Journal::read(self, position).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        Journal::sync(self).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        Journal::close(self).await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        Journal::destroy(self).await
-    }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
+        Self::read(self, position).await
     }
 }
 
+impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Self::append(self, item).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Self::prune(self, min_position).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Self::rewind(self, size).await
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
+    async fn commit(&mut self) -> Result<(), Error> {
+        Self::commit(self).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        Self::sync(self).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        Self::close(self).await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        Self::destroy(self).await
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,7 +1327,7 @@ mod tests {
             }
 
             // Offsets journal should be fully rebuilt to match data journal
-            assert_eq!(variable.offsets.size().await, 20);
+            assert_eq!(variable.offsets.size(), 20);
 
             variable.destroy().await.unwrap();
         });
@@ -1437,7 +1448,7 @@ mod tests {
             }
 
             // Verify offsets journal fully rebuilt
-            assert_eq!(variable.offsets.size().await, 25);
+            assert_eq!(variable.offsets.size(), 25);
 
             // Verify next append gets position 25
             let pos = variable.append(2500).await.unwrap();
@@ -1540,7 +1551,7 @@ mod tests {
             }
 
             // Manually sync only data to simulate crash during concurrent sync
-            journal.sync_data().await.unwrap();
+            journal.commit().await.unwrap();
 
             // Simulate a crash (offsets not synced)
             drop(journal);

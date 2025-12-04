@@ -9,7 +9,7 @@ use commonware_storage::{
         immutable::{self, Config},
         operation,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +18,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::variable::Operation<Key, Value>;
+pub type Operation = operation::variable::immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
@@ -91,7 +91,6 @@ where
                 Operation::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -101,8 +100,8 @@ where
         self.commit(None).await
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self) -> Key {
+        self.root()
     }
 
     fn op_count(&self) -> Location {

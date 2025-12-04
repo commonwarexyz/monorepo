@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{CounterExt, Status},
+    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{
@@ -154,7 +154,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         loop {
             // Cleanup waiters
             self.cleanup_waiters();
-            self.metrics.waiters.set(self.waiters.len() as i64);
+            let _ = self.metrics.waiters.try_set(self.waiters.len());
 
             select! {
                 // Handle shutdown signal
@@ -265,12 +265,10 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 .collect(),
 
             // Search by commitment
-            None => match self.items.get(&commitment) {
+            None => self.items.get(&commitment).map_or_else(
                 // If there are no messages for the commitment, return an empty vector
-                None => Vec::new(),
-
-                // If there are messages, return the ones that match the digest filter
-                Some(msgs) => match digest {
+                Vec::new,
+                |msgs| match digest {
                     // If a digest is provided, return whatever matches it.
                     Some(dg) => msgs.get(&dg).cloned().into_iter().collect(),
 
@@ -278,7 +276,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     None if all => msgs.values().cloned().collect(),
                     None => msgs.values().next().cloned().into_iter().collect(),
                 },
-            },
+            ),
         }
     }
 

@@ -63,6 +63,10 @@ impl Sha256 {
 impl Hasher for Sha256 {
     type Digest = Digest;
 
+    const EMPTY: Self::Digest = Digest(hex!(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ));
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
@@ -77,10 +81,6 @@ impl Hasher for Sha256 {
     fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
         self
-    }
-
-    fn empty() -> Self::Digest {
-        Self::new().finalize()
     }
 }
 
@@ -165,8 +165,6 @@ mod tests {
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
-    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
     #[test]
     fn test_sha256() {
@@ -196,17 +194,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Sha256::empty();
-        let digest2 = Sha256::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
     fn test_sha256_empty() {
-        let empty_digest = Sha256::empty();
-        let expected_digest = Digest::from(EMPTY_DIGEST);
+        let empty_digest = Sha256::EMPTY;
+        let expected_digest = Sha256::new().finalize();
 
         assert_eq!(empty_digest, expected_digest);
     }

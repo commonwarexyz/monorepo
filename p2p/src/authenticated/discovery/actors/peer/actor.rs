@@ -13,7 +13,7 @@ use crate::authenticated::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -108,12 +108,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
-    ) -> Error {
+    ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
@@ -130,42 +130,40 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 let mut deadline = context.current();
 
                 // Enter into the main loop
-                loop {
-                    select! {
-                        _ = context.sleep_until(deadline) => {
-                            // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone());
+                select_loop! {
+                    _ = context.sleep_until(deadline) => {
+                        // Get latest bitset from tracker (also used as ping)
+                        tracker.construct(peer.clone(), mailbox.clone());
 
-                            // Reset ticker
-                            deadline = context.current() + self.gossip_bit_vec_frequency;
-                        },
-                        msg_control = self.control.next() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            let (metric, payload) = match msg {
-                                Message::BitVec(bit_vec) =>
-                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
-                                Message::Peers(peers) =>
-                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
-                                Message::Kill => {
-                                    return Err(Error::PeerKilled(peer.to_string()))
-                                }
-                            };
-                            Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
-                                .await?;
-                        },
-                        msg_high = self.high.next() => {
-                            let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
-                                .await?;
-                        },
-                        msg_low = self.low.next() => {
-                            let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
-                                .await?;
-                        }
+                        // Reset ticker
+                        deadline = context.current() + self.gossip_bit_vec_frequency;
+                    },
+                    msg_control = self.control.next() => {
+                        let msg = match msg_control {
+                            Some(msg_control) => msg_control,
+                            None => return Err(Error::PeerDisconnected),
+                        };
+                        let (metric, payload) = match msg {
+                            Message::BitVec(bit_vec) =>
+                                (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
+                            Message::Peers(peers) =>
+                                (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
+                            Message::Kill => {
+                                return Err(Error::PeerKilled(peer.to_string()))
+                            }
+                        };
+                        Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
+                            .await?;
+                    },
+                    msg_high = self.high.next() => {
+                        let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                            .await?;
+                    },
+                    msg_low = self.low.next() => {
+                        let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                            .await?;
                     }
                 }
             }
@@ -175,15 +173,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .with_label("receiver")
             .spawn(move |context| async move {
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
                 loop {
                     // Receive a message from the peer
-                    let msg = conn_receiver
-                        .recv()
-                        .await
-                        .map_err(Error::ReceiveFailed)?;
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
                     let cfg = types::PayloadConfig {
@@ -262,24 +257,26 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             });
 
-        // Wait for one of the handlers to finish
-        //
-        // It is only possible for a handler to exit if there is an error.
+        // Wait for one of the handlers to finish or shutdown
+        let mut shutdown = self.context.stopped();
         let result = select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping peer");
+                Ok(Ok(()))
+            },
             send_result = &mut send_handler => {
-                receive_handler.abort();
                 send_result
             },
             receive_result = &mut receive_handler => {
-                send_handler.abort();
                 receive_result
             }
         };
 
-        // Parse error
+        // Parse result
         match result {
-            Ok(e) => e.unwrap_err(),
-            Err(e) => Error::UnexpectedFailure(e),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Error::UnexpectedFailure(e)),
         }
     }
 }

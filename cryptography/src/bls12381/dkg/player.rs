@@ -15,7 +15,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::{quorum, set::Ordered};
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Output of a DKG/Resharing procedure.
@@ -31,6 +31,7 @@ pub struct Output<V: Variant> {
 }
 
 /// Track commitments and dealings distributed by dealers.
+#[derive(Clone)]
 pub struct Player<P: PublicKey, V: Variant> {
     me: u32,
     dealer_threshold: u32,
@@ -52,11 +53,11 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         recipients: Ordered<P>,
         concurrency: usize,
     ) -> Self {
-        let me_idx = recipients.position(&me).expect("player not in recipients") as u32;
+        let me_idx = recipients.index(&me).expect("player not in recipients");
         Self {
             me: me_idx,
-            dealer_threshold: quorum(dealers.len() as u32),
-            player_threshold: quorum(recipients.len() as u32),
+            dealer_threshold: dealers.quorum(),
+            player_threshold: recipients.quorum(),
             previous,
             concurrency,
 
@@ -74,10 +75,10 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let dealer_idx = match self.dealers.position(&dealer) {
+        let dealer_idx = match self.dealers.index(&dealer) {
             Some(contributor) => contributor,
             None => return Err(Error::DealerInvalid),
-        } as u32;
+        };
 
         // Check that share is valid
         if share.index != self.me {

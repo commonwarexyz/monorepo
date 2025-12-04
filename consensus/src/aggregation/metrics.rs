@@ -50,9 +50,9 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            rebroadcast.clone(),
+            rebroadcast,
         );
-        let digest_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
+        let digest_duration = Histogram::new(histogram::Buckets::LOCAL);
         context.register(
             "digest_duration",
             "Histogram of application digest durations",

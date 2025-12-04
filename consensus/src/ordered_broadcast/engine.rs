@@ -12,7 +12,10 @@ use super::{
     types::{Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal},
     AckManager, Config, TipManager,
 };
-use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
+use crate::{
+    types::{Epoch, EpochDelta},
+    Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::Variant},
     Digest, PublicKey, Signer,
@@ -27,7 +30,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -113,7 +116,7 @@ pub struct Engine<
     // For example, if the current epoch is 10, and the bounds are (1, 2), then
     // epochs 9, 10, 11, and 12 are kept (and accepted);
     // all others are pruned or rejected.
-    epoch_bounds: (u64, u64),
+    epoch_bounds: (EpochDelta, EpochDelta),
 
     // The number of future heights to accept acks for.
     // This is used to prevent spam of acks for arbitrary heights.
@@ -253,7 +256,7 @@ impl<
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
-            epoch: 0,
+            epoch: Epoch::zero(),
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
@@ -335,7 +338,7 @@ impl<
                     };
 
                     // Refresh the epoch
-                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
                     continue;
@@ -343,7 +346,7 @@ impl<
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!(epoch = self.epoch, sender=?self.crypto.public_key(), "rebroadcast");
+                    debug!(epoch = %self.epoch, sender = ?self.crypto.public_key(), "rebroadcast");
                     if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
@@ -440,7 +443,7 @@ impl<
                         guard.set(Status::Failure);
                         continue;
                     }
-                    debug!(?sender, epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "ack");
+                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -595,7 +598,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
-            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered threshold");
+            debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
@@ -614,10 +617,11 @@ impl<
         // If a higher height than the previous tip...
         if is_new {
             // Update metrics for sequencer height
-            self.metrics
+            let _ = self
+                .metrics
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
-                .set(node.chunk.height as i64);
+                .try_set(node.chunk.height);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
@@ -952,7 +956,7 @@ impl<
     ////////////////////////////////////////
 
     /// Returns the section of the journal for the given height.
-    fn get_journal_section(&self, height: u64) -> u64 {
+    const fn get_journal_section(&self, height: u64) -> u64 {
         height / self.journal_heights_per_section
     }
 

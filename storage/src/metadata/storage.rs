@@ -1,7 +1,9 @@
 use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
-use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
+};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -19,7 +21,7 @@ struct Info {
 
 impl Info {
     /// Create a new [Info].
-    fn new(start: usize, length: usize) -> Self {
+    const fn new(start: usize, length: usize) -> Self {
         Self { start, length }
     }
 }
@@ -35,7 +37,7 @@ struct Wrapper<B: Blob, K: Array> {
 
 impl<B: Blob, K: Array> Wrapper<B, K> {
     /// Create a new [Wrapper].
-    fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
+    const fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
         Self {
             blob,
             version,
@@ -114,7 +116,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         context.register("keys", "number of tracked keys", keys.clone());
 
         // Return metadata
-        keys.set(map.len() as i64);
+        let _ = keys.try_set(map.len());
         Ok(Self {
             context,
 
@@ -251,11 +253,11 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // We need to mark both blobs as modified because we may need to update both files.
         if exists {
             self.blobs[self.cursor].modified.insert(key.clone());
-            self.blobs[1 - self.cursor].modified.insert(key.clone());
+            self.blobs[1 - self.cursor].modified.insert(key);
         } else {
             self.key_order_changed = self.next_version;
         }
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.
@@ -298,7 +300,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         if past.is_some() {
             self.key_order_changed = self.next_version;
         }
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
 
         past
     }
@@ -308,11 +310,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// If a prefix is provided, only keys that start with the prefix bytes will be returned.
     pub fn keys<'a>(&'a self, prefix: Option<&'a [u8]>) -> impl Iterator<Item = &'a K> + 'a {
         self.map.keys().filter(move |key| {
-            if let Some(prefix_bytes) = prefix {
-                key.as_ref().starts_with(prefix_bytes)
-            } else {
-                true
-            }
+            prefix.is_none_or(|prefix_bytes| key.as_ref().starts_with(prefix_bytes))
         })
     }
 
@@ -323,7 +321,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // Mark key order as changed since we may have removed keys
         self.key_order_changed = self.next_version;
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
     }
 
     /// Atomically commit the current state of [Metadata].

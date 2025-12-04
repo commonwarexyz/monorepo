@@ -58,17 +58,14 @@ async fn wait_for_event<Op, D: Digest, E>(
     update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
     outstanding_requests: &mut Requests<Op, D, E>,
 ) -> Option<Event<Op, D, E>> {
-    let target_update_fut = match update_receiver {
-        Some(update_rx) => Either::Left(update_rx.next()),
-        None => Either::Right(futures::future::pending()),
-    };
+    let target_update_fut = update_receiver.as_mut().map_or_else(
+        || Either::Right(futures::future::pending()),
+        |update_rx| Either::Left(update_rx.next()),
+    );
 
     select! {
         target = target_update_fut => {
-            match target {
-                Some(target) => Some(Event::TargetUpdate(target)),
-                None => Some(Event::UpdateChannelClosed),
-            }
+            target.map_or_else(|| Some(Event::UpdateChannelClosed), |target| Some(Event::TargetUpdate(target)))
         },
         result = outstanding_requests.futures_mut().next() => {
             result.map(|fetch_result| Event::BatchReceived(fetch_result))

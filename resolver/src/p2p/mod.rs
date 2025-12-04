@@ -68,7 +68,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Manager,
+        Blocker, Manager,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
@@ -100,7 +100,7 @@ mod tests {
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -115,7 +115,8 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-        oracle.update(0, peers.clone().into()).await;
+        let mut manager = oracle.manager();
+        manager.update(0, peers.clone().into()).await;
 
         let mut connections = Vec::new();
         for peer in &peers {
@@ -145,7 +146,8 @@ mod tests {
 
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
-        oracle: &Oracle<PublicKey>,
+        manager: impl Manager<PublicKey = PublicKey>,
+        blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
@@ -155,7 +157,8 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                manager: oracle.clone(),
+                manager,
+                blocker,
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
@@ -193,20 +196,24 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -239,10 +246,12 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
@@ -285,30 +294,36 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -342,10 +357,12 @@ mod tests {
             let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
@@ -388,30 +405,36 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -474,20 +497,24 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -568,30 +595,36 @@ mod tests {
             cons1.add_expected(key_b.clone(), valid_data_b.clone());
 
             // Spawn actors
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -599,7 +632,7 @@ mod tests {
             .await;
 
             // Fetch keyA multiple times to ensure that Peer2 is blocked.
-            for _ in 0..10 {
+            for _ in 0..20 {
                 // Fetch keyA
                 mailbox1.fetch(key_a.clone()).await;
 
@@ -631,6 +664,12 @@ mod tests {
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),
             }
+
+            // Check oracle
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
         });
     }
 
@@ -652,20 +691,24 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -722,20 +765,24 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -756,10 +803,12 @@ mod tests {
             }
 
             // Change peer set to include peer 3
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &oracle,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,

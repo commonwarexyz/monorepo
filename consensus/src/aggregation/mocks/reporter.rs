@@ -65,7 +65,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
         let identity = *poly::public::<V>(&polynomial);
         let polynomial = evaluate_all::<V>(&polynomial, participants);
         (
-            Reporter {
+            Self {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 identity,
@@ -74,7 +74,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 digests: BTreeMap::new(),
                 contiguous: None,
                 highest: None,
-                current_epoch: 111, // Initialize with the expected epoch
+                current_epoch: Epoch::new(111), // Initialize with the expected epoch
             },
             Mailbox { sender },
         )

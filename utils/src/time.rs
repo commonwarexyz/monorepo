@@ -94,14 +94,14 @@ pub trait DurationExt {
 impl DurationExt for Duration {
     fn from_nanos_saturating(ns: u128) -> Duration {
         // Clamp anything beyond the representable range
-        if ns > Duration::MAX.as_nanos() {
-            return Duration::MAX;
+        if ns > Self::MAX.as_nanos() {
+            return Self::MAX;
         }
 
         // Convert to `Duration`
         let secs = (ns / NANOS_PER_SEC) as u64;
         let nanos = (ns % NANOS_PER_SEC) as u32;
-        Duration::new(secs, nanos)
+        Self::new(secs, nanos)
     }
 
     fn parse(s: &str) -> Result<Duration, String> {
@@ -113,7 +113,7 @@ impl DurationExt for Duration {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid milliseconds value: '{num_str}'"))?;
-            return Ok(Duration::from_millis(millis));
+            return Ok(Self::from_millis(millis));
         }
 
         // Handle hours
@@ -125,7 +125,7 @@ impl DurationExt for Duration {
             let seconds = hours
                 .checked_mul(3600)
                 .ok_or_else(|| format!("Hours value too large (would overflow): '{hours}'"))?;
-            return Ok(Duration::from_secs(seconds));
+            return Ok(Self::from_secs(seconds));
         }
 
         // Handle minutes
@@ -137,7 +137,7 @@ impl DurationExt for Duration {
             let seconds = minutes
                 .checked_mul(60)
                 .ok_or_else(|| format!("Minutes value too large (would overflow): '{minutes}'"))?;
-            return Ok(Duration::from_secs(seconds));
+            return Ok(Self::from_secs(seconds));
         }
 
         // Handle seconds
@@ -146,7 +146,7 @@ impl DurationExt for Duration {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid seconds value: '{num_str}'"))?;
-            return Ok(Duration::from_secs(secs));
+            return Ok(Self::from_secs(secs));
         }
 
         // No suffix - return error
@@ -196,7 +196,7 @@ impl SystemTimeExt for SystemTime {
     }
 
     fn limit() -> SystemTime {
-        SystemTime::UNIX_EPOCH
+        Self::UNIX_EPOCH
             .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
             .expect("maximum system time must be representable")
     }

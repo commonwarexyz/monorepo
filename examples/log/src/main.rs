@@ -48,7 +48,10 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex;
+use commonware_consensus::{
+    simplex,
+    types::{Epoch, ViewDelta},
+};
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -143,7 +146,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure network
     let p2p_cfg = discovery::Config::local(
@@ -171,12 +174,12 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (pending_sender, pending_receiver) = network.register(
+        let (vote_sender, vote_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (recovered_sender, recovered_receiver) = network.register(
+        let (certificate_sender, certificate_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
@@ -209,17 +212,16 @@ fn main() {
             namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
-            epoch: 0,
+            epoch: Epoch::zero(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
             notarization_timeout: Duration::from_secs(2),
             nullify_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
-            activity_timeout: 10,
-            skip_timeout: 5,
-            max_fetch_count: 32,
-            fetch_concurrent: 2,
+            activity_timeout: ViewDelta::new(10),
+            skip_timeout: ViewDelta::new(5),
+            fetch_concurrent: 32,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
@@ -229,8 +231,8 @@ fn main() {
         application.start();
         network.start();
         engine.start(
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
 

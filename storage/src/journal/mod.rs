@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+pub mod authenticated;
 pub mod contiguous;
 pub mod segmented;
 
@@ -19,19 +20,21 @@ where
     type Error = Error;
 
     async fn size(&self) -> u64 {
-        contiguous::fixed::Journal::size(self).await
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        contiguous::fixed::Journal::append(self, op)
-            .await
-            .map(|_| ())
+        Self::append(self, op).await.map(|_| ())
     }
 }
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("mmr error: {0}")]
+    Mmr(anyhow::Error),
+    #[error("journal error: {0}")]
+    Journal(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
