@@ -106,7 +106,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     pub async fn run(mut self) -> Result<(), R::Error> {
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping muxer");
             },
             // Prefer control messages because network messages will

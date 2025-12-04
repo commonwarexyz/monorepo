@@ -241,7 +241,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         let t = self.context.current() + 2 * self.dkg_phase_timeout;
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping round");
                 return (round, None);
             },

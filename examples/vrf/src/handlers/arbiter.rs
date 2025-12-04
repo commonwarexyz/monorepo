@@ -83,7 +83,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         );
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping arbiter");
                 return (None, HashSet::new());
             },

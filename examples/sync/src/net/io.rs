@@ -37,7 +37,7 @@ async fn run_loop<E, Si, St, M>(
 {
     select_loop! {
         context,
-        on_shutdown => {
+        on_stopped => {
             debug!("context shutdown, terminating I/O task");
         },
         outgoing = request_rx.next() => {

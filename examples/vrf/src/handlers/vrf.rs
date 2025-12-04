@@ -88,7 +88,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         let mut received = HashSet::new();
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping round");
                 return None;
             },

@@ -97,7 +97,7 @@ impl<
     ) {
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping spawner");
             },
             msg = self.receiver.next() => {

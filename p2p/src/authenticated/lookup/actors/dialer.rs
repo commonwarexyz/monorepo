@@ -146,7 +146,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
         let mut query_deadline = self.context.current();
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {

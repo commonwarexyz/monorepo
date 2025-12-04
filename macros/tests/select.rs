@@ -36,6 +36,10 @@ mod tests {
         });
     }
 
+    /// A mock signaler that never resolves.
+    ///
+    /// Used in place of a proper `Signal` from `commonware_runtime` to avoid cyclical
+    /// dependencies.
     struct MockSignaler;
 
     impl MockSignaler {
@@ -44,6 +48,10 @@ mod tests {
         }
     }
 
+    /// A mock signaler that resolves immediately.
+    ///
+    /// Used in place of a proper `Signal` from `commonware_runtime` to avoid cyclical
+    /// dependencies.
     struct MockSignalerResolves;
 
     impl MockSignalerResolves {
@@ -65,7 +73,7 @@ mod tests {
             let mock_context = MockSignaler;
             select_loop! {
                 mock_context,
-                on_shutdown => {},
+                on_stopped => {},
                 msg = rx.next() => {
                     match msg {
                         Some(v) => received.push(v),
@@ -90,7 +98,7 @@ mod tests {
             let mock_context = MockSignalerResolves;
             select_loop! {
                 mock_context,
-                on_shutdown => {
+                on_stopped => {
                     did_shutdown = true;
                 },
                 _ = rx.next() => {
@@ -115,7 +123,7 @@ mod tests {
             let mock_context = MockSignaler;
             select_loop! {
                 mock_context,
-                on_shutdown => {},
+                on_stopped => {},
                 msg = rx.next() => {
                     match msg {
                         Some(v) if v % 2 != 0 => continue,
@@ -145,7 +153,7 @@ mod tests {
             let mock_context = MockSignaler;
             select_loop! {
                 mock_context,
-                on_shutdown => {},
+                on_stopped => {},
                 msg = high_rx.next() => {
                     if let Some(v) = msg {
                         results.push(v);

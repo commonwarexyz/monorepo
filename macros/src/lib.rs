@@ -435,7 +435,7 @@ pub fn select(input: TokenStream) -> TokenStream {
 
 /// Input for [select_loop].
 ///
-/// Parses: `context, on_shutdown => { block }, { branches... }`
+/// Parses: `context, on_stopped => { block }, { branches... }`
 struct SelectLoopInput {
     context: Expr,
     shutdown_block: Block,
@@ -448,12 +448,12 @@ impl Parse for SelectLoopInput {
         let context: Expr = input.parse()?;
         input.parse::<Token![,]>()?;
 
-        // Parse `on_shutdown =>`
-        let on_shutdown_ident: Ident = input.parse()?;
-        if on_shutdown_ident != "on_shutdown" {
+        // Parse `on_stopped =>`
+        let on_stopped_ident: Ident = input.parse()?;
+        if on_stopped_ident != "on_stopped" {
             return Err(Error::new(
-                on_shutdown_ident.span(),
-                "expected `on_shutdown` keyword",
+                on_stopped_ident.span(),
+                "expected `on_stopped` keyword",
             ));
         }
         input.parse::<Token![=>]>()?;
@@ -510,7 +510,7 @@ impl Parse for SelectLoopInput {
 /// ```rust,ignore
 /// select_loop! {
 ///     context,
-///     on_shutdown => { cleanup },
+///     on_stopped => { cleanup },
 ///     pattern = future => block,
 ///     // ...
 /// }
@@ -527,7 +527,7 @@ impl Parse for SelectLoopInput {
 /// async fn run(context: impl commonware_runtime::Spawner) {
 ///     select_loop! {
 ///         context,
-///         on_shutdown => {
+///         on_stopped => {
 ///             println!("shutting down");
 ///             drop(shutdown);
 ///         },

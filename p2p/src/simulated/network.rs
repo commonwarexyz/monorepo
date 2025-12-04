@@ -867,7 +867,7 @@ impl<P: PublicKey> Peer<P> {
             // Continually listen for control messages and outbound messages
             select_loop! {
                 context,
-                on_shutdown => {},
+                on_stopped => {},
                 // Listen for control messages, which are used to register channels
                 control = control_receiver.next() => {
                     // If control is closed, exit

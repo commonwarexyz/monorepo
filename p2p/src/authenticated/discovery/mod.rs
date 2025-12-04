@@ -899,7 +899,7 @@ mod tests {
                         // Keep receiving messages until shutdown
                         select_loop! {
                             context,
-                            on_shutdown => {},
+                            on_stopped => {},
                             result = receiver.recv() => {
                                 if result.is_err() {
                                     // Channel closed due to shutdown

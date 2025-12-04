@@ -466,7 +466,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
             // Process remaining messages until shutdown
             select_loop! {
                 ctx,
-                on_shutdown => {},
+                on_stopped => {},
                 _ = receiver.recv() => {
                     // Discard message
                 },

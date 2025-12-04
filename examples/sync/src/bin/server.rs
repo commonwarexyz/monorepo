@@ -296,7 +296,7 @@ where
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
     select_loop! {
         context,
-        on_shutdown => {
+        on_stopped => {
             debug!("context shutdown, closing client connection");
         },
         incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
@@ -422,7 +422,7 @@ where
     let mut next_op_time = context.current() + config.op_interval;
     select_loop! {
         context,
-        on_shutdown => {
+        on_stopped => {
             debug!("context shutdown, stopping server");
         },
         _ = context.sleep_until(next_op_time) => {

@@ -132,7 +132,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 // Enter into the main loop
                 select_loop! {
                     context,
-                    on_shutdown => {},
+                    on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
                         tracker.construct(peer.clone(), mailbox.clone());

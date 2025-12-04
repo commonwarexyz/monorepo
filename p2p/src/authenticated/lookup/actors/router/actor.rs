@@ -99,7 +99,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     async fn run(mut self, routing: Channels<P>) {
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping router");
             },
             msg = self.control.next() => {

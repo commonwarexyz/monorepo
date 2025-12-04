@@ -197,7 +197,7 @@ where
         let mut engines = BTreeMap::new();
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
             message = pending_backup.next() => {

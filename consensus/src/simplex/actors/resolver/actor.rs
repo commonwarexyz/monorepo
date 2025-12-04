@@ -129,7 +129,7 @@ impl<
 
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping resolver");
             },
             _ = &mut resolver_task => {

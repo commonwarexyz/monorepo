@@ -129,7 +129,7 @@ where
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         select_loop! {
             self.context,
-            on_shutdown => {
+            on_stopped => {
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
