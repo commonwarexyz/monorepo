@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{FixedSize, ReadExt};
+use commonware_codec::DecodeExt;
 use commonware_consensus::{
     simplex::{
         signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
@@ -72,26 +72,16 @@ fn make_vote<S: Scheme>(data: &VoteData, sig: S::Signature) -> Nullify<S> {
     }
 }
 
-fn decode_signature<T: FixedSize + for<'a> commonware_codec::Read<Cfg = ()>>(
-    bytes: &[u8],
-) -> Option<T> {
-    if bytes.len() < T::SIZE {
-        return None;
-    }
-    let mut buf = &bytes[..T::SIZE];
-    T::read(&mut buf).ok()
-}
-
 fn make_vote_ed25519(data: &VoteData) -> Option<Nullify<Ed25519Scheme>> {
-    let sig =
-        decode_signature::<commonware_cryptography::ed25519::Signature>(&data.signature_bytes)?;
+    let sig = commonware_cryptography::ed25519::Signature::decode(data.signature_bytes.as_slice())
+        .ok()?;
     Some(make_vote::<Ed25519Scheme>(data, sig))
 }
 
 fn make_vote_multisig<V: Variant>(
     data: &VoteData,
 ) -> Option<Nullify<bls12381_multisig::Scheme<PublicKey, V>>> {
-    let sig = decode_signature::<V::Signature>(&data.signature_bytes)?;
+    let sig = V::Signature::decode(data.signature_bytes.as_slice()).ok()?;
     Some(make_vote::<bls12381_multisig::Scheme<PublicKey, V>>(
         data, sig,
     ))
@@ -100,7 +90,7 @@ fn make_vote_multisig<V: Variant>(
 fn make_vote_threshold<V: Variant>(
     data: &VoteData,
 ) -> Option<Nullify<bls12381_threshold::Scheme<PublicKey, V>>> {
-    let vote_sig = decode_signature::<V::Signature>(&data.signature_bytes)?;
+    let vote_sig = V::Signature::decode(data.signature_bytes.as_slice()).ok()?;
     let sig = bls12381_threshold::Signature {
         vote_signature: vote_sig,
         seed_signature: vote_sig,
