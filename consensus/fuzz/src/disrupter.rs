@@ -18,7 +18,6 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::set::OrderedQuorum;
-use futures_timer::Delay;
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use std::time::Duration;
 
@@ -229,7 +228,7 @@ where
                     }
                 },
 
-                _ = Delay::new(DEFAULT_TIMEOUT).fuse() => {
+                _ = self.context.sleep(DEFAULT_TIMEOUT) => {
                     self.send_random_message(&mut sender).await;
                 }
             }
