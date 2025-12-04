@@ -390,15 +390,6 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, I, H, Dirty>
-{
-}
-
-impl<
-        E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
@@ -440,9 +431,11 @@ impl<
             .last_commit
             .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
         let inactivity_floor_loc = self.raise_floor().await?;
 
-        // Append the commit operation with the new inactivity floor.
+        // Commit the log to ensure this commit is durable.
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
             .await?;
 

@@ -12,7 +12,7 @@ use crate::{
         store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
-    bitmap::CleanBitMap,
+    bitmap::{CleanBitMap, DirtyBitMap},
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, Mmr as MemMmr, State},
@@ -55,7 +55,7 @@ pub struct Current<
 
     bitmap_metadata_partition: String,
 
-    /// Cached root digest. Only valid when in Clean state.
+    /// Cached root digest. Invariant: valid when in Clean state.
     cached_root: Option<H::Digest>,
 }
 
@@ -514,14 +514,19 @@ impl<
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete the log write part of the commit process.
-        self.commit_to_log(None).await?;
+        let _ = self.commit_to_log(None).await?;
         Ok(())
     }
 
-    #[cfg(test)]
     /// Helper that performs the commit operations up to and including writing to the log,
-    /// but does not merkleize the bitmap or prune. Used for simulating partial commit failures.
-    async fn commit_to_log(&mut self, metadata: Option<V>) -> Result<(), Error> {
+    /// but does not merkleize the bitmap or prune. Used for simulating partial commit failures
+    /// in tests, and as the first phase of the full commit operation.
+    ///
+    /// Returns the dirty bitmap that needs to be merkleized and pruned.
+    async fn commit_to_log(
+        &mut self,
+        metadata: Option<V>,
+    ) -> Result<DirtyBitMap<H::Digest, N>, Error> {
         let empty_status = CleanBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
         let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
 
@@ -540,7 +545,7 @@ impl<
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(())
+        Ok(status)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -552,23 +557,8 @@ impl<
             .last_commit
             .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
-        let empty_status = CleanBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
-        let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
-
-        // Inactivate the current commit operation.
-        if let Some(last_commit_loc) = self.any.last_commit {
-            status.set_bit(*last_commit_loc, false);
-        }
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut status).await?;
-
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
-
-        self.any.apply_commit_op(commit_op).await?; // recovery is ensured after this returns
+        // Commit to log (recovery is ensured after this returns)
+        let status = self.commit_to_log(metadata).await?;
 
         // Merkleize the new bitmap entries.
         let mmr = &self.any.log.mmr;
@@ -979,16 +969,16 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete [Current] type used in these unit tests (Clean state).
-    type CurrentTest = Current<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    /// A type alias for the concrete [Current] type used in these unit tests.
+    type CleanCurrentTest = Current<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
     /// A type alias for the Dirty variant of CurrentTest.
     type DirtyCurrentTest =
         Current<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Dirty>;
 
     /// Return an [Current] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context, partition_prefix: &str) -> CurrentTest {
-        CurrentTest::init(context, current_db_config(partition_prefix))
+    async fn open_db(context: deterministic::Context, partition_prefix: &str) -> CleanCurrentTest {
+        CleanCurrentTest::init(context, current_db_config(partition_prefix))
             .await
             .unwrap()
     }
@@ -1172,7 +1162,7 @@ pub mod test {
             };
             let root = db.root();
             // Proof should be verifiable against current root.
-            assert!(CurrentTest::verify_key_value_proof(
+            assert!(CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
@@ -1183,7 +1173,7 @@ pub mod test {
             // Proof should not verify against a different value.
             let mut bad_info = info.clone();
             bad_info.value = v2;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 bad_info,
@@ -1193,7 +1183,7 @@ pub mod test {
             // Proof should not be verifiable if we fail to give verification the correct next key.
             let mut bad_info = info.clone();
             bad_info.next_key = Sha256::fill(0x02);
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 bad_info,
@@ -1208,7 +1198,7 @@ pub mod test {
 
             // Proof should not be verifiable against the new root.
             let root = db.root();
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
@@ -1229,7 +1219,7 @@ pub mod test {
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 proof_inactive_info,
@@ -1248,7 +1238,7 @@ pub mod test {
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_loc,
@@ -1267,7 +1257,7 @@ pub mod test {
 
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_chunk,
@@ -1279,13 +1269,13 @@ pub mod test {
     }
 
     /// Apply random operations to the given db, committing them (randomly & at the end) only if
-    /// `commit_changes` is true. Takes a Dirty db and returns a Clean db.
+    /// `commit_changes` is true.
     async fn apply_random_ops(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
         mut db: DirtyCurrentTest,
-    ) -> Result<CurrentTest, Error> {
+    ) -> Result<CleanCurrentTest, Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
         let mut rng = StdRng::seed_from_u64(rng_seed);
@@ -1347,7 +1337,14 @@ pub mod test {
                     .await
                     .unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    CleanCurrentTest::verify_range_proof(
+                        &mut hasher,
+                        &proof,
+                        loc,
+                        &ops,
+                        &chunks,
+                        &root
+                    ),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1388,7 +1385,7 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
-                assert!(CurrentTest::verify_key_value_proof(
+                assert!(CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     info.clone(),
@@ -1398,7 +1395,7 @@ pub mod test {
                 let wrong_val = Sha256::fill(0xFF);
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     bad_info.clone(),
@@ -1408,7 +1405,7 @@ pub mod test {
                 let wrong_key = Sha256::fill(0xEE);
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     bad_info,
@@ -1416,7 +1413,7 @@ pub mod test {
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     info,
@@ -1489,7 +1486,7 @@ pub mod test {
                 assert_eq!(info.value, v);
                 assert_eq!(info.next_key, k);
                 assert!(
-                    CurrentTest::verify_key_value_proof(
+                    CleanCurrentTest::verify_key_value_proof(
                         hasher.inner(),
                         &proof,
                         info.clone(),
@@ -1499,7 +1496,12 @@ pub mod test {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
+                    !CleanCurrentTest::verify_key_value_proof(
+                        hasher.inner(),
+                        &proof,
+                        old_info,
+                        &root
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
@@ -1587,11 +1589,11 @@ pub mod test {
             let db_config_pruning = current_db_config("pruning_test");
 
             let mut db_no_pruning =
-                CurrentTest::init(context.clone(), db_config_no_pruning.clone())
+                CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
                     .await
                     .unwrap()
                     .into_dirty();
-            let mut db_pruning = CurrentTest::init(context.clone(), db_config_pruning.clone())
+            let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
                 .await
                 .unwrap()
                 .into_dirty();
@@ -1638,10 +1640,10 @@ pub mod test {
             db_pruning.close().await.unwrap();
 
             // Restart both databases
-            let db_no_pruning = CurrentTest::init(context.clone(), db_config_no_pruning)
+            let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)
                 .await
                 .unwrap();
-            let db_pruning = CurrentTest::init(context.clone(), db_config_pruning)
+            let db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1679,7 +1681,7 @@ pub mod test {
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &empty_proof,
                 &key_exists_1,
@@ -1716,14 +1718,14 @@ pub mod test {
             assert_eq!(proof, proof2);
             assert_eq!(info, info2);
             // Any key except the one that exists should verify against this proof.
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
@@ -1731,7 +1733,7 @@ pub mod test {
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,
@@ -1743,7 +1745,7 @@ pub mod test {
             if let ExclusionProofInfo::KeyValue(ref mut kv_info) = corrupt_info {
                 kv_info.next_key = Sha256::fill(0x02);
             }
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,
@@ -1772,21 +1774,21 @@ pub mod test {
                 .unwrap();
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
                 info.clone(),
                 &root,
             ));
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &middle_key,
@@ -1808,7 +1810,7 @@ pub mod test {
                 .await
                 .unwrap();
             // `k` should fail since it's in the db.
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,
@@ -1816,7 +1818,7 @@ pub mod test {
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &middle_key,
@@ -1828,7 +1830,7 @@ pub mod test {
                 panic!("expected KeyValue variant");
             };
             assert_eq!(kv_info.next_key, key_exists_2);
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_2,
@@ -1837,7 +1839,7 @@ pub mod test {
             ));
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &conflicting_middle_key,
@@ -1846,14 +1848,14 @@ pub mod test {
             ));
 
             // Using lesser/greater keys for the middle-proof should fail.
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
@@ -1880,14 +1882,14 @@ pub mod test {
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,
                 info.clone(),
                 &root,
             ));
-            assert!(CurrentTest::verify_exclusion_proof(
+            assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_2,
@@ -1896,21 +1898,21 @@ pub mod test {
             ));
 
             // Try fooling the verifier with improper values.
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &empty_proof, // wrong proof
                 &key_exists_1,
                 info.clone(),
                 &root,
             ));
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,
                 info,
                 &empty_root, // wrong root
             ));
-            assert!(!CurrentTest::verify_exclusion_proof(
+            assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &key_exists_1,

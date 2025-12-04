@@ -229,7 +229,7 @@ pub mod tests {
         batch.update(key.clone(), D::Value::from_seed(9)).await?;
         assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(9)));
 
-        db.destroy().await.unwrap();
+        db.destroy().await?;
         Ok(())
     }
 
@@ -260,7 +260,7 @@ pub mod tests {
                 .await?
         );
 
-        db.destroy().await.unwrap();
+        db.destroy().await?;
         Ok(())
     }
 
@@ -314,7 +314,7 @@ pub mod tests {
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.destroy().await.unwrap();
+        db.destroy().await?;
         Ok(())
     }
 
@@ -354,7 +354,7 @@ pub mod tests {
         db.write_batch(delete_batch.into_iter()).await?;
         assert_eq!(Store::get(&db, &existing).await?, None);
 
-        db.destroy().await.unwrap();
+        db.destroy().await?;
         Ok(())
     }
 
