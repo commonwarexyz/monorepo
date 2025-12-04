@@ -4,7 +4,7 @@ use commonware_cryptography::{
         dkg::{DealerLog, Info, SignedDealerLog},
         primitives::variant::Variant,
     },
-    PrivateKey,
+    Signer,
 };
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
@@ -21,7 +21,7 @@ pub struct Observer<E, V, S>
 where
     E: Clock + Storage + Metrics,
     V: Variant,
-    S: PrivateKey,
+    S: Signer,
 {
     key: U64,
     storage: Metadata<E, U64, Data<V, S::PublicKey>>,
@@ -31,7 +31,7 @@ impl<E, V, S> Observer<E, V, S>
 where
     E: Clock + Storage + Metrics,
     V: Variant,
-    S: PrivateKey,
+    S: Signer,
 {
     /// Load the storage from disk.
     pub async fn load(ctx: E, partition: String, round: u64, max_read_size: NonZeroU32) -> Self {

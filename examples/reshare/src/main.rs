@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::hex;
 use std::{future::Future, path::PathBuf, pin::Pin};
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 mod application;
 mod dkg;
@@ -25,6 +25,18 @@ mod self_channel;
 mod setup;
 mod validator;
 
+/// This exists to implement [`UpdateCallBack`] for the simple case of saving the DKG result.
+///
+/// This is used to do an initial setup for using the result to run a threshold-signature
+/// based consensus. In order to bootstrap the initial shares, we run a non-threshold
+/// version of consensus, until we successfully complete a DKG, and then save the
+/// public output and our private share to a file.
+///
+/// For a more production-oriented version of this pattern, you'd probably want
+/// to have this use [`commonware_storage`], with the same backing store that you
+/// use for storing the shares later, e.g. [`commonware_storage::metadata`].
+///
+/// In this example, this saves to a file to make the result more easily inspectable.
 struct SaveFileOnUpdate {
     path: PathBuf,
 }
@@ -44,7 +56,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
         Box::pin(async move {
             match update {
                 Update::Failure { epoch } => {
-                    info!(epoch = %epoch, "dkg failed ; retrying");
+                    warn!(epoch = %epoch, "dkg failed; retrying");
                     PostUpdate::Continue
                 }
                 Update::Success {
@@ -52,7 +64,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
                     share,
                     epoch,
                 } => {
-                    info!(epoch = %epoch, "dkg succeeded ; saving file");
+                    info!(epoch = %epoch, "dkg succeeded; stopping");
                     let config_str =
                         std::fs::read_to_string(&config_path).expect("failed to read config file");
                     let config: ParticipantConfig = serde_json::from_str(&config_str)
@@ -172,7 +184,7 @@ fn main() {
                     .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args, Box::new(ContinueOnUpdate))
+                validator::run::<ThresholdScheme<MinSig>>(context, args, ContinueOnUpdate::boxed())
                     .await
             }
         }

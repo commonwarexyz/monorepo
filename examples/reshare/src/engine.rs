@@ -19,7 +19,7 @@ use commonware_cryptography::{
         dkg::Output,
         primitives::{group, variant::Variant},
     },
-    Hasher, PrivateKey,
+    Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
@@ -52,7 +52,7 @@ const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 pub struct Config<C, P, B, V>
 where
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
-    C: PrivateKey,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -71,7 +71,7 @@ where
 pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: PrivateKey,
+    C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -111,7 +111,7 @@ where
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: PrivateKey,
+    C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -312,7 +312,7 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
-        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -324,7 +324,7 @@ where
                 dkg,
                 orchestrator,
                 marshal,
-                update_cb
+                callback
             )
             .await
         )
@@ -361,14 +361,14 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
-        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let dkg_handle = self.dkg.start(
             self.config.output,
             self.config.share,
             self.orchestrator_mailbox,
             dkg,
-            update_cb,
+            callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle = self

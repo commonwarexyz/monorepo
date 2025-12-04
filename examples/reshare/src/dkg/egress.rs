@@ -46,6 +46,12 @@ pub trait UpdateCallBack<V: Variant, P>: Send {
 /// An implementor of [UpdateCallBack] which always continues.
 pub struct ContinueOnUpdate;
 
+impl ContinueOnUpdate {
+    pub fn boxed() -> Box<Self> {
+        Box::new(Self)
+    }
+}
+
 impl<V: Variant, P> UpdateCallBack<V, P> for ContinueOnUpdate {
     fn on_update(
         &mut self,

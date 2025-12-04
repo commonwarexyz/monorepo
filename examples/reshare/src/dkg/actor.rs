@@ -18,7 +18,7 @@ use commonware_cryptography::{
         dkg::{observe, Info, Output, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
-    Hasher, PrivateKey, PublicKey,
+    Hasher, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
@@ -90,7 +90,7 @@ impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
     }
 }
 
-pub struct Config<C: PrivateKey, P> {
+pub struct Config<C: Signer, P> {
     pub manager: P,
     pub signer: C,
     pub mailbox_size: usize,
@@ -103,7 +103,7 @@ where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
@@ -121,7 +121,7 @@ where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
@@ -176,14 +176,14 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
         // cryptographic operations.
         spawn_cell!(
             self.context,
-            self.run(output, share, orchestrator, dkg_chan, update_cb)
+            self.run(output, share, orchestrator, dkg_chan, callback)
                 .await
         )
     }

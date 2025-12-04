@@ -4,7 +4,7 @@ use commonware_cryptography::{
         dkg::{DealerLog, DealerPrivMsg, DealerPubMsg, Error, Info, Output, Player, PlayerAck},
         primitives::{group::Share, variant::Variant},
     },
-    PrivateKey, PublicKey,
+    PublicKey, Signer,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -31,7 +31,7 @@ enum Message<V: Variant, P: PublicKey> {
     Transmit,
     Finalize {
         logs: BTreeMap<P, DealerLog<V, P>>,
-        cb_in: oneshot::Sender<PlayerOutput<V, P>>,
+        output: oneshot::Sender<PlayerOutput<V, P>>,
     },
 }
 
@@ -53,7 +53,10 @@ where
     ) -> Result<PlayerOutput<V, P>, Canceled> {
         let (cb_in, cb_out) = oneshot::channel();
         self.0
-            .send(Message::Finalize { logs, cb_in })
+            .send(Message::Finalize {
+                logs,
+                output: cb_in,
+            })
             .await
             .map_err(|_| Canceled)?;
         cb_out.await
@@ -70,7 +73,7 @@ pub struct Actor<E, V, C, S, R>
 where
     E: Clock + Storage + Metrics,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
 {
     ctx: ContextCell<E>,
     max_read_size: NonZeroU32,
@@ -86,7 +89,7 @@ impl<E, V, C, S, R> Actor<E, V, C, S, R>
 where
     E: Clock + Storage + Metrics + Spawner,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
     S: Sender<PublicKey = C::PublicKey>,
     R: Receiver<PublicKey = C::PublicKey>,
 {
@@ -174,7 +177,7 @@ where
                         Message::Transmit => if self.transmit().await.is_err() {
                             break None;
                         },
-                        Message::Finalize { logs, cb_in } => break Some((logs,cb_in)),
+                        Message::Finalize { logs, output } => break Some((logs, output)),
                     }
                 }
             }
@@ -219,8 +222,12 @@ where
     fn finalize(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
-        cb_in: oneshot::Sender<PlayerOutput<V, C::PublicKey>>,
+        output: oneshot::Sender<PlayerOutput<V, C::PublicKey>>,
     ) {
-        let _ = cb_in.send(self.player.finalize(logs, 1));
+        // We get asked by the DKG actor to finalize, and we use the
+        // callback they provide to return the answer. If the callback
+        // has been dropped on their end, then no one cares about this answer
+        // anymore, and we can die in peace.
+        let _ = output.send(self.player.finalize(logs, 1));
     }
 }

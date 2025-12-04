@@ -5,7 +5,7 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::Variant},
     },
     transcript::Transcript,
-    PrivateKey,
+    Signer,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -23,7 +23,7 @@ use tracing::{debug, info};
 mod state;
 use state::State;
 
-enum Message<V: Variant, C: PrivateKey> {
+enum Message<V: Variant, C: Signer> {
     Transmit,
     Finalize {
         cb_in: oneshot::Sender<SignedDealerLog<V, C>>,
@@ -31,9 +31,9 @@ enum Message<V: Variant, C: PrivateKey> {
 }
 
 /// A handle to send messages to an [Actor].
-pub struct Mailbox<V: Variant, C: PrivateKey>(mpsc::Sender<Message<V, C>>);
+pub struct Mailbox<V: Variant, C: Signer>(mpsc::Sender<Message<V, C>>);
 
-impl<V: Variant, C: PrivateKey> Mailbox<V, C> {
+impl<V: Variant, C: Signer> Mailbox<V, C> {
     pub async fn finalize(mut self) -> Result<SignedDealerLog<V, C>, Canceled> {
         let (cb_in, cb_out) = oneshot::channel();
         self.0
@@ -57,7 +57,7 @@ pub struct Actor<E, V, C, S, R>
 where
     E: Clock + Storage + Metrics,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
 {
     ctx: ContextCell<E>,
     state: State<E, C::PublicKey>,
@@ -73,7 +73,7 @@ impl<E, V, C, S, R> Actor<E, V, C, S, R>
 where
     E: Clock + Storage + Metrics + Spawner + CryptoRngCore,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
     S: Sender<PublicKey = C::PublicKey>,
     R: Receiver<PublicKey = C::PublicKey>,
 {
