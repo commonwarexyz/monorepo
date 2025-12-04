@@ -246,18 +246,13 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.peek_pending().map(|(deadline, _)| deadline);
+        let pending_deadline = self.pending.peek().map(|(_, (deadline, _))| *deadline);
         pending_deadline.max(self.waiter)
     }
 
     /// Returns the deadline for the next requester timeout.
     pub fn get_active_deadline(&self) -> Option<SystemTime> {
         self.requester.next().map(|(_, deadline)| deadline)
-    }
-
-    /// Returns whether the next item in the pending queue is a retry.
-    pub fn peek_pending(&self) -> Option<(SystemTime, bool)> {
-        self.pending.peek().map(|(_, value)| *value)
     }
 
     /// Removes and returns the pending key with the earliest deadline.
