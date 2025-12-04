@@ -742,7 +742,7 @@ where
         iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
     ) -> Result<(), Error> {
         let mut updates = HashMap::new();
-        let mut locations = Vec::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
             let iter = self.snapshot.get(&key);
             locations.extend(iter.copied());
