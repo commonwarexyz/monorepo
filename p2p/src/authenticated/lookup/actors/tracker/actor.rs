@@ -225,6 +225,7 @@ mod tests {
     use super::*;
     use crate::{
         authenticated::lookup::actors::peer,
+        Address,
         Blocker,
         Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
@@ -316,7 +317,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, OrderedAssociated::from([(pk.clone(), addr)]))
+                .update(0, OrderedAssociated::from([(pk.clone(), Address::from(addr))]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -345,7 +346,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, OrderedAssociated::from([(pk1.clone(), addr)]))
+                .update(0, OrderedAssociated::from([(pk1.clone(), Address::from(addr))]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -402,8 +403,8 @@ mod tests {
                 .update(
                     0,
                     OrderedAssociated::from([
-                        (peer_pk.clone(), peer_addr),
-                        (peer_pk2.clone(), peer_addr2),
+                        (peer_pk.clone(), Address::from(peer_addr)),
+                        (peer_pk2.clone(), Address::from(peer_addr2)),
                     ]),
                 )
                 .await;
@@ -436,7 +437,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, OrderedAssociated::from([(peer_pk.clone(), Address::from(peer_addr))]))
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -471,7 +472,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, OrderedAssociated::from([(boot_pk.clone(), Address::from(boot_addr))]))
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -495,7 +496,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, OrderedAssociated::from([(boot_pk.clone(), Address::from(boot_addr))]))
                 .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
@@ -532,7 +533,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, OrderedAssociated::from([(peer_pk.clone(), Address::from(peer_addr))]))
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -586,7 +587,10 @@ mod tests {
             oracle
                 .update(
                     0,
-                    OrderedAssociated::from([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]),
+                    OrderedAssociated::from([
+                        (my_pk.clone(), Address::from(my_addr)),
+                        (pk_1.clone(), Address::from(addr_1)),
+                    ]),
                 )
                 .await;
             // let the register take effect
@@ -607,7 +611,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .update(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]))
+                .update(1, OrderedAssociated::from([(pk_2.clone(), Address::from(addr_2))]))
                 .await;
 
             // Wait for a listener update

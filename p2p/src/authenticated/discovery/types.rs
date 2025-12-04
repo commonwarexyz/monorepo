@@ -1,4 +1,4 @@
-use crate::authenticated::data::Data;
+use crate::{authenticated::data::Data, Address};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
@@ -171,22 +171,25 @@ impl Read for BitVec {
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
+/// A signed message from a peer attesting to its own address and public key at a given time.
 ///
-/// This is used to share the peer's socket address and public key with other peers in a verified
+/// This is used to share the peer's address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug)]
 pub struct Info<C: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
+    /// The address of the peer.
+    ///
+    /// This can be either a single address (same for ingress/egress) or separate
+    /// addresses for each direction.
+    pub address: Address,
 
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the address was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
     pub public_key: C,
 
-    /// The peer's signature over the socket and timestamp.
+    /// The peer's signature over the address and timestamp.
     pub signature: C::Signature,
 }
 
@@ -195,7 +198,7 @@ impl<C: PublicKey> Info<C> {
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
             namespace,
-            &(self.socket, self.timestamp).encode(),
+            &(self.address.clone(), self.timestamp).encode(),
             &self.signature,
         )
     }
@@ -217,26 +220,31 @@ impl<C: PublicKey> Info<C> {
         )
     }
 
-    /// Sign the [Info] message.
+    /// Sign the [Info] message with an Address.
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
-        socket: SocketAddr,
+        address: Address,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(namespace, &(socket, timestamp).encode());
+        let signature = signer.sign(namespace, &(address.clone(), timestamp).encode());
         Self {
-            socket,
+            address,
             timestamp,
             public_key: signer.public_key(),
             signature,
         }
     }
+
+    /// Get the egress address (address to dial).
+    pub const fn egress(&self) -> SocketAddr {
+        self.address.egress()
+    }
 }
 
 impl<C: PublicKey> EncodeSize for Info<C> {
     fn encode_size(&self) -> usize {
-        self.socket.encode_size()
+        self.address.encode_size()
             + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
@@ -245,7 +253,7 @@ impl<C: PublicKey> EncodeSize for Info<C> {
 
 impl<C: PublicKey> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
+        self.address.write(buf);
         UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
@@ -256,12 +264,12 @@ impl<C: PublicKey> Read for Info<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let socket = SocketAddr::read(buf)?;
+        let address = Address::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(Self {
-            socket,
+            address,
             timestamp,
             public_key,
             signature,
@@ -320,10 +328,11 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
-            // Check if IP is allowed
+            // Check if egress IP is allowed (we use egress for dialing)
+            let egress_ip = info.egress().ip();
             #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            if !self.allow_private_ips && !egress_ip.is_global() {
+                return Err(Error::PrivateIPsNotAllowed(egress_ip));
             }
 
             // Check if peer is us
@@ -365,8 +374,9 @@ mod tests {
     fn signed_peer_info() -> Info<PublicKey> {
         let mut rng = rand::thread_rng();
         let c = PrivateKey::from_rng(&mut rng);
+        let address: Address = SocketAddr::from(([127, 0, 0, 1], 8080)).into();
         Info {
-            socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            address,
             timestamp: 1234567890,
             public_key: c.public_key(),
             signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
@@ -389,7 +399,7 @@ mod tests {
         let encoded = original.encode();
         let decoded = Vec::<Info<PublicKey>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
-            assert_eq!(original.socket, decoded.socket);
+            assert_eq!(original.address, decoded.address);
             assert_eq!(original.timestamp, decoded.timestamp);
             assert_eq!(original.public_key, decoded.public_key);
             assert_eq!(original.signature, decoded.signature);
@@ -431,7 +441,7 @@ mod tests {
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
-            assert_eq!(a.socket, b.socket);
+            assert_eq!(a.address, b.address);
             assert_eq!(a.timestamp, b.timestamp);
             assert_eq!(a.public_key, b.public_key);
             assert_eq!(a.signature, b.signature);
@@ -538,7 +548,7 @@ mod tests {
             let peer = Info::sign(
                 &peer_key,
                 NAMESPACE,
-                SocketAddr::from(([8, 8, 8, 8], 8080)),
+                SocketAddr::from(([8, 8, 8, 8], 8080)).into(),
                 timestamp,
             );
             assert!(validator.validate(&context, &[peer]).is_ok());
@@ -558,13 +568,13 @@ mod tests {
                 let peer_a = Info::sign(
                     &PrivateKey::from_rng(&mut context),
                     NAMESPACE,
-                    addr_a,
+                    addr_a.into(),
                     timestamp,
                 );
                 let peer_b = Info::sign(
                     &PrivateKey::from_rng(&mut context),
                     NAMESPACE,
-                    addr_b,
+                    addr_b.into(),
                     timestamp,
                 );
                 vec![peer_a, peer_b]
@@ -598,7 +608,7 @@ mod tests {
             let peer = Info::sign(
                 &peer_key,
                 NAMESPACE,
-                SocketAddr::from(([192, 168, 1, 1], 8080)),
+                SocketAddr::from(([192, 168, 1, 1], 8080)).into(),
                 timestamp,
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
@@ -622,7 +632,7 @@ mod tests {
             let peer = Info::sign(
                 &validator_key,
                 NAMESPACE,
-                SocketAddr::from(([203, 0, 113, 1], 8080)),
+                SocketAddr::from(([203, 0, 113, 1], 8080)).into(),
                 timestamp,
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
@@ -650,7 +660,7 @@ mod tests {
             let peer = Info::sign(
                 &peer_key,
                 NAMESPACE,
-                SocketAddr::from(([198, 51, 100, 1], 8080)),
+                SocketAddr::from(([198, 51, 100, 1], 8080)).into(),
                 future_timestamp,
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
@@ -683,7 +693,7 @@ mod tests {
             let peer = Info::sign(
                 &peer_key,
                 NAMESPACE,
-                SocketAddr::from(([198, 51, 100, 1], 8080)),
+                SocketAddr::from(([198, 51, 100, 1], 8080)).into(),
                 past_timestamp,
             );
             assert!(validator.validate(&context, &[peer]).is_ok());
@@ -707,7 +717,7 @@ mod tests {
             let peer = Info::sign(
                 &peer_key,
                 b"wrong-namespace",
-                SocketAddr::from(([8, 8, 4, 4], 8080)),
+                SocketAddr::from(([8, 8, 4, 4], 8080)).into(),
                 timestamp,
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();

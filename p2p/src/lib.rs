@@ -10,7 +10,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{Error as CodecError, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::set::Ordered;
@@ -49,6 +50,83 @@ impl Socket {
 impl From<SocketAddr> for Socket {
     fn from(addr: SocketAddr) -> Self {
         Self::Direct(addr)
+    }
+}
+
+/// Prefix byte for [Socket::Direct].
+const SOCKET_DIRECT_PREFIX: u8 = 0;
+/// Prefix byte for [Socket::Dns].
+const SOCKET_DNS_PREFIX: u8 = 1;
+
+impl EncodeSize for Socket {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Direct(addr) => addr.encode_size(),
+            Self::Dns { hostname, port } => {
+                hostname.as_bytes().encode_size() + port.encode_size()
+            }
+        }
+    }
+}
+
+impl Write for Socket {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Direct(addr) => {
+                SOCKET_DIRECT_PREFIX.write(buf);
+                addr.write(buf);
+            }
+            Self::Dns { hostname, port } => {
+                SOCKET_DNS_PREFIX.write(buf);
+                hostname.as_bytes().write(buf);
+                port.write(buf);
+            }
+        }
+    }
+}
+
+/// Maximum hostname length for DNS entries (255 bytes per DNS spec).
+const MAX_HOSTNAME_LEN: usize = 255;
+
+impl Read for Socket {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let prefix = u8::read(buf)?;
+        match prefix {
+            SOCKET_DIRECT_PREFIX => {
+                let addr = SocketAddr::read(buf)?;
+                Ok(Self::Direct(addr))
+            }
+            SOCKET_DNS_PREFIX => {
+                let hostname_bytes = Vec::<u8>::read_range(buf, ..=MAX_HOSTNAME_LEN)?;
+                let hostname = String::from_utf8(hostname_bytes)
+                    .map_err(|_| CodecError::Invalid("p2p::Socket", "Invalid UTF-8 hostname"))?;
+                let port = u16::read(buf)?;
+                Ok(Self::Dns { hostname, port })
+            }
+            _ => Err(CodecError::Invalid("p2p::Socket", "Invalid prefix")),
+        }
+    }
+}
+
+impl PartialOrd for Socket {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Socket {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Direct(a), Self::Direct(b)) => a.cmp(b),
+            (Self::Direct(_), Self::Dns { .. }) => std::cmp::Ordering::Less,
+            (Self::Dns { .. }, Self::Direct(_)) => std::cmp::Ordering::Greater,
+            (
+                Self::Dns { hostname: h1, port: p1 },
+                Self::Dns { hostname: h2, port: p2 },
+            ) => (h1, p1).cmp(&(h2, p2)),
+        }
     }
 }
 
@@ -103,6 +181,76 @@ impl Address {
 impl From<SocketAddr> for Address {
     fn from(addr: SocketAddr) -> Self {
         Self::Single(addr)
+    }
+}
+
+impl PartialOrd for Address {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Address {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Single(a), Self::Single(b)) => a.cmp(b),
+            (Self::Single(_), Self::Split { .. }) => std::cmp::Ordering::Less,
+            (Self::Split { .. }, Self::Single(_)) => std::cmp::Ordering::Greater,
+            (
+                Self::Split { ingress: i1, egress: e1 },
+                Self::Split { ingress: i2, egress: e2 },
+            ) => (i1, e1).cmp(&(i2, e2)),
+        }
+    }
+}
+
+/// Prefix byte for [Address::Single].
+const ADDRESS_SINGLE_PREFIX: u8 = 0;
+/// Prefix byte for [Address::Split].
+const ADDRESS_SPLIT_PREFIX: u8 = 1;
+
+impl EncodeSize for Address {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Single(addr) => addr.encode_size(),
+            Self::Split { ingress, egress } => ingress.encode_size() + egress.encode_size(),
+        }
+    }
+}
+
+impl Write for Address {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Single(addr) => {
+                ADDRESS_SINGLE_PREFIX.write(buf);
+                addr.write(buf);
+            }
+            Self::Split { ingress, egress } => {
+                ADDRESS_SPLIT_PREFIX.write(buf);
+                ingress.write(buf);
+                egress.write(buf);
+            }
+        }
+    }
+}
+
+impl Read for Address {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let prefix = <u8>::read(buf)?;
+        match prefix {
+            ADDRESS_SINGLE_PREFIX => {
+                let addr = SocketAddr::read(buf)?;
+                Ok(Self::Single(addr))
+            }
+            ADDRESS_SPLIT_PREFIX => {
+                let ingress = Socket::read(buf)?;
+                let egress = SocketAddr::read(buf)?;
+                Ok(Self::Split { ingress, egress })
+            }
+            _ => Err(CodecError::Invalid("p2p::Address", "Invalid prefix")),
+        }
     }
 }
 

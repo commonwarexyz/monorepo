@@ -184,7 +184,7 @@ impl<C: PublicKey> Record<C> {
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
         if let Address::Discovered(info, fails) = &mut self.address {
-            if info.socket == socket {
+            if info.egress() == socket {
                 *fails += 1;
             }
         }
@@ -235,9 +235,9 @@ impl<C: PublicKey> Record<C> {
     pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
+            Address::Myself(info) => Some(info.egress()),
             Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info, _) => Some(info.socket),
+            Address::Discovered(info, _) => Some(info.egress()),
             Address::Blocked => None,
         }
     }
@@ -299,6 +299,7 @@ impl<C: PublicKey> Record<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Address as PeerAddress;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         secp256r1::standard::{PrivateKey, PublicKey},
@@ -318,9 +319,10 @@ mod tests {
         S: PrivateKeyExt,
     {
         let signer = S::from_seed(signer_seed);
-        let signature = signer.sign(NAMESPACE, &(socket, timestamp).encode());
+        let address: PeerAddress = socket.into();
+        let signature = signer.sign(NAMESPACE, &(address.clone(), timestamp).encode());
         Info {
-            socket,
+            address,
             timestamp,
             public_key: signer.public_key(),
             signature,
@@ -340,7 +342,7 @@ mod tests {
         actual: &Info<S>,
         expected: &Info<S>,
     ) -> bool {
-        actual.socket == expected.socket
+        actual.address == expected.address
             && actual.timestamp == expected.timestamp
             && actual.public_key == expected.public_key
             && actual.signature == expected.signature
@@ -380,7 +382,7 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.socket(), Some(my_info.socket),);
+        assert_eq!(record.socket(), Some(my_info.egress()));
         assert!(compare_optional_peer_info(
             record.sharable().as_ref(),
             &my_info
