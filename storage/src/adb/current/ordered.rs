@@ -1697,18 +1697,17 @@ pub mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let mut ctx = context.clone();
-                async move {
-                    let seed = ctx.next_u64();
-                    let partition = format!("current_ordered_batch_{seed}");
-                    open_db(ctx, &partition).await
-                }
-            })
-            .await
-            .unwrap();
+        // Run the batch tests twice and check for determinism.
+        let state1 = batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let partition = format!("current_ordered_batch_{seed}");
+            open_db(ctx, &partition).await
         });
+        let state2 = batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let partition = format!("current_ordered_batch_{seed}");
+            open_db(ctx, &partition).await
+        });
+        assert_eq!(state1, state2);
     }
 }

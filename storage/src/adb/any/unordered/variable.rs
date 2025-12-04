@@ -613,18 +613,17 @@ pub(super) mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let mut ctx = context.clone();
-                async move {
-                    let seed = ctx.next_u64();
-                    let cfg = db_config(&format!("batch_{seed}"));
-                    AnyTest::init(ctx, cfg).await.unwrap()
-                }
-            })
-            .await
-            .unwrap();
+        // Run the batch tests twice and check for determinism.
+        let state1 = batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let cfg = db_config(&format!("batch_{seed}"));
+            AnyTest::init(ctx, cfg).await.unwrap()
         });
+        let state2 = batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let cfg = db_config(&format!("batch_{seed}"));
+            AnyTest::init(ctx, cfg).await.unwrap()
+        });
+        assert_eq!(state1, state2);
     }
 }
