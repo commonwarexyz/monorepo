@@ -724,7 +724,7 @@ impl<P: PublicKey> AckOrReveal<P> {
 impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Ack(x) => write!(f, "Ack({:?})", x),
+            Self::Ack(x) => write!(f, "Ack({x:?})"),
             Self::Reveal(_) => write!(f, "Reveal(REDACTED)"),
         }
     }
@@ -1558,20 +1558,12 @@ mod test_plan {
             // Check dealer/player ranges
             for &d in &self.dealers {
                 if d >= num_participants {
-                    return Err(anyhow!(
-                        "dealer {} out of range [1, {}]",
-                        d,
-                        num_participants
-                    ));
+                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]",));
                 }
             }
             for &p in &self.players {
                 if p >= num_participants {
-                    return Err(anyhow!(
-                        "player {} out of range [1, {}]",
-                        p,
-                        num_participants
-                    ));
+                    return Err(anyhow!("player {p} out of range [1, {num_participants}]",));
                 }
             }
 
@@ -1912,8 +1904,7 @@ mod test_plan {
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
-                        "Round {} should have failed but succeeded",
-                        i_round
+                        "Round {i_round} should have failed but succeeded",
                     );
                     continue;
                 }
