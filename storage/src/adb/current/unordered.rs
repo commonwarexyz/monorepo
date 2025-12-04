@@ -213,10 +213,9 @@ impl<
         .await?;
 
         let height = Self::grafting_height();
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, height).await?;
-
-        // Compute and cache the root
-        let cached_root = Some(super::root(&mut hasher, height, &status, &any.log.mmr).await?);
+        let (status, root) =
+            merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, height).await?;
+        let cached_root = Some(root);
 
         Ok(Self {
             any,
@@ -389,18 +388,16 @@ impl<
         // Phase 1: Commit to log (recovery is ensured after this returns)
         let status = self.commit_to_log(metadata).await?;
 
-        // Phase 2: Merkleize the new bitmap entries.
+        // Phase 2: Merkleize the new bitmap entries and compute grafted root.
         let mmr = &self.any.log.mmr;
         let height = Self::grafting_height();
-        self.status =
+        let (status, root) =
             merkleize_grafted_bitmap(&mut self.any.log.hasher, status, mmr, height).await?;
+        self.status = status;
+        self.cached_root = Some(root);
 
         // Phase 3: Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
-
-        // Phase 4: Refresh cached root after commit
-        self.cached_root =
-            Some(super::root(&mut self.any.log.hasher, height, &self.status, mmr).await?);
 
         Ok(start_loc..self.op_count())
     }
@@ -519,12 +516,9 @@ impl<
         // Now use the clean MMR for bitmap merkleization
         let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
-        let status =
+        let (status, root) =
             merkleize_grafted_bitmap(&mut hasher, self.status, &clean_any.log.mmr, height).await?;
-
-        // Compute and cache the root
-        let cached_root =
-            Some(super::root(&mut hasher, height, &status, &clean_any.log.mmr).await?);
+        let cached_root = Some(root);
 
         Ok(Current {
             any: clean_any,

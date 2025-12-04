@@ -82,46 +82,6 @@ impl<T: Translator> Config<T> {
     }
 }
 
-/// Return the root of the current adb represented by the provided mmr and bitmap.
-async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
-    height: u32,
-    status: &CleanBitMap<H::Digest, N>,
-    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
-) -> Result<H::Digest, Error> {
-    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
-    let mmr_root = grafted_mmr.root(hasher).await?;
-
-    // The digest contains all information from the base mmr, and all information from the peak
-    // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
-    // all the information we need.
-
-    // Handle empty/fully pruned bitmap
-    if status.len() == status.pruned_bits() {
-        return Ok(mmr_root);
-    }
-
-    let (last_chunk, next_bit) = status.last_chunk();
-    if next_bit == CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-        // Last chunk is complete, no partial chunk to add
-        return Ok(mmr_root);
-    }
-
-    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that
-    // information into the root digest. We do so by computing a root in the same format as an
-    // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
-    // the last chunk and the digest of the last chunk.
-    hasher.inner().update(last_chunk);
-    let last_chunk_digest = hasher.inner().finalize();
-
-    Ok(CleanBitMap::<H::Digest, N>::partial_chunk_root(
-        hasher.inner(),
-        &mmr_root,
-        next_bit,
-        &last_chunk_digest,
-    ))
-}
-
 /// Returns a proof that the specified range of operations are part of the database, along with
 /// the operations from the range. A truncated range (from hitting the max) can be detected by
 /// looking at the length of the returned operations vector. Also returns the bitmap chunks
@@ -192,12 +152,13 @@ async fn range_proof<
 }
 
 /// Performs merkleization of a grafted bitmap.
+/// Returns the merkleized bitmap and the root of the grafted MMR.
 async fn merkleize_grafted_bitmap<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
     status: DirtyBitMap<H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
     grafting_height: u32,
-) -> Result<CleanBitMap<H::Digest, N>, Error>
+) -> Result<(CleanBitMap<H::Digest, N>, H::Digest), Error>
 where
     H: CHasher,
 {
@@ -205,7 +166,30 @@ where
     grafter
         .load_grafted_digests(&status.dirty_chunks(), mmr)
         .await?;
-    status.merkleize(&mut grafter).await.map_err(Into::into)
+    let status = status.merkleize(&mut grafter).await?;
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&status, mmr, grafting_height);
+    let mmr_root = grafted_mmr.root(hasher).await?;
+
+    // Handle partial chunk case
+    let root = if status.len() == status.pruned_bits() {
+        mmr_root
+    } else {
+        let (last_chunk, next_bit) = status.last_chunk();
+        if next_bit == CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+            mmr_root
+        } else {
+            hasher.inner().update(last_chunk);
+            let last_chunk_digest = hasher.inner().finalize();
+            CleanBitMap::<H::Digest, N>::partial_chunk_root(
+                hasher.inner(),
+                &mmr_root,
+                next_bit,
+                &last_chunk_digest,
+            )
+        }
+    };
+
+    Ok((status, root))
 }
 
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
