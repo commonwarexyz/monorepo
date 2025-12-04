@@ -1,24 +1,28 @@
 //! Benchmarks of ADB variants on fixed-size values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
+use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, Clock, Metrics, Storage, ThreadPool};
 use commonware_storage::{
     adb::{
         any::{
             ordered::fixed::Any as OAny,
             unordered::{fixed::Any as UAny, variable::Any as VariableAny},
-            CleanAny, DirtyAny as _, FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
+            CleanAny, DirtyAny, FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Batchable, DirtyStore as _},
+        store::{Batchable, Config as StoreConfig, DirtyStore, LogStore, Store},
+        Error,
     },
-    translator::EightCap,
+    mmr::Location,
+    store::{Store as StoreTrait, StoreDeletable, StoreMut},
+    translator::{EightCap, Translator},
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_codec::Codec;
+use commonware_utils::{Array, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{future::Future, num::{NonZeroU64, NonZeroUsize}};
 
 pub mod generate;
 pub mod init;
@@ -55,10 +59,214 @@ impl Variant {
         )
     }
 
-    /// Returns whether this variant supports the CleanAny/DirtyAny pattern.
-    /// Store doesn't implement these traits.
-    pub const fn supports_clean_any(&self) -> bool {
-        !matches!(self, Self::Store)
+}
+
+// =============================================================================
+// BenchmarkableDb trait and implementations
+// =============================================================================
+
+/// A trait abstracting databases for benchmarking purposes.
+/// Allows both authenticated (CleanAny) and unauthenticated (Store) databases
+/// to be tested with the same benchmark functions.
+pub trait BenchmarkableDb {
+    type Key;
+    type Value;
+    type Error: std::fmt::Debug;
+
+    /// Get the value for a given key.
+    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
+
+    /// Update a key with a new value.
+    fn update(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Delete a key. Returns true if deleted, false if didn't exist.
+    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
+
+    /// Commit changes, optionally with metadata. Ensures durability.
+    fn commit(
+        &mut self,
+        metadata: Option<Self::Value>,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Prune historical operations before the given location.
+    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Get the inactivity floor location.
+    fn inactivity_floor_loc(&self) -> Location;
+
+    /// Close the database.
+    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Destroy the database, removing all data.
+    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// Implementation of BenchmarkableDb for the unauthenticated Store type.
+impl<E, K, V, T> BenchmarkableDb for Store<E, K, V, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Codec + Clone,
+    T: Translator,
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        StoreTrait::get(self, key).await
+    }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        StoreMut::update(self, key, value).await
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        StoreDeletable::delete(self, key).await
+    }
+
+    async fn commit(&mut self, _metadata: Option<Self::Value>) -> Result<(), Self::Error> {
+        // Store doesn't support metadata in commit, so ignore it
+        Store::commit(self, None).await.map(|_| ())
+    }
+
+    async fn prune(&mut self, loc: Location) -> Result<(), Self::Error> {
+        Store::prune(self, loc).await
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        LogStore::inactivity_floor_loc(self)
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        Store::close(self).await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        Store::destroy(self).await
+    }
+}
+
+// =============================================================================
+// CleanAnyWrapper - wraps CleanAny types for BenchmarkableDb compatibility
+// =============================================================================
+
+/// Wrapper that makes CleanAny types compatible with BenchmarkableDb.
+/// Handles state transitions (into_dirty/merkleize) transparently.
+/// Stays in Dirty state during mutations and only merkleizes when necessary.
+pub struct CleanAnyWrapper<A: CleanAny> {
+    inner: Option<CleanAnyState<A>>,
+}
+
+enum CleanAnyState<A: CleanAny> {
+    Clean(A),
+    Dirty(A::Dirty),
+}
+
+impl<A: CleanAny> CleanAnyWrapper<A> {
+    pub fn new(db: A) -> Self {
+        Self {
+            inner: Some(CleanAnyState::Clean(db)),
+        }
+    }
+
+    /// Ensure we're in dirty state, transitioning if necessary
+    fn ensure_dirty(&mut self) {
+        let state = self.inner.take().expect("wrapper should never be empty");
+        self.inner = Some(match state {
+            CleanAnyState::Clean(clean) => CleanAnyState::Dirty(clean.into_dirty()),
+            CleanAnyState::Dirty(dirty) => CleanAnyState::Dirty(dirty),
+        });
+    }
+
+    /// Merkleize if in dirty state, ensuring we're in clean state
+    async fn ensure_clean(&mut self) {
+        let state = self.inner.take().expect("wrapper should never be empty");
+        self.inner = Some(match state {
+            CleanAnyState::Clean(clean) => CleanAnyState::Clean(clean),
+            CleanAnyState::Dirty(dirty) => CleanAnyState::Clean(dirty.merkleize().await),
+        });
+    }
+}
+
+impl<A> BenchmarkableDb for CleanAnyWrapper<A>
+where
+    A: CleanAny,
+{
+    type Key = A::Key;
+    type Value = <A as LogStore>::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.get(key).await,
+            CleanAnyState::Dirty(dirty) => dirty.get(key).await,
+        }
+    }
+
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        // Ensure we're in dirty state, then update
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Dirty(dirty) => dirty.update(key, value).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
+
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        // Ensure we're in dirty state, then delete
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Dirty(dirty) => dirty.delete(key).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
+
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<(), Self::Error> {
+        // Merkleize before commit
+        self.ensure_clean().await;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.commit(metadata).await.map(|_| ()),
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    async fn prune(&mut self, loc: Location) -> Result<(), Self::Error> {
+        // Merkleize before prune
+        self.ensure_clean().await;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.prune(loc).await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.inactivity_floor_loc(),
+            CleanAnyState::Dirty(dirty) => dirty.inactivity_floor_loc(),
+        }
+    }
+
+    async fn close(mut self) -> Result<(), Self::Error> {
+        // Merkleize before close
+        self.ensure_clean().await;
+        match self.inner.take().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.close().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    async fn destroy(mut self) -> Result<(), Self::Error> {
+        // Merkleize before destroy
+        self.ensure_clean().await;
+        match self.inner.take().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => clean.destroy().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
     }
 }
 
@@ -116,6 +324,7 @@ type OCurrentDb = OCurrent<
 >;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 
 /// Configuration for any ADB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -209,22 +418,39 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
     VariableAny::init(ctx, variable_any_cfg).await.unwrap()
 }
 
-/// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
+/// Configuration for Store.
+fn store_cfg() -> StoreConfig<EightCap, ()> {
+    StoreConfig::<EightCap, ()> {
+        log_partition: format!("store_{PARTITION_SUFFIX}"),
+        log_write_buffer: WRITE_BUFFER_SIZE,
+        log_compression: None,
+        log_codec_config: (),
+        log_items_per_section: ITEMS_PER_BLOB,
+        translator: EightCap,
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+    }
+}
+
+/// Get a Store instance.
+async fn get_store(ctx: Context) -> StoreDb {
+    let cfg = store_cfg();
+    Store::init(ctx, cfg).await.unwrap()
+}
+
+/// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// database is committed after every `commit_frequency` operations (if Some), or at the end (if
 /// None).
 async fn gen_random_kv<A>(
-    db: A,
+    mut db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
-    let mut db = db.into_dirty();
-
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
@@ -244,16 +470,13 @@ where
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                let mut clean_db = db.merkleize().await;
-                clean_db.commit(None).await.unwrap();
-                db = clean_db.into_dirty();
+                db.commit(None).await.unwrap();
             }
         }
     }
 
-    let mut clean_db = db.merkleize().await;
-    clean_db.commit(None).await.unwrap();
-    clean_db
+    db.commit(None).await.unwrap();
+    db
 }
 
 async fn gen_random_kv_batched<A>(

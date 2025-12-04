@@ -2,8 +2,9 @@
 //! fixed-size values.
 
 use crate::fixed::{
-    gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current,
-    get_unordered_any, get_unordered_current, get_variable_any, Variant, VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current, get_store,
+    get_unordered_any, get_unordered_current, get_variable_any, BenchmarkableDb,
+    CleanAnyWrapper, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -23,12 +24,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VARIANTS {
-                // Skip variants that don't support CleanAny pattern
-                if !variant.supports_clean_any() {
-                    continue;
-                }
-
-                // Current ADBs don't support batching due to type-state pattern
+                // Current ADBs and Store don't support batching
                 let batch_options = if variant.supports_batching() {
                     vec![false, true]
                 } else {
@@ -54,6 +50,13 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                     let commit_frequency =
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let duration = match variant {
+                                        Variant::Store => {
+                                            // Store implements BenchmarkableDb directly
+                                            let db = get_store(ctx.clone()).await;
+                                            test_db(db, elements, operations, commit_frequency)
+                                                .await
+                                                .unwrap()
+                                        }
                                         Variant::AnyUnordered => {
                                             let db = get_unordered_any(ctx.clone()).await;
                                             if use_batch {
@@ -66,8 +69,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                                 .await
                                                 .unwrap()
                                             } else {
+                                                let wrapper = CleanAnyWrapper::new(db);
                                                 test_db(
-                                                    db,
+                                                    wrapper,
                                                     elements,
                                                     operations,
                                                     commit_frequency,
@@ -88,8 +92,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                                 .await
                                                 .unwrap()
                                             } else {
+                                                let wrapper = CleanAnyWrapper::new(db);
                                                 test_db(
-                                                    db,
+                                                    wrapper,
                                                     elements,
                                                     operations,
                                                     commit_frequency,
@@ -110,8 +115,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                                 .await
                                                 .unwrap()
                                             } else {
+                                                let wrapper = CleanAnyWrapper::new(db);
                                                 test_db(
-                                                    db,
+                                                    wrapper,
                                                     elements,
                                                     operations,
                                                     commit_frequency,
@@ -121,21 +127,29 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             }
                                         }
                                         Variant::CurrentUnordered => {
-                                            // Current ADBs only support non-batched mode
                                             let db = get_unordered_current(ctx.clone()).await;
-                                            test_db(db, elements, operations, commit_frequency)
-                                                .await
-                                                .unwrap()
+                                            let wrapper = CleanAnyWrapper::new(db);
+                                            test_db(
+                                                wrapper,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
                                         }
                                         Variant::CurrentOrdered => {
-                                            // Current ADBs only support non-batched mode
                                             let db = get_ordered_current(ctx.clone()).await;
-                                            test_db(db, elements, operations, commit_frequency)
-                                                .await
-                                                .unwrap()
+                                            let wrapper = CleanAnyWrapper::new(db);
+                                            test_db(
+                                                wrapper,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
                                         }
-                                        // Store is skipped (doesn't support CleanAny)
-                                        Variant::Store => unreachable!(),
                                     };
                                     total_elapsed += duration;
                                 }
@@ -150,7 +164,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
 }
 
 /// Test a database using non-batched operations.
-/// Works with any type that implements CleanAny (including Current ADBs).
+/// Works with any type that implements BenchmarkableDb.
 async fn test_db<A>(
     db: A,
     elements: u64,
@@ -158,11 +172,14 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, commonware_storage::adb::Error>
 where
-    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: BenchmarkableDb<
+        Key = <Sha256 as Hasher>::Digest,
+        Value = <Sha256 as Hasher>::Digest,
+        Error = commonware_storage::adb::Error,
+    >,
 {
     let start = Instant::now();
     let mut db = gen_random_kv(db, elements, operations, Some(commit_frequency)).await;
-    db.commit(None).await?;
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
     db.destroy().await?;
