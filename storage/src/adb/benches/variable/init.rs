@@ -1,7 +1,10 @@
 //! Benchmark the initialization performance of each ADB variant on a large randomly generated
 //! database with variable-sized values.
 
-use crate::variable::{any_cfg, gen_random_kv, get_any, AnyDb, Variant, THREADS, VARIANTS};
+use crate::{
+    common::{BenchmarkableDb, CleanAnyWrapper},
+    variable::{any_cfg, gen_random_kv, get_any, get_store, store_cfg, AnyDb, StoreDb, Variant, THREADS, VARIANTS},
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -30,23 +33,24 @@ fn bench_variable_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VARIANTS {
-                // Skip variants that don't support CleanAny pattern
-                if !variant.supports_clean_any() {
-                    continue;
-                }
-
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     match variant {
                         Variant::Any => {
                             let db = get_any(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let wrapped_db = CleanAnyWrapper::new(db);
+                            let mut db = gen_random_kv(wrapped_db, elements, operations, COMMIT_FREQUENCY).await;
+                            let floor = db.inactivity_floor_loc();
+                            db.prune(floor).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        // Store is skipped (doesn't support CleanAny)
-                        Variant::Store => unreachable!(),
+                        Variant::Store => {
+                            let store_db = get_store(ctx.clone()).await;
+                            let mut db = gen_random_kv(store_db, elements, operations, COMMIT_FREQUENCY).await;
+                            let floor = db.inactivity_floor_loc();
+                            db.prune(floor).await.unwrap();
+                            db.close().await.unwrap();
+                        }
                     }
                 });
                 let runner = tokio::Runner::new(cfg.clone());
@@ -62,21 +66,27 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool =
-                                commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                            let any_cfg = any_cfg(pool);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
                                     Variant::Any => {
+                                        let pool = commonware_runtime::create_pool(ctx.clone(), THREADS)
+                                            .unwrap();
+                                        let any_cfg = any_cfg(pool);
                                         let db = AnyDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    // Store is skipped (doesn't support CleanAny)
-                                    Variant::Store => unreachable!(),
+                                    Variant::Store => {
+                                        let store_cfg = store_cfg();
+                                        let db = StoreDb::init(ctx.clone(), store_cfg)
+                                            .await
+                                            .unwrap();
+                                        assert_ne!(db.op_count(), 0);
+                                        db.close().await.unwrap();
+                                    }
                                 }
                             }
 
@@ -88,8 +98,16 @@ fn bench_variable_init(c: &mut Criterion) {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     // Clean up the databases after the benchmark.
-                    let db = get_any(ctx).await;
-                    db.destroy().await.unwrap();
+                    match variant {
+                        Variant::Any => {
+                            let db = get_any(ctx).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::Store => {
+                            let db = get_store(ctx).await;
+                            db.destroy().await.unwrap();
+                        }
+                    }
                 });
             }
         }

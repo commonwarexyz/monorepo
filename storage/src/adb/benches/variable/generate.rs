@@ -1,13 +1,16 @@
 //! Benchmark the generation of a large database with values of varying sizes for each (a)db variant
 //! that supports variable-size values.
 
-use crate::variable::{gen_random_kv, gen_random_kv_batched, get_any, Variant, VARIANTS};
+use crate::{
+    common::{BenchmarkableDb, CleanAnyWrapper},
+    variable::{gen_random_kv, gen_random_kv_batched, get_any, get_store, Variant, VARIANTS},
+};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::{any::CleanAny, store::Batchable, Error};
+use commonware_storage::adb::store::Batchable;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -22,11 +25,6 @@ fn bench_variable_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VARIANTS {
-                // Skip variants that don't support CleanAny pattern
-                if !variant.supports_clean_any() {
-                    continue;
-                }
-
                 for use_batch in [false, true] {
                     c.bench_function(
                         &format!(
@@ -47,6 +45,29 @@ fn bench_variable_generate(c: &mut Criterion) {
                                     let elapsed = match variant {
                                         Variant::Any => {
                                             let db = get_any(ctx.clone()).await;
+                                            let wrapped_db = CleanAnyWrapper::new(db);
+                                            if use_batch {
+                                                test_db_batched(
+                                                    wrapped_db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            } else {
+                                                test_db(
+                                                    wrapped_db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            }
+                                        }
+                                        Variant::Store => {
+                                            let db = get_store(ctx.clone()).await;
                                             if use_batch {
                                                 test_db_batched(
                                                     db,
@@ -62,8 +83,6 @@ fn bench_variable_generate(c: &mut Criterion) {
                                                     .unwrap()
                                             }
                                         }
-                                        // Store is skipped (doesn't support CleanAny)
-                                        Variant::Store => unreachable!(),
                                     };
                                     total_elapsed += elapsed;
                                 }
@@ -83,9 +102,9 @@ async fn test_db<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, Error>
+) -> Result<Duration, A::Error>
 where
-    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
+    A: BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
     let start = Instant::now();
     let db = gen_random_kv(db, elements, operations, commit_frequency).await;
@@ -100,10 +119,10 @@ async fn test_db_batched<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, Error>
+) -> Result<Duration, <A as BenchmarkableDb>::Error>
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
+        + BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
     let start = Instant::now();
     let db = gen_random_kv_batched(db, elements, operations, commit_frequency).await;
