@@ -60,6 +60,8 @@ fn roundtrip_socket_v6(addr: SocketAddrV6) {
     assert_eq!(addr.encode_size(), encoded.len());
     let decoded = SocketAddrV6::decode(&mut &*encoded).expect("Failed to decode SocketAddrV6!");
 
+    // The codec intentionally discards flowinfo and scope_id (see codec/src/types/net.rs),
+    // so we only compare ip and port, and verify flowinfo/scope_id are zeroed.
     assert_eq!(addr.ip(), decoded.ip());
     assert_eq!(addr.port(), decoded.port());
     assert_eq!(decoded.flowinfo(), 0);
@@ -202,38 +204,6 @@ where
     assert_eq!(set, &decoded);
 }
 
-fn roundtrip_signed_varint_i16(v: i16) {
-    let varint = SInt(v);
-    let encoded = varint.encode();
-    assert_eq!(varint.encode_size(), encoded.len());
-    let decoded = SInt::<i16>::decode(&mut &*encoded).expect("Failed to decode signed varint!");
-    assert_eq!(varint, decoded);
-}
-
-fn roundtrip_signed_varint_i32(v: i32) {
-    let varint = SInt(v);
-    let encoded = varint.encode();
-    assert_eq!(varint.encode_size(), encoded.len());
-    let decoded = SInt::<i32>::decode(&mut &*encoded).expect("Failed to decode signed varint!");
-    assert_eq!(varint, decoded);
-}
-
-fn roundtrip_signed_varint_i64(v: i64) {
-    let varint = SInt(v);
-    let encoded = varint.encode();
-    assert_eq!(varint.encode_size(), encoded.len());
-    let decoded = SInt::<i64>::decode(&mut &*encoded).expect("Failed to decode signed varint!");
-    assert_eq!(varint, decoded);
-}
-
-fn roundtrip_signed_varint_i128(v: i128) {
-    let varint = SInt(v);
-    let encoded = varint.encode();
-    assert_eq!(varint.encode_size(), encoded.len());
-    let decoded = SInt::<i128>::decode(&mut &*encoded).expect("Failed to decode signed varint!");
-    assert_eq!(varint, decoded);
-}
-
 fn roundtrip_vec<T>(vec: Vec<T>)
 where
     T: Encode + Decode + PartialEq + DecodeExt<()> + std::fmt::Debug,
@@ -273,8 +243,8 @@ where
 
 fn roundtrip_tuple_2<T1, T2>(tuple: (T1, T2))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
     (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug + EncodeSize,
 {
     let encoded = tuple.encode();
@@ -285,9 +255,9 @@ where
 
 fn roundtrip_tuple_3<T1, T2, T3>(tuple: (T1, T2, T3))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
-    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
     (T1, T2, T3): Encode
         + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
         + PartialEq
@@ -300,14 +270,10 @@ where
     assert_eq!(tuple, decoded);
 }
 
-fn roundtrip_usize(v: usize, range_cfg: RangeCfg<usize>) {
-    // Only test values that fit in the range
-    if !range_cfg.contains(&v) {
-        return;
-    }
+fn roundtrip_usize(v: usize) {
     let encoded = v.encode();
     assert_eq!(v.encode_size(), encoded.len());
-    let decoded = usize::decode_cfg(encoded, &range_cfg).expect("Failed to decode usize!");
+    let decoded = usize::decode_cfg(encoded, &(..).into()).expect("Failed to decode usize!");
     assert_eq!(v, decoded);
 }
 
@@ -449,17 +415,17 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::UVarInt64(v) => roundtrip_primitive(UInt(v)),
         FuzzInput::UVarInt128(v) => roundtrip_primitive(UInt(v)),
         // Signed varints
-        FuzzInput::SVarInt16(v) => roundtrip_signed_varint_i16(v),
-        FuzzInput::SVarInt32(v) => roundtrip_signed_varint_i32(v),
-        FuzzInput::SVarInt64(v) => roundtrip_signed_varint_i64(v),
-        FuzzInput::SVarInt128(v) => roundtrip_signed_varint_i128(v),
+        FuzzInput::SVarInt16(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt32(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt64(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt128(v) => roundtrip_primitive(SInt(v)),
         // Fixed-width primitives
         FuzzInput::Bool(v) => roundtrip_primitive(v),
         FuzzInput::Unit => roundtrip_primitive(()),
         FuzzInput::Usize(v) => {
             // Limit to u32::MAX for testing (since usize encodes as u32)
             let v = v.min(u32::MAX as usize);
-            roundtrip_usize(v, (..).into())
+            roundtrip_usize(v)
         }
         FuzzInput::U8(v) => roundtrip_primitive(v),
         FuzzInput::U16(v) => roundtrip_primitive(v),
