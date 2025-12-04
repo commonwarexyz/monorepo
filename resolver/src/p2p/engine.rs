@@ -70,7 +70,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key>>,
+    mailbox: mpsc::Receiver<Message<Key, P>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -110,7 +110,7 @@ impl<
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         // TODO(#1833): Metrics should use the post-start context
@@ -275,6 +275,10 @@ impl<
                                 self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
                             }
                         }
+                        Message::Hint { key, peer } => {
+                            trace!(?key, ?peer, "mailbox: hint");
+                            self.fetcher.hint(key, peer);
+                        }
                     }
                 },
 
@@ -389,10 +393,14 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+
+            // Clear all hints for this key
+            self.fetcher.clear_hints(&key);
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
+        // (blocking the peer also removes any hints associated with it)
         self.blocker.block(peer.clone()).await;
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);

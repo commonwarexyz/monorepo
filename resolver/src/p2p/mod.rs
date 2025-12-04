@@ -21,6 +21,13 @@
 //! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
 //! it responds to.
 //!
+//! # Hints
+//!
+//! Callers can register "hints" indicating which peers likely have data for a specific key. When
+//! fetching, hinted peers are tried first. If a hinted peer fails (timeout, error response, or
+//! send failure), that peer is removed from hints. As hints deplete through failures, the resolver
+//! naturally falls back to trying all peers. Hints are cleared on successful fetch.
+//!
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
@@ -152,7 +159,7 @@ mod tests {
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
-    ) -> Mailbox<Key> {
+    ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
