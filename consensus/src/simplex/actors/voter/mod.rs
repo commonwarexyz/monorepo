@@ -1477,7 +1477,7 @@ mod tests {
             // Create a conflicting proposal from ourselves (equivocating) for view 2
             let conflicting_proposal = Proposal {
                 round: view2_round,
-                leader: leader_idx as u32,
+                leader: leader_idx,
                 parent: View::new(1),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"leader_proposal"),

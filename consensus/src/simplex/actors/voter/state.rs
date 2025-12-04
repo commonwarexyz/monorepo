@@ -499,6 +499,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return false;
         }
 
+        // Validate leader index matches the expected leader for this view.
+        if Some(proposal.leader) != self.leader_index(view) {
+            return false;
+        }
+
         // Ensure we have a certificate at the parent view.
         if Some(&proposal.parent_payload) != self.quorum_payload(parent) {
             return false;
@@ -1001,6 +1006,75 @@ mod tests {
                 payload: Sha256Digest::from([8u8; 32]),
             };
             assert!(state.validate_parent_payload(&proposal));
+        });
+    }
+
+    #[test]
+    fn parent_payload_validation_fails_with_wrong_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let epoch = Epoch::new(1);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                namespace: namespace.clone(),
+                epoch,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+                activity_timeout: ViewDelta::new(5),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Add notarization to enter view 2 and set its leader
+            let parent_view = View::new(1);
+            let parent_proposal = Proposal {
+                round: Rnd::new(epoch, parent_view),
+                leader: 0,
+                parent: GENESIS_VIEW,
+                parent_payload: Sha256Digest::from([0u8; 32]),
+                payload: Sha256Digest::from([1u8; 32]),
+            };
+            let notarization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            state.add_notarization(notarization);
+
+            // Get the expected leader for view 2
+            let expected_leader = state
+                .leader_index(View::new(2))
+                .expect("leader should exist");
+
+            // Proposal with correct leader should pass validation
+            let valid_proposal = Proposal {
+                round: Rnd::new(epoch, View::new(2)),
+                leader: expected_leader,
+                parent: parent_view,
+                parent_payload: Sha256Digest::from([1u8; 32]),
+                payload: Sha256Digest::from([2u8; 32]),
+            };
+            assert!(state.validate_parent_payload(&valid_proposal));
+
+            // Proposal with wrong leader should fail validation
+            let wrong_leader = (expected_leader + 1) % 4;
+            let invalid_proposal = Proposal {
+                round: Rnd::new(epoch, View::new(2)),
+                leader: wrong_leader,
+                parent: parent_view,
+                parent_payload: Sha256Digest::from([1u8; 32]),
+                payload: Sha256Digest::from([3u8; 32]),
+            };
+            assert!(
+                !state.validate_parent_payload(&invalid_proposal),
+                "expected validation to fail with wrong leader"
+            );
         });
     }
 
