@@ -4,8 +4,8 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
     adb::{
-        any::{unordered::variable::Any, CleanAny, VariableConfig as AConfig},
-        store::{Batchable, Config as SConfig, Store},
+        any::{unordered::variable::Any, CleanAny, DirtyAny as _, VariableConfig as AConfig},
+        store::{Batchable, DirtyStore as _},
     },
     translator::EightCap,
 };
@@ -28,6 +28,12 @@ impl Variant {
             Self::Store => "store",
             Self::Any => "any",
         }
+    }
+
+    /// Returns whether this variant supports the CleanAny/DirtyAny pattern.
+    /// Store doesn't implement these traits.
+    pub const fn supports_clean_any(&self) -> bool {
+        !matches!(self, Self::Store)
     }
 }
 
@@ -53,19 +59,6 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
-
-fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-    SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-        log_partition: format!("journal_{PARTITION_SUFFIX}"),
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: ITEMS_PER_BLOB,
-        translator: EightCap,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    }
-}
 
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -84,11 +77,6 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
     }
 }
 
-async fn get_store(ctx: Context) -> StoreDb {
-    let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
-}
-
 async fn get_any(ctx: Context) -> AnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
@@ -100,16 +88,12 @@ async fn get_any(ctx: Context) -> AnyDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-async fn gen_random_kv<A>(
-    mut db: A,
-    num_elements: u64,
-    num_operations: u64,
-    commit_frequency: u32,
-) -> A
+async fn gen_random_kv<A>(db: A, num_elements: u64, num_operations: u64, commit_frequency: u32) -> A
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
+    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
+    let mut db = db.into_dirty();
+
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
@@ -128,13 +112,16 @@ where
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
         db.update(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
-            db.commit(None).await.unwrap();
+            let mut clean_db = db.merkleize().await;
+            clean_db.commit(None).await.unwrap();
+            db = clean_db.into_dirty();
         }
     }
-    db.commit(None).await.unwrap();
-    db.prune(db.inactivity_floor_loc()).await.unwrap();
 
-    db
+    let mut clean_db = db.merkleize().await;
+    clean_db.commit(None).await.unwrap();
+    clean_db.prune(clean_db.inactivity_floor_loc()).await.unwrap();
+    clean_db
 }
 
 async fn gen_random_kv_batched<A>(

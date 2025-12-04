@@ -2,7 +2,7 @@
 //! fixed-size values.
 
 use crate::fixed::{
-    gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current, get_store,
+    gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current,
     get_unordered_any, get_unordered_current, get_variable_any, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
@@ -23,7 +23,19 @@ fn bench_fixed_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VARIANTS {
-                for use_batch in [false, true] {
+                // Skip variants that don't support CleanAny pattern
+                if !variant.supports_clean_any() {
+                    continue;
+                }
+
+                // Current ADBs don't support batching due to type-state pattern
+                let batch_options = if variant.supports_batching() {
+                    vec![false, true]
+                } else {
+                    vec![false]
+                };
+
+                for use_batch in batch_options {
                     let runner = tokio::Runner::new(Config::default().clone());
                     c.bench_function(
                         &format!(
@@ -44,79 +56,86 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                     let duration = match variant {
                                         Variant::AnyUnordered => {
                                             let db = get_unordered_any(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
+                                            if use_batch {
+                                                test_db_batched(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            } else {
+                                                test_db(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            }
                                         }
                                         Variant::AnyOrdered => {
                                             let db = get_ordered_any(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
-                                        }
-                                        Variant::Store => {
-                                            todo!()
-                                            /*
-                                            let db = get_store(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
-                                            */
+                                            if use_batch {
+                                                test_db_batched(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            } else {
+                                                test_db(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            }
                                         }
                                         Variant::Variable => {
                                             let db = get_variable_any(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
+                                            if use_batch {
+                                                test_db_batched(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            } else {
+                                                test_db(
+                                                    db,
+                                                    elements,
+                                                    operations,
+                                                    commit_frequency,
+                                                )
+                                                .await
+                                                .unwrap()
+                                            }
                                         }
                                         Variant::CurrentUnordered => {
+                                            // Current ADBs only support non-batched mode
                                             let db = get_unordered_current(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
+                                            test_db(db, elements, operations, commit_frequency)
+                                                .await
+                                                .unwrap()
                                         }
                                         Variant::CurrentOrdered => {
+                                            // Current ADBs only support non-batched mode
                                             let db = get_ordered_current(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
+                                            test_db(db, elements, operations, commit_frequency)
+                                                .await
+                                                .unwrap()
                                         }
+                                        // Store is skipped (doesn't support CleanAny)
+                                        Variant::Store => unreachable!(),
                                     };
                                     total_elapsed += duration;
                                 }
@@ -130,9 +149,31 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
+/// Test a database using non-batched operations.
+/// Works with any type that implements CleanAny (including Current ADBs).
 async fn test_db<A>(
     db: A,
-    use_batch: bool,
+    elements: u64,
+    operations: u64,
+    commit_frequency: u32,
+) -> Result<Duration, commonware_storage::adb::Error>
+where
+    A: CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+{
+    let start = Instant::now();
+    let mut db = gen_random_kv(db, elements, operations, Some(commit_frequency)).await;
+    db.commit(None).await?;
+    db.prune(db.inactivity_floor_loc()).await?;
+    let res = start.elapsed();
+    db.destroy().await?;
+
+    Ok(res)
+}
+
+/// Test a database using batched operations.
+/// Requires both Batchable and CleanAny on the same type (excludes Current ADBs).
+async fn test_db_batched<A>(
+    db: A,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
@@ -142,15 +183,11 @@ where
         + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     let start = Instant::now();
-    let mut db = if use_batch {
-        gen_random_kv_batched(db, elements, operations, Some(commit_frequency)).await
-    } else {
-        gen_random_kv(db, elements, operations, Some(commit_frequency)).await
-    };
+    let mut db = gen_random_kv_batched(db, elements, operations, Some(commit_frequency)).await;
     db.commit(None).await?;
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
-    db.destroy().await?; // don't time destroy
+    db.destroy().await?;
 
     Ok(res)
 }

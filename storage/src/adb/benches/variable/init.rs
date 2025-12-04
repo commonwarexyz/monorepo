@@ -1,7 +1,7 @@
 //! Benchmark the initialization performance of each ADB variant on a large randomly generated
 //! database with variable-sized values.
 
-use crate::variable::{gen_random_kv, get_any, get_store, Variant, VARIANTS};
+use crate::variable::{any_cfg, gen_random_kv, get_any, AnyDb, Variant, THREADS, VARIANTS};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -30,19 +30,14 @@ fn bench_variable_init(c: &mut Criterion) {
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VARIANTS {
+                // Skip variants that don't support CleanAny pattern
+                if !variant.supports_clean_any() {
+                    continue;
+                }
+
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     match variant {
-                        Variant::Store => {
-                            todo!()
-                            /*
-                            let db = get_store(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
-                             */
-                        }
                         Variant::Any => {
                             let db = get_any(ctx.clone()).await;
                             let mut db =
@@ -50,6 +45,8 @@ fn bench_variable_init(c: &mut Criterion) {
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
+                        // Store is skipped (doesn't support CleanAny)
+                        Variant::Store => unreachable!(),
                     }
                 });
                 let runner = tokio::Runner::new(cfg.clone());
@@ -65,19 +62,21 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let pool =
+                                commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
+                            let any_cfg = any_cfg(pool);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
-                                    Variant::Store => {
-                                        let db = get_store(ctx.clone()).await;
-                                        assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
-                                    }
                                     Variant::Any => {
-                                        let db = get_any(ctx.clone()).await;
+                                        let db = AnyDb::init(ctx.clone(), any_cfg.clone())
+                                            .await
+                                            .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
+                                    // Store is skipped (doesn't support CleanAny)
+                                    Variant::Store => unreachable!(),
                                 }
                             }
 
@@ -89,8 +88,6 @@ fn bench_variable_init(c: &mut Criterion) {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     // Clean up the databases after the benchmark.
-                    let db = get_store(ctx.clone()).await;
-                    db.destroy().await.unwrap();
                     let db = get_any(ctx).await;
                     db.destroy().await.unwrap();
                 });

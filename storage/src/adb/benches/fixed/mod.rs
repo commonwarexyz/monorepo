@@ -12,7 +12,7 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Batchable, Config as SConfig, DirtyStore as _, Store},
+        store::{Batchable, DirtyStore as _},
     },
     translator::EightCap,
 };
@@ -43,6 +43,22 @@ impl Variant {
             Self::CurrentUnordered => "current::unordered",
             Self::CurrentOrdered => "current::ordered",
         }
+    }
+
+    /// Returns whether this variant supports batched operations.
+    /// Current ADBs don't support batching because their type-state pattern
+    /// separates mutation (Dirty) from commit (Clean).
+    pub const fn supports_batching(&self) -> bool {
+        match self {
+            Self::CurrentUnordered | Self::CurrentOrdered | Self::Store => false,
+            _ => true,
+        }
+    }
+
+    /// Returns whether this variant supports the CleanAny/DirtyAny pattern.
+    /// Store doesn't implement these traits.
+    pub const fn supports_clean_any(&self) -> bool {
+        !matches!(self, Self::Store)
     }
 }
 
@@ -98,7 +114,6 @@ type OCurrentDb = OCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
@@ -131,18 +146,6 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    }
-}
-
-fn store_cfg() -> SConfig<EightCap, ()> {
-    SConfig::<EightCap, ()> {
-        log_partition: format!("journal_{PARTITION_SUFFIX}"),
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
-        translator: EightCap,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
@@ -198,11 +201,6 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
-}
-
-async fn get_store(ctx: Context) -> StoreDb {
-    let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_variable_any(ctx: Context) -> VariableAnyDb {
