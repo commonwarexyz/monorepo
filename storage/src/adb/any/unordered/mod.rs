@@ -771,7 +771,9 @@ where
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
                 self.log.append(C::Item::new_delete(key.clone())).await?;
+                self.active_keys -= 1;
             }
+            self.steps += 1;
         }
 
         // Process the creates.
@@ -781,6 +783,7 @@ where
             };
             self.snapshot.insert(&key, self.op_count());
             self.log.append(C::Item::new_update(key, value)).await?;
+            self.active_keys += 1;
         }
 
         Ok(())
