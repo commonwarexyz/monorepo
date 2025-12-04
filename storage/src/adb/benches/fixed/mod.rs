@@ -1,6 +1,5 @@
 //! Benchmarks of ADB variants on fixed-size values.
 
-use super::common::{BenchmarkableDb, CleanAnyWrapper};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
@@ -16,6 +15,7 @@ use commonware_storage::{
         store::{Batchable, Config as StoreConfig, Store},
         Error,
     },
+    store::{StoreDeletable, StorePersistable},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -227,7 +227,11 @@ async fn gen_random_kv<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: StorePersistable<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = <Sha256 as Hasher>::Digest,
+            Error = Error,
+        > + StoreDeletable,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -248,12 +252,12 @@ where
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit(None).await.unwrap();
+                db.commit().await.unwrap();
             }
         }
     }
 
-    db.commit(None).await.unwrap();
+    db.commit().await.unwrap();
     db
 }
 
@@ -265,11 +269,8 @@ async fn gen_random_kv_batched<A>(
 ) -> A
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + BenchmarkableDb<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-            Error = Error,
-        >,
+        + StoreDeletable
+        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -295,7 +296,7 @@ where
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
                 db.write_batch(iter).await.unwrap();
-                db.commit(None).await.unwrap();
+                db.commit().await.unwrap();
                 batch = db.start_batch();
             }
         }
@@ -303,6 +304,6 @@ where
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit(None).await.unwrap();
+    db.commit().await.unwrap();
     db
 }

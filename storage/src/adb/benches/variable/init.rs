@@ -1,12 +1,9 @@
 //! Benchmark the initialization performance of each ADB variant on a large randomly generated
 //! database with variable-sized values.
 
-use crate::{
-    common::{BenchmarkableDb, CleanAnyWrapper},
-    variable::{
-        any_cfg, gen_random_kv, get_any, get_store, store_cfg, AnyDb, StoreDb, Variant, THREADS,
-        VARIANTS,
-    },
+use crate::variable::{
+    any_cfg, gen_random_kv, get_any, get_store, store_cfg, AnyDb, StoreDb, Variant, THREADS,
+    VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -49,10 +46,8 @@ fn bench_variable_init(c: &mut Criterion) {
                         }
                         Variant::Any => {
                             let db = get_any(ctx.clone()).await;
-                            let wrapped_db = CleanAnyWrapper::new(db);
                             let mut db =
-                                gen_random_kv(wrapped_db, elements, operations, COMMIT_FREQUENCY)
-                                    .await;
+                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }

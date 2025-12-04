@@ -3,15 +3,20 @@
 
 use crate::fixed::{
     gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current, get_store,
-    get_unordered_any, get_unordered_current, get_variable_any, BenchmarkableDb, CleanAnyWrapper,
-    Variant, VARIANTS,
+    get_unordered_any, get_unordered_current, get_variable_any, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::store::Batchable;
+use commonware_storage::{
+    adb::{
+        any::AnyExt,
+        store::{Batchable, LogStorePrunable},
+    },
+    store::{Store as StoreTrait, StoreDeletable, StorePersistable},
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -46,7 +51,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         Variant::AnyUnordered => {
                                             let db = get_unordered_any(ctx.clone()).await;
                                             test_db(
-                                                CleanAnyWrapper::new(db),
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -58,7 +63,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         Variant::AnyOrdered => {
                                             let db = get_ordered_any(ctx.clone()).await;
                                             test_db(
-                                                CleanAnyWrapper::new(db),
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -82,7 +87,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         Variant::Variable => {
                                             let db = get_variable_any(ctx.clone()).await;
                                             test_db(
-                                                CleanAnyWrapper::new(db),
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -93,8 +98,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentUnordered => {
                                             let db = get_unordered_current(ctx.clone()).await;
+                                            let db = AnyExt::new(db);
                                             test_db(
-                                                CleanAnyWrapper::new(db),
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -105,8 +111,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentOrdered => {
                                             let db = get_ordered_current(ctx.clone()).await;
+                                            let db = AnyExt::new(db);
                                             test_db(
-                                                CleanAnyWrapper::new(db),
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -134,14 +141,12 @@ async fn test_db<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, commonware_storage::adb::Error>
+) -> Result<Duration, <A as StoreTrait>::Error>
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + BenchmarkableDb<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-            Error = commonware_storage::adb::Error,
-        >,
+        + StoreDeletable
+        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + LogStorePrunable,
 {
     let start = Instant::now();
     let mut db = if use_batch {

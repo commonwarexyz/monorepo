@@ -434,8 +434,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreM
 impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
     for Ordinal<E, V>
 {
-    type Error = Error;
-
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
     }

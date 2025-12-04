@@ -1,0 +1,213 @@
+//! Extension type for simplified usage of Any authenticated databases.
+//!
+//! The [AnyExt] wrapper provides a traditional mutable key-value store interface over Any
+//! databases, automatically handling Clean/Dirty state transitions. This eliminates the need for
+//! manual state management while maintaining the performance benefits of deferred merkleization.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_storage::adb::any::{AnyExt, unordered::fixed::Any};
+//! use commonware_runtime::{deterministic, Runner as _};
+//! use commonware_storage::store::{Store as _, StoreMut, StoreDeletable, StorePersistable};
+//!
+//! let executor = deterministic::Runner::default();
+//! executor.start(|context| async move {
+//!     // Initialize Any database
+//!     let db = Any::init(context, config).await.unwrap();
+//!
+//!     // Wrap for simple mutable interface
+//!     let mut db = AnyExt::new(db);
+//!
+//!     // Use like a traditional database - state transitions are automatic
+//!     db.update(key1, value1).await.unwrap();  // Transitions to Dirty
+//!     db.update(key2, value2).await.unwrap();  // Stays Dirty
+//!     db.commit().await.unwrap();              // Merkleizes to Clean, commits
+//!     db.delete(key1).await.unwrap();          // Transitions back to Dirty
+//!     db.commit().await.unwrap();              // Merkleizes to Clean, commits
+//!
+//!     db.destroy().await.unwrap();
+//! });
+//! ```
+//!
+//! # When to Use
+//!
+//! Use [AnyExt] when you want a simple mutable interface without manually managing Clean/Dirty
+//! state transitions. For fine-grained control over merkleization timing, use [CleanAny] and
+//! [DirtyAny] directly.
+
+use super::{CleanAny, DirtyAny};
+use crate::{
+    adb::{
+        store::{DirtyStore, LogStore, LogStorePrunable},
+        Error,
+    },
+    mmr::Location,
+    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+};
+
+/// An extension wrapper for [CleanAny] databases that provides a traditional mutable key-value
+/// store interface with automatic state transitions.
+///
+/// This wrapper handles Clean/Dirty state transitions transparently:
+/// - Mutations (update/delete) automatically transition to Dirty state
+/// - Operations requiring Clean state (commit/prune) automatically merkleize first
+pub struct AnyExt<A: CleanAny> {
+    inner: Option<State<A>>,
+}
+
+enum State<A: CleanAny> {
+    Clean(A),
+    Dirty(A::Dirty),
+}
+
+impl<A: CleanAny> AnyExt<A> {
+    /// Create a new wrapper from a Clean Any database.
+    pub const fn new(db: A) -> Self {
+        Self {
+            inner: Some(State::Clean(db)),
+        }
+    }
+
+    /// Close the database without destroying it. Uncommitted operations may be lost.
+    pub async fn close(mut self) -> Result<(), Error> {
+        // Merkleize before close
+        self.ensure_clean().await;
+        match self.inner.take().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.close().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    /// Ensure we're in dirty state, transitioning if necessary.
+    fn ensure_dirty(&mut self) {
+        let state = self.inner.take().expect("wrapper should never be empty");
+        self.inner = Some(match state {
+            State::Clean(clean) => State::Dirty(clean.into_dirty()),
+            State::Dirty(dirty) => State::Dirty(dirty),
+        });
+    }
+
+    /// Merkleize if in dirty state, ensuring we're in clean state.
+    async fn ensure_clean(&mut self) {
+        let state = self.inner.take().expect("wrapper should never be empty");
+        self.inner = Some(match state {
+            State::Clean(clean) => State::Clean(clean),
+            State::Dirty(dirty) => State::Clean(dirty.merkleize().await),
+        });
+    }
+}
+
+impl<A> StoreTrait for AnyExt<A>
+where
+    A: CleanAny,
+{
+    type Key = A::Key;
+    type Value = <A as LogStore>::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            State::Clean(clean) => CleanAny::get(clean, key).await,
+            State::Dirty(dirty) => DirtyAny::get(dirty, key).await,
+        }
+    }
+}
+
+impl<A> StoreMut for AnyExt<A>
+where
+    A: CleanAny,
+{
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Dirty(dirty) => DirtyAny::update(dirty, key, value).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
+}
+
+impl<A> StoreDeletable for AnyExt<A>
+where
+    A: CleanAny,
+{
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Dirty(dirty) => DirtyAny::delete(dirty, key).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
+}
+
+impl<A> StorePersistable for AnyExt<A>
+where
+    A: CleanAny,
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        // Merkleize before commit
+        self.ensure_clean().await;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.commit(None).await.map(|_| ()),
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    async fn destroy(mut self) -> Result<(), Self::Error> {
+        // Merkleize before destroy
+        self.ensure_clean().await;
+        match self.inner.take().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.destroy().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+}
+
+impl<A> LogStore for AnyExt<A>
+where
+    A: CleanAny,
+{
+    type Value = <A as LogStore>::Value;
+
+    fn is_empty(&self) -> bool {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.is_empty(),
+            State::Dirty(dirty) => dirty.is_empty(),
+        }
+    }
+
+    fn op_count(&self) -> Location {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.op_count(),
+            State::Dirty(dirty) => dirty.op_count(),
+        }
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.inactivity_floor_loc(),
+            State::Dirty(dirty) => dirty.inactivity_floor_loc(),
+        }
+    }
+
+    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.get_metadata().await,
+            State::Dirty(dirty) => dirty.get_metadata().await,
+        }
+    }
+}
+
+impl<A> LogStorePrunable for AnyExt<A>
+where
+    A: CleanAny,
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        // Merkleize before prune
+        self.ensure_clean().await;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.prune(prune_loc).await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+}

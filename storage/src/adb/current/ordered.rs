@@ -707,26 +707,6 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StorePersistable for Current<E, K, V, H, T, N>
-{
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await.map(|_| ())
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: Value,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
     > crate::adb::store::LogStorePrunable for Current<E, K, V, H, T, N>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
@@ -1020,8 +1000,6 @@ pub mod test {
     }
 
     impl crate::store::StorePersistable for BatchTestWrapper {
-        type Error = Error;
-
         async fn commit(&mut self) -> Result<(), Self::Error> {
             self.ensure_clean().await;
             match self.inner.as_mut().expect("wrapper should never be empty") {

@@ -1,16 +1,18 @@
 //! Benchmark the generation of a large database with values of varying sizes for each (a)db variant
 //! that supports variable-size values.
 
-use crate::{
-    common::{BenchmarkableDb, CleanAnyWrapper},
-    variable::{gen_random_kv, gen_random_kv_batched, get_any, get_store, Variant, VARIANTS},
+use crate::variable::{
+    gen_random_kv, gen_random_kv_batched, get_any, get_store, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::store::Batchable;
+use commonware_storage::{
+    adb::store::{Batchable, LogStorePrunable},
+    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -57,9 +59,8 @@ fn bench_variable_generate(c: &mut Criterion) {
                                         }
                                         Variant::Any => {
                                             let db = get_any(ctx.clone()).await;
-                                            let wrapped_db = CleanAnyWrapper::new(db);
                                             test_db(
-                                                wrapped_db,
+                                                db,
                                                 use_batch,
                                                 elements,
                                                 operations,
@@ -87,10 +88,13 @@ async fn test_db<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, <A as BenchmarkableDb>::Error>
+) -> Result<Duration, <A as StoreTrait>::Error>
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
+        + StoreMut<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + StoreDeletable
+        + StorePersistable
+        + LogStorePrunable,
 {
     let start = Instant::now();
     let mut db = if use_batch {

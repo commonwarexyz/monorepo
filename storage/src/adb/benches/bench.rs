@@ -1,6 +1,5 @@
 use criterion::criterion_main;
 
-mod common;
 mod fixed;
 mod keyless_generate;
 mod variable;

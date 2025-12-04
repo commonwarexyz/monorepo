@@ -69,9 +69,7 @@ pub trait StoreDeletable: StoreMut {
 }
 
 /// A mutable key-value store that can be persisted.
-pub trait StorePersistable {
-    type Error;
-
+pub trait StorePersistable: StoreMut {
     /// Commit the store to disk, ensuring all changes are durably persisted.
     fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
 
