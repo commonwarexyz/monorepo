@@ -4,150 +4,183 @@ use arbitrary::Arbitrary;
 use commonware_codec::{FixedSize, ReadExt};
 use commonware_consensus::{
     simplex::{
-        signing_scheme::{
-            bls12381_multisig, bls12381_threshold, bls12381_threshold::Signature, ed25519,
-        },
-        types::{AttributableMap, Nullify, Vote},
+        signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        types::{AttributableMap, Nullify, Signature},
     },
-    types::Round,
+    types::{Epoch, Round, View},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    ed25519::{PublicKey, Signature as Ed25519Signature},
+    ed25519::PublicKey,
 };
 use libfuzzer_sys::fuzz_target;
 
-const MAX_VOTES: usize = 64;
+type Ed25519Scheme = ed25519::Scheme;
+type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
+type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
+type Bls12381ThresholdMinPk = bls12381_threshold::Scheme<PublicKey, MinPk>;
+type Bls12381ThresholdMinSig = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
-#[derive(Arbitrary, Debug)]
-enum SchemeType {
-    Ed25519,
-    Bls12381MultisigMinPk,
-    Bls12381MultisigMinSig,
-    Bls12381ThresholdMinPk,
-    Bls12381ThresholdMinSig,
-}
+const MAX_OPERATIONS: usize = 64;
 
-#[derive(Arbitrary, Debug)]
-struct VoteInput {
+#[derive(Arbitrary, Debug, Clone)]
+struct VoteData {
     signer: u32,
     epoch: u64,
     view: u64,
     signature_bytes: Vec<u8>,
 }
 
+#[derive(Arbitrary, Debug, Clone)]
+enum Operation {
+    Insert(VoteData),
+    Get { signer: u32 },
+    Clear,
+}
+
 #[derive(Arbitrary, Debug)]
-struct FuzzInput {
-    scheme: SchemeType,
-    participants: u8,
-    votes: Vec<VoteInput>,
+enum FuzzInput {
+    Ed25519 {
+        participants: u8,
+        operations: Vec<Operation>,
+    },
+    Bls12381MultisigMinPk {
+        participants: u8,
+        operations: Vec<Operation>,
+    },
+    Bls12381MultisigMinSig {
+        participants: u8,
+        operations: Vec<Operation>,
+    },
+    Bls12381ThresholdMinPk {
+        participants: u8,
+        operations: Vec<Operation>,
+    },
+    Bls12381ThresholdMinSig {
+        participants: u8,
+        operations: Vec<Operation>,
+    },
 }
 
-fn ed25519_signature_from_bytes(bytes: &[u8]) -> Option<Ed25519Signature> {
-    if bytes.len() < Ed25519Signature::SIZE {
+fn make_vote<S: Scheme>(data: &VoteData, sig: S::Signature) -> Nullify<S> {
+    Nullify {
+        round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
+        signature: Signature {
+            signer: data.signer,
+            signature: sig,
+        },
+    }
+}
+
+fn decode_signature<T: FixedSize + for<'a> commonware_codec::Read<Cfg = ()>>(
+    bytes: &[u8],
+) -> Option<T> {
+    if bytes.len() < T::SIZE {
         return None;
     }
-    let mut buf = &bytes[..Ed25519Signature::SIZE];
-    Ed25519Signature::read(&mut buf).ok()
+    let mut buf = &bytes[..T::SIZE];
+    T::read(&mut buf).ok()
 }
 
-fn bls_signature_from_bytes<V: Variant>(bytes: &[u8]) -> Option<V::Signature> {
-    if bytes.len() < V::Signature::SIZE {
-        return None;
-    }
-    let mut buf = &bytes[..V::Signature::SIZE];
-    V::Signature::read(&mut buf).ok()
+fn make_vote_ed25519(data: &VoteData) -> Option<Nullify<Ed25519Scheme>> {
+    let sig =
+        decode_signature::<commonware_cryptography::ed25519::Signature>(&data.signature_bytes)?;
+    Some(make_vote::<Ed25519Scheme>(data, sig))
 }
 
-fn fuzz_ed25519(participants: u8, votes: Vec<VoteInput>) {
-    let mut map: AttributableMap<Nullify<ed25519::Scheme>> =
-        AttributableMap::new(participants as usize);
-
-    for vote_data in votes.into_iter().take(MAX_VOTES) {
-        let Some(signature) = ed25519_signature_from_bytes(&vote_data.signature_bytes) else {
-            continue;
-        };
-
-        let message_vote = Vote::<ed25519::Scheme> {
-            signer: vote_data.signer,
-            signature,
-        };
-
-        let nullify = Nullify::<ed25519::Scheme> {
-            round: Round::new(vote_data.epoch, vote_data.view),
-            vote: message_vote,
-        };
-
-        let _ = map.insert(nullify);
-    }
+fn make_vote_multisig<V: Variant>(
+    data: &VoteData,
+) -> Option<Nullify<bls12381_multisig::Scheme<PublicKey, V>>> {
+    let sig = decode_signature::<V::Signature>(&data.signature_bytes)?;
+    Some(make_vote::<bls12381_multisig::Scheme<PublicKey, V>>(
+        data, sig,
+    ))
 }
 
-fn fuzz_bls_multisig<V: Variant>(participants: u8, votes: Vec<VoteInput>) {
-    let mut map: AttributableMap<Nullify<bls12381_multisig::Scheme<PublicKey, V>>> =
-        AttributableMap::new(participants as usize);
-
-    for vote_data in votes.into_iter().take(MAX_VOTES) {
-        let Some(signature) = bls_signature_from_bytes::<V>(&vote_data.signature_bytes) else {
-            continue;
-        };
-
-        let message_vote = Vote::<bls12381_multisig::Scheme<PublicKey, V>> {
-            signer: vote_data.signer,
-            signature,
-        };
-
-        let nullify = Nullify::<bls12381_multisig::Scheme<PublicKey, V>> {
-            round: Round::new(vote_data.epoch, vote_data.view),
-            vote: message_vote,
-        };
-
-        let _ = map.insert(nullify);
-    }
+fn make_vote_threshold<V: Variant>(
+    data: &VoteData,
+) -> Option<Nullify<bls12381_threshold::Scheme<PublicKey, V>>> {
+    let vote_sig = decode_signature::<V::Signature>(&data.signature_bytes)?;
+    let sig = bls12381_threshold::Signature {
+        vote_signature: vote_sig,
+        seed_signature: vote_sig,
+    };
+    Some(make_vote::<bls12381_threshold::Scheme<PublicKey, V>>(
+        data, sig,
+    ))
 }
 
-fn fuzz_bls_threshold<V: Variant>(participants: u8, votes: Vec<VoteInput>) {
-    let mut map: AttributableMap<Nullify<bls12381_threshold::Scheme<PublicKey, V>>> =
-        AttributableMap::new(participants as usize);
+fn fuzz_map<S: Scheme, F>(participants: u8, operations: Vec<Operation>, make_vote: F)
+where
+    F: Fn(&VoteData) -> Option<Nullify<S>>,
+{
+    let mut map: AttributableMap<Nullify<S>> = AttributableMap::new(participants as usize);
+    let mut inserted_signers = std::collections::HashSet::new();
 
-    for vote_data in votes.into_iter().take(MAX_VOTES) {
-        let Some(vote_sig) = bls_signature_from_bytes::<V>(&vote_data.signature_bytes) else {
-            continue;
-        };
-        // Use the same signature for both vote and seed for fuzzing
-        let signature = Signature::<V> {
-            vote_signature: vote_sig,
-            seed_signature: vote_sig,
-        };
+    for op in operations.into_iter().take(MAX_OPERATIONS) {
+        match op {
+            Operation::Insert(data) => {
+                let signer = data.signer;
+                if let Some(nullify) = make_vote(&data) {
+                    let result = map.insert(nullify);
 
-        let message_vote = Vote::<bls12381_threshold::Scheme<PublicKey, V>> {
-            signer: vote_data.signer,
-            signature,
-        };
+                    let in_bounds = (signer as usize) < (participants as usize);
+                    let already_inserted = inserted_signers.contains(&signer);
 
-        let nullify = Nullify::<bls12381_threshold::Scheme<PublicKey, V>> {
-            round: Round::new(vote_data.epoch, vote_data.view),
-            vote: message_vote,
-        };
+                    if in_bounds && !already_inserted {
+                        assert!(result, "insert should succeed for new in-bounds signer");
+                        inserted_signers.insert(signer);
+                    } else {
+                        assert!(!result, "insert should fail for out-of-bounds or duplicate");
+                    }
 
-        let _ = map.insert(nullify);
+                    assert_eq!(map.len(), inserted_signers.len());
+                    assert_eq!(map.is_empty(), inserted_signers.is_empty());
+                }
+            }
+            Operation::Get { signer } => {
+                let result = map.get(signer);
+                let should_exist = inserted_signers.contains(&signer);
+                assert_eq!(result.is_some(), should_exist);
+            }
+            Operation::Clear => {
+                map.clear();
+                inserted_signers.clear();
+                assert!(map.is_empty());
+                assert_eq!(map.len(), 0);
+            }
+        }
     }
+
+    assert_eq!(map.iter().count(), inserted_signers.len());
 }
 
 fn fuzz(input: FuzzInput) {
-    let votes = input.votes;
+    match input {
+        FuzzInput::Ed25519 {
+            participants,
+            operations,
+        } => fuzz_map::<Ed25519Scheme, _>(participants, operations, make_vote_ed25519),
 
-    match input.scheme {
-        SchemeType::Ed25519 => fuzz_ed25519(input.participants, votes),
-        SchemeType::Bls12381MultisigMinPk => fuzz_bls_multisig::<MinPk>(input.participants, votes),
-        SchemeType::Bls12381MultisigMinSig => {
-            fuzz_bls_multisig::<MinSig>(input.participants, votes)
-        }
-        SchemeType::Bls12381ThresholdMinPk => {
-            fuzz_bls_threshold::<MinPk>(input.participants, votes)
-        }
-        SchemeType::Bls12381ThresholdMinSig => {
-            fuzz_bls_threshold::<MinSig>(input.participants, votes)
-        }
+        FuzzInput::Bls12381MultisigMinPk {
+            participants,
+            operations,
+        } => fuzz_map::<Bls12381MultisigMinPk, _>(participants, operations, make_vote_multisig),
+
+        FuzzInput::Bls12381MultisigMinSig {
+            participants,
+            operations,
+        } => fuzz_map::<Bls12381MultisigMinSig, _>(participants, operations, make_vote_multisig),
+
+        FuzzInput::Bls12381ThresholdMinPk {
+            participants,
+            operations,
+        } => fuzz_map::<Bls12381ThresholdMinPk, _>(participants, operations, make_vote_threshold),
+
+        FuzzInput::Bls12381ThresholdMinSig {
+            participants,
+            operations,
+        } => fuzz_map::<Bls12381ThresholdMinSig, _>(participants, operations, make_vote_threshold),
     }
 }
 
