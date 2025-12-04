@@ -17,11 +17,11 @@ type VecIntoIter<T> = alloc::vec::IntoIter<T>;
 #[cfg(feature = "std")]
 type VecIntoIter<T> = std::vec::IntoIter<T>;
 
-/// Errors that can occur when constructing [`OrderedBijection`].
+/// Errors that can occur when interacting with sets.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A value was duplicated across different keys.
-    #[error("duplicate value across keys")]
+    #[error("duplicate value")]
     DuplicateValue,
 }
 
@@ -483,12 +483,12 @@ pub struct OrderedBijection<K, V> {
 
 impl<K, V> OrderedBijection<K, V> {
     /// Returns the number of entries in the map.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.inner.len()
     }
 
     /// Returns `true` if the map is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
@@ -506,7 +506,7 @@ impl<K, V> OrderedBijection<K, V> {
     }
 
     /// Returns the ordered keys as an [`Ordered`] reference.
-    pub fn keys(&self) -> &Ordered<K> {
+    pub const fn keys(&self) -> &Ordered<K> {
         self.inner.keys()
     }
 
@@ -625,9 +625,7 @@ impl<K: Ord, V: Ord, const N: usize> From<[(K, V); N]> for OrderedBijection<K, V
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Ord, const N: usize> From<&[(K, V); N]>
-    for OrderedBijection<K, V>
-{
+impl<K: Ord + Clone, V: Clone + Ord, const N: usize> From<&[(K, V); N]> for OrderedBijection<K, V> {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
