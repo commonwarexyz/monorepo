@@ -558,17 +558,24 @@ impl<
         let status = self.commit_to_log(metadata).await?;
 
         // Merkleize the new bitmap entries.
-        let mmr = &self.any.log.mmr;
         let height = Self::grafting_height();
         self.status =
-            merkleize_grafted_bitmap(&mut self.any.log.hasher, status, mmr, height).await?;
+            merkleize_grafted_bitmap(&mut self.any.log.hasher, status, &self.any.log.mmr, height)
+                .await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
         // Refresh cached root after commit
-        self.cached_root =
-            Some(super::root(&mut self.any.log.hasher, height, &self.status, mmr).await?);
+        self.cached_root = Some(
+            super::root(
+                &mut self.any.log.hasher,
+                height,
+                &self.status,
+                &self.any.log.mmr,
+            )
+            .await?,
+        );
 
         Ok(start_loc..self.op_count())
     }
@@ -914,7 +921,7 @@ impl<
 pub mod test {
     use super::*;
     use crate::{
-        adb::store::batch_tests,
+        adb::{any::AnyExt, store::batch_tests},
         index::Unordered as _,
         mmr::{hasher::Hasher as _, mem::Mmr},
         translator::OneCap,
@@ -926,96 +933,6 @@ pub mod test {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::collections::HashMap;
     use tracing::warn;
-
-    /// Wrapper to enable batch testing for Current ADB via type-state management.
-    struct BatchTestWrapper {
-        inner: Option<BatchTestState>,
-    }
-
-    enum BatchTestState {
-        Clean(CleanCurrentTest),
-        Dirty(DirtyCurrentTest),
-    }
-
-    impl BatchTestWrapper {
-        fn new(db: CleanCurrentTest) -> Self {
-            Self {
-                inner: Some(BatchTestState::Clean(db)),
-            }
-        }
-
-        fn ensure_dirty(&mut self) {
-            let state = self.inner.take().expect("wrapper should never be empty");
-            self.inner = Some(match state {
-                BatchTestState::Clean(clean) => BatchTestState::Dirty(clean.into_dirty()),
-                BatchTestState::Dirty(dirty) => BatchTestState::Dirty(dirty),
-            });
-        }
-
-        async fn ensure_clean(&mut self) {
-            let state = self.inner.take().expect("wrapper should never be empty");
-            self.inner = Some(match state {
-                BatchTestState::Dirty(dirty) => {
-                    BatchTestState::Clean(dirty.merkleize().await.unwrap())
-                }
-                BatchTestState::Clean(clean) => BatchTestState::Clean(clean),
-            });
-        }
-    }
-
-    impl crate::store::Store for BatchTestWrapper {
-        type Key = Digest;
-        type Value = Digest;
-        type Error = Error;
-
-        async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-            match self.inner.as_ref().expect("wrapper should never be empty") {
-                BatchTestState::Clean(clean) => clean.get(key).await,
-                BatchTestState::Dirty(dirty) => dirty.get(key).await,
-            }
-        }
-    }
-
-    impl crate::store::StoreMut for BatchTestWrapper {
-        async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-            self.ensure_dirty();
-            match self.inner.as_mut().expect("wrapper should never be empty") {
-                BatchTestState::Dirty(dirty) => dirty.update(key, value).await,
-                _ => unreachable!("ensure_dirty guarantees Dirty state"),
-            }
-        }
-    }
-
-    impl crate::store::StoreDeletable for BatchTestWrapper {
-        async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-            self.ensure_dirty();
-            match self.inner.as_mut().expect("wrapper should never be empty") {
-                BatchTestState::Dirty(dirty) => dirty.delete(key).await,
-                _ => unreachable!("ensure_dirty guarantees Dirty state"),
-            }
-        }
-    }
-
-    impl crate::store::StorePersistable for BatchTestWrapper {
-        async fn commit(&mut self) -> Result<(), Self::Error> {
-            self.ensure_clean().await;
-            match self.inner.as_mut().expect("wrapper should never be empty") {
-                BatchTestState::Clean(clean) => {
-                    clean.commit(None).await?;
-                    Ok(())
-                }
-                _ => unreachable!("ensure_clean guarantees Clean state"),
-            }
-        }
-
-        async fn destroy(mut self) -> Result<(), Self::Error> {
-            self.ensure_clean().await;
-            match self.inner.take().expect("wrapper should never be empty") {
-                BatchTestState::Clean(clean) => clean.destroy().await,
-                _ => unreachable!("ensure_clean guarantees Clean state"),
-            }
-        }
-    }
 
     const PAGE_SIZE: usize = 88;
     const PAGE_CACHE_SIZE: usize = 8;
@@ -1998,7 +1915,7 @@ pub mod test {
                 async move {
                     let seed = ctx.next_u64();
                     let partition = format!("current_ordered_batch_{seed}");
-                    BatchTestWrapper::new(open_db(ctx, &partition).await)
+                    AnyExt::new(open_db(ctx, &partition).await)
                 }
             })
             .await
