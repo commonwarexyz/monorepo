@@ -1272,17 +1272,10 @@ pub mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        // Run the batch tests twice and check for determinism.
-        let state1 = batch_tests::test_batch(|mut ctx| async move {
+        batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
             let prefix = format!("current_unordered_batch_{seed}");
             open_db(ctx, &prefix).await
         });
-        let state2 = batch_tests::test_batch(|mut ctx| async move {
-            let seed = ctx.next_u64();
-            let prefix = format!("current_unordered_batch_{seed}");
-            open_db(ctx, &prefix).await
-        });
-        assert_eq!(state1, state2);
     }
 }

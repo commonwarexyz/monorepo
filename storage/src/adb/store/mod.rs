@@ -1119,13 +1119,8 @@ mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        // Run the batch tests twice and check for determinism.
-        let state1 = batch_tests::test_batch(|ctx| async move {
-            create_test_store(ctx.with_label("batch")).await
-        });
-        let state2 = batch_tests::test_batch(|ctx| async move {
-            create_test_store(ctx.with_label("batch")).await
-        });
-        assert_eq!(state1, state2);
+        batch_tests::test_batch(
+            |ctx| async move { create_test_store(ctx.with_label("batch")).await },
+        );
     }
 }

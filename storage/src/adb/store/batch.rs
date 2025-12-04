@@ -192,29 +192,40 @@ pub mod tests {
         fn from_seed(seed: u8) -> Self;
     }
 
-    /// Run the batch test suite against a database factory within a deterministic executor and
-    /// return the auditor state.
-    pub fn test_batch<D, F, Fut>(mut new_db: F) -> String
+    /// Run the batch test suite against a database factory within a deterministic executor twice,
+    /// and test the auditor output for equality.
+    pub fn test_batch<D, F, Fut>(mut new_db: F)
     where
-        F: FnMut(Context) -> Fut,
+        F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
         D: Batchable + StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
         let executor = deterministic::Runner::default();
-
-        executor.start(|context| async move {
+        let mut new_db_clone = new_db.clone();
+        let state1 = executor.start(|context| async move {
             let ctx = context.clone();
-            run_batch_tests::<D, _, Fut>(|| new_db(ctx.clone()))
+            run_batch_tests::<D, _, Fut>(&mut || new_db_clone(ctx.clone()))
                 .await
                 .unwrap();
             ctx.auditor().state()
-        })
+        });
+
+        let executor = deterministic::Runner::default();
+        let state2 = executor.start(|context| async move {
+            let ctx = context.clone();
+            run_batch_tests::<D, _, Fut>(&mut || new_db(ctx.clone()))
+                .await
+                .unwrap();
+            ctx.auditor().state()
+        });
+
+        assert_eq!(state1, state2);
     }
 
     /// Run the shared batch test suite against a database factory.
-    pub async fn run_batch_tests<D, F, Fut>(mut new_db: F) -> Result<(), Error>
+    pub async fn run_batch_tests<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
@@ -222,11 +233,11 @@ pub mod tests {
         D::Key: TestKey,
         D::Value: TestValue,
     {
-        test_overlay_reads(&mut new_db).await?;
-        test_create(&mut new_db).await?;
-        test_delete(&mut new_db).await?;
-        test_delete_unchecked(&mut new_db).await?;
-        test_write_batch(&mut new_db).await?;
+        test_overlay_reads(new_db).await?;
+        test_create(new_db).await?;
+        test_delete(new_db).await?;
+        test_delete_unchecked(new_db).await?;
+        test_write_batch(new_db).await?;
         Ok(())
     }
 

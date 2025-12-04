@@ -268,6 +268,10 @@ fn update_known_loc<I: Index<Value = Location>>(
 
 /// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
 /// it from the snapshot.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], old_loc: Location) {
     let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
     assert!(
