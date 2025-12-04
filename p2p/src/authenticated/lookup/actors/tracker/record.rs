@@ -1,6 +1,6 @@
 use commonware_utils::IpAddrExt;
 use std::{
-    collections::HashSet,
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
 };
 
@@ -51,7 +51,7 @@ pub struct Record {
 
     /// All IP addresses this peer has been associated with.
     /// Used for accepting incoming connections from any known IP.
-    tracked_ips: HashSet<IpAddr>,
+    tracked_ips: BTreeSet<IpAddr>,
 }
 
 impl Record {
@@ -64,7 +64,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            tracked_ips: HashSet::from([socket.ip()]),
+            tracked_ips: BTreeSet::from_iter(vec![socket.ip()]),
         }
     }
 
@@ -75,7 +75,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            tracked_ips: HashSet::new(),
+            tracked_ips: BTreeSet::new(),
         }
     }
 
