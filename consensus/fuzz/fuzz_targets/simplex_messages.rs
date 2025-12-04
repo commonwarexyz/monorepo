@@ -7,7 +7,9 @@ use commonware_consensus::simplex::{
         bls12381_threshold::{self},
         ed25519, Scheme,
     },
-    types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Voter},
+    types::{
+        Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Vote,
+    },
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -47,7 +49,10 @@ where
     let cert_cfg = participants_count;
 
     let mut reader = &input.message_bytes[..];
-    let _ = Voter::<S, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Vote::<S, sha256::Digest>::read(&mut reader);
+
+    let mut reader = &input.message_bytes[..];
+    let _ = Certificate::<S, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
     let _ = Notarize::<S, sha256::Digest>::read(&mut reader);
@@ -72,7 +77,10 @@ fn fuzz_threshold_minpk(input: &FuzzInput) {
     let cert_cfg = ();
 
     let mut reader = &input.message_bytes[..];
-    let _ = Voter::<ThresholdSchemeMinPk, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Vote::<ThresholdSchemeMinPk, sha256::Digest>::read(&mut reader);
+
+    let mut reader = &input.message_bytes[..];
+    let _ = Certificate::<ThresholdSchemeMinPk, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
     let _ = Notarize::<ThresholdSchemeMinPk, sha256::Digest>::read(&mut reader);
@@ -97,7 +105,10 @@ fn fuzz_threshold_minsig(input: &FuzzInput) {
     let cert_cfg = ();
 
     let mut reader = &input.message_bytes[..];
-    let _ = Voter::<ThresholdSchemeMinSig, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Vote::<ThresholdSchemeMinSig, sha256::Digest>::read(&mut reader);
+
+    let mut reader = &input.message_bytes[..];
+    let _ = Certificate::<ThresholdSchemeMinSig, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
     let _ = Notarize::<ThresholdSchemeMinSig, sha256::Digest>::read(&mut reader);
