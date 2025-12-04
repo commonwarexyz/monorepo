@@ -20,7 +20,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 pub mod fixed;
@@ -741,7 +741,8 @@ where
         &mut self,
         iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
     ) -> Result<(), Error> {
-        let mut updates = HashMap::new();
+        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
+        let mut updates = BTreeMap::new();
         let mut locations = Vec::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
             let iter = self.snapshot.get(&key);
