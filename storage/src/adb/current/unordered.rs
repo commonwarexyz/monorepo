@@ -241,7 +241,6 @@ impl<
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -266,7 +265,6 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,

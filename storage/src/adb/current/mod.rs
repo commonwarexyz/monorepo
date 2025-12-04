@@ -84,10 +84,6 @@ impl<T: Translator> Config<T> {
 }
 
 /// Return the root of the current adb represented by the provided mmr and bitmap.
-///
-/// # Errors
-///
-/// Returns [Error::UncommittedOperations] if there are uncommitted operations.
 async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     height: u32,

@@ -25,7 +25,7 @@ use std::{
     ops::Range,
 };
 
-pub mod ext;
+mod ext;
 pub mod ordered;
 pub mod unordered;
 
