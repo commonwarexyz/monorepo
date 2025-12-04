@@ -37,7 +37,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 pub async fn run<S>(
     context: tokio::Context,
     args: super::ParticipantArgs,
-    update_cb: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
+    callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
@@ -143,7 +143,7 @@ pub async fn run<S>(
         dkg,
         orchestrator,
         marshal,
-        update_cb,
+        callback,
     );
 
     if let Err(e) = try_join_all(vec![p2p_handle, engine_handle]).await {

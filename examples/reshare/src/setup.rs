@@ -105,11 +105,11 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
 
     /// Pick the dealers for a particular round.
     ///
-    /// The first round will use the first `num_participants_per_epoch` players
+    /// The first round will use the first [`Self::num_participants_in_round`] players
     /// as the dealers.
     ///
-    /// Subsequent rounds will choose the same number, pseudo-randomly,
-    /// using the round number as a seed.
+    /// Subsequent rounds will their corresponding [`Self::num_participants_in_round`], and
+    /// so on.
     pub fn dealers(&self, round: u64) -> Set<P> {
         let p_iter = self.participants.iter().cloned();
         let to_choose = self.num_participants_in_round(round) as usize;
@@ -177,6 +177,7 @@ fn generate_identities(
     let peer_signers = (0..num_peers)
         .map(|_| PrivateKey::from_rng(&mut OsRng))
         .collect::<Vec<_>>();
+
     // Generate consensus key
     let threshold = quorum(num_participants_per_epoch);
     let (output, shares) = if is_dkg {
