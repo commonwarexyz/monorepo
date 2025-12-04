@@ -38,7 +38,6 @@ jobs:
         rm -rf coding/fuzz
         rm -rf consensus/fuzz
         rm -rf collector/fuzz
-        rm -rf consensus/fuzz
         rm -rf cryptography/fuzz
         rm -rf p2p/fuzz
         rm -rf runtime/fuzz
