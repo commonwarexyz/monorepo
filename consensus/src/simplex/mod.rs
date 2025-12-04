@@ -4275,18 +4275,21 @@ mod tests {
             let proposal_b0 = Proposal {
                 round: round_f,
                 parent: View::new(f_view - 1),
+                parent_payload: D::from([0u8; 32]),
                 payload: payload_b0,
             };
             let payload_b1a = Sha256::hash(b"B_G1");
             let proposal_b1a = Proposal {
                 round: Round::new(Epoch::new(333), View::new(f_view + 1)),
                 parent: View::new(f_view),
+                parent_payload: payload_b0,
                 payload: payload_b1a,
             };
             let payload_b1b = Sha256::hash(b"B_G2");
             let proposal_b1b = Proposal {
                 round: Round::new(Epoch::new(333), View::new(f_view + 2)),
                 parent: View::new(f_view),
+                parent_payload: payload_b0,
                 payload: payload_b1b,
             };
 

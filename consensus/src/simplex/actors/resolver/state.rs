@@ -247,6 +247,7 @@ mod tests {
         let proposal = Proposal {
             round: Round::new(EPOCH, view),
             parent: view.previous().unwrap_or(View::zero()),
+            parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([view.get() as u8; 32]),
         };
         let votes: Vec<_> = schemes
@@ -264,6 +265,7 @@ mod tests {
         let proposal = Proposal {
             round: Round::new(EPOCH, view),
             parent: view.previous().unwrap_or(View::zero()),
+            parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([view.get() as u8; 32]),
         };
         let votes: Vec<_> = schemes

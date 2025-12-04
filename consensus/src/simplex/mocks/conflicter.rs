@@ -58,6 +58,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let proposal = Proposal {
                         round: notarize.round(),
                         parent: notarize.proposal.parent,
+                        parent_payload: notarize.proposal.parent_payload,
                         payload,
                     };
                     let n =
@@ -78,6 +79,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let proposal = Proposal {
                         round: finalize.round(),
                         parent: finalize.proposal.parent,
+                        parent_payload: finalize.proposal.parent_payload,
                         payload,
                     };
                     let f =

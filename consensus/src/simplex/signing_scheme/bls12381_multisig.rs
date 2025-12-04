@@ -359,6 +359,7 @@ mod tests {
         Proposal {
             round: Round::new(Epoch::new(round), View::new(view)),
             parent: View::new(view).previous().unwrap(),
+            parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256::hash(&[tag]),
         }
     }
