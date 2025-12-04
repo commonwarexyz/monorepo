@@ -708,6 +708,7 @@ mod tests {
     fn sample_proposal(epoch: Epoch, view: View, tag: u8) -> Proposal<Sha256Digest> {
         Proposal {
             round: Round::new(epoch, view),
+            leader: 0,
             parent: view.previous().unwrap(),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256::hash(&[tag]),

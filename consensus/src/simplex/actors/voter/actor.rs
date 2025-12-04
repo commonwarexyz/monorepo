@@ -797,8 +797,11 @@ impl<
                     }
 
                     // Construct proposal
+                    let leader = self.state.leader_index(context.round.view())
+                        .expect("leader must be set when proposing");
                     let proposal = Proposal {
                         round: context.round,
+                        leader,
                         parent: context.parent.0,
                         parent_payload: context.parent.1,
                         payload: proposed,

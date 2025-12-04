@@ -228,6 +228,7 @@ mod tests {
             let payload = Sha256::hash(b"test");
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), View::new(100)),
+                leader: 0,
                 parent: View::new(50),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload,
@@ -274,6 +275,7 @@ mod tests {
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), View::new(50)),
+                leader: 0,
                 parent: View::new(49),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload,
@@ -287,6 +289,7 @@ mod tests {
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), View::new(300)),
+                leader: 0,
                 parent: View::new(100),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload,
@@ -469,6 +472,7 @@ mod tests {
             // Send Finalization via voter mailbox to advance last_finalized
             let proposal_lf = Proposal {
                 round: Round::new(Epoch::new(333), lf_target),
+                leader: 0,
                 parent: lf_target.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test"),
@@ -514,6 +518,7 @@ mod tests {
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal {
                 round: Round::new(Epoch::new(333), journal_floor_target),
+                leader: 0,
                 parent: journal_floor_target.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test2"),
@@ -543,6 +548,7 @@ mod tests {
             let problematic_view = journal_floor_target.saturating_sub(ViewDelta::new(3));
             let proposal_bft = Proposal {
                 round: Round::new(Epoch::new(333), problematic_view),
+                leader: 0,
                 parent: problematic_view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test3"),
@@ -568,6 +574,7 @@ mod tests {
             // Send Finalization via voter mailbox to new view (100)
             let proposal_lf = Proposal {
                 round: Round::new(Epoch::new(333), View::new(100)),
+                leader: 0,
                 parent: View::new(99),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test4"),
@@ -732,6 +739,7 @@ mod tests {
             let view = View::new(2);
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"finalize_without_notarization"),
@@ -896,6 +904,7 @@ mod tests {
             let view = View::new(2);
             let proposal_a = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"proposal_a"),
@@ -908,6 +917,7 @@ mod tests {
             // Send notarization certificate for a DIFFERENT proposal B
             let proposal_b = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"proposal_b"),
@@ -1066,12 +1076,14 @@ mod tests {
             let view = View::new(2);
             let proposal_a = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"proposal_a"),
             };
             let proposal_b = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"proposal_b"),
@@ -1234,6 +1246,7 @@ mod tests {
             let view = View::new(2);
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"same_proposal"),
@@ -1425,6 +1438,7 @@ mod tests {
             let view1_round = Round::new(epoch, View::new(1));
             let view1_proposal = Proposal {
                 round: view1_round,
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"view1_payload"),
@@ -1463,6 +1477,7 @@ mod tests {
             // Create a conflicting proposal from ourselves (equivocating) for view 2
             let conflicting_proposal = Proposal {
                 round: view2_round,
+                leader: leader_idx as u32,
                 parent: View::new(1),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"leader_proposal"),
@@ -1627,6 +1642,7 @@ mod tests {
             let view = View::new(2);
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"finalize_without_notarization"),
@@ -1841,6 +1857,7 @@ mod tests {
             let view = View::new(2);
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"finalization_from_resolver"),
@@ -1993,6 +2010,7 @@ mod tests {
             let view = View::new(2);
             let proposal = Proposal {
                 round: Round::new(Epoch::new(333), view),
+                leader: 0,
                 parent: view.previous().unwrap(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"no_resolver_boomerang"),

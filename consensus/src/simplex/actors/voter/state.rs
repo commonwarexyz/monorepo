@@ -575,6 +575,7 @@ mod tests {
             let notarize_round = Rnd::new(Epoch::new(11), notarize_view);
             let notarize_proposal = Proposal {
                 round: notarize_round,
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([50u8; 32]),
@@ -618,6 +619,7 @@ mod tests {
             let finalize_round = Rnd::new(Epoch::new(11), finalize_view);
             let finalize_proposal = Proposal {
                 round: finalize_round,
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([51u8; 32]),
@@ -672,6 +674,7 @@ mod tests {
             let parent_round = Rnd::new(state.epoch(), View::new(1));
             let parent_proposal = Proposal {
                 round: parent_round,
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([11u8; 32]),
@@ -699,6 +702,7 @@ mod tests {
             // Insert proposal
             let proposal = Proposal {
                 round: Rnd::new(state.epoch(), View::new(2)),
+                leader: 0,
                 parent: View::new(1),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([22u8; 32]),
@@ -708,6 +712,7 @@ mod tests {
             // New certificate shows
             let future_proposal = Proposal {
                 round: Rnd::new(state.epoch(), View::new(99)),
+                leader: 0,
                 parent: View::new(97),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([11u8; 32]),
@@ -816,6 +821,7 @@ mod tests {
             // Create finalization for view 20
             let proposal_a = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(20)),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([1u8; 32]),
@@ -870,6 +876,7 @@ mod tests {
             let parent_payload = Sha256Digest::from([1u8; 32]);
             let parent_proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), parent_view),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: parent_payload,
@@ -878,6 +885,7 @@ mod tests {
             // Parent payload validation fails without certificate
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(2)),
+                leader: 0,
                 parent: parent_view,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([9u8; 32]),
@@ -922,6 +930,7 @@ mod tests {
             let parent_view = View::new(1);
             let parent_proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), parent_view),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([2u8; 32]),
@@ -938,6 +947,7 @@ mod tests {
             // Parent payload validation fails without nullification
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(3)),
+                leader: 0,
                 parent: parent_view,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([3u8; 32]),
@@ -985,6 +995,7 @@ mod tests {
             let genesis_payload = Sha256Digest::from([0u8; 32]);
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(2)),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: genesis_payload,
                 payload: Sha256Digest::from([8u8; 32]),
@@ -1016,6 +1027,7 @@ mod tests {
             // Add finalization
             let proposal_a = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(3)),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([1u8; 32]),
@@ -1031,6 +1043,7 @@ mod tests {
             // Attempt to verify before finalized
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(4)),
+                leader: 0,
                 parent: View::new(2),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([6u8; 32]),
@@ -1068,12 +1081,14 @@ mod tests {
             let round = Rnd::new(epoch, view);
             let proposal_a = Proposal {
                 round,
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([21u8; 32]),
             };
             let proposal_b = Proposal {
                 round,
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([22u8; 32]),
@@ -1142,6 +1157,7 @@ mod tests {
             // Set proposal
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), view),
+                leader: 0,
                 parent: GENESIS_VIEW,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([1u8; 32]),

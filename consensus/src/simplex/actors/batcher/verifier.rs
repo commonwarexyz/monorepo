@@ -501,6 +501,7 @@ mod tests {
     ) -> Notarize<S, Sha256> {
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: parent_view,
             parent_payload: sample_digest(0),
             payload: sample_digest(payload_val),
@@ -522,6 +523,7 @@ mod tests {
     ) -> Finalize<S, Sha256> {
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: parent_view,
             parent_payload: sample_digest(0),
             payload: sample_digest(payload_val),
@@ -817,12 +819,14 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal {
             round,
+            leader: 0,
             parent: View::new(0),
             parent_payload: sample_digest(0),
             payload: sample_digest(10),
         };
         let proposal_b = Proposal {
             round,
+            leader: 0,
             parent: View::new(0),
             parent_payload: sample_digest(0),
             payload: sample_digest(20),
@@ -976,6 +980,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(0),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),

@@ -635,6 +635,8 @@ impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
 pub struct Proposal<D: Digest> {
     /// The round in which this proposal is made
     pub round: Round,
+    /// The index of the leader proposing this block
+    pub leader: u32,
     /// The view of the parent proposal that this one builds upon
     pub parent: View,
     /// The payload of the parent proposal
@@ -646,6 +648,7 @@ pub struct Proposal<D: Digest> {
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
+        self.leader.write(writer);
         self.parent.write(writer);
         self.parent_payload.write(writer);
         self.payload.write(writer)
@@ -657,11 +660,13 @@ impl<D: Digest> Read for Proposal<D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
+        let leader = u32::read(reader)?;
         let parent = View::read(reader)?;
         let parent_payload = D::read(reader)?;
         let payload = D::read(reader)?;
         Ok(Self {
             round,
+            leader,
             parent,
             parent_payload,
             payload,
@@ -672,6 +677,7 @@ impl<D: Digest> Read for Proposal<D> {
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
+            + self.leader.encode_size()
             + self.parent.encode_size()
             + self.parent_payload.encode_size()
             + self.payload.encode_size()
@@ -2183,6 +2189,7 @@ mod tests {
     fn test_proposal_encode_decode() {
         let proposal = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2196,6 +2203,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2221,6 +2229,7 @@ mod tests {
     fn notarization_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2291,6 +2300,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2315,6 +2325,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2356,6 +2367,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2404,6 +2416,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2451,12 +2464,14 @@ mod tests {
     fn conflicting_notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
         };
         let proposal2 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(2),
@@ -2484,12 +2499,14 @@ mod tests {
     fn conflicting_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
         };
         let proposal2 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(2),
@@ -2518,6 +2535,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2546,6 +2564,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(1),
@@ -2569,6 +2588,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(2),
@@ -2594,6 +2614,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(3),
@@ -2629,6 +2650,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(4),
@@ -2664,6 +2686,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(5),
@@ -2693,12 +2716,14 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal1 = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(6),
         };
         let proposal2 = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(7),
@@ -2728,6 +2753,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(8),
@@ -2757,6 +2783,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: sample_digest(0),
             payload: sample_digest(9),

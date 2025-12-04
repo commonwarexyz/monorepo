@@ -128,14 +128,17 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             self.hasher.update(&payload_b);
             let digest_b = self.hasher.finalize();
 
+            let leader = self.scheme.me().unwrap();
             let proposal_a = Proposal {
                 round: next_round,
+                leader,
                 parent: view,
                 parent_payload: H::EMPTY,
                 payload: digest_a,
             };
             let proposal_b = Proposal {
                 round: next_round,
+                leader,
                 parent: view,
                 parent_payload: H::EMPTY,
                 payload: digest_b,

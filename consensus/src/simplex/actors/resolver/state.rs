@@ -246,6 +246,7 @@ mod tests {
     ) -> Notarization<TestScheme, Sha256Digest> {
         let proposal = Proposal {
             round: Round::new(EPOCH, view),
+            leader: 0,
             parent: view.previous().unwrap_or(View::zero()),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([view.get() as u8; 32]),
@@ -264,6 +265,7 @@ mod tests {
     ) -> Finalization<TestScheme, Sha256Digest> {
         let proposal = Proposal {
             round: Round::new(EPOCH, view),
+            leader: 0,
             parent: view.previous().unwrap_or(View::zero()),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([view.get() as u8; 32]),

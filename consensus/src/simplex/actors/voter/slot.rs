@@ -169,6 +169,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(7), View::new(3));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([1u8; 32]),
@@ -185,6 +186,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(9), View::new(1));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([2u8; 32]),
@@ -206,6 +208,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(1), View::new(2));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(1),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([10u8; 32]),
@@ -225,6 +228,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(17), View::new(6));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(5),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([11u8; 32]),
@@ -244,6 +248,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(13), View::new(2));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(1),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([12u8; 32]),
@@ -260,12 +265,14 @@ mod tests {
         let round = Rnd::new(Epoch::new(21), View::new(4));
         let proposal_a = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([13u8; 32]),
         };
         let proposal_b = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([14u8; 32]),
@@ -290,12 +297,14 @@ mod tests {
         let round = Rnd::new(Epoch::new(25), View::new(8));
         let compromised = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([42u8; 32]),
         };
         let honest = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([15u8; 32]),
@@ -324,12 +333,14 @@ mod tests {
         let round = Rnd::new(Epoch::new(26), View::new(9));
         let leader_proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(4),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([16u8; 32]),
         };
         let conflicting = Proposal {
             round,
+            leader: 0,
             parent: View::new(4),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([99u8; 32]),
@@ -360,12 +371,14 @@ mod tests {
         let round = Rnd::new(Epoch::new(21), View::new(4));
         let proposal_a = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([15u8; 32]),
         };
         let proposal_b = Proposal {
             round,
+            leader: 0,
             parent: View::new(2),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([16u8; 32]),
@@ -390,12 +403,14 @@ mod tests {
         let round = Rnd::new(Epoch::new(25), View::new(7));
         let proposal_a = Proposal {
             round,
+            leader: 0,
             parent: View::new(3),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([17u8; 32]),
         };
         let proposal_b = Proposal {
             round,
+            leader: 0,
             parent: View::new(3),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([18u8; 32]),

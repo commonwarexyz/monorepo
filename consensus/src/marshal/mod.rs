@@ -523,6 +523,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
+                    leader: 0,
                     parent: View::new(height.checked_sub(1).unwrap()),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: block.digest(),
@@ -668,6 +669,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
+                    leader: 0,
                     parent: View::new(height.checked_sub(1).unwrap()),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: block.digest(),
@@ -807,6 +809,7 @@ mod tests {
 
             let proposal = Proposal {
                 round: Round::new(Epoch::new(0), View::new(1)),
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: commitment,
@@ -876,6 +879,7 @@ mod tests {
                 let view = View::new(view);
                 let proposal = Proposal {
                     round: Round::new(Epoch::zero(), view),
+                    leader: 0,
                     parent: view.previous().unwrap(),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: block.digest(),
@@ -952,6 +956,7 @@ mod tests {
                 let view = View::new(view);
                 let proposal = Proposal {
                     round: Round::new(Epoch::zero(), view),
+                    leader: 0,
                     parent: view.previous().unwrap(),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: block.digest(),
@@ -1032,6 +1037,7 @@ mod tests {
             // Block3: Notarized by the actor
             let proposal3 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(3)),
+                leader: 0,
                 parent: View::new(2),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: block3.digest(),
@@ -1051,6 +1057,7 @@ mod tests {
             let finalization4 = make_finalization(
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(4)),
+                    leader: 0,
                     parent: View::new(3),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: block4.digest(),
@@ -1118,6 +1125,7 @@ mod tests {
 
             let proposal = Proposal {
                 round,
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: digest,
@@ -1177,6 +1185,7 @@ mod tests {
             let f1 = make_finalization(
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(1)),
+                    leader: 0,
                     parent: View::new(0),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: d1,
@@ -1196,6 +1205,7 @@ mod tests {
             let f2 = make_finalization(
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(2)),
+                    leader: 0,
                     parent: View::new(1),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: d2,
@@ -1215,6 +1225,7 @@ mod tests {
             let f3 = make_finalization(
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(3)),
+                    leader: 0,
                     parent: View::new(2),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: d3,
@@ -1261,6 +1272,7 @@ mod tests {
             actor.verified(round, block.clone()).await;
             let proposal = Proposal {
                 round,
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: commitment,
@@ -1327,6 +1339,7 @@ mod tests {
             actor.verified(round2, fin_block.clone()).await;
             let proposal = Proposal {
                 round: round2,
+                leader: 0,
                 parent: View::new(1),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: fin_commitment,
@@ -1379,6 +1392,7 @@ mod tests {
             actor.verified(round, block.clone()).await;
             let proposal = Proposal {
                 round,
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: commitment,
@@ -1431,6 +1445,7 @@ mod tests {
                 actor.verified(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
+                    leader: 0,
                     parent: View::new(i - 1),
                     parent_payload: Sha256Digest::from([0u8; 32]),
                     payload: commitment,
@@ -1654,6 +1669,7 @@ mod tests {
             // Validator 0: Finalize with view 1
             let proposal_v1 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(1)),
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: commitment,
@@ -1672,6 +1688,7 @@ mod tests {
             // with different views by different validators.
             let proposal_v2 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(2)), // Different view
+                leader: 0,
                 parent: View::new(0),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: commitment, // Same block

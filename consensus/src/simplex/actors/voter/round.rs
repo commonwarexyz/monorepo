@@ -490,12 +490,14 @@ mod tests {
         } = ed25519(&mut rng, 4);
         let proposal_a = Proposal {
             round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([1u8; 32]),
         };
         let proposal_b = Proposal {
             round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([2u8; 32]),
@@ -545,12 +547,14 @@ mod tests {
         } = ed25519(&mut rng, 4);
         let proposal_a = Proposal {
             round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([1u8; 32]),
         };
         let proposal_b = Proposal {
             round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([2u8; 32]),
@@ -610,6 +614,7 @@ mod tests {
         } = ed25519(&mut rng, 4);
         let proposal = Proposal {
             round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([1u8; 32]),
@@ -648,6 +653,7 @@ mod tests {
         let round = Rnd::new(Epoch::new(5), View::new(view));
         let proposal = Proposal {
             round,
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([40u8; 32]),
@@ -721,6 +727,7 @@ mod tests {
         let round_info = Rnd::new(Epoch::new(5), View::new(view));
         let proposal = Proposal {
             round: round_info,
+            leader: 0,
             parent: View::new(0),
             parent_payload: Sha256Digest::from([0u8; 32]),
             payload: Sha256Digest::from([40u8; 32]),

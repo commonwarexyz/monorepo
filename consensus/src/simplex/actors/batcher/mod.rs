@@ -200,6 +200,7 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal {
                 round,
+                leader: 0,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),
@@ -368,6 +369,7 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),
@@ -526,6 +528,7 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),
@@ -708,12 +711,14 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal_a = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"payload_a"),
             };
             let proposal_b = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"payload_b"),
@@ -912,8 +917,10 @@ mod tests {
 
             // Build proposal and leader's vote
             let round = Round::new(epoch, view);
+            let leader = 1u32;
             let proposal = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),
@@ -1032,8 +1039,10 @@ mod tests {
             // Build proposal and leader's vote for view 1 with participant 1 as leader
             let view = View::new(1);
             let round = Round::new(epoch, view);
+            let leader = 1u32;
             let proposal = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),
@@ -1182,6 +1191,7 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal {
                 round,
+                leader,
                 parent: View::zero(),
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256::hash(b"test_payload"),

@@ -57,6 +57,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal {
                         round: notarize.round(),
+                        leader: notarize.proposal.leader,
                         parent: notarize.proposal.parent,
                         parent_payload: notarize.proposal.parent_payload,
                         payload,
@@ -78,6 +79,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal {
                         round: finalize.round(),
+                        leader: finalize.proposal.leader,
                         parent: finalize.proposal.parent,
                         parent_payload: finalize.proposal.parent_payload,
                         payload,
