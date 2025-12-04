@@ -27,8 +27,14 @@ pub enum Error {
 ///
 /// After construction, the contained [`Vec<T>`] is sealed and cannot be modified. To unseal the
 /// inner [`Vec<T>`], use the [`Into<Vec<T>>`] impl.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ordered<T>(Vec<T>);
+
+impl<T: fmt::Debug> fmt::Debug for Ordered<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Ordered").field(&self.0).finish()
+    }
+}
 
 impl<T> Ordered<T> {
     /// Returns the size of the ordered collection.
@@ -321,6 +327,19 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedAssociated<K, V> {
     }
 }
 
+impl<K: fmt::Display, V: fmt::Display> fmt::Display for OrderedAssociated<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "[")?;
+        for (i, (key, value)) in self.iter_pairs().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "({key}, {value})")?;
+        }
+        write!(f, "]")
+    }
+}
+
 impl<K, V> AsRef<[K]> for OrderedAssociated<K, V> {
     fn as_ref(&self) -> &[K] {
         self.keys.as_ref()
@@ -385,7 +404,7 @@ impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for OrderedAss
     }
 }
 
-impl<K: Ord, V> From<OrderedAssociated<K, V>> for Vec<(K, V)> {
+impl<K, V> From<OrderedAssociated<K, V>> for Vec<(K, V)> {
     fn from(wrapped: OrderedAssociated<K, V>) -> Self {
         wrapped.into_iter().collect()
     }
@@ -575,6 +594,19 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedBijection<K, V> {
     }
 }
 
+impl<K: fmt::Display, V: fmt::Display> fmt::Display for OrderedBijection<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "[")?;
+        for (i, (key, value)) in self.iter_pairs().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "({key}, {value})")?;
+        }
+        write!(f, "]")
+    }
+}
+
 impl<K, V> AsRef<[K]> for OrderedBijection<K, V> {
     fn as_ref(&self) -> &[K] {
         self.inner.as_ref()
@@ -626,7 +658,7 @@ impl<K: Ord + Clone, V: Clone + Eq, const N: usize> From<&[(K, V); N]> for Order
     }
 }
 
-impl<K: Ord, V> From<OrderedBijection<K, V>> for Vec<(K, V)> {
+impl<K, V> From<OrderedBijection<K, V>> for Vec<(K, V)> {
     fn from(wrapped: OrderedBijection<K, V>) -> Self {
         wrapped.inner.into()
     }
