@@ -8,10 +8,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{
-    quorum,
-    set::{OrderedAssociated, OrderedBijection},
-};
+use commonware_utils::{quorum, set::OrderedBijection};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -29,7 +26,7 @@ pub struct Fixture<S> {
 pub fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
-) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
+) -> OrderedBijection<ed25519::PublicKey, ed25519::PrivateKey>
 where
     R: RngCore + CryptoRng,
 {

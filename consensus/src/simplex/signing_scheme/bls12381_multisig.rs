@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Participants have both an identity key and a consensus key. The identity key
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
-    pub fn verifier(participants: OrderedBijection<P, V::Public>) -> Self {
+    pub const fn verifier(participants: OrderedBijection<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
