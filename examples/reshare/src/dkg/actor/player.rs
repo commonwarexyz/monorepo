@@ -1,4 +1,6 @@
+use crate::dkg::state::State;
 use commonware_codec::{Encode, Read};
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
         dkg::{DealerLog, DealerPrivMsg, DealerPubMsg, Error, Info, Output, Player, PlayerAck},
@@ -17,9 +19,6 @@ use futures::{
 };
 use std::{collections::BTreeMap, num::NonZeroU32};
 use tracing::debug;
-
-mod state;
-use state::State;
 
 /// The output of a player after finalizing.
 ///
@@ -76,6 +75,7 @@ where
     C: Signer,
 {
     ctx: ContextCell<E>,
+    epoch: Epoch,
     max_read_size: NonZeroU32,
     state: State<E, V, C::PublicKey>,
     to_dealers: S,
@@ -102,32 +102,26 @@ where
     /// `me` is the private key identifying this player.
     pub async fn init(
         ctx: E,
-        storage_partition: String,
+        state: State<E, V, C::PublicKey>,
         to_dealers: S,
         from_dealers: R,
         round_info: Info<V, C::PublicKey>,
         max_read_size: NonZeroU32,
         me: C,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
-        let state = State::load(
-            ctx.with_label("storage"),
-            storage_partition,
-            round_info.round(),
-            max_read_size,
-        )
-        .await;
-
         let (outbox, inbox) = mpsc::channel(1);
         let mailbox = Mailbox(outbox);
 
         let me_pk = me.public_key();
         let player = Player::new(round_info.clone(), me)
             .unwrap_or_else(|_| panic!("should be able to create player {me_pk:?}"));
-
+        let epoch = Epoch::new(round_info.round());
+        let replay = state.dealer_msgs(epoch).await;
         let mut this = Self {
             ctx: ContextCell::new(ctx),
-            max_read_size,
+            epoch,
             state,
+            max_read_size,
             to_dealers,
             from_dealers,
             inbox,
@@ -135,8 +129,7 @@ where
             acks: BTreeMap::new(),
         };
 
-        let priv_msgs = this.state.msgs().to_vec();
-        for (dealer, pub_msg, priv_msg) in priv_msgs {
+        for (dealer, pub_msg, priv_msg) in replay {
             this.dealer_message(true, dealer, pub_msg, priv_msg).await;
         }
 
@@ -201,7 +194,9 @@ where
         {
             self.acks.insert(dealer.clone(), ack);
             if !replay {
-                self.state.put_msg(dealer, pub_msg, priv_msg).await;
+                self.state
+                    .append_dealer_msg(self.epoch, dealer, pub_msg, priv_msg)
+                    .await;
             }
         };
     }

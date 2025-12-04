@@ -1,10 +1,12 @@
+use crate::dkg::state::State;
 use commonware_codec::{Encode, ReadExt as _};
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
         dkg::{Dealer, DealerPrivMsg, DealerPubMsg, Info, PlayerAck, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
-    transcript::Transcript,
+    transcript::{Summary, Transcript},
     Signer,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -17,11 +19,8 @@ use futures::{
     select_biased, FutureExt, SinkExt, StreamExt,
 };
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::collections::BTreeMap;
 use tracing::{debug, info};
-
-mod state;
-use state::State;
 
 enum Message<V: Variant, C: Signer> {
     Transmit,
@@ -60,7 +59,8 @@ where
     C: Signer,
 {
     ctx: ContextCell<E>,
-    state: State<E, C::PublicKey>,
+    epoch: Epoch,
+    state: State<E, V, C::PublicKey>,
     to_players: S,
     from_players: R,
     inbox: mpsc::Receiver<Message<V, C>>,
@@ -87,26 +87,21 @@ where
     /// `share` is the previous share for the dealer.
     pub async fn init(
         ctx: E,
-        storage_partition: String,
+        rng_seed: Summary,
+        state: State<E, V, C::PublicKey>,
         (to_players, from_players): (S, R),
         round_info: Info<V, C::PublicKey>,
-        max_read_size: NonZeroU32,
         me: C,
         share: Option<Share>,
     ) -> (Self, Mailbox<V, C>) {
-        let mut state = State::load(
-            ctx.with_label("storage"),
-            storage_partition,
-            round_info.round(),
-            max_read_size.get() as usize,
-        )
-        .await;
-        let mut ctx = ContextCell::new(ctx);
         let (outbox, inbox) = mpsc::channel(1);
         let mailbox = Mailbox(outbox);
 
+        let epoch = Epoch::new(round_info.round());
+        let replay = state.player_acks(epoch).await;
+
         let (dealer, pub_msg, priv_msgs) = Dealer::start(
-            Transcript::resume(state.seed(ctx.as_mut()).await).noise(b"dealer rng"),
+            Transcript::resume(rng_seed).noise(b"dealer rng"),
             round_info,
             me,
             share,
@@ -114,7 +109,8 @@ where
         .expect("should be able to create dealer");
 
         let mut this = Self {
-            ctx,
+            ctx: ContextCell::new(ctx),
+            epoch,
             state,
             to_players,
             from_players,
@@ -124,7 +120,7 @@ where
             unsent_priv_msgs: priv_msgs.into_iter().collect(),
         };
 
-        for (player, ack) in this.state.acks().to_vec() {
+        for (player, ack) in replay {
             this.ack(true, player.clone(), ack.clone()).await;
         }
 
@@ -184,7 +180,7 @@ where
         }
         self.unsent_priv_msgs.remove(&player);
         if !replay {
-            self.state.put_ack(player, ack).await;
+            self.state.append_player_ack(self.epoch, player, ack).await;
         }
     }
 
