@@ -10,6 +10,8 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use rayon::{prelude::*, ThreadPoolBuilder};
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -318,6 +320,59 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
     }
 }
 
+#[cfg(feature = "std")]
+impl<R: Sync, K: Space<R>> Space<R> for Poly<K> {
+    fn msm(polys: &[Self], scalars: &[R], concurrency: usize) -> Self {
+        if polys.len() < MIN_POINTS_FOR_MSM {
+            return msm_naive(polys, scalars);
+        }
+
+        let cols = polys.len().min(scalars.len());
+        let polys = &polys[..cols];
+        let scalars = &scalars[..cols];
+
+        let rows = polys
+            .iter()
+            .map(|x| x.len_usize())
+            .max()
+            .expect("at least 1 point");
+
+        if concurrency > 1 {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("Unable to build thread pool");
+
+            let coeffs = pool.install(|| {
+                (0..rows)
+                    .into_par_iter()
+                    .map(|i| {
+                        let row: Vec<_> = polys
+                            .iter()
+                            .map(|p| p.coeffs.get(i).cloned().unwrap_or_else(K::zero))
+                            .collect();
+                        K::msm(&row, scalars, 1)
+                    })
+                    .collect()
+            });
+            return Self { coeffs };
+        }
+
+        let mut row = Vec::with_capacity(cols);
+        let coeffs = (0..rows)
+            .map(|i| {
+                row.clear();
+                for p in polys {
+                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
+                }
+                K::msm(&row, scalars, concurrency)
+            })
+            .collect::<Vec<_>>();
+        Self { coeffs }
+    }
+}
+
+#[cfg(not(feature = "std"))]
 impl<R, K: Space<R>> Space<R> for Poly<K> {
     fn msm(polys: &[Self], scalars: &[R], concurrency: usize) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
@@ -339,7 +394,7 @@ impl<R, K: Space<R>> Space<R> for Poly<K> {
             .map(|i| {
                 row.clear();
                 for p in polys {
-                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(|| K::zero()));
+                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
                 }
                 K::msm(&row, scalars, concurrency)
             })
