@@ -19,6 +19,7 @@ std = [
 	"commonware-codec/std",
 	"commonware-utils/std",
 	"rand_core/std",
+	"rayon",
 ]
 
 [dependencies]
@@ -28,6 +29,7 @@ commonware-codec.workspace = true
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }
 rand_core.workspace = true
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

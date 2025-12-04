@@ -489,8 +489,8 @@ pub mod test_suites {
         Ok(())
     }
 
-    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
-        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars, 1));
+    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R], conc: usize) -> TestResult {
+        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars, conc));
         Ok(())
     }
 
@@ -510,9 +510,10 @@ pub mod test_suites {
                 (
                     prop::collection::vec(k_strat, len),
                     prop::collection::vec(r_strat, len),
+                    1usize..=4,
                 )
             }),
-            |(points, scalars)| check_msm_eq_naive(&points, &scalars),
+            |(points, scalars, conc)| check_msm_eq_naive(&points, &scalars, conc),
         );
     }
 
