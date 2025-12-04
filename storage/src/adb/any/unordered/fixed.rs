@@ -794,14 +794,6 @@ pub(super) mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let ctx = context.clone();
-                async move { create_test_db(ctx.clone()).await }
-            })
-            .await
-            .unwrap();
-        });
+        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await });
     }
 }

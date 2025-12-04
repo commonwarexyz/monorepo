@@ -7,7 +7,7 @@
 use super::{CleanAny, DirtyAny};
 use crate::{
     adb::{
-        store::{DirtyStore, LogStore, LogStorePrunable},
+        store::{Batchable, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
     mmr::Location,
@@ -175,4 +175,11 @@ where
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
     }
+}
+
+impl<A> Batchable for AnyExt<A>
+where
+    A: CleanAny,
+    <A as LogStore>::Value: Clone,
+{
 }

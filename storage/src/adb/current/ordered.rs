@@ -7,9 +7,9 @@ use crate::{
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{
             fixed::{ordered::Operation, Value},
-            Committable as _, KeyData, Keyed as _,
+            Committable as _, KeyData, Keyed,
         },
-        store::{CleanStore, DirtyStore, LogStore},
+        store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
     bitmap::{CleanBitMap, DirtyBitMap},
@@ -833,6 +833,16 @@ impl<
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
     }
+}
+
+impl<E, K, V, T, H, const N: usize> Batchable for Current<E, K, V, H, T, N, Dirty>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+    H: Hasher,
+{
 }
 
 impl<
@@ -1908,18 +1918,10 @@ pub mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let mut ctx = context.clone();
-                async move {
-                    let seed = ctx.next_u64();
-                    let partition = format!("current_ordered_batch_{seed}");
-                    AnyExt::new(open_db(ctx, &partition).await)
-                }
-            })
-            .await
-            .unwrap();
+        batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let partition = format!("current_ordered_batch_{seed}");
+            AnyExt::new(open_db(ctx, &partition).await)
         });
     }
 }
