@@ -394,14 +394,20 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
         let (leader, proposal) = self.views.get(&view)?.should_verify()?;
-        let parent_payload = self.parent_payload(&proposal)?;
+
+        // Ensure the parent payload is valid
+        if !self.validate_parent_payload(&proposal) {
+            return None;
+        }
+
+        // Try to verify the proposal
         if !self.views.get_mut(&view)?.try_verify() {
             return None;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
-            parent: (proposal.parent, parent_payload),
+            parent: (proposal.parent, proposal.parent_payload),
         };
         Some((context, proposal))
     }
@@ -478,30 +484,28 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
-    /// Returns the payload of the proposal's parent if:
-    /// - It is less-than the proposal view.
-    /// - It is greater-than-or-equal-to the last finalized view.
-    /// - It is notarized or finalized.
-    /// - There exist nullifications for all views between it and the proposal view.
-    fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
+    /// Returns true if we know that the parent payload is valid for the proposal.
+    fn validate_parent_payload(&self, proposal: &Proposal<D>) -> bool {
         // Sanity check that the parent view is less than the proposal view.
         let (view, parent) = (proposal.view(), proposal.parent);
-        if view <= parent {
-            return None;
+
+        // Invalid parent view - parent must be less than the proposal view.
+        if parent >= view {
+            return false;
         }
 
         // Ignore any requests for outdated parent views.
         if parent < self.last_finalized {
-            return None;
+            return false;
         }
+
+        // Ensure we have a certificate at the parent view.
+        if Some(&proposal.parent_payload) != self.quorum_payload(parent) {
+            return false;
+        };
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        if !View::range(parent.next(), view).all(|v| self.is_nullified(v)) {
-            return None;
-        }
-
-        // May return `None` if the parent view is not yet notarized or finalized.
-        self.quorum_payload(parent).copied()
+        View::range(parent.next(), view).all(|v| self.is_nullified(v))
     }
 
     /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
@@ -871,14 +875,14 @@ mod tests {
                 payload: parent_payload,
             };
 
-            // Attempt to get parent payload without certificate
+            // Parent payload validation fails without certificate
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(2)),
                 parent: parent_view,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([9u8; 32]),
             };
-            assert!(state.parent_payload(&proposal).is_none());
+            assert!(!state.validate_parent_payload(&proposal));
 
             // Add notarization certificate
             let notarization_votes: Vec<_> = schemes
@@ -889,14 +893,13 @@ mod tests {
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
             state.add_notarization(notarization);
 
-            // Get parent
-            let digest = state.parent_payload(&proposal).expect("parent payload");
-            assert_eq!(digest, parent_payload);
+            // Parent payload validation succeeds with certificate
+            assert!(state.validate_parent_payload(&proposal));
         });
     }
 
     #[test]
-    fn parent_payload_errors_without_nullification() {
+    fn parent_payload_validation_fails_without_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -932,19 +935,19 @@ mod tests {
             state.add_notarization(notarization);
             state.create_round(View::new(2));
 
-            // Attempt to get parent payload
+            // Parent payload validation fails without nullification
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(3)),
                 parent: parent_view,
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([3u8; 32]),
             };
-            assert!(state.parent_payload(&proposal).is_none());
+            assert!(!state.validate_parent_payload(&proposal));
         });
     }
 
     #[test]
-    fn parent_payload_returns_genesis_payload() {
+    fn parent_payload_validation_succeeds_with_genesis_payload() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -979,20 +982,19 @@ mod tests {
             state.add_nullification(nullification);
 
             // Get genesis payload
+            let genesis_payload = Sha256Digest::from([0u8; 32]);
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(2)),
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: genesis_payload,
                 payload: Sha256Digest::from([8u8; 32]),
             };
-            let genesis = Sha256Digest::from([0u8; 32]);
-            let digest = state.parent_payload(&proposal).expect("genesis payload");
-            assert_eq!(digest, genesis);
+            assert!(state.validate_parent_payload(&proposal));
         });
     }
 
     #[test]
-    fn parent_payload_rejects_parent_before_finalized() {
+    fn parent_payload_validation_fails_with_parent_before_finalized() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1033,7 +1035,7 @@ mod tests {
                 parent_payload: Sha256Digest::from([0u8; 32]),
                 payload: Sha256Digest::from([6u8; 32]),
             };
-            assert!(state.parent_payload(&proposal).is_none());
+            assert!(!state.validate_parent_payload(&proposal));
         });
     }
 
