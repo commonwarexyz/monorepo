@@ -226,7 +226,7 @@ impl<
         &mut self,
         message: Message,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64>,
+        resolver: &mut p2p::Mailbox<U64, P>,
     ) {
         match message {
             Message::Deliver {
