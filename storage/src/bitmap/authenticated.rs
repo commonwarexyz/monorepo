@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Clean, CleanMmr, Config, Dirty, State},
+        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -26,7 +26,6 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
-use core::marker::PhantomData;
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
 
@@ -68,7 +67,7 @@ pub struct BitMap<D: Digest, const N: usize, S: State<D> = Clean<D>> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: CleanMmr<D>,
+    mmr: Mmr<D, S>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).
@@ -82,9 +81,6 @@ pub struct BitMap<D: Digest, const N: usize, S: State<D> = Clean<D>> {
     /// The cached root digest. This is always `Some` for a clean bitmap and computed during
     /// merkleization. For a dirty bitmap, this may be stale or `None`.
     cached_root: Option<D>,
-
-    /// Phantom data for the state type parameter.
-    _state: PhantomData<S>,
 }
 
 /// Prefix used for the metadata key identifying node digests.
@@ -292,8 +288,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             mmr,
             dirty_chunks: HashSet::new(),
             pool,
-            cached_root: Some(cached_root), // TODO is this right?
-            _state: PhantomData,
+            cached_root: Some(cached_root),
         }
     }
 
@@ -365,7 +360,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
 
         let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned_chunks should never overflow");
-        // Restored bitmap starts empty (needs replay), so root is the MMR's root
         let cached_root = *mmr.root();
         Ok(Self {
             bitmap,
@@ -374,7 +368,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             dirty_chunks: HashSet::new(),
             pool,
             cached_root: Some(cached_root),
-            _state: PhantomData,
         })
     }
 
@@ -515,11 +508,10 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
         DirtyBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
-            mmr: self.mmr,
+            mmr: self.mmr.into_dirty(),
             dirty_chunks: self.dirty_chunks,
             pool: self.pool,
             cached_root: self.cached_root,
-            _state: PhantomData,
         }
     }
 }
@@ -579,9 +571,8 @@ impl<D: Digest, const N: usize> DirtyBitMap<D, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let mut mmr = std::mem::replace(&mut self.mmr, CleanMmr::new(hasher)).into_dirty();
         for i in start..end {
-            mmr.add(hasher, self.bitmap.get_chunk(i));
+            self.mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -595,9 +586,10 @@ impl<D: Digest, const N: usize> DirtyBitMap<D, N> {
                 (loc, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        mmr.update_leaf_batched(hasher, self.pool.clone(), &updates)?;
+        self.mmr
+            .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
         self.dirty_chunks.clear();
-        let mmr = mmr.merkleize(hasher, self.pool.clone());
+        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
 
         // Compute the bitmap root
         let mmr_root = *mmr.root();
@@ -621,7 +613,6 @@ impl<D: Digest, const N: usize> DirtyBitMap<D, N> {
             dirty_chunks: self.dirty_chunks,
             pool: self.pool,
             cached_root: Some(cached_root),
-            _state: PhantomData,
         })
     }
 }
