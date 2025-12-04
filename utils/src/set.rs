@@ -543,22 +543,6 @@ impl<K, V> OrderedBijection<K, V> {
         self.inner.iter()
     }
 
-    /// Attempts to create an [`OrderedBijection`] from an [`OrderedAssociated`].
-    ///
-    /// Returns an error if any value is duplicated across different keys.
-    pub fn try_from_associated(map: OrderedAssociated<K, V>) -> Result<Self, Error>
-    where
-        V: Ord,
-    {
-        let mut seen = BTreeSet::new();
-        for value in &map.values {
-            if !seen.insert(value) {
-                return Err(Error::DuplicateValue);
-            }
-        }
-        Ok(Self { inner: map })
-    }
-
     /// Attempts to create an [`OrderedBijection`] from an iterator of key-value pairs.
     ///
     /// Returns an error if any value is duplicated across different keys.
@@ -568,7 +552,21 @@ impl<K, V> OrderedBijection<K, V> {
         V: Ord,
     {
         let map: OrderedAssociated<K, V> = iter.into_iter().collect();
-        Self::try_from_associated(map)
+        Self::try_from(map)
+    }
+}
+
+impl<K, V: Ord> TryFrom<OrderedAssociated<K, V>> for OrderedBijection<K, V> {
+    type Error = Error;
+
+    fn try_from(map: OrderedAssociated<K, V>) -> Result<Self, Self::Error> {
+        let mut seen = BTreeSet::new();
+        for value in &map.values {
+            if !seen.insert(value) {
+                return Err(Error::DuplicateValue);
+            }
+        }
+        Ok(Self { inner: map })
     }
 }
 
@@ -850,19 +848,19 @@ mod test {
     }
 
     #[test]
-    fn test_ordered_unique_from_associated() {
+    fn test_ordered_bijection_try_from_associated() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let unique = OrderedBijection::try_from_associated(associated).unwrap();
-        assert_eq!(unique.len(), 3);
-        assert_eq!(unique.get_value(&1), Some(&"a"));
+        let bijection = OrderedBijection::try_from(associated).unwrap();
+        assert_eq!(bijection.len(), 3);
+        assert_eq!(bijection.get_value(&1), Some(&"a"));
     }
 
     #[test]
-    fn test_ordered_unique_from_associated_duplicate() {
+    fn test_ordered_bijection_try_from_associated_duplicate() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let result = OrderedBijection::try_from_associated(associated);
+        let result = OrderedBijection::try_from(associated);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 }
