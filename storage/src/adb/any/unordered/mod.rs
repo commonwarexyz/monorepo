@@ -751,6 +751,7 @@ where
 
         // Concurrently look up all possible matching locations.
         locations.sort();
+        locations.dedup();
         let futures = locations.iter().map(|loc| self.log.read(*loc));
         let results = try_join_all(futures).await?;
 
