@@ -202,7 +202,6 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
         .unwrap()
 }
 
-/// Get a Store instance.
 async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
     Store::init(ctx, store_cfg).await.unwrap()

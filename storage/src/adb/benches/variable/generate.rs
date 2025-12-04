@@ -11,7 +11,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     adb::store::{Batchable, LogStorePrunable},
-    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+    store::{StoreDeletable, StoreMut, StorePersistable},
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -88,7 +88,7 @@ async fn test_db<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, <A as StoreTrait>::Error>
+) -> Result<Duration, commonware_storage::adb::Error>
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
         + StoreMut<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
