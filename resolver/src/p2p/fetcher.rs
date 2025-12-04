@@ -4,7 +4,7 @@ use commonware_cryptography::PublicKey;
 use commonware_p2p::{
     utils::{
         codec::WrappedSender,
-        requester::{Config, Requester, ID},
+        requester::{Config, RequestError, Requester, ID},
     },
     Recipients, Sender,
 };
@@ -132,12 +132,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                     .request_filtered(*retry, |p| hints.contains(p))
                 {
                     Ok(selection) => Ok(selection),
-                    Err(wait) if wait == Duration::MAX => {
+                    Err(RequestError::NoEligibleParticipants) => {
                         // No hinted peers available - clear hints, try any peer
                         self.hints.remove(key);
                         self.requester.request(*retry)
                     }
-                    Err(wait) => Err(wait), // Hinted peers rate-limited, wait for them
+                    Err(err) => Err(err), // Hinted peers rate-limited, wait for them
                 }
             }
             _ => self.requester.request(*retry),
@@ -145,9 +145,13 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         let (peer, id) = match result {
             Ok(selection) => selection,
-            Err(next) => {
-                let waiter = self.context.current().saturating_add(next);
-                self.waiter = Some(waiter);
+            Err(RequestError::RateLimited(wait)) => {
+                self.waiter = Some(self.context.current().saturating_add(wait));
+                return;
+            }
+            Err(RequestError::NoEligibleParticipants) => {
+                // No peers available at all - set waiter to far future to avoid busy loop
+                self.waiter = Some(self.context.current().saturating_add(Duration::MAX));
                 return;
             }
         };
