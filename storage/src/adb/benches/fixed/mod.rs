@@ -1,7 +1,10 @@
 //! Benchmarks of ADB variants on fixed-size values.
 
+use commonware_codec::Codec;
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, Clock, Metrics, Storage, ThreadPool};
+use commonware_runtime::{
+    buffer::PoolRef, create_pool, tokio::Context, Clock, Metrics, Storage, ThreadPool,
+};
 use commonware_storage::{
     adb::{
         any::{
@@ -19,10 +22,12 @@ use commonware_storage::{
     store::{Store as StoreTrait, StoreDeletable, StoreMut},
     translator::{EightCap, Translator},
 };
-use commonware_codec::Codec;
 use commonware_utils::{Array, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{future::Future, num::{NonZeroU64, NonZeroUsize}};
+use std::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 pub mod generate;
 pub mod init;
@@ -50,15 +55,11 @@ impl Variant {
     }
 
     /// Returns whether this variant supports batched operations.
-    /// Current ADBs don't support batching because their type-state pattern
-    /// separates mutation (Dirty) from commit (Clean).
+    /// All variants now support batching via the CleanAnyWrapper which
+    /// handles type-state transitions transparently.
     pub const fn supports_batching(&self) -> bool {
-        !matches!(
-            self,
-            Self::CurrentUnordered | Self::CurrentOrdered | Self::Store
-        )
+        true
     }
-
 }
 
 // =============================================================================
@@ -74,7 +75,10 @@ pub trait BenchmarkableDb {
     type Error: std::fmt::Debug;
 
     /// Get the value for a given key.
-    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
+    fn get(
+        &self,
+        key: &Self::Key,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
 
     /// Update a key with a new value.
     fn update(
@@ -266,6 +270,49 @@ where
         match self.inner.take().expect("wrapper should never be empty") {
             CleanAnyState::Clean(clean) => clean.destroy().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+}
+
+// Implement standard store traits for CleanAnyWrapper to enable Batchable blanket impl
+impl<A> StoreTrait for CleanAnyWrapper<A>
+where
+    A: CleanAny,
+{
+    type Key = A::Key;
+    type Value = <A as LogStore>::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        match self.inner.as_ref().expect("wrapper should never be empty") {
+            CleanAnyState::Clean(clean) => CleanAny::get(clean, key).await,
+            CleanAnyState::Dirty(dirty) => DirtyAny::get(dirty, key).await,
+        }
+    }
+}
+
+impl<A> StoreMut for CleanAnyWrapper<A>
+where
+    A: CleanAny,
+{
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Dirty(dirty) => DirtyAny::update(dirty, key, value).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
+}
+
+impl<A> StoreDeletable for CleanAnyWrapper<A>
+where
+    A: CleanAny,
+{
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            CleanAnyState::Dirty(dirty) => DirtyAny::delete(dirty, key).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
         }
     }
 }
@@ -487,7 +534,11 @@ async fn gen_random_kv_batched<A>(
 ) -> A
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + CleanAny<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+        + BenchmarkableDb<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = <Sha256 as Hasher>::Digest,
+            Error = Error,
+        >,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
