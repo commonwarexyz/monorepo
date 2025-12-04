@@ -449,7 +449,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
     ///
     /// The root is computed during merkleization and cached, so this method is cheap to call.
-    pub fn root(&self) -> D {
+    pub const fn root(&self) -> D {
         self.cached_root
             .expect("CleanBitMap should always have a cached root")
     }
