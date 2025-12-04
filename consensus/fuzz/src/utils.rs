@@ -78,7 +78,7 @@ fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
 }
 
 fn linear(n: usize, i: usize, j: usize) -> bool {
-    i + 1 % n == j % n || i == j
+    (i + 1) % n == j % n || i == j
 }
 
 pub async fn link_peers<P: PublicKey>(
