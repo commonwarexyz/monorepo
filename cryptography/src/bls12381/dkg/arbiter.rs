@@ -132,9 +132,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Find the index of the dealer
-        let idx = match self.dealers.index(&dealer) {
-            Some(idx) => idx,
-            None => return Err(Error::DealerInvalid),
+        let Some(idx) = self.dealers.index(&dealer) else {
+            return Err(Error::DealerInvalid);
         };
 
         // Check if commitment already exists

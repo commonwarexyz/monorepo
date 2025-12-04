@@ -567,9 +567,7 @@ pub fn can_command_advance(
     received: &BTreeMap<u32, BTreeSet<PublicKey>>,
 ) -> bool {
     match cmd {
-        Command::Propose(_, _) => true, // Propose always advances (proposer check handled by caller)
-        Command::Broadcast(_, _) => true, // Broadcast always advances
-        Command::Reply(_, _) => true,   // Reply always advances
+        Command::Propose(_, _) | Command::Broadcast(_, _) | Command::Reply(_, _) => true,
         Command::Collect(id, thresh, _) => {
             if is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
@@ -655,13 +653,10 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                                 messages.push((p, Recipients::One(proposer_key), *id));
                             }
                         }
-                        Command::Collect(_, _, _) | Command::Wait(_, _, _) => {
-                            // No side effects for collect/wait - just advancement
-                        }
-                        Command::Or(_, _) | Command::And(_, _) => {
-                            // No direct side effects for compound commands
-                            // Side effects come from their sub-commands when they execute
-                        }
+                        Command::Collect(_, _, _)
+                        | Command::Wait(_, _, _)
+                        | Command::Or(_, _)
+                        | Command::And(_, _) => {}
                     }
                 }
 

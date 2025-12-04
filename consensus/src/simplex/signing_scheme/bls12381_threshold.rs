@@ -155,8 +155,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
-            Self::Signer { participants, .. } => participants,
-            Self::Verifier { participants, .. } => participants,
+            Self::Signer { participants, .. } | Self::Verifier { participants, .. } => participants,
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -164,9 +163,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the public identity of the committee (constant across reshares).
     pub const fn identity(&self) -> &V::Public {
         match self {
-            Self::Signer { identity, .. } => identity,
-            Self::Verifier { identity, .. } => identity,
-            Self::CertificateVerifier { identity, .. } => identity,
+            Self::Signer { identity, .. }
+            | Self::Verifier { identity, .. }
+            | Self::CertificateVerifier { identity, .. } => identity,
         }
     }
 
@@ -181,8 +180,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
-            Self::Signer { participants, .. } => participants.values(),
-            Self::Verifier { participants, .. } => participants.values(),
+            Self::Signer { participants, .. } | Self::Verifier { participants, .. } => {
+                participants.values()
+            }
             _ => panic!("can only be called for signer and verifier"),
         }
     }

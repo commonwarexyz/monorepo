@@ -57,8 +57,7 @@ impl<K: Array, V: Value> Keyed for Operation<K, V> {
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
-            Self::Delete(key) => Some(key),
-            Self::Update(key, _) => Some(key),
+            Self::Delete(key) | Self::Update(key, _) => Some(key),
             Self::CommitFloor(_, _) => None,
         }
     }

@@ -62,19 +62,19 @@ impl<K, V: Eq> CursorTrait for Cursor<'_, K, V> {
     }
 
     fn insert(&mut self, value: V) {
-        self.inner.insert(value)
+        self.inner.insert(value);
     }
 
     fn delete(&mut self) {
-        self.inner.delete()
+        self.inner.delete();
     }
 
     fn update(&mut self, value: V) {
-        self.inner.update(value)
+        self.inner.update(value);
     }
 
     fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
+        self.inner.prune(predicate);
     }
 }
 

@@ -467,7 +467,7 @@ where
 
     /// Relays a report to the underlying [Application].
     async fn report(&mut self, update: Self::Activity) {
-        self.application.report(update).await
+        self.application.report(update).await;
     }
 }
 

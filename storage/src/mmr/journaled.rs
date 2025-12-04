@@ -381,7 +381,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             }
             journal.rewind(*last_valid_size).await?;
             journal.sync().await?;
-            journal_size = last_valid_size
+            journal_size = last_valid_size;
         }
 
         // Initialize the mem_mmr in the "prune_all" state.

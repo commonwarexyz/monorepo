@@ -75,9 +75,8 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let dealer_idx = match self.dealers.index(&dealer) {
-            Some(contributor) => contributor,
-            None => return Err(Error::DealerInvalid),
+        let Some(dealer_idx) = self.dealers.index(&dealer) else {
+            return Err(Error::DealerInvalid);
         };
 
         // Check that share is valid

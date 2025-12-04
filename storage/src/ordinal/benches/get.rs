@@ -65,7 +65,7 @@ fn bench_get(c: &mut Criterion) {
                         match mode {
                             "serial" => read_serial_indices(&store, &selected_indices).await,
                             "concurrent" => {
-                                read_concurrent_indices(&store, &selected_indices).await
+                                read_concurrent_indices(&store, &selected_indices).await;
                             }
                             _ => unreachable!(),
                         }

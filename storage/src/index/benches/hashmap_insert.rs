@@ -50,7 +50,7 @@ fn benchmark_hashmap_insert(c: &mut Criterion) {
                         }
                     },
                     BatchSize::SmallInput,
-                )
+                );
             });
         }
     }

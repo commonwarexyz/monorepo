@@ -858,6 +858,6 @@ mod tests {
             [].as_slice(),
             CONCURRENCY,
         )
-        .is_err())
+        .is_err());
     }
 }

@@ -78,9 +78,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         msg: Option<Data>,
         rate_limits: &HashMap<u64, V>,
     ) -> Result<Data, Error> {
-        let data = match msg {
-            Some(data) => data,
-            None => return Err(Error::PeerDisconnected),
+        let Some(data) = msg else {
+            return Err(Error::PeerDisconnected);
         };
         assert!(
             rate_limits.contains_key(&data.channel),
@@ -141,9 +140,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         deadline = context.current() + self.gossip_bit_vec_frequency;
                     },
                     msg_control = self.control.next() => {
-                        let msg = match msg_control {
-                            Some(msg_control) => msg_control,
-                            None => return Err(Error::PeerDisconnected),
+                        let Some(msg) = msg_control else {
+                            return Err(Error::PeerDisconnected);
                         };
                         let (metric, payload) = match msg {
                             Message::BitVec(bit_vec) =>

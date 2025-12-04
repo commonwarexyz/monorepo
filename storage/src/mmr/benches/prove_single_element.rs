@@ -55,7 +55,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         });
                     },
                     criterion::BatchSize::SmallInput,
-                )
+                );
             },
         );
     }

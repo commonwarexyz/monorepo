@@ -48,8 +48,7 @@ fn normalize_group_name(raw: &str) -> Result<String, &'static str> {
         match ch {
             'a'..='z' | '0'..='9' => sanitized.push(ch),
             'A'..='Z' => sanitized.push(ch.to_ascii_lowercase()),
-            '_' => sanitized.push('_'),
-            '-' => sanitized.push('_'),
+            '_' | '-' => sanitized.push('_'),
             _ => {
                 return Err(
                     "filter group names may only contain ASCII letters, digits, '_' or '-'",

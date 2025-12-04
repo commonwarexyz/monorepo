@@ -266,7 +266,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 debug!(?proposal, "setting verified proposal from certificate");
                 None
             }
-            ProposalChange::Unchanged => None,
+            ProposalChange::Unchanged | ProposalChange::Skipped => None,
             ProposalChange::Equivocated { dropped, retained } => {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
@@ -280,7 +280,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
                 equivocator
             }
-            ProposalChange::Skipped => None,
         }
     }
 

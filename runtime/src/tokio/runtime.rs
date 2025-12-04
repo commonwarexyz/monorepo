@@ -553,7 +553,7 @@ impl crate::Metrics for Context {
             .registry
             .lock()
             .unwrap()
-            .register(prefixed_name, help, metric)
+            .register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {

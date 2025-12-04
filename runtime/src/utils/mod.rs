@@ -63,7 +63,7 @@ pub async fn reschedule() {
         }
     }
 
-    Reschedule { yielded: false }.await
+    Reschedule { yielded: false }.await;
 }
 
 fn extract_panic_message(err: &(dyn Any + Send)) -> String {

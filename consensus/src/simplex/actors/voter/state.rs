@@ -450,9 +450,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return false;
         }
 
-        let round = match self.views.get(&view) {
-            Some(round) => round,
-            None => return false,
+        let Some(round) = self.views.get(&view) else {
+            return false;
         };
         round.nullification().is_some()
     }

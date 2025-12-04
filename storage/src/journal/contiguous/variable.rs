@@ -693,9 +693,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     "offsets oldest pos ({oldest_retained_pos}) > data oldest pos ({data_oldest_pos})"
                 )));
             }
-            Some(_) => {
-                // Both journals are pruned to the same position.
-            }
             None if data_oldest_pos > 0 => {
                 // Offsets journal is empty (size == oldest_retained_pos).
                 // This can happen if we pruned all data, then appended new data, persisted the
@@ -709,8 +706,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 }
                 info!("crash repair: offsets journal empty at {data_oldest_pos}");
             }
-            None => {
-                // Both journals are empty/fully pruned.
+            Some(_) | None => {
+                // Both journals are pruned to the same position, or both empty/fully pruned.
             }
         }
 

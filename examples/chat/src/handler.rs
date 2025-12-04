@@ -68,10 +68,7 @@ pub async fn run(
                 }
                 Err(_) => break,
             };
-            let e = match event::read() {
-                Ok(e) => e,
-                Err(_) => break,
-            };
+            let Ok(e) = event::read() else { break };
             if let CEvent::Key(key) = e {
                 if tx.send(Event::Input(key)).await.is_err() {
                     break;
@@ -202,10 +199,7 @@ pub async fn run(
         let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
         select! {
             event = rx.next() => {
-                let event = match event {
-                    Some(event) => event,
-                    None => break,
-                };
+                let Some(event) = event else { break };
                 match event {
                     Event::Input(event) => match event.code {
                         KeyCode::Char(c) => {

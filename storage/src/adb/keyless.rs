@@ -822,12 +822,8 @@ mod test {
             for i in 0..*oldest_retained {
                 let result = db.get(Location::new_unchecked(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
-                match result {
-                    Ok(None) => {} // Commit operation or pruned
-                    Ok(Some(_)) => {
-                        panic!("Should not be able to get pruned value at location {i}")
-                    }
-                    Err(_) => {} // Expected error for pruned data
+                if let Ok(Some(_)) = result {
+                    panic!("Should not be able to get pruned value at location {i}")
                 }
             }
 

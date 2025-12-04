@@ -70,10 +70,10 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                         &root,
                                     ));
                                 }
-                            })
+                            });
                         },
                         criterion::BatchSize::SmallInput,
-                    )
+                    );
                 },
             );
         }

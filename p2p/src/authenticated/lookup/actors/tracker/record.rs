@@ -170,9 +170,8 @@ impl Record {
     /// Return the socket of the peer, if known.
     pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Myself => None,
             Address::Known(addr) => Some(*addr),
-            Address::Blocked => None,
+            Address::Myself | Address::Blocked => None,
         }
     }
 

@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn rfc8032_test_vector_1() {
         let (private_key, public_key, message, signature) = vector_1();
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     // sanity check the test infra rejects bad signatures
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn rfc8032_test_vector_2() {
         let (private_key, public_key, message, signature) = vector_2();
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -592,7 +592,7 @@ mod tests {
             4a7c15e9716ed28dc027beceea1ec40a
             ",
         );
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -686,7 +686,7 @@ mod tests {
             5e8fcd4f681e30a6ac00a9704a188a03
             ",
         );
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -728,7 +728,7 @@ mod tests {
             PublicKey::decode(public_key.as_ref()).unwrap(),
             &message,
             Signature::decode(signature.as_ref()).unwrap(),
-        )
+        );
     }
 
     #[test]

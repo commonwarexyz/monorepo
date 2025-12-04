@@ -38,7 +38,7 @@ impl EncodeSize for Shard {
 
 impl Write for Shard {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
+        self.0.write(buf);
     }
 }
 

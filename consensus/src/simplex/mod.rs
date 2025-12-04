@@ -2459,10 +2459,8 @@ mod tests {
                     for (_, faults) in faulter.iter() {
                         for fault in faults.iter() {
                             match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting += 1;
-                                }
-                                Activity::ConflictingFinalize(_) => {
+                                Activity::ConflictingNotarize(_)
+                                | Activity::ConflictingFinalize(_) => {
                                     count_conflicting += 1;
                                 }
                                 _ => panic!("unexpected fault: {fault:?}"),
@@ -3713,7 +3711,7 @@ mod tests {
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
-        })
+        });
     }
 
     #[test_group("slow")]

@@ -47,7 +47,7 @@ fn bench_append_additional(c: &mut Criterion) {
                         });
                     },
                     criterion::BatchSize::SmallInput,
-                )
+                );
             });
         }
     }

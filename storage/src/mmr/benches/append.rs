@@ -28,7 +28,7 @@ fn bench_append(c: &mut Criterion) {
                     for digest in &elements {
                         mmr.add(&mut h, digest);
                     }
-                })
+                });
             });
         });
     }

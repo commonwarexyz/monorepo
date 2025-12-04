@@ -274,7 +274,7 @@ impl Matrix {
                 let c = self[(i, j)];
                 let other_j = &other[j];
                 for k in 0..other.cols {
-                    out[(i, k)] = out[(i, k)] + c * other_j[k]
+                    out[(i, k)] = out[(i, k)] + c * other_j[k];
                 }
             }
         }
@@ -282,7 +282,7 @@ impl Matrix {
     }
 
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, Self>(self.rows, self.cols, self)
+        ntt::<FORWARD, Self>(self.rows, self.cols, self);
     }
 
     pub const fn rows(&self) -> usize {
@@ -531,9 +531,9 @@ impl Polynomial {
                         ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
                         ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
                         for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                            *p_i = *p_i * s_i
+                            *p_i = *p_i * s_i;
                         }
-                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice })
+                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice });
                     }
                 }
                 // If there was a polynomial on the left or the right, then on the next iteration
@@ -1024,7 +1024,7 @@ mod test {
             data: vec![F::one()],
             present: vec![false, true].into(),
         }
-        .test()
+        .test();
     }
 
     proptest! {

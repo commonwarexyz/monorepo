@@ -441,8 +441,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             debug!(blob = i, "destroyed blob");
         }
         match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

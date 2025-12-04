@@ -293,7 +293,7 @@ impl FixedSize for Summary {
 
 impl Write for Summary {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.hash.as_bytes().write(buf)
+        self.hash.as_bytes().write(buf);
     }
 }
 

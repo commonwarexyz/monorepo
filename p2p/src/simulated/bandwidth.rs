@@ -259,13 +259,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             // Step 2: if the limiting resources still have headroom, advance every active flow by
             // `delta`. If `delta` is zero we already exhausted a resource, so we skip the advance
             // and immediately freeze the affected flows instead.
-            let delta = match min_delta {
-                Some(delta) => delta,
-                None => {
-                    // Every active flow should have been tied to at least one limited resource.
-                    assert_eq!(self.active, 0, "active flows without constraints");
-                    break;
-                }
+            let Some(delta) = min_delta else {
+                // Every active flow should have been tied to at least one limited resource.
+                assert_eq!(self.active, 0, "active flows without constraints");
+                break;
             };
             if delta.is_zero() {
                 for &res_idx in &limiting {
@@ -637,15 +634,12 @@ mod tests {
         let allocations = allocate(
             &flows,
             |origin: &char| match origin {
-                'A' => Some(1_000_000),
-                'B' => Some(1_000_000),
-                'C' => Some(1_000_000),
+                'A' | 'B' | 'C' => Some(1_000_000),
                 _ => None,
             },
             |recipient: &char| match recipient {
-                'A' => Some(500_000),
+                'A' | 'C' => Some(500_000),
                 'B' => Some(1_000),
-                'C' => Some(500_000),
                 _ => None,
             },
         );
@@ -678,14 +672,12 @@ mod tests {
             &flows,
             |origin: &char| match origin {
                 'A' => Some(50_000),
-                'B' => Some(1_000_000),
-                'C' => Some(1_000_000),
+                'B' | 'C' => Some(1_000_000),
                 _ => None,
             },
             |recipient: &char| match recipient {
-                'A' => Some(500_000),
+                'A' | 'C' => Some(500_000),
                 'B' => Some(1_000),
-                'C' => Some(500_000),
                 _ => None,
             },
         );

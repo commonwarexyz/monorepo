@@ -95,12 +95,9 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                 match result {
                     Ok((peer, msg)) =>{
                         // Parse msg
-                        let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
-                            Ok(msg) => msg,
-                            Err(_) => {
-                                arbiter.disqualify(peer).expect("failed to disqualify peer");
-                                continue;
-                            }
+                        let Ok(msg) = wire::Dkg::decode_cfg(msg, &self.contributors.len()) else {
+                            arbiter.disqualify(peer).expect("failed to disqualify peer");
+                            continue;
                         };
                         if msg.round != round {
                             continue;

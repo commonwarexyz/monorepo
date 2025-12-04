@@ -268,9 +268,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 debug!("context shutdown, stopping application");
             },
             message = self.mailbox.next() => {
-                let message =match message {
-                    Some(message) => message,
-                    None => break,
+                let Some(message) = message else {
+                    break;
                 };
                 match message {
                     Message::Genesis { epoch, response } => {
