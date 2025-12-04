@@ -4,7 +4,7 @@ use commonware_cryptography::PublicKey;
 use commonware_p2p::{
     utils::{
         codec::WrappedSender,
-        requester::{Config, RequestError, Requester, ID},
+        requester::{Config, Error, Requester, ID},
     },
     Recipients, Sender,
 };
@@ -132,7 +132,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                     .request_filtered(*retry, |p| hints.contains(p))
                 {
                     Ok(selection) => Ok(selection),
-                    Err(RequestError::NoEligibleParticipants) => {
+                    Err(Error::NoEligibleParticipants) => {
                         // No hinted peers available - clear hints, try any peer
                         self.hints.remove(key);
                         self.requester.request(*retry)
@@ -145,11 +145,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         let (peer, id) = match result {
             Ok(selection) => selection,
-            Err(RequestError::RateLimited(wait)) => {
+            Err(Error::RateLimited(wait)) => {
                 self.waiter = Some(self.context.current().saturating_add(wait));
                 return;
             }
-            Err(RequestError::NoEligibleParticipants) => {
+            Err(Error::NoEligibleParticipants) => {
                 // No peers available at all - set waiter to far future to avoid busy loop
                 self.waiter = Some(self.context.current().saturating_add(Duration::MAX));
                 return;
