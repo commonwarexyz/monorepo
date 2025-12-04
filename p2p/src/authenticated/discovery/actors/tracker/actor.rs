@@ -509,8 +509,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9999);
-            let cfg_with_boot =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_with_boot = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
@@ -879,8 +881,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
@@ -895,8 +899,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 

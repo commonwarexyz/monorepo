@@ -12,13 +12,99 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc;
-use std::{error::Error as StdError, fmt::Debug, future::Future};
+use std::{error::Error as StdError, fmt::Debug, future::Future, net::SocketAddr};
 
 pub mod authenticated;
 pub mod simulated;
 pub mod utils;
+
+/// A socket address that can be either a direct IP address or a DNS hostname with port.
+///
+/// This type supports both direct socket addresses and DNS entries that can be resolved
+/// at connection time using the runtime's resolver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Socket {
+    /// Direct socket address.
+    Direct(SocketAddr),
+    /// DNS hostname and port that needs to be resolved.
+    Dns { hostname: String, port: u16 },
+}
+
+impl Socket {
+    /// Resolve this socket to a direct socket address.
+    ///
+    /// For `Direct` variants, returns the address directly.
+    /// For `Dns` variants, uses the provided resolver to resolve the hostname.
+    pub async fn resolve<R: Resolver>(&self, resolver: &R) -> Result<SocketAddr, RuntimeError> {
+        match self {
+            Self::Direct(addr) => Ok(*addr),
+            Self::Dns { hostname, port } => resolver.resolve(hostname, *port).await,
+        }
+    }
+}
+
+impl From<SocketAddr> for Socket {
+    fn from(addr: SocketAddr) -> Self {
+        Self::Direct(addr)
+    }
+}
+
+/// Address configuration for a peer.
+///
+/// This type allows specifying either a single address for both ingress and egress
+/// connections, or separate addresses for each direction. This is useful when a peer
+/// has different public/private addresses or when NAT traversal is involved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Address {
+    /// Single address for both ingress and egress.
+    Single(SocketAddr),
+    /// Separate addresses for ingress and egress.
+    ///
+    /// - `ingress`: Address where we can receive connections from this peer.
+    ///   This can be a DNS entry that will be resolved at connection time.
+    /// - `egress`: Address where we dial out to connect to this peer.
+    Split {
+        /// Address where we can receive connections from this peer.
+        ingress: Socket,
+        /// Address where we dial out to connect to this peer.
+        egress: SocketAddr,
+    },
+}
+
+impl Address {
+    /// Get the egress address (address to dial).
+    pub const fn egress(&self) -> SocketAddr {
+        match self {
+            Self::Single(addr) => *addr,
+            Self::Split { egress, .. } => *egress,
+        }
+    }
+
+    /// Get the ingress socket (may require resolution).
+    pub fn ingress(&self) -> Socket {
+        match self {
+            Self::Single(addr) => Socket::Direct(*addr),
+            Self::Split { ingress, .. } => ingress.clone(),
+        }
+    }
+
+    /// Resolve the ingress address to a direct socket address.
+    pub async fn resolve_ingress<R: Resolver>(
+        &self,
+        resolver: &R,
+    ) -> Result<SocketAddr, RuntimeError> {
+        self.ingress().resolve(resolver).await
+    }
+}
+
+impl From<SocketAddr> for Address {
+    fn from(addr: SocketAddr) -> Self {
+        Self::Single(addr)
+    }
+}
 
 /// Tuple representing a message received from a given public key.
 ///

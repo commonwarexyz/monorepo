@@ -97,6 +97,8 @@ pub enum Error {
     OffsetOverflow,
     #[error("io error: {0}")]
     Io(#[from] IoError),
+    #[error("not found")]
+    NotFound,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -437,6 +439,23 @@ pub trait Stream: Sync + Send + 'static {
         &mut self,
         buf: impl Into<StableBuf> + Send,
     ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
+}
+
+/// Interface for resolving domain names to socket addresses.
+///
+/// This trait enables DNS resolution that works across different runtime
+/// implementations:
+/// - In the deterministic runtime, resolution uses a configurable mapping
+/// - In the tokio runtime, resolution uses tokio's built-in DNS functionality
+pub trait Resolver: Clone + Send + Sync + 'static {
+    /// Resolve a domain name and port to a socket address.
+    ///
+    /// Returns the first resolved address, or an error if resolution fails.
+    fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> impl Future<Output = Result<SocketAddr, Error>> + Send;
 }
 
 /// Interface to interact with storage.

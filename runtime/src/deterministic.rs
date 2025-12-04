@@ -75,9 +75,9 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -193,16 +193,23 @@ pub struct Config {
 
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// DNS resolution mapping for deterministic testing.
+    ///
+    /// Maps hostnames to IP addresses. When resolving a hostname, the runtime
+    /// will look up the hostname in this map and return the corresponding IP.
+    dns_mappings: HashMap<String, IpAddr>,
 }
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
+            dns_mappings: HashMap::new(),
         }
     }
 
@@ -227,6 +234,11 @@ impl Config {
         self.catch_panics = catch_panics;
         self
     }
+    /// See [Config]
+    pub fn with_dns_mappings(mut self, dns_mappings: HashMap<String, IpAddr>) -> Self {
+        self.dns_mappings = dns_mappings;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -244,6 +256,10 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn dns_mappings(&self) -> &HashMap<String, IpAddr> {
+        &self.dns_mappings
     }
 
     /// Assert that the configuration is valid.
@@ -278,6 +294,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    dns_mappings: HashMap<String, IpAddr>,
 }
 
 impl Executor {
@@ -362,6 +379,7 @@ pub struct Checkpoint {
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     catch_panics: bool,
+    dns_mappings: HashMap<String, IpAddr>,
 }
 
 impl Checkpoint {
@@ -602,6 +620,7 @@ impl Runner {
             time: executor.time,
             storage,
             catch_panics: executor.panicker.catch(),
+            dns_mappings: executor.dns_mappings,
         };
 
         (output, checkpoint)
@@ -838,6 +857,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns_mappings: cfg.dns_mappings,
         });
 
         (
@@ -887,6 +907,7 @@ impl Context {
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
+            dns_mappings: checkpoint.dns_mappings,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -1343,6 +1364,22 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str, port: u16) -> Result<SocketAddr, Error> {
+        let executor = self.executor();
+        executor.auditor.event(b"resolve", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(port.to_be_bytes());
+        });
+        let ip = executor
+            .dns_mappings
+            .get(host)
+            .copied()
+            .ok_or(Error::NotFound)?;
+        Ok(SocketAddr::new(ip, port))
     }
 }
 

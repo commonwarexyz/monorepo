@@ -298,7 +298,7 @@ mod tests {
             if i > 0 {
                 bootstrappers.push((
                     addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port).into(),
                 ));
             }
 
@@ -561,7 +561,7 @@ mod tests {
                 if i > 0 {
                     bootstrappers.push((
                         addresses[0].clone(),
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port).into(),
                     ));
                 }
 
@@ -709,7 +709,7 @@ mod tests {
             let config0 = Config::test(
                 signer0.clone(),
                 socket0,
-                vec![(peers[1].public_key(), socket1)],
+                vec![(peers[1].public_key(), socket1.into())],
                 1_024 * 1_024, // 1MB
             );
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
@@ -723,7 +723,7 @@ mod tests {
             let config1 = Config::test(
                 signer1.clone(),
                 socket1,
-                vec![(peers[0].public_key(), socket0)],
+                vec![(peers[0].public_key(), socket0.into())],
                 1_024 * 1_024, // 1MB
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
@@ -784,7 +784,7 @@ mod tests {
             let config = Config::test(
                 peer0.0,
                 peer0.2,
-                vec![(peer0.1.clone(), peer0.2)],
+                vec![(peer0.1.clone(), peer0.2.into())],
                 1_024 * 1_024,
             );
             let (network, mut oracle) = Network::new(context.with_label("network"), config);
@@ -853,7 +853,7 @@ mod tests {
                 if i > 0 {
                     bootstrappers.push((
                         addresses[0].clone(),
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port).into(),
                     ));
                 }
 

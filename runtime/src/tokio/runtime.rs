@@ -656,3 +656,14 @@ impl crate::Storage for Context {
         self.storage.scan(partition).await
     }
 }
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str, port: u16) -> Result<SocketAddr, Error> {
+        let addr = tokio::net::lookup_host(format!("{host}:{port}"))
+            .await
+            .map_err(|_| Error::NotFound)?
+            .next()
+            .ok_or(Error::NotFound)?;
+        Ok(addr)
+    }
+}
