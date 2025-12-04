@@ -295,6 +295,10 @@ where
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
     select_loop! {
+        context,
+        on_stopped => {
+            debug!("context shutdown, closing client connection");
+        },
         incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
             match incoming {
                 Ok(message_data) => {
@@ -324,7 +328,7 @@ where
                 Err(err) => {
                     info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
                     state.error_counter.inc();
-                    break Ok(());
+                    return Ok(());
                 }
             }
         },
@@ -336,14 +340,16 @@ where
                 if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
                     info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
                     state.error_counter.inc();
-                    break Ok(());
+                    return Ok(());
                 }
             } else {
                 // Channel closed
-                break Ok(());
+                return Ok(());
             }
         }
     }
+
+    Ok(())
 }
 
 /// Initialize and display database state with initial operations.
@@ -415,6 +421,10 @@ where
     let state = Arc::new(State::new(context.with_label("server"), database));
     let mut next_op_time = context.current() + config.op_interval;
     select_loop! {
+        context,
+        on_stopped => {
+            debug!("context shutdown, stopping server");
+        },
         _ = context.sleep_until(next_op_time) => {
             // Add operations to the database
             if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
@@ -440,6 +450,8 @@ where
             }
         }
     }
+
+    Ok(())
 }
 
 /// Run the Any database server.

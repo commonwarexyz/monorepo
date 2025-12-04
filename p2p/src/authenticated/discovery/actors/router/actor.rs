@@ -97,11 +97,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
     /// Returns when the `control` channel is closed.
     async fn run(mut self, routing: Channels<P>) {
-        let mut shutdown = self.context.stopped();
         select_loop! {
-            _ = &mut shutdown => {
+            self.context,
+            on_stopped => {
                 debug!("context shutdown, stopping router");
-                break;
             },
             msg = self.control.next() => {
                 let Some(msg) = msg else {
