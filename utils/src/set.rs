@@ -172,7 +172,7 @@ impl<T: fmt::Display> fmt::Display for Ordered<T> {
     }
 }
 
-impl<T: Ord> From<Ordered<T>> for Vec<T> {
+impl<T> From<Ordered<T>> for Vec<T> {
     fn from(set: Ordered<T>) -> Self {
         set.0
     }
