@@ -97,6 +97,12 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
+    /// Return the size of the bitmap in bits.
+    #[inline]
+    pub fn size(&self) -> Position {
+        self.mmr.size()
+    }
+
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
     pub const fn len(&self) -> u64 {
@@ -289,10 +295,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             cached_root: Some(cached_root), // TODO is this right?
             _state: PhantomData,
         }
-    }
-
-    pub fn size(&self) -> Position {
-        self.mmr.size()
     }
 
     pub fn get_node(&self, position: Position) -> Option<D> {
