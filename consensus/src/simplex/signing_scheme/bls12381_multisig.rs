@@ -137,6 +137,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         self.participants.keys()
     }
 
+    fn weighted_quorum(&self) -> u64 {
+        self.participants.weighted_quorum()
+    }
+
+    fn weight(&self, index: u32) -> u64 {
+        self.participants.weight(index as usize).unwrap_or(0)
+    }
+
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],

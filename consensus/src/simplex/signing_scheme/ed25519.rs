@@ -171,6 +171,14 @@ impl signing_scheme::Scheme for Scheme {
         self.participants.keys()
     }
 
+    fn weighted_quorum(&self) -> u64 {
+        self.participants.weighted_quorum()
+    }
+
+    fn weight(&self, index: u32) -> u64 {
+        self.participants.weight(index as usize).unwrap_or(0)
+    }
+
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
@@ -1042,5 +1050,96 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[test]
+    fn test_weighted_quorum_rejects_insufficient_weight() {
+        use crate::simplex::mocks::fixtures::ed25519_weighted;
+        use crate::simplex::signing_scheme::Scheme as _;
+
+        // Create participants with weights [10, 1, 1, 1]
+        // total_weight = 13
+        // max_faulty_weight = (13-1)/3 = 4
+        // weighted_quorum = 13 - 4 = 9
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { schemes, .. } = ed25519_weighted(&mut rng, &[10, 1, 1, 1]);
+
+        // Find the heavy participant (weight 10) by querying weights
+        let heavy_idx = (0..4)
+            .find(|&i| schemes[0].weight(i) == 10)
+            .expect("should find heavy participant");
+        let light_indices: Vec<_> = (0..4).filter(|&i| i != heavy_idx).collect();
+
+        let proposal = sample_proposal(0, 1, 1);
+
+        // Collect votes from the 3 lightweight participants (weights 1+1+1=3)
+        // This is 3 signers which would meet count-based quorum (3 out of 4)
+        // But weight 3 < weighted_quorum 9
+        let votes: Vec<_> = light_indices
+            .iter()
+            .map(|&i| {
+                schemes[i as usize]
+                    .sign_vote(
+                        NAMESPACE,
+                        Subject::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        // Assembly should fail - we have 3 signers but only 3 weight, need 9
+        assert!(
+            schemes[0].assemble_certificate(votes).is_none(),
+            "Certificate assembly should fail when weight is insufficient despite having quorum count"
+        );
+    }
+
+    #[test]
+    fn test_weighted_quorum_accepts_sufficient_weight() {
+        use crate::simplex::mocks::fixtures::ed25519_weighted;
+        use crate::simplex::signing_scheme::Scheme as _;
+
+        // Same setup: weights [10, 1, 1, 1]
+        // weighted_quorum = 9
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519_weighted(&mut rng, &[10, 1, 1, 1]);
+
+        // Find the heavy participant (weight 10) by querying weights
+        let heavy_idx = (0..4)
+            .find(|&i| schemes[0].weight(i) == 10)
+            .expect("should find heavy participant");
+
+        let proposal = sample_proposal(0, 1, 1);
+
+        // Collect vote from the heavy participant only
+        // This is just 1 signer, but weight 10 >= weighted_quorum 9
+        let votes: Vec<_> = [schemes[heavy_idx as usize]
+            .sign_vote(
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap()]
+        .into();
+
+        // Assembly should succeed - we have only 1 signer but 10 weight >= 9 quorum
+        let certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("Certificate assembly should succeed when weight is sufficient");
+
+        // Verify the certificate is valid
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
     }
 }
