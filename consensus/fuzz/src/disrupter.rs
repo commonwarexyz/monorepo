@@ -8,15 +8,16 @@ use commonware_consensus::{
     simplex::{
         mocks::reporter::Reporter,
         signing_scheme::Scheme,
-        types::{Finalize, Notarize, Nullify, OrderedExt, Proposal, Voter},
+        types::{Artifact, Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
-    types::Round,
+    types::{Epoch, Round, View},
     Epochable, Viewable,
 };
 use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest, Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_utils::set::OrderedQuorum;
 use futures_timer::Delay;
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use std::time::Duration;
@@ -252,72 +253,72 @@ where
         // Parse message
         // Use the default config for the certificate type
         let default_cfg = Default::default();
-        let msg = match Voter::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &default_cfg) {
+        let msg = match Artifact::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &default_cfg) {
             Ok(msg) => msg,
             Err(_) => return, // Skip malformed messages
         };
 
-        self.view = msg.view();
-        self.epoch = msg.epoch();
+        self.view = msg.view().get();
+        self.epoch = msg.epoch().get();
 
         // Process message based on type
         match msg {
-            Voter::Finalization(finalization) => {
-                self.last_finalized = finalization.view();
+            Artifact::Finalization(finalization) => {
+                self.last_finalized = finalization.view().get();
                 let malformed_bytes = self.random_bytes();
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await
                     .unwrap();
             }
-            Voter::Nullification(nullification) => {
-                self.last_nullified = nullification.view();
+            Artifact::Nullification(nullification) => {
+                self.last_nullified = nullification.view().get();
                 let malformed_bytes = self.random_bytes();
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await
                     .unwrap();
             }
-            Voter::Notarization(notarization) => {
-                self.last_notarized = notarization.view();
+            Artifact::Notarization(notarization) => {
+                self.last_notarized = notarization.view().get();
                 let malformed_bytes = self.random_bytes();
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
                     .await
                     .unwrap();
             }
-            Voter::Notarize(notarize) => {
+            Artifact::Notarize(notarize) => {
                 // Notarize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&notarize.proposal, mutation);
                 let msg = Notarize::sign(&self.scheme, &self.namespace, mutated_proposal);
                 if let Some(notarize) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Notarize(notarize.clone())
+                    let msg = Vote::<S, Sha256Digest>::Notarize(notarize.clone())
                         .encode()
                         .into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
-            Voter::Finalize(finalize) => {
+            Artifact::Finalize(finalize) => {
                 // Finalize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&finalize.proposal, mutation);
                 let msg = Finalize::sign(&self.scheme, &self.namespace, mutated_proposal);
                 if let Some(finalize) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Finalize(finalize).encode().into();
+                    let msg = Vote::<S, Sha256Digest>::Finalize(finalize).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
-            Voter::Nullify(nullify) => {
+            Artifact::Nullify(nullify) => {
                 // Nullify random view
-                let mutated_view = self.random_view(nullify.view());
+                let mutated_view = self.random_view(nullify.view().get());
                 let msg = Nullify::<S>::sign::<Sha256Digest>(
                     &self.scheme,
                     &self.namespace,
-                    Round::new(self.epoch, mutated_view),
+                    Round::new(Epoch::new(self.epoch), View::new(mutated_view)),
                 );
                 if let Some(nullify) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Nullify(nullify).encode().into();
+                    let msg = Vote::<S, Sha256Digest>::Nullify(nullify).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
@@ -338,7 +339,7 @@ where
             Mutation::View => {
                 let mutated_view = self.random_view(self.view);
                 Proposal::new(
-                    Round::new(original.epoch(), mutated_view),
+                    Round::new(original.epoch(), View::new(mutated_view)),
                     original.parent,
                     original.payload,
                 )
@@ -347,13 +348,13 @@ where
                 let mutated_parent = self.random_parent();
                 Proposal::new(
                     Round::new(original.epoch(), original.view()),
-                    mutated_parent,
+                    View::new(mutated_parent),
                     original.payload,
                 )
             }
             Mutation::All => Proposal::new(
-                Round::new(original.epoch(), self.random_view(self.view)),
-                self.random_parent(),
+                Round::new(original.epoch(), View::new(self.random_view(self.view))),
+                View::new(self.random_parent()),
                 self.random_payload(),
             ),
         }
@@ -363,8 +364,8 @@ where
         let real_view = self.view;
 
         let proposal = Proposal::new(
-            Round::new(self.epoch, self.random_view(self.view)),
-            self.random_parent(),
+            Round::new(Epoch::new(self.epoch), View::new(self.random_view(self.view))),
+            View::new(self.random_parent()),
             self.random_payload(),
         );
 
@@ -375,13 +376,13 @@ where
             match message {
                 Message::Notarize => {
                     if let Some(msg) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Notarize(msg).encode().into();
+                        let encoded_msg = Vote::<S, Sha256Digest>::Notarize(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }
                 Message::Finalize => {
                     if let Some(msg) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Finalize(msg).encode().into();
+                        let encoded_msg = Vote::<S, Sha256Digest>::Finalize(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }
@@ -389,9 +390,9 @@ where
                     if let Some(msg) = Nullify::<S>::sign::<Sha256Digest>(
                         &self.scheme,
                         &self.namespace,
-                        Round::new(self.epoch, real_view),
+                        Round::new(Epoch::new(self.epoch), View::new(real_view)),
                     ) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Nullify(msg).encode().into();
+                        let encoded_msg = Vote::<S, Sha256Digest>::Nullify(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }

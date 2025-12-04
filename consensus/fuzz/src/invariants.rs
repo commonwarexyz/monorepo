@@ -1,5 +1,5 @@
 use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
-use commonware_consensus::types::View;
+use commonware_consensus::Viewable;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::quorum;
 use rand::{CryptoRng, Rng};
@@ -44,7 +44,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: Safe finalization (global)
     // If any replica finalized view v, no replica may have nullification for view v.
     {
-        let finalized_views: HashMap<View, Sha256Digest> = replicas
+        let finalized_views: HashMap<u64, Sha256Digest> = replicas
             .iter()
             .flat_map(|(_, _, finalizations)| {
                 finalizations
@@ -85,7 +85,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: no two quorum notarizations for different payloads in the same view
     // In any view, there cannot be quorum notarizations for multiple digests (payloads).
     {
-        let mut per_view: HashMap<View, HashSet<Sha256Digest>> = HashMap::new();
+        let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
         for (notarizations, _, _) in replicas.iter() {
             for (v, d) in notarizations {
                 let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
@@ -105,7 +105,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
 
     // Invariant: If any replica nullified view v, no replica may finalize v.
     {
-        let nullified: HashSet<View> = replicas
+        let nullified: HashSet<u64> = replicas
             .iter()
             .flat_map(|(_, nulls, _)| nulls.keys().cloned())
             .collect();
@@ -123,7 +123,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: finalization requires a notarization for the same (view, payload)
     // Any finalization seen anywhere must be backed by some notarization for the same (view, payload) by any replica.
     {
-        let notarized: HashSet<(View, Sha256Digest)> = replicas
+        let notarized: HashSet<(u64, Sha256Digest)> = replicas
             .iter()
             .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
             .collect();
@@ -214,9 +214,9 @@ where
             let notarizations = reporter.notarizations.lock().unwrap();
             let notarization_data = notarizations
                 .iter()
-                .map(|(&view, cert)| {
+                .map(|(view, cert)| {
                     (
-                        view,
+                        view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
                             signature_count: None, // Ed25519 doesn't expose signature count directly
@@ -228,9 +228,9 @@ where
             let nullifications = reporter.nullifications.lock().unwrap();
             let nullification_data = nullifications
                 .iter()
-                .map(|(&view, _cert)| {
+                .map(|(view, _cert)| {
                     (
-                        view,
+                        view.get(),
                         Nullification {
                             signature_count: None, // Ed25519 doesn't expose signature count directly
                         },
@@ -241,9 +241,9 @@ where
             let finalizations = reporter.finalizations.lock().unwrap();
             let finalization_data = finalizations
                 .iter()
-                .map(|(&view, cert)| {
+                .map(|(view, cert)| {
                     (
-                        view,
+                        view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
                             signature_count: None, // Ed25519 doesn't expose signature count directly

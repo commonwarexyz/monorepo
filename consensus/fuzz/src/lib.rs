@@ -23,7 +23,7 @@ use commonware_consensus::{
         },
         Engine,
     },
-    types::View,
+    types::{Delta, Epoch, View},
     Monitor,
 };
 use commonware_cryptography::{
@@ -258,15 +258,14 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
-                max_fetch_count: 1,
+                activity_timeout: Delta::new(10),
+                skip_timeout: Delta::new(5),
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -283,7 +282,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers {
+                    while latest.get() < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));

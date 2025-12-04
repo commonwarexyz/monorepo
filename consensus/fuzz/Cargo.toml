@@ -11,10 +11,18 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
-commonware-consensus.workspace = true
+commonware-consensus = { workspace = true, features = ["fuzz"] }
 commonware-cryptography.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
+commonware-p2p.workspace = true
+commonware-utils.workspace = true
+bytes.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
+futures-timer = "3.0.3"
+futures.workspace = true
+governor.workspace = true
 
 [[bin]]
 name = "simplex_select_leader"
