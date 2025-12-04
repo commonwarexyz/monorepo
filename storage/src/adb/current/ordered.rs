@@ -950,6 +950,98 @@ pub mod test {
     use std::collections::HashMap;
     use tracing::warn;
 
+    /// Wrapper to enable batch testing for Current ADB via type-state management.
+    struct BatchTestWrapper {
+        inner: Option<BatchTestState>,
+    }
+
+    enum BatchTestState {
+        Clean(CleanCurrentTest),
+        Dirty(DirtyCurrentTest),
+    }
+
+    impl BatchTestWrapper {
+        fn new(db: CleanCurrentTest) -> Self {
+            Self {
+                inner: Some(BatchTestState::Clean(db)),
+            }
+        }
+
+        fn ensure_dirty(&mut self) {
+            let state = self.inner.take().expect("wrapper should never be empty");
+            self.inner = Some(match state {
+                BatchTestState::Clean(clean) => BatchTestState::Dirty(clean.into_dirty()),
+                BatchTestState::Dirty(dirty) => BatchTestState::Dirty(dirty),
+            });
+        }
+
+        async fn ensure_clean(&mut self) {
+            let state = self.inner.take().expect("wrapper should never be empty");
+            self.inner = Some(match state {
+                BatchTestState::Dirty(dirty) => {
+                    BatchTestState::Clean(dirty.merkleize().await.unwrap())
+                }
+                BatchTestState::Clean(clean) => BatchTestState::Clean(clean),
+            });
+        }
+    }
+
+    impl crate::store::Store for BatchTestWrapper {
+        type Key = Digest;
+        type Value = Digest;
+        type Error = Error;
+
+        async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+            match self.inner.as_ref().expect("wrapper should never be empty") {
+                BatchTestState::Clean(clean) => clean.get(key).await,
+                BatchTestState::Dirty(dirty) => dirty.get(key).await,
+            }
+        }
+    }
+
+    impl crate::store::StoreMut for BatchTestWrapper {
+        async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+            self.ensure_dirty();
+            match self.inner.as_mut().expect("wrapper should never be empty") {
+                BatchTestState::Dirty(dirty) => dirty.update(key, value).await,
+                _ => unreachable!("ensure_dirty guarantees Dirty state"),
+            }
+        }
+    }
+
+    impl crate::store::StoreDeletable for BatchTestWrapper {
+        async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+            self.ensure_dirty();
+            match self.inner.as_mut().expect("wrapper should never be empty") {
+                BatchTestState::Dirty(dirty) => dirty.delete(key).await,
+                _ => unreachable!("ensure_dirty guarantees Dirty state"),
+            }
+        }
+    }
+
+    impl crate::store::StorePersistable for BatchTestWrapper {
+        type Error = Error;
+
+        async fn commit(&mut self) -> Result<(), Self::Error> {
+            self.ensure_clean().await;
+            match self.inner.as_mut().expect("wrapper should never be empty") {
+                BatchTestState::Clean(clean) => {
+                    clean.commit(None).await?;
+                    Ok(())
+                }
+                _ => unreachable!("ensure_clean guarantees Clean state"),
+            }
+        }
+
+        async fn destroy(mut self) -> Result<(), Self::Error> {
+            self.ensure_clean().await;
+            match self.inner.take().expect("wrapper should never be empty") {
+                BatchTestState::Clean(clean) => clean.destroy().await,
+                _ => unreachable!("ensure_clean guarantees Clean state"),
+            }
+        }
+    }
+
     const PAGE_SIZE: usize = 88;
     const PAGE_CACHE_SIZE: usize = 8;
 
@@ -1922,23 +2014,20 @@ pub mod test {
         });
     }
 
-    // NOTE: The batch tests are disabled because they assume a single type can implement
-    // both mutation traits (StoreMut, StoreDeletable) and persistence traits (StorePersistable),
-    // but the type-state pattern separates these into Clean and Dirty states.
-    // #[test_traced("DEBUG")]
-    // fn test_batch() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         batch_tests::run_batch_tests(|| {
-    //             let mut ctx = context.clone();
-    //             async move {
-    //                 let seed = ctx.next_u64();
-    //                 let partition = format!("current_ordered_batch_{seed}");
-    //                 open_db(ctx, &partition).await.into_dirty()
-    //             }
-    //         })
-    //         .await
-    //         .unwrap();
-    //     });
-    // }
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let partition = format!("current_ordered_batch_{seed}");
+                    BatchTestWrapper::new(open_db(ctx, &partition).await)
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
 }

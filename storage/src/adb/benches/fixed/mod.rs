@@ -19,7 +19,7 @@ use commonware_storage::{
         Error,
     },
     mmr::Location,
-    store::{Store as StoreTrait, StoreDeletable, StoreMut},
+    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
     translator::{EightCap, Translator},
 };
 use commonware_utils::{Array, NZUsize, NZU64};
@@ -52,13 +52,6 @@ impl Variant {
             Self::CurrentUnordered => "current::unordered",
             Self::CurrentOrdered => "current::ordered",
         }
-    }
-
-    /// Returns whether this variant supports batched operations.
-    /// All variants now support batching via the CleanAnyWrapper which
-    /// handles type-state transitions transparently.
-    pub const fn supports_batching(&self) -> bool {
-        true
     }
 }
 
@@ -314,6 +307,21 @@ where
             CleanAnyState::Dirty(dirty) => DirtyAny::delete(dirty, key).await,
             _ => unreachable!("ensure_dirty guarantees Dirty state"),
         }
+    }
+}
+
+impl<A> StorePersistable for CleanAnyWrapper<A>
+where
+    A: CleanAny,
+{
+    type Error = Error;
+
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        BenchmarkableDb::commit(self, None).await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        BenchmarkableDb::destroy(self).await
     }
 }
 

@@ -24,14 +24,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
             for variant in VARIANTS {
-                // All variants support batching via CleanAnyWrapper or direct impl
-                let batch_options = if variant.supports_batching() {
-                    vec![false, true]
-                } else {
-                    vec![false]
-                };
-
-                for use_batch in batch_options {
+                // All variants support both batched and non-batched modes
+                for use_batch in [false, true] {
                     let runner = tokio::Runner::new(Config::default().clone());
                     c.bench_function(
                         &format!(
