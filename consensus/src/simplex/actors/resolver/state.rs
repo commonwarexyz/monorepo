@@ -244,11 +244,11 @@ mod tests {
         verifier: &TestScheme,
         view: View,
     ) -> Notarization<TestScheme, Sha256Digest> {
-        let proposal = Proposal::new(
-            Round::new(EPOCH, view),
-            view.previous().unwrap_or(View::zero()),
-            Sha256Digest::from([view.get() as u8; 32]),
-        );
+        let proposal = Proposal {
+            round: Round::new(EPOCH, view),
+            parent: view.previous().unwrap_or(View::zero()),
+            payload: Sha256Digest::from([view.get() as u8; 32]),
+        };
         let votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -261,11 +261,11 @@ mod tests {
         verifier: &TestScheme,
         view: View,
     ) -> Finalization<TestScheme, Sha256Digest> {
-        let proposal = Proposal::new(
-            Round::new(EPOCH, view),
-            view.previous().unwrap_or(View::zero()),
-            Sha256Digest::from([view.get() as u8; 32]),
-        );
+        let proposal = Proposal {
+            round: Round::new(EPOCH, view),
+            parent: view.previous().unwrap_or(View::zero()),
+            payload: Sha256Digest::from([view.get() as u8; 32]),
+        };
         let votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())

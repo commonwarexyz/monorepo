@@ -165,7 +165,11 @@ mod tests {
         let hash = Sha256::hash(data.as_bytes());
         let epoch = Epoch::new(epoch);
         let view = View::new(view);
-        Proposal::new(Round::new(epoch, view), view, hash)
+        Proposal {
+            round: Round::new(epoch, view),
+            parent: view,
+            payload: hash,
+        }
     }
 
     #[test]

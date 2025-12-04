@@ -362,11 +362,11 @@ mod tests {
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
-        Proposal::new(
-            Round::new(Epoch::new(round), View::new(view)),
-            View::new(view).previous().unwrap(),
-            Sha256::hash(&[tag]),
-        )
+        Proposal {
+            round: Round::new(Epoch::new(round), View::new(view)),
+            parent: View::new(view).previous().unwrap(),
+            payload: Sha256::hash(&[tag]),
+        }
     }
 
     #[test]

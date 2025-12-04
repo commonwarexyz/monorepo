@@ -226,11 +226,11 @@ mod tests {
 
             // Send finalization via voter mailbox (view 100)
             let payload = Sha256::hash(b"test");
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), View::new(100)),
-                View::new(50),
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), View::new(100)),
+                parent: View::new(50),
                 payload,
-            );
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
@@ -271,11 +271,11 @@ mod tests {
 
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), View::new(50)),
-                View::new(49),
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), View::new(50)),
+                parent: View::new(49),
                 payload,
-            );
+            };
             let (_, notarization) = build_notarization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization))
@@ -283,11 +283,11 @@ mod tests {
 
             // Send new finalization via voter mailbox (view 300)
             let payload = Sha256::hash(b"test3");
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), View::new(300)),
-                View::new(100),
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), View::new(300)),
+                parent: View::new(100),
                 payload,
-            );
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
@@ -464,11 +464,11 @@ mod tests {
                 .saturating_add(ViewDelta::new(5));
 
             // Send Finalization via voter mailbox to advance last_finalized
-            let proposal_lf = Proposal::new(
-                Round::new(Epoch::new(333), lf_target),
-                lf_target.previous().unwrap(),
-                Sha256::hash(b"test"),
-            );
+            let proposal_lf = Proposal {
+                round: Round::new(Epoch::new(333), lf_target),
+                parent: lf_target.previous().unwrap(),
+                payload: Sha256::hash(b"test"),
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
@@ -508,11 +508,11 @@ mod tests {
             }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
-            let proposal_jft = Proposal::new(
-                Round::new(Epoch::new(333), journal_floor_target),
-                journal_floor_target.previous().unwrap(),
-                Sha256::hash(b"test2"),
-            );
+            let proposal_jft = Proposal {
+                round: Round::new(Epoch::new(333), journal_floor_target),
+                parent: journal_floor_target.previous().unwrap(),
+                payload: Sha256::hash(b"test2"),
+            };
             let (_, notarization_for_floor) =
                 build_notarization(&schemes, &namespace, &proposal_jft, quorum);
             mailbox
@@ -536,11 +536,11 @@ mod tests {
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view = journal_floor_target.saturating_sub(ViewDelta::new(3));
-            let proposal_bft = Proposal::new(
-                Round::new(Epoch::new(333), problematic_view),
-                problematic_view.previous().unwrap(),
-                Sha256::hash(b"test3"),
-            );
+            let proposal_bft = Proposal {
+                round: Round::new(Epoch::new(333), problematic_view),
+                parent: problematic_view.previous().unwrap(),
+                payload: Sha256::hash(b"test3"),
+            };
             let (_, notarization_for_bft) =
                 build_notarization(&schemes, &namespace, &proposal_bft, quorum);
             mailbox
@@ -560,11 +560,11 @@ mod tests {
             }
 
             // Send Finalization via voter mailbox to new view (100)
-            let proposal_lf = Proposal::new(
-                Round::new(Epoch::new(333), View::new(100)),
-                View::new(99),
-                Sha256::hash(b"test4"),
-            );
+            let proposal_lf = Proposal {
+                round: Round::new(Epoch::new(333), View::new(100)),
+                parent: View::new(99),
+                payload: Sha256::hash(b"test4"),
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
@@ -723,11 +723,11 @@ mod tests {
 
             // Build a finalization certificate (without notarization)
             let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
-            );
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"finalize_without_notarization"),
+            };
             let (_, expected_finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum);
 
@@ -886,22 +886,22 @@ mod tests {
 
             // Send proposal A from batcher (simulating leader's proposal being forwarded)
             let view = View::new(2);
-            let proposal_a = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
-            );
+            let proposal_a = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"proposal_a"),
+            };
             mailbox.proposal(proposal_a.clone()).await;
 
             // Give it time to process the proposal
             context.sleep(Duration::from_millis(10)).await;
 
             // Send notarization certificate for a DIFFERENT proposal B
-            let proposal_b = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
-            );
+            let proposal_b = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"proposal_b"),
+            };
             let (_, notarization_b) = build_notarization(&schemes, &namespace, &proposal_b, quorum);
 
             mailbox
@@ -1054,16 +1054,16 @@ mod tests {
             }
 
             let view = View::new(2);
-            let proposal_a = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
-            );
-            let proposal_b = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
-            );
+            let proposal_a = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"proposal_a"),
+            };
+            let proposal_b = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"proposal_b"),
+            };
 
             // Send certificate for proposal A FIRST
             let (_, notarization_a) = build_notarization(&schemes, &namespace, &proposal_a, quorum);
@@ -1220,11 +1220,11 @@ mod tests {
             }
 
             let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"same_proposal"),
-            );
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"same_proposal"),
+            };
 
             // Send proposal from batcher first
             mailbox.proposal(proposal.clone()).await;
@@ -1410,8 +1410,11 @@ mod tests {
 
             // Now create a finalization certificate for view 1 to advance to view 2
             let view1_round = Round::new(epoch, View::new(1));
-            let view1_proposal =
-                Proposal::new(view1_round, View::new(0), Sha256::hash(b"view1_payload"));
+            let view1_proposal = Proposal {
+                round: view1_round,
+                parent: View::new(0),
+                payload: Sha256::hash(b"view1_payload"),
+            };
 
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &view1_proposal, quorum);
@@ -1444,8 +1447,11 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
 
             // Create a conflicting proposal from ourselves (equivocating) for view 2
-            let conflicting_proposal =
-                Proposal::new(view2_round, View::new(1), Sha256::hash(b"leader_proposal"));
+            let conflicting_proposal = Proposal {
+                round: view2_round,
+                parent: View::new(1),
+                payload: Sha256::hash(b"leader_proposal"),
+            };
 
             // Send the proposal via mailbox (simulating batcher receiving leader's notarize)
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
@@ -1604,11 +1610,11 @@ mod tests {
 
             // Build finalization certificate for view 2
             let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
-            );
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"finalize_without_notarization"),
+            };
             let (_, expected_finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum);
 
@@ -1817,11 +1823,11 @@ mod tests {
 
             // Send a finalization from resolver (view 2, which is current+1)
             let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"finalization_from_resolver"),
-            );
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"finalization_from_resolver"),
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization.clone()))
@@ -1968,11 +1974,11 @@ mod tests {
 
             // Send a finalization from resolver (simulating resolver sending us a certificate)
             let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(b"no_resolver_boomerang"),
-            );
+            let proposal = Proposal {
+                round: Round::new(Epoch::new(333), view),
+                parent: view.previous().unwrap(),
+                payload: Sha256::hash(b"no_resolver_boomerang"),
+            };
             let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .resolved(Certificate::Finalization(finalization.clone()))

@@ -797,11 +797,11 @@ impl<
                     }
 
                     // Construct proposal
-                    let proposal = Proposal::new(
-                        context.round,
-                        context.parent.0,
-                        proposed,
-                    );
+                    let proposal = Proposal {
+                        round: context.round,
+                        parent: context.parent.0,
+                        payload: proposed,
+                    };
                     if !self.state.proposed(proposal) {
                         warn!(round = ?context.round, "dropped our proposal");
                         continue;

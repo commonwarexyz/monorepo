@@ -198,7 +198,11 @@ mod tests {
 
             // Build certificates
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
 
             let notarization = build_notarization(&schemes, &namespace, &proposal, quorum);
             let nullification = build_nullification(&schemes, &namespace, round, quorum);
@@ -361,7 +365,11 @@ mod tests {
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
 
             // Send notarize votes from participants 1..quorum_size (excluding participant 0)
             // Participant 0's vote will be sent via mailbox.constructed()
@@ -514,7 +522,11 @@ mod tests {
 
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
             let notarization = build_notarization(&schemes, &namespace, &proposal, quorum_size);
 
             // Send some votes (but not enough for quorum), starting with leader (participant 1)
@@ -691,8 +703,16 @@ mod tests {
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
-            let proposal_a = Proposal::new(round, View::zero(), Sha256::hash(b"payload_a"));
-            let proposal_b = Proposal::new(round, View::zero(), Sha256::hash(b"payload_b"));
+            let proposal_a = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"payload_a"),
+            };
+            let proposal_b = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"payload_b"),
+            };
 
             // Send vote for proposal_a from participant 1 (the leader)
             // This establishes proposal_a as the leader's proposal
@@ -887,7 +907,11 @@ mod tests {
 
             // Build proposal and leader's vote
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
 
             // Now send the leader's vote - this should trigger proposal forwarding
@@ -1002,7 +1026,11 @@ mod tests {
             // Build proposal and leader's vote for view 1 with participant 1 as leader
             let view = View::new(1);
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
 
             // Send the leader's vote BEFORE setting the leader
@@ -1145,7 +1173,11 @@ mod tests {
 
             // Test 3: Send a vote from the leader for the current view (view 5)
             let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: Sha256::hash(b"test_payload"),
+            };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal).unwrap();
             leader_sender
                 .send(

@@ -128,8 +128,16 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             self.hasher.update(&payload_b);
             let digest_b = self.hasher.finalize();
 
-            let proposal_a = Proposal::new(next_round, view, digest_a);
-            let proposal_b = Proposal::new(next_round, view, digest_b);
+            let proposal_a = Proposal {
+                round: next_round,
+                parent: view,
+                payload: digest_a,
+            };
+            let proposal_b = Proposal {
+                round: next_round,
+                parent: view,
+                payload: digest_b,
+            };
 
             // Broadcast payloads via relay so nodes can verify
             let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];

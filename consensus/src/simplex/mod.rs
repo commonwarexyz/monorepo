@@ -4272,19 +4272,23 @@ mod tests {
             let f_view = 1;
             let round_f = Round::new(Epoch::new(333), View::new(f_view));
             let payload_b0 = Sha256::hash(b"B_F");
-            let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
+            let proposal_b0 = Proposal {
+                round: round_f,
+                parent: View::new(f_view - 1),
+                payload: payload_b0,
+            };
             let payload_b1a = Sha256::hash(b"B_G1");
-            let proposal_b1a = Proposal::new(
-                Round::new(Epoch::new(333), View::new(f_view + 1)),
-                View::new(f_view),
-                payload_b1a,
-            );
+            let proposal_b1a = Proposal {
+                round: Round::new(Epoch::new(333), View::new(f_view + 1)),
+                parent: View::new(f_view),
+                payload: payload_b1a,
+            };
             let payload_b1b = Sha256::hash(b"B_G2");
-            let proposal_b1b = Proposal::new(
-                Round::new(Epoch::new(333), View::new(f_view + 2)),
-                View::new(f_view),
-                payload_b1b,
-            );
+            let proposal_b1b = Proposal {
+                round: Round::new(Epoch::new(333), View::new(f_view + 2)),
+                parent: View::new(f_view),
+                payload: payload_b1b,
+            };
 
             // Build notarization and finalization for the first block
             let b0_notarization = build_notarization(&proposal_b0);
