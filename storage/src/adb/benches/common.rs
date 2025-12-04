@@ -72,11 +72,11 @@ where
 
     async fn commit(&mut self, _metadata: Option<Self::Value>) -> Result<(), Self::Error> {
         // Store doesn't support metadata in commit, so ignore it
-        Store::commit(self, None).await.map(|_| ())
+        self.commit(None).await.map(|_| ())
     }
 
     async fn prune(&mut self, loc: Location) -> Result<(), Self::Error> {
-        Store::prune(self, loc).await
+        self.prune(loc).await
     }
 
     fn inactivity_floor_loc(&self) -> Location {
@@ -84,11 +84,11 @@ where
     }
 
     async fn close(self) -> Result<(), Self::Error> {
-        Store::close(self).await
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {
-        Store::destroy(self).await
+        self.destroy().await
     }
 }
 
@@ -105,7 +105,7 @@ enum CleanAnyState<A: CleanAny> {
 }
 
 impl<A: CleanAny> CleanAnyWrapper<A> {
-    pub fn new(db: A) -> Self {
+    pub const fn new(db: A) -> Self {
         Self {
             inner: Some(CleanAnyState::Clean(db)),
         }

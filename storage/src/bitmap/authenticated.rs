@@ -46,7 +46,7 @@ pub type DirtyBitMap<D, const N: usize> = BitMap<D, N, Dirty>;
 /// The bitmap uses the type-state pattern to enforce at compile-time whether the bitmap has pending
 /// updates that must be merkleized before computing proofs. CleanBitMap represents a bitmap
 /// whose root digest has been computed and cached. DirtyBitMap represents a bitmap with pending
-/// updates. A dirty bitmap can be converted into a clean bitmap by calling DirtyBitMap::merkleize.
+/// updates. A dirty bitmap can be converted into a clean bitmap by calling [DirtyBitMap::merkleize].
 ///
 /// # Warning
 ///
