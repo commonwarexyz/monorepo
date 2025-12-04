@@ -225,14 +225,17 @@ where
                 .collect();
 
             let nullifications = reporter.nullifications.lock().unwrap();
-            let nullification_data = nullifications.keys().map(|view| {
-                (
-                    view.get(),
-                    Nullification {
-                        signature_count: None, // Ed25519 doesn't expose signature count directly
-                    },
-                )
-            });
+            let nullification_data = nullifications
+                .keys()
+                .map(|view| {
+                    (
+                        view.get(),
+                        Nullification {
+                            signature_count: None, // Ed25519 doesn't expose signature count directly
+                        },
+                    )
+                })
+                .collect();
 
             let finalizations = reporter.finalizations.lock().unwrap();
             let finalization_data = finalizations
