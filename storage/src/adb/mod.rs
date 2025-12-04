@@ -223,6 +223,10 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 async fn find_update_op<C>(
     log: &C,
     cursor: &mut impl Cursor<Value = Location>,
@@ -244,6 +248,10 @@ where
 
 /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
 /// its location to `new_loc`.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 fn update_known_loc<I: Index<Value = Location>>(
     snapshot: &mut I,
     key: &[u8],
