@@ -1,15 +1,13 @@
 //! Ordered collections that guarantee sorted, deduplicated keys.
 
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
     ops::{Deref, Index, Range},
 };
-#[cfg(feature = "std")]
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[cfg(not(feature = "std"))]
@@ -549,20 +547,19 @@ impl<K, V> OrderedBijection<K, V> {
     pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
     where
         K: Ord,
-        V: Ord,
+        V: Eq,
     {
         let map: OrderedAssociated<K, V> = iter.into_iter().collect();
         Self::try_from(map)
     }
 }
 
-impl<K, V: Ord> TryFrom<OrderedAssociated<K, V>> for OrderedBijection<K, V> {
+impl<K, V: Eq> TryFrom<OrderedAssociated<K, V>> for OrderedBijection<K, V> {
     type Error = Error;
 
     fn try_from(map: OrderedAssociated<K, V>) -> Result<Self, Self::Error> {
-        let mut seen = BTreeSet::new();
-        for value in &map.values {
-            if !seen.insert(value) {
+        for (i, value) in map.values.iter().enumerate() {
+            if map.values[i + 1..].contains(value) {
                 return Err(Error::DuplicateValue);
             }
         }
@@ -598,32 +595,32 @@ impl<K, V> Deref for OrderedBijection<K, V> {
     }
 }
 
-impl<K: Ord, V: Ord> FromIterator<(K, V)> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq> FromIterator<(K, V)> for OrderedBijection<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self::try_from_iter(iter)
             .expect("duplicate value detected during OrderedBijection construction")
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Ord> From<&[(K, V)]> for OrderedBijection<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq> From<&[(K, V)]> for OrderedBijection<K, V> {
     fn from(items: &[(K, V)]) -> Self {
         items.iter().cloned().collect()
     }
 }
 
-impl<K: Ord, V: Ord> From<Vec<(K, V)>> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq> From<Vec<(K, V)>> for OrderedBijection<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V: Ord, const N: usize> From<[(K, V); N]> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq, const N: usize> From<[(K, V); N]> for OrderedBijection<K, V> {
     fn from(items: [(K, V); N]) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Ord, const N: usize> From<&[(K, V); N]> for OrderedBijection<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq, const N: usize> From<&[(K, V); N]> for OrderedBijection<K, V> {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
@@ -647,7 +644,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedBijection<K, V> {
     }
 }
 
-impl<K: Read, V: Ord + Read> Read for OrderedBijection<K, V> {
+impl<K: Read, V: Eq + Read> Read for OrderedBijection<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
