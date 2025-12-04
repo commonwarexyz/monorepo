@@ -128,7 +128,6 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-/// Test a database with optional batching.
 async fn test_db<A>(
     db: A,
     use_batch: bool,
@@ -152,7 +151,7 @@ where
     };
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
-    db.destroy().await?;
+    db.destroy().await?; // don't time destroy
 
     Ok(res)
 }

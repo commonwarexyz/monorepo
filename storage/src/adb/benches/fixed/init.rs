@@ -48,48 +48,48 @@ fn bench_fixed_init(c: &mut Criterion) {
                         }
                         Variant::AnyUnordered => {
                             let db = get_unordered_any(ctx.clone()).await;
-                            let wrapper = CleanAnyWrapper::new(db);
-                            let mut wrapper =
-                                gen_random_kv(wrapper, elements, operations, Some(COMMIT_FREQUENCY))
+                            let db = CleanAnyWrapper::new(db);
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            wrapper.prune(wrapper.inactivity_floor_loc()).await.unwrap();
-                            wrapper.close().await.unwrap();
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
                         }
                         Variant::AnyOrdered => {
                             let db = get_ordered_any(ctx.clone()).await;
-                            let wrapper = CleanAnyWrapper::new(db);
-                            let mut wrapper =
-                                gen_random_kv(wrapper, elements, operations, Some(COMMIT_FREQUENCY))
+                            let db = CleanAnyWrapper::new(db);
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            wrapper.prune(wrapper.inactivity_floor_loc()).await.unwrap();
-                            wrapper.close().await.unwrap();
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
                         }
                         Variant::CurrentUnordered => {
                             let db = get_unordered_current(ctx.clone()).await;
-                            let wrapper = CleanAnyWrapper::new(db);
-                            let mut wrapper =
-                                gen_random_kv(wrapper, elements, operations, Some(COMMIT_FREQUENCY))
+                            let db = CleanAnyWrapper::new(db);
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            wrapper.prune(wrapper.inactivity_floor_loc()).await.unwrap();
-                            wrapper.close().await.unwrap();
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
                         }
                         Variant::CurrentOrdered => {
                             let db = get_ordered_current(ctx.clone()).await;
-                            let wrapper = CleanAnyWrapper::new(db);
-                            let mut wrapper =
-                                gen_random_kv(wrapper, elements, operations, Some(COMMIT_FREQUENCY))
+                            let db = CleanAnyWrapper::new(db);
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            wrapper.prune(wrapper.inactivity_floor_loc()).await.unwrap();
-                            wrapper.close().await.unwrap();
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
                         }
                         Variant::Variable => {
                             let db = get_variable_any(ctx.clone()).await;
-                            let wrapper = CleanAnyWrapper::new(db);
-                            let mut wrapper =
-                                gen_random_kv(wrapper, elements, operations, Some(COMMIT_FREQUENCY))
+                            let db = CleanAnyWrapper::new(db);
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            wrapper.prune(wrapper.inactivity_floor_loc()).await.unwrap();
-                            wrapper.close().await.unwrap();
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
                         }
                     }
                 });
