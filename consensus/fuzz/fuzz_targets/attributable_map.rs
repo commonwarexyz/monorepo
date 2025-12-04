@@ -24,7 +24,7 @@ struct VoteData {
 #[derive(Arbitrary, Debug, Clone)]
 enum Operation {
     Insert(VoteData),
-    Get { signer: u32 },
+    Get(u32),
     Clear,
 }
 
@@ -77,7 +77,7 @@ fn fuzz(input: FuzzInput) {
                 assert_eq!(map.len(), inserted_signers.len());
                 assert_eq!(map.is_empty(), inserted_signers.is_empty());
             }
-            Operation::Get { signer } => {
+            Operation::Get(signer) => {
                 let result = map.get(signer);
                 let should_exist = inserted_signers.contains(&signer);
                 assert_eq!(result.is_some(), should_exist);
