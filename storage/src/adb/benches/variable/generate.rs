@@ -43,45 +43,30 @@ fn bench_variable_generate(c: &mut Criterion) {
                                     let commit_frequency =
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let elapsed = match variant {
+                                        Variant::Store => {
+                                            let db = get_store(ctx.clone()).await;
+                                            test_db(
+                                                db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
+                                        }
                                         Variant::Any => {
                                             let db = get_any(ctx.clone()).await;
                                             let wrapped_db = CleanAnyWrapper::new(db);
-                                            if use_batch {
-                                                test_db_batched(
-                                                    wrapped_db,
-                                                    elements,
-                                                    operations,
-                                                    commit_frequency,
-                                                )
-                                                .await
-                                                .unwrap()
-                                            } else {
-                                                test_db(
-                                                    wrapped_db,
-                                                    elements,
-                                                    operations,
-                                                    commit_frequency,
-                                                )
-                                                .await
-                                                .unwrap()
-                                            }
-                                        }
-                                        Variant::Store => {
-                                            let db = get_store(ctx.clone()).await;
-                                            if use_batch {
-                                                test_db_batched(
-                                                    db,
-                                                    elements,
-                                                    operations,
-                                                    commit_frequency,
-                                                )
-                                                .await
-                                                .unwrap()
-                                            } else {
-                                                test_db(db, elements, operations, commit_frequency)
-                                                    .await
-                                                    .unwrap()
-                                            }
+                                            test_db(
+                                                wrapped_db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
                                         }
                                     };
                                     total_elapsed += elapsed;
@@ -96,26 +81,9 @@ fn bench_variable_generate(c: &mut Criterion) {
     }
 }
 
-/// Test a database using non-batched operations.
 async fn test_db<A>(
     db: A,
-    elements: u64,
-    operations: u64,
-    commit_frequency: u32,
-) -> Result<Duration, A::Error>
-where
-    A: BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
-{
-    let start = Instant::now();
-    let db = gen_random_kv(db, elements, operations, commit_frequency).await;
-    let elapsed = start.elapsed();
-    db.destroy().await?;
-    Ok(elapsed)
-}
-
-/// Test a database using batched operations.
-async fn test_db_batched<A>(
-    db: A,
+    use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
@@ -125,10 +93,16 @@ where
         + BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
     let start = Instant::now();
-    let db = gen_random_kv_batched(db, elements, operations, commit_frequency).await;
-    let elapsed = start.elapsed();
-    db.destroy().await?;
-    Ok(elapsed)
+    let mut db = if use_batch {
+        gen_random_kv_batched(db, elements, operations, commit_frequency).await
+    } else {
+        gen_random_kv(db, elements, operations, commit_frequency).await
+    };
+    db.prune(db.inactivity_floor_loc()).await?;
+    let res = start.elapsed();
+    db.destroy().await?; // don't time destroy
+
+    Ok(res)
 }
 
 criterion_group! {

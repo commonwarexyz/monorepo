@@ -1,8 +1,4 @@
 //! Shared benchmarking infrastructure for ADB variants.
-//!
-//! This module provides the `BenchmarkableDb` trait which abstracts over both authenticated
-//! (CleanAny) and unauthenticated (Store) databases, enabling consistent benchmarking across
-//! all database types.
 
 use commonware_codec::Codec;
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -54,7 +50,7 @@ pub trait BenchmarkableDb {
     fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
-/// Implementation of BenchmarkableDb for the unauthenticated Store type.
+/// Implementation of [BenchmarkableDb] for the unauthenticated [Store] type.
 impl<E, K, V, T> BenchmarkableDb for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,

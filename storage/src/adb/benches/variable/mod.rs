@@ -56,6 +56,18 @@ const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
+fn store_cfg() -> StoreConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    StoreConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+        log_partition: format!("store_{PARTITION_SUFFIX}"),
+        log_write_buffer: WRITE_BUFFER_SIZE,
+        log_compression: None,
+        log_codec_config: ((0..=10000).into(), ()),
+        log_items_per_section: ITEMS_PER_BLOB,
+        translator: EightCap,
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+    }
+}
+
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -73,16 +85,9 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
     }
 }
 
-fn store_cfg() -> StoreConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-    StoreConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-        log_partition: format!("store_{PARTITION_SUFFIX}"),
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: ITEMS_PER_BLOB,
-        translator: EightCap,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    }
+async fn get_store(ctx: Context) -> StoreDb {
+    let cfg = store_cfg();
+    Store::init(ctx, cfg).await.unwrap()
 }
 
 async fn get_any(ctx: Context) -> AnyDb {
@@ -91,17 +96,17 @@ async fn get_any(ctx: Context) -> AnyDb {
     Any::init(ctx, any_cfg).await.unwrap()
 }
 
-async fn get_store(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
-    Store::init(ctx, cfg).await.unwrap()
-}
-
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-async fn gen_random_kv<A>(mut db: A, num_elements: u64, num_operations: u64, commit_frequency: u32) -> A
+async fn gen_random_kv<A>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: u32,
+) -> A
 where
     A: BenchmarkableDb<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
 {
@@ -128,8 +133,7 @@ where
     }
 
     db.commit(None).await.unwrap();
-    let floor = db.inactivity_floor_loc();
-    db.prune(floor).await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
     db
 }
 
@@ -174,8 +178,7 @@ where
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
     db.commit(None).await.unwrap();
-    let floor = db.inactivity_floor_loc();
-    db.prune(floor).await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
 }
