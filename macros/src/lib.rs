@@ -433,10 +433,10 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Convenience macro to continuously [select] over a set of futures in biased order. See
-/// [select] for more details.
+/// Convenience macro to continuously [select!] over a set of futures in biased order. See
+/// [select!] for more details.
 ///
-/// Expands to a `loop` containing a [select] block. Rather than writing:
+/// Expands to a `loop` containing a [select!] block. Rather than writing:
 ///
 /// ```rust
 /// use std::time::Duration;
