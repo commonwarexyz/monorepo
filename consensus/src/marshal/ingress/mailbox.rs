@@ -99,6 +99,8 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// A request to broadcast a block to all peers.
     Broadcast {
+        /// The round in which the block was proposed.
+        round: Round,
         /// The block to broadcast.
         block: B,
     },
@@ -265,10 +267,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
+    pub async fn broadcast(&mut self, round: Round, block: B) {
         if self
             .sender
-            .send(Message::Broadcast { block })
+            .send(Message::Broadcast { round, block })
             .await
             .is_err()
         {
