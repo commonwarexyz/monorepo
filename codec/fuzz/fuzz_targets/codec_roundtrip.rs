@@ -157,7 +157,7 @@ fn roundtrip_map<K, V>(
 
 fn roundtrip_set<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
-    K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug + PartialEq,
     HashSet<K>:
         Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
