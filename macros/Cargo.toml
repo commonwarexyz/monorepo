@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
 documentation = "https://docs.rs/commonware-macros"
 
+[lints]
+workspace = true
+
 [lib]
 bench = false
 proc-macro = true

@@ -16,7 +16,7 @@ pub struct Reservation<P: PublicKey> {
 
 impl<P: PublicKey> Reservation<P> {
     /// Create a new reservation for a peer.
-    pub fn new(metadata: Metadata<P>, releaser: Releaser<P>) -> Self {
+    pub const fn new(metadata: Metadata<P>, releaser: Releaser<P>) -> Self {
         Self {
             metadata,
             releaser: Some(releaser),
@@ -26,7 +26,7 @@ impl<P: PublicKey> Reservation<P> {
 
 impl<P: PublicKey> Reservation<P> {
     /// Returns the metadata associated with this reservation.
-    pub fn metadata(&self) -> &Metadata<P> {
+    pub const fn metadata(&self) -> &Metadata<P> {
         &self.metadata
     }
 }

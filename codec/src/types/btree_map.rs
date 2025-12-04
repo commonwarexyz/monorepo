@@ -96,7 +96,7 @@ impl<K: Read + Clone + Ord + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = BTreeMap::new();
+        let mut map = Self::new();
 
         // Read items in ascending order
         read_ordered_map(

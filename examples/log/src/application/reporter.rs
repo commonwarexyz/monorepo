@@ -11,7 +11,7 @@ pub struct Reporter<D: Digest> {
 }
 
 impl<D: Digest> Reporter<D> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             _phantom: PhantomData,
         }

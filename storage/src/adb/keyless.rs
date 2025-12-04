@@ -9,7 +9,10 @@
 
 use crate::{
     adb::{
-        operation::{keyless::Operation, Committable},
+        operation::{
+            variable::{keyless::Operation, Value},
+            Committable,
+        },
         Error,
     },
     journal::{
@@ -22,7 +25,6 @@ use crate::{
         Location, Proof,
     },
 };
-use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -68,7 +70,7 @@ pub struct Config<C> {
 /// A keyless ADB for variable length data.
 type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>> = Dirty>
+pub struct Keyless<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>> = Dirty>
 {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H, S>,
@@ -77,7 +79,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<D
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -100,7 +102,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
     }
 
     /// Returns the location of the last commit, if any.
-    pub fn last_commit_loc(&self) -> Option<Location> {
+    pub const fn last_commit_loc(&self) -> Option<Location> {
         self.last_commit_loc
     }
 
@@ -122,9 +124,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
             .map_err(Into::into)
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(loc) = self.last_commit_loc else {
             return Ok(None);
         };
@@ -133,11 +134,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
             return Ok(None);
         };
 
-        Ok(Some((loc, metadata)))
+        Ok(metadata)
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -170,7 +171,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> H::Digest {
         self.journal.root()
     }
 
@@ -367,23 +368,20 @@ mod test {
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            let metadata = Some(vec![3u8; 10]);
-            db.commit(metadata.clone()).await.unwrap();
+            let metadata = vec![3u8; 10];
+            db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(0), metadata.clone()))
-            );
-            assert_eq!(db.get(Location::new_unchecked(0)).await.unwrap(), metadata); // the commit op
+                db.get(Location::new_unchecked(0)).await.unwrap(),
+                Some(metadata.clone())
+            ); // the commit op
             let root = db.root();
 
             // Commit op should remain after reopen even without clean shutdown.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // commit op should remain after re-open.
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(0), metadata))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Some(Location::new_unchecked(0)));
 
@@ -410,10 +408,7 @@ mod test {
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 2 appends, 1 commit
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(2), None))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(2)).await.unwrap(), None); // the commit op
             let root = db.root();
             db.close().await.unwrap();

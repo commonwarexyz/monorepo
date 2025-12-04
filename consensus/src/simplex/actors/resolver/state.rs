@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Nullification, Voter},
+        types::{Certificate, Nullification},
     },
     types::View,
     Viewable,
@@ -17,14 +17,14 @@ use tracing::debug;
 pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Nullification<S>>,
     current_view: View,
-    floor: Option<Voter<S, D>>,
+    floor: Option<Certificate<S, D>>,
 
     fetch_concurrent: usize,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub const fn new(fetch_concurrent: usize) -> Self {
         Self {
             nullifications: BTreeMap::new(),
             current_view: View::zero(),
@@ -34,9 +34,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Handle a new message and update the [Resolver] accordingly.
-    pub async fn handle(&mut self, message: Voter<S, D>, resolver: &mut impl Resolver<Key = U64>) {
-        match message {
-            Voter::Nullification(nullification) => {
+    pub async fn handle(
+        &mut self,
+        certificate: Certificate<S, D>,
+        resolver: &mut impl Resolver<Key = U64>,
+    ) {
+        match certificate {
+            Certificate::Nullification(nullification) => {
                 // Update current view
                 let view = nullification.view();
                 if view > self.current_view {
@@ -51,7 +55,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 // Remove from pending and cancel request
                 resolver.cancel(view.into()).await;
             }
-            Voter::Notarization(notarization) => {
+            Certificate::Notarization(notarization) => {
                 // Update current view
                 let view = notarization.view();
                 if view > self.current_view {
@@ -60,13 +64,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
                 // Set last notarized
                 if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
-                    self.floor = Some(Voter::Notarization(notarization));
+                    self.floor = Some(Certificate::Notarization(notarization));
                 }
 
                 // Prune old nullifications
                 self.prune(resolver).await;
             }
-            Voter::Finalization(finalization) => {
+            Certificate::Finalization(finalization) => {
                 // Update current view
                 let view = finalization.view();
                 if view > self.current_view {
@@ -75,16 +79,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
                 // Set last finalized
                 if self.floor.as_ref().is_none_or(|floor| {
-                    (matches!(floor, Voter::Notarization(_)) && view == floor.view())
+                    (matches!(floor, Certificate::Notarization(_)) && view == floor.view())
                         || view > floor.view()
                 }) {
-                    self.floor = Some(Voter::Finalization(finalization));
+                    self.floor = Some(Certificate::Finalization(finalization));
                 }
 
                 // Prune old nullifications
                 self.prune(resolver).await;
             }
-            _ => unreachable!("unexpected message type"),
         }
 
         // Request missing nullifications
@@ -93,7 +96,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Get the best certificate for a given view (or the floor
     /// if the view is below the floor).
-    pub fn get(&self, view: View) -> Option<Voter<S, D>> {
+    pub fn get(&self, view: View) -> Option<Certificate<S, D>> {
         // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
@@ -104,7 +107,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // Otherwise, return the nullification for the view
         self.nullifications
             .get(&view)
-            .map(|nullification| Voter::Nullification(nullification.clone()))
+            .map(|nullification| Certificate::Nullification(nullification.clone()))
     }
 
     /// Get the view of the floor.
@@ -279,39 +282,39 @@ mod tests {
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         state
             .handle(
-                Voter::Nullification(nullification_v4.clone()),
+                Certificate::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
         );
         assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         state
             .handle(
-                Voter::Nullification(nullification_v2.clone()),
+                Certificate::Nullification(nullification_v2.clone()),
                 &mut resolver,
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(2)), Some(Voter::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == nullification_v2)
         );
         assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
             .handle(
-                Voter::Nullification(nullification_v1.clone()),
+                Certificate::Nullification(nullification_v1.clone()),
                 &mut resolver,
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(1)), Some(Voter::Nullification(n)) if n == nullification_v1)
+            matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == nullification_v1)
         );
         assert_eq!(resolver.outstanding(), vec![3]);
     }
@@ -325,7 +328,7 @@ mod tests {
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, View::new(view));
             state
-                .handle(Voter::Nullification(nullification), &mut resolver)
+                .handle(Certificate::Nullification(nullification), &mut resolver)
                 .await;
         }
         assert_eq!(state.current_view, View::new(6));
@@ -333,26 +336,41 @@ mod tests {
 
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
         state
-            .handle(Voter::Notarization(notarization.clone()), &mut resolver)
+            .handle(
+                Certificate::Notarization(notarization.clone()),
+                &mut resolver,
+            )
             .await;
 
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization)
+        );
         assert!(state.nullifications.is_empty());
         assert!(resolver.outstanding().is_empty());
 
         // Old finalization is ignored
         let finalization = build_finalization(&schemes, &verifier, View::new(4));
         state
-            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
+            .handle(
+                Certificate::Finalization(finalization.clone()),
+                &mut resolver,
+            )
             .await;
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization)
+        );
 
         // Finalization at same view overwrites notarization
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
         state
-            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
+            .handle(
+                Certificate::Finalization(finalization.clone()),
+                &mut resolver,
+            )
             .await;
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization));
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
+        );
     }
 
     #[test_async]
@@ -364,49 +382,52 @@ mod tests {
         // Finalization sets floor
         let finalization = build_finalization(&schemes, &verifier, View::new(3));
         state
-            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
+            .handle(
+                Certificate::Finalization(finalization.clone()),
+                &mut resolver,
+            )
             .await;
         assert!(
-            matches!(state.get(View::new(1)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
         );
         assert!(
-            matches!(state.get(View::new(3)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == finalization)
         );
 
         // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         state
             .handle(
-                Voter::Nullification(nullification_v4.clone()),
+                Certificate::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )
             .await;
         assert!(
-            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
         );
         assert!(
-            matches!(state.get(View::new(2)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == finalization)
         );
 
         // Old nullification is ignored
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
             .handle(
-                Voter::Nullification(nullification_v1.clone()),
+                Certificate::Nullification(nullification_v1.clone()),
                 &mut resolver,
             )
             .await;
         assert!(
-            matches!(state.get(View::new(1)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
         );
         assert!(
-            matches!(state.get(View::new(2)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == finalization)
         );
         assert!(
-            matches!(state.get(View::new(3)), Some(Voter::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == finalization)
         );
         assert!(
-            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
         );
         assert!(resolver.outstanding().is_empty());
     }

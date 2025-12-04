@@ -158,7 +158,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::Commit => {
-                    db.commit().await.expect("Commit should not fail");
+                    db.commit(None).await.expect("Commit should not fail");
                     last_committed_op_count = db.op_count();
                     uncommitted_ops = 0;
                 }
@@ -169,7 +169,7 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Root => {
                     if uncommitted_ops > 0 {
-                        db.commit().await.expect("Commit before root should not fail");
+                        db.commit(None).await.expect("Commit before root should not fail");
                         last_committed_op_count = db.op_count();
                         uncommitted_ops = 0;
                     }
@@ -182,7 +182,7 @@ fn fuzz(data: FuzzInput) {
 
                     if current_op_count > 0 {
                         if uncommitted_ops > 0 {
-                            db.commit().await.expect("Commit before proof should not fail");
+                            db.commit(None).await.expect("Commit before proof should not fail");
                             last_committed_op_count = db.op_count();
                             uncommitted_ops = 0;
                         }
@@ -250,7 +250,7 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
 
                     if uncommitted_ops > 0 {
-                        db.commit().await.expect("Commit before key value proof should not fail");
+                        db.commit(None).await.expect("Commit before key value proof should not fail");
                         last_committed_op_count = db.op_count();
                         uncommitted_ops = 0;
                     }
@@ -296,7 +296,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         if uncommitted_ops > 0 {
-            db.commit().await.expect("Final commit should not fail");
+            db.commit(None).await.expect("Final commit should not fail");
         }
 
         for key in &all_keys {

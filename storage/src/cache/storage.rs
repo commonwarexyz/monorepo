@@ -25,7 +25,7 @@ struct Record<V: Codec> {
 
 impl<V: Codec> Record<V> {
     /// Create a new `Record`.
-    fn new(index: u64, value: V) -> Self {
+    const fn new(index: u64, value: V) -> Self {
         Self { index, value }
     }
 }
@@ -72,7 +72,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
 
 impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Calculate the section for a given index.
-    fn section(&self, index: u64) -> u64 {
+    const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
     }
 
@@ -306,5 +306,15 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
+    type Key = u64;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(*key).await
     }
 }

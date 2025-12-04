@@ -65,7 +65,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
         let identity = *poly::public::<V>(&polynomial);
         let polynomial = evaluate_all::<V>(&polynomial, participants);
         (
-            Reporter {
+            Self {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 identity,

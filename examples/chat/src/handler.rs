@@ -181,7 +181,7 @@ pub async fn run(
                 let logs_text = Text::from(
                     logs.iter()
                         .map(|log| Line::raw(log.clone()))
-                        .collect::<Vec<Line>>(),
+                        .collect::<Vec<Line<'_>>>(),
                 );
                 let logs_block = Paragraph::new(logs_text)
                     .block(

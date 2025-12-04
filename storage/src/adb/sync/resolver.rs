@@ -3,12 +3,14 @@ use crate::{
         self,
         any::{unordered::fixed::Any, AnyDb},
         immutable::Immutable,
-        operation::{fixed::unordered::Operation as Fixed, variable::Operation as Variable},
+        operation::{
+            fixed::{unordered::Operation as Fixed, Value as FixedValue},
+            variable::{immutable::Operation as ImmutableOp, Value as VariableValue},
+        },
     },
     mmr::{Location, Proof},
     translator::Translator,
 };
-use commonware_codec::CodecFixed;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
@@ -62,7 +64,7 @@ impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    V: FixedValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -94,7 +96,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    V: FixedValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -125,13 +127,13 @@ impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: commonware_codec::Codec + Send + Sync + 'static,
+    V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::adb::Error;
 
     async fn get_operations(
@@ -157,13 +159,13 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: commonware_codec::Codec + Send + Sync + 'static,
+    V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::adb::Error;
 
     async fn get_operations(
@@ -200,7 +202,7 @@ pub(crate) mod tests {
     where
         D: Digest,
         K: Array,
-        V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
+        V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
         type Op = Fixed<K, V>;

@@ -2,7 +2,7 @@
 //! [commonware_storage::adb::any::unordered::fixed::Any] database.
 
 use clap::{Arg, Command};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
@@ -108,31 +108,28 @@ where
 {
     let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-
     if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
         *last_time = now;
-
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
-
+        let new_operations_len = new_operations.len();
         // Add operations to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
+            if let Err(err) = DB::add_operations(&mut *database, new_operations).await {
                 error!(?err, "failed to add operations to database");
             }
             DB::root(&*database)
         };
-
-        state.ops_counter.inc_by(new_operations.len() as u64);
+        state.ops_counter.inc_by(new_operations_len as u64);
         let root_hex = root
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         info!(
-            operations_added = new_operations.len(),
+            new_operations_len,
             root = %root_hex,
             "added operations"
         );
@@ -289,6 +286,7 @@ async fn handle_client<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
@@ -396,6 +394,7 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());

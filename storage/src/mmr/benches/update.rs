@@ -52,8 +52,7 @@ fn bench_update(c: &mut Criterion) {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
-                                        commonware_runtime::create_pool(ctx.clone(), THREADS)
-                                            .unwrap();
+                                        commonware_runtime::create_pool(ctx, THREADS).unwrap();
                                     Some(pool)
                                 }
                                 _ => None,

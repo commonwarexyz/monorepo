@@ -4,9 +4,9 @@
 
 use crate::simplex::{
     signing_scheme::Scheme,
-    types::{Finalize, Notarize, Nullify, Voter},
+    types::{Finalize, Notarize, Nullify, Vote},
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
@@ -35,18 +35,15 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
         }
     }
 
-    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(pending_network).await)
+    pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        spawn_cell!(self.context, self.run(vote_network).await)
     }
 
-    async fn run(self, pending_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = pending_network;
+    async fn run(self, vote_network: (impl Sender, impl Receiver)) {
+        let (mut sender, mut receiver) = vote_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<S, H::Digest>::decode_cfg(
-                msg,
-                &self.scheme.certificate_codec_config(),
-            ) {
+            let msg = match Vote::<S, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -56,7 +53,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
 
             // Process message
             match msg {
-                Voter::Notarize(notarize) => {
+                Vote::Notarize(notarize) => {
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = notarize.proposal.clone();
                     let old_round = proposal.round;
@@ -65,10 +62,10 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
 
                     // Sign and broadcast
                     let n = Notarize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Voter::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
-                Voter::Finalize(finalize) => {
+                Vote::Finalize(finalize) => {
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = finalize.proposal.clone();
                     let old_round = proposal.round;
@@ -77,10 +74,10 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
 
                     // Sign and broadcast
                     let f = Finalize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Voter::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
-                Voter::Nullify(nullify) => {
+                Vote::Nullify(nullify) => {
                     // Re-sign nullify for the next epoch
                     let old_round = nullify.round;
                     let new_epoch = old_round.epoch().next();
@@ -88,10 +85,9 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
 
                     let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
                         .unwrap();
-                    let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
+                    let msg = Vote::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
-                _ => continue,
             }
         }
     }

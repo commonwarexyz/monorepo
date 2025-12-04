@@ -47,7 +47,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
     ) -> Self {
         // Sign the resharing outcome
         let payload = Self::signature_payload_from_parts(round, &commitment, &acks, &reveals);
-        let dealer_signature = dealer_signer.sign(Some(namespace), payload.as_ref());
+        let dealer_signature = dealer_signer.sign(namespace, payload.as_ref());
 
         Self {
             dealer: dealer_signer.public_key(),
@@ -68,7 +68,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
             &self.reveals,
         );
         self.dealer
-            .verify(Some(namespace), &payload, &self.dealer_signature)
+            .verify(namespace, &payload, &self.dealer_signature)
     }
 
     /// Returns the payload that was signed by the dealer, formed from raw parts.
@@ -190,7 +190,7 @@ pub enum Payload<V: Variant, S: Signature> {
 
 impl<V: Variant, S: Signature> Payload<V, S> {
     /// Lifts the [Payload] into a [Dkg] message for a specific round.
-    pub fn into_message(self, round: u64) -> Dkg<V, S> {
+    pub const fn into_message(self, round: u64) -> Dkg<V, S> {
         Dkg {
             round,
             payload: self,
@@ -201,11 +201,11 @@ impl<V: Variant, S: Signature> Payload<V, S> {
 impl<V: Variant, S: Signature> Write for Payload<V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::Share(inner) => {
+            Self::Share(inner) => {
                 buf.put_u8(SHARE_TAG);
                 inner.write(buf);
             }
-            Payload::Ack(inner) => {
+            Self::Ack(inner) => {
                 buf.put_u8(ACK_TAG);
                 inner.write(buf);
             }
@@ -219,8 +219,8 @@ impl<V: Variant, S: Signature> Read for Payload<V, S> {
     fn read_cfg(buf: &mut impl Buf, p: &u32) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         let result = match tag {
-            SHARE_TAG => Payload::Share(Share::read_cfg(buf, p)?),
-            ACK_TAG => Payload::Ack(Ack::read(buf)?),
+            SHARE_TAG => Self::Share(Share::read_cfg(buf, p)?),
+            ACK_TAG => Self::Ack(Ack::read(buf)?),
             _ => return Err(commonware_codec::Error::InvalidEnum(tag)),
         };
         Ok(result)
@@ -231,8 +231,8 @@ impl<V: Variant, S: Signature> EncodeSize for Payload<V, S> {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Payload::Share(inner) => inner.encode_size(),
-                Payload::Ack(inner) => inner.encode_size(),
+                Self::Share(inner) => inner.encode_size(),
+                Self::Ack(inner) => inner.encode_size(),
             }
     }
 }

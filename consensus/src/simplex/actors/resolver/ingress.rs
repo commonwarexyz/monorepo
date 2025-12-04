@@ -1,5 +1,5 @@
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Voter},
+    simplex::{signing_scheme::Scheme, types::Certificate},
     types::View,
 };
 use bytes::Bytes;
@@ -14,17 +14,19 @@ use tracing::error;
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Voter<S, D>>,
+    sender: mpsc::Sender<Certificate<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Voter<S, D>>) -> Self {
+    /// Create a new mailbox.
+    pub const fn new(sender: mpsc::Sender<Certificate<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn updated(&mut self, voter: Voter<S, D>) {
-        if let Err(err) = self.sender.send(voter).await {
-            error!(?err, "failed to send voter message");
+    /// Send a certificate.
+    pub async fn updated(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self.sender.send(certificate).await {
+            error!(?err, "failed to send certificate message");
         }
     }
 }
@@ -35,7 +37,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
 }

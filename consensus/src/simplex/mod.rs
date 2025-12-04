@@ -228,7 +228,7 @@ use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 
@@ -272,11 +272,10 @@ where
         !participants.is_empty(),
         "no participants to select leader from"
     );
-    let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
-    } else {
-        (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len()
-    };
+    let idx = seed.map_or_else(
+        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
+        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
+    );
     let leader = participants[idx].clone();
 
     (leader, idx as u32)
@@ -293,16 +292,16 @@ mod tests {
             },
             signing_scheme::bls12381_threshold::Seedable,
             types::{
-                Finalization as TFinalization, Finalize as TFinalize,
+                Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
-                Nullification as TNullification, Nullify as TNullify, Proposal, Voter,
+                Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
         types::{Epoch, Round},
         Monitor, Viewable,
     };
     use bytes::Bytes;
-    use commonware_codec::Decode;
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
@@ -342,12 +341,12 @@ mod tests {
         (Sender<P>, Receiver<P>),
     ) {
         let mut control = oracle.control(validator.clone());
-        let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
-        let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
+        let (vote_sender, vote_receiver) = control.register(0).await.unwrap();
+        let (certificate_sender, certificate_receiver) = control.register(1).await.unwrap();
         let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
         (
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         )
     }
@@ -433,7 +432,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -584,7 +583,7 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < quorum as usize {
+                        if notarizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -623,7 +622,7 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < quorum as usize {
+                        if finalizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -996,12 +995,12 @@ mod tests {
                 result
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(180))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             // Check if we should exit
             if complete {
@@ -1281,7 +1280,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -1466,7 +1465,7 @@ mod tests {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
-                        if nullifies < quorum as usize {
+                        if nullifies < quorum {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }
@@ -4299,7 +4298,7 @@ mod tests {
 
             // Create an 11th non-participant injector and obtain senders
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_recovered_receiver) = oracle
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1)
                 .await
@@ -4325,8 +4324,8 @@ mod tests {
             // something but generates a certificate for a different proposal.
 
             // View F+2:
-            let notarization_msg = Voter::<_, D>::Notarization(b1b_notarization);
-            let nullification_msg = Voter::<_, D>::Nullification(null_b.clone());
+            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
@@ -4336,8 +4335,8 @@ mod tests {
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F+1:
-            let notarization_msg = Voter::<_, D>::Notarization(b1a_notarization);
-            let nullification_msg = Voter::<_, D>::Nullification(null_a.clone());
+            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
@@ -4347,12 +4346,16 @@ mod tests {
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F:
-            let msg = Voter::<_, D>::Notarization(b0_notarization).encode().into();
+            let msg = Certificate::<_, D>::Notarization(b0_notarization)
+                .encode()
+                .into();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
-            let msg = Voter::<_, D>::Finalization(b0_finalization).encode().into();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization)
+                .encode()
+                .into();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -5007,20 +5010,33 @@ mod tests {
             // Create twin engines (f Byzantine twins)
             for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
                 let (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
+                    (vote_sender, vote_receiver),
+                    (certificate_sender, certificate_receiver),
                     (resolver_sender, resolver_receiver),
                 ) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
 
-                // Create forwarder closures
-                let make_view_forwarder = || {
+                // Create forwarder closures for votes
+                let make_vote_forwarder = || {
+                    let participants = participants.clone();
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        let (primary, secondary) =
+                            strategy.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                // Create forwarder closures for certificates
+                let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
                         match origin {
@@ -5032,32 +5048,39 @@ mod tests {
                 let make_drop_forwarder =
                     || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
 
-                // Create router closures
-                let make_view_router = || {
+                // Create router closures for votes
+                let make_vote_router = || {
+                    let participants = participants.clone();
+                    move |(sender, message): &(_, Bytes)| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        strategy.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                // Create router closures for certificates
+                let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
                 };
                 let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
                 // Apply view-based forwarder and router to pending and recovered channel
-                let (pending_sender_primary, pending_sender_secondary) =
-                    pending_sender.split_with(make_view_forwarder());
-                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
-                    .split_with(
-                        context.with_label(&format!("pending-split-{idx}")),
-                        make_view_router(),
-                    );
-                let (recovered_sender_primary, recovered_sender_secondary) =
-                    recovered_sender.split_with(make_view_forwarder());
-                let (recovered_receiver_primary, recovered_receiver_secondary) = recovered_receiver
-                    .split_with(
+                let (vote_sender_primary, vote_sender_secondary) =
+                    vote_sender.split_with(make_vote_forwarder());
+                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                    context.with_label(&format!("pending-split-{idx}")),
+                    make_vote_router(),
+                );
+                let (certificate_sender_primary, certificate_sender_secondary) =
+                    certificate_sender.split_with(make_certificate_forwarder());
+                let (certificate_receiver_primary, certificate_receiver_secondary) =
+                    certificate_receiver.split_with(
                         context.with_label(&format!("recovered-split-{idx}")),
-                        make_view_router(),
+                        make_certificate_router(),
                     );
 
                 // Prevent any resolver messages from being sent or received by twins (these messages aren't cleanly mapped to a view and allowing them to bypass partitions seems wrong)
@@ -5072,14 +5095,14 @@ mod tests {
                 for (twin_label, pending, recovered, resolver) in [
                     (
                         "primary",
-                        (pending_sender_primary, pending_receiver_primary),
-                        (recovered_sender_primary, recovered_receiver_primary),
+                        (vote_sender_primary, vote_receiver_primary),
+                        (certificate_sender_primary, certificate_receiver_primary),
                         (resolver_sender_primary, resolver_receiver_primary),
                     ),
                     (
                         "secondary",
-                        (pending_sender_secondary, pending_receiver_secondary),
-                        (recovered_sender_secondary, recovered_receiver_secondary),
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
                         (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {

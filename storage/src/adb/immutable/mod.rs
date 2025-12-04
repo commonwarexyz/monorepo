@@ -4,7 +4,7 @@
 use crate::{
     adb::{
         build_snapshot_from_log,
-        operation::{variable::Operation, Committable},
+        operation::variable::{immutable::Operation, Value},
         Error,
     },
     index::{unordered::Index, Unordered as _},
@@ -19,7 +19,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
@@ -75,7 +75,7 @@ pub struct Config<T: Translator, C> {
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     H: CHasher,
     T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -97,7 +97,7 @@ pub struct Immutable<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Codec,
+        V: Value,
         H: CHasher,
         T: Translator,
         S: State<DigestOf<H>>,
@@ -155,9 +155,8 @@ impl<
         self.journal.size()
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -165,7 +164,7 @@ impl<
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(metadata)
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
@@ -177,7 +176,7 @@ impl<
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -222,7 +221,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let last_commit = journal.size().checked_sub(1);
 
-        Ok(Immutable {
+        Ok(Self {
             journal,
             snapshot,
             last_commit,
@@ -281,7 +280,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let last_commit = journal.size().checked_sub(1);
 
-        let mut db = Immutable {
+        let mut db = Self {
             journal,
             snapshot,
             last_commit,
@@ -325,7 +324,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> H::Digest {
         self.journal.root()
     }
 
@@ -440,7 +439,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Dirty>
 {
     /// Merkleize the database and compute the root digest.
@@ -450,6 +449,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             snapshot: self.snapshot,
             last_commit: self.last_commit,
         }
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+    crate::store::Store for Immutable<E, K, V, H, T, Clean<H::Digest>>
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(key).await
     }
 }
 
@@ -562,10 +573,7 @@ pub(super) mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata.clone()))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -573,18 +581,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Commit the second key.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Capture state.
             let root = db.root();
@@ -602,10 +604,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Cleanup.
             db.destroy().await.unwrap();

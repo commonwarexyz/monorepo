@@ -41,7 +41,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     }
 
     /// Get the set of outstanding request locations
-    pub fn locations(&self) -> &BTreeSet<Location> {
+    pub const fn locations(&self) -> &BTreeSet<Location> {
         &self.locations
     }
 

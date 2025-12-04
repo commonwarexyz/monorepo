@@ -310,7 +310,7 @@ struct Branch {
 }
 
 impl Parse for SelectInput {
-    fn parse(input: ParseStream) -> Result<Self> {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
@@ -333,7 +333,7 @@ impl Parse for SelectInput {
             }
         }
 
-        Ok(SelectInput { branches })
+        Ok(Self { branches })
     }
 }
 
@@ -433,10 +433,10 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Convenience macro to continuously [select] over a set of futures in biased order. See
-/// [select] for more details.
+/// Convenience macro to continuously [select!] over a set of futures in biased order. See
+/// [select!] for more details.
 ///
-/// Expands to a `loop` containing a [select] block. Rather than writing:
+/// Expands to a `loop` containing a [select!] block. Rather than writing:
 ///
 /// ```rust
 /// use std::time::Duration;

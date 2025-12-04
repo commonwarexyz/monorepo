@@ -57,7 +57,7 @@ impl<
     > AttributableReporter<E, S, D, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
         Self {
             rng,
             scheme,
@@ -118,7 +118,7 @@ mod tests {
         simplex::{
             mocks::fixtures::{bls12381_threshold, ed25519, Fixture},
             signing_scheme::Scheme,
-            types::{Notarization, Notarize, Proposal, VoteContext},
+            types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
     };
@@ -184,15 +184,18 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -222,15 +225,18 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -266,7 +272,7 @@ mod tests {
                 scheme
                     .sign_vote::<Sha256Digest>(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -311,16 +317,19 @@ mod tests {
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature,
+        };
 
         // Report peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -345,16 +354,19 @@ mod tests {
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature,
+        };
 
         // Report the peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));

@@ -8,7 +8,7 @@
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{Vote, VoteContext, VoteVerification},
+        types::{Signature, SignatureVerification, Subject},
     },
     types::Round,
 };
@@ -55,7 +55,7 @@ impl Scheme {
     /// Builds a verifier that can authenticate votes without generating signatures.
     ///
     /// Participants use the same key for both identity and consensus.
-    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    pub const fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -67,7 +67,7 @@ impl Scheme {
         &self,
         batch: &mut Batch,
         namespace: &[u8],
-        context: VoteContext<'a, D>,
+        subject: Subject<'a, D>,
         certificate: &'a Certificate,
     ) -> bool {
         // If the certificate signers length does not match the participant set, return false.
@@ -86,18 +86,13 @@ impl Scheme {
         }
 
         // Add the certificate to the batch.
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.get(signer as usize) else {
                 return false;
             };
 
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+            batch.add(namespace.as_ref(), message.as_ref(), public_key, signature);
         }
 
         true
@@ -169,14 +164,14 @@ impl signing_scheme::Scheme for Scheme {
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-    ) -> Option<Vote<Self>> {
+        subject: Subject<'_, D>,
+    ) -> Option<Signature<Self>> {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
+        let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
-        Some(Vote {
+        Some(Signature {
             signer: *index,
             signature,
         })
@@ -185,55 +180,55 @@ impl signing_scheme::Scheme for Scheme {
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
+        subject: Subject<'_, D>,
+        signature: &Signature<Self>,
     ) -> bool {
-        let Some(public_key) = self.participants.get(vote.signer as usize) else {
+        let Some(public_key) = self.participants.get(signature.signer as usize) else {
             return false;
         };
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
+        public_key.verify(namespace.as_ref(), message.as_ref(), &signature.signature)
     }
 
     fn verify_votes<R, D, I>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
+        subject: Subject<'_, D>,
+        signatures: I,
+    ) -> SignatureVerification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
 
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut batch = Batch::new();
 
-        for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.get(vote.signer as usize) else {
-                invalid.insert(vote.signer);
+        for sig in signatures.into_iter() {
+            let Some(public_key) = self.participants.get(sig.signer as usize) else {
+                invalid.insert(sig.signer);
                 continue;
             };
 
             batch.add(
-                Some(namespace.as_ref()),
+                namespace.as_ref(),
                 message.as_ref(),
                 public_key,
-                &vote.signature,
+                &sig.signature,
             );
 
-            candidates.push((vote, public_key));
+            candidates.push((sig, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);
                 }
             }
@@ -241,25 +236,25 @@ impl signing_scheme::Scheme for Scheme {
 
         let verified = candidates
             .into_iter()
-            .filter_map(|(vote, _)| {
-                if invalid.contains(&vote.signer) {
+            .filter_map(|(sig, _)| {
+                if invalid.contains(&sig.signer) {
                     None
                 } else {
-                    Some(vote)
+                    Some(sig)
                 }
             })
             .collect();
 
-        VoteVerification::new(verified, invalid.into_iter().collect())
+        SignatureVerification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for Vote { signer, signature } in votes {
+        for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
@@ -272,12 +267,12 @@ impl signing_scheme::Scheme for Scheme {
 
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
-        let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
+        let (signer, sigs): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
 
         Some(Certificate {
             signers,
-            signatures,
+            signatures: sigs,
         })
     }
 
@@ -285,11 +280,11 @@ impl signing_scheme::Scheme for Scheme {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
         let mut batch = Batch::new();
-        if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
+        if !self.batch_verify_certificate(&mut batch, namespace, subject, certificate) {
             return false;
         }
 
@@ -305,7 +300,7 @@ impl signing_scheme::Scheme for Scheme {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+        I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {
         let mut batch = Batch::new();
         for (context, certificate) in certificates {
@@ -341,13 +336,13 @@ mod tests {
         simplex::{
             mocks::fixtures::{ed25519, Fixture},
             signing_scheme::Scheme as _,
-            types::{Proposal, VoteContext},
+            types::{Proposal, Subject},
         },
         types::{Epoch, Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
-    use commonware_utils::quorum;
+    use commonware_utils::quorum_from_slice;
     use rand::{
         rngs::{OsRng, StdRng},
         thread_rng, SeedableRng,
@@ -383,14 +378,14 @@ mod tests {
         let vote = scheme
             .sign_vote(
                 NAMESPACE,
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
             .unwrap();
         assert!(scheme.verify_vote(
             NAMESPACE,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
             &vote
@@ -399,14 +394,14 @@ mod tests {
         let vote = scheme
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
-                VoteContext::Nullify {
+                Subject::Nullify {
                     round: proposal.round,
                 },
             )
             .unwrap();
         assert!(scheme.verify_vote::<Sha256Digest>(
             NAMESPACE,
-            VoteContext::Nullify {
+            Subject::Nullify {
                 round: proposal.round,
             },
             &vote
@@ -415,14 +410,14 @@ mod tests {
         let vote = scheme
             .sign_vote(
                 NAMESPACE,
-                VoteContext::Finalize {
+                Subject::Finalize {
                     proposal: &proposal,
                 },
             )
             .unwrap();
         assert!(scheme.verify_vote(
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &vote
@@ -432,7 +427,7 @@ mod tests {
     #[test]
     fn test_verify_votes_filters_bad_signers() {
         let (schemes, _) = setup_signers(5, 42);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
         let mut votes: Vec<_> = schemes
@@ -442,7 +437,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -454,7 +449,7 @@ mod tests {
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
             votes.clone(),
@@ -467,7 +462,7 @@ mod tests {
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
             votes.clone(),
@@ -481,7 +476,7 @@ mod tests {
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
             votes,
@@ -499,7 +494,7 @@ mod tests {
             schemes[2]
                 .sign_vote(
                     NAMESPACE,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &proposal,
                     },
                 )
@@ -507,7 +502,7 @@ mod tests {
             schemes[0]
                 .sign_vote(
                     NAMESPACE,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &proposal,
                     },
                 )
@@ -515,7 +510,7 @@ mod tests {
             schemes[1]
                 .sign_vote(
                     NAMESPACE,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &proposal,
                     },
                 )
@@ -543,7 +538,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -566,7 +561,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -591,7 +586,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -616,7 +611,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -632,18 +627,18 @@ mod tests {
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &corrupted,
@@ -662,7 +657,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -688,7 +683,7 @@ mod tests {
             signer
                 .sign_vote(
                     NAMESPACE,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &proposal,
                     },
                 )
@@ -701,7 +696,7 @@ mod tests {
             verifier
                 .sign_vote(
                     NAMESPACE,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &proposal,
                     },
                 )
@@ -722,7 +717,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -770,16 +765,17 @@ mod tests {
     #[test]
     fn test_verify_certificate() {
         let (schemes, participants) = setup_signers(4, 42);
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 21, 11);
 
         let votes: Vec<_> = schemes
             .iter()
-            .take(quorum(schemes.len() as u32) as usize)
+            .take(quorum)
             .map(|scheme| {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -795,7 +791,7 @@ mod tests {
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
@@ -814,7 +810,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -826,7 +822,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let mut truncated = certificate.clone();
+        let mut truncated = certificate;
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);
@@ -836,7 +832,7 @@ mod tests {
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &truncated,
@@ -855,7 +851,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -878,7 +874,7 @@ mod tests {
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
@@ -897,7 +893,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -914,7 +910,7 @@ mod tests {
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
@@ -928,7 +924,7 @@ mod tests {
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
@@ -947,7 +943,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal,
                         },
                     )
@@ -964,7 +960,7 @@ mod tests {
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
             &certificate,
@@ -984,7 +980,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal_a,
                         },
                     )
@@ -998,7 +994,7 @@ mod tests {
                 scheme
                     .sign_vote(
                         NAMESPACE,
-                        VoteContext::Finalize {
+                        Subject::Finalize {
                             proposal: &proposal_b,
                         },
                     )
@@ -1017,13 +1013,13 @@ mod tests {
         let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal_a,
                 },
                 &certificate_a,
             ),
             (
-                VoteContext::Finalize {
+                Subject::Finalize {
                     proposal: &proposal_b,
                 },
                 &bad_certificate,
