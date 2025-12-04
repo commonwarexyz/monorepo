@@ -647,12 +647,17 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedBijection<K, V> {
     }
 }
 
-impl<K: Read, V: Read> Read for OrderedBijection<K, V> {
+impl<K: Read, V: Ord + Read> Read for OrderedBijection<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let inner = OrderedAssociated::<K, V>::read_cfg(buf, cfg)?;
-        Ok(Self { inner })
+        Self::try_from(inner).map_err(|_| {
+            commonware_codec::Error::Invalid(
+                "OrderedBijection",
+                "duplicate value detected during deserialization",
+            )
+        })
     }
 }
 
@@ -823,20 +828,20 @@ mod test {
 
     #[test]
     #[should_panic(expected = "duplicate value detected")]
-    fn test_ordered_unique_duplicate_value_panic() {
+    fn test_ordered_bijection_duplicate_value_panic() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
         let _map: OrderedBijection<_, _> = items.into_iter().collect();
     }
 
     #[test]
-    fn test_ordered_unique_duplicate_value_error() {
+    fn test_ordered_bijection_duplicate_value_error() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
         let result = OrderedBijection::try_from_iter(items);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 
     #[test]
-    fn test_ordered_unique_no_duplicate_values() {
+    fn test_ordered_bijection_no_duplicate_values() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
         let result = OrderedBijection::try_from_iter(items);
         assert!(result.is_ok());
@@ -862,5 +867,18 @@ mod test {
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
         let result = OrderedBijection::try_from(associated);
         assert_eq!(result, Err(Error::DuplicateValue));
+    }
+
+    #[test]
+    fn test_ordered_bijection_decode_rejects_duplicate_values() {
+        let items: [(u8, u8); 3] = [(1, 10), (2, 20), (3, 10)];
+        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+
+        let mut buf = Vec::with_capacity(associated.encode_size());
+        associated.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), (), ());
+        let result = OrderedBijection::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_err());
     }
 }
