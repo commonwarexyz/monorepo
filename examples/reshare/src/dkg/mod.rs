@@ -1,4 +1,5 @@
 //! DKG participant actor
+mod state;
 
 mod actor;
 pub use actor::{Actor, Config};

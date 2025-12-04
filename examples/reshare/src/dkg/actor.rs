@@ -1,16 +1,17 @@
 use super::{Mailbox, Message};
 use crate::{
-    dkg::{actor::observer::Observer, PostUpdate, Update, UpdateCallBack},
+    dkg::{
+        state::{DkgState, State},
+        PostUpdate, Update, UpdateCallBack,
+    },
     namespace,
     orchestrator::{self, EpochTransition},
     self_channel::self_channel,
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::Epoch,
-    utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
+    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
 use commonware_cryptography::{
@@ -18,77 +19,21 @@ use commonware_cryptography::{
         dkg::{observe, Info, Output, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
-    Hasher, PublicKey, Signer,
+    transcript::Summary,
+    Digest, Hasher, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::metadata::Metadata;
-use commonware_utils::{ordered::Set, sequence::FixedBytes, Acknowledgement, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
-use std::num::NonZeroU32;
 use tracing::{info, warn};
 
 mod dealer;
-mod observer;
 mod player;
-
-#[derive(Clone)]
-struct EpochState<V: Variant, P: PublicKey> {
-    epoch: Epoch,
-    // Increments only when the DKG is successful.
-    round: u64,
-    output: Option<Output<V, P>>,
-    share: Option<Share>,
-}
-
-impl<V: Variant, P: PublicKey> Default for EpochState<V, P> {
-    fn default() -> Self {
-        Self {
-            epoch: Default::default(),
-            round: Default::default(),
-            output: None,
-            share: None,
-        }
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for EpochState<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.epoch.write(buf);
-        UInt(self.round).write(buf);
-        self.output.write(buf);
-        self.share.write(buf);
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for EpochState<V, P> {
-    fn encode_size(&self) -> usize {
-        self.epoch.encode_size()
-            + UInt(self.round).encode_size()
-            + self.output.encode_size()
-            + self.share.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        &cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            epoch: ReadExt::read(buf)?,
-            round: UInt::read(buf)?.into(),
-            output: Read::read_cfg(buf, &cfg)?,
-            share: ReadExt::read(buf)?,
-        })
-    }
-}
 
 pub struct Config<C: Signer, P> {
     pub manager: P,
@@ -111,7 +56,6 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
-    epoch_metadata: Metadata<E, FixedBytes<0>, EpochState<V, C::PublicKey>>,
     failed_rounds: Counter,
     partition_prefix: String,
 }
@@ -126,21 +70,6 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
-        // Initialize a metadata store for epoch information.
-        //
-        // **This stores persist private key material to disk. In a production
-        // environment, this key material should both be stored securely and deleted permanently
-        // after use.**
-        let epoch_metadata = Metadata::init(
-            context.with_label("epoch_metadata"),
-            commonware_storage::metadata::Config {
-                partition: format!("{}_current_epoch", &config.partition_prefix),
-                codec_config: NZU32!(config.peer_config.max_participants_per_round()),
-            },
-        )
-        .await
-        .expect("failed to initialize epoch metadata");
-
         let failed_rounds = Counter::default();
         context.register(
             "failed_rounds",
@@ -158,7 +87,6 @@ where
                 mailbox,
                 signer: config.signer,
                 peer_config: config.peer_config,
-                epoch_metadata,
                 failed_rounds,
                 partition_prefix: config.partition_prefix,
             },
@@ -201,21 +129,24 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
-
-        if self.epoch_metadata.get(&FixedBytes::new([])).is_none() {
-            self.epoch_metadata
-                .put_sync(
-                    FixedBytes::new([]),
-                    EpochState {
-                        epoch: Default::default(),
-                        round: 0,
-                        output,
-                        share,
-                    },
-                )
-                .await
-                .expect("should be able to update state");
-        }
+        // **This stores persist private key material to disk. In a production
+        // environment, this key material should both be stored securely and deleted permanently
+        // after use.**
+        let state = State::init(
+            self.context.with_label("storage"),
+            &self.partition_prefix,
+            max_read_size,
+        )
+        .await;
+        if state.dkg_state().await.is_none() {
+            let initial_state = DkgState {
+                round: 0,
+                rng_seed: Summary::random(&mut self.context),
+                output,
+                share,
+            };
+            state.append_dkg_state(initial_state).await;
+        };
 
         // Start a muxer for the physical channel used by DKG/reshare.
         // Make sure to use a channel allowing sending messages to ourselves.
@@ -224,11 +155,14 @@ where
             Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
         mux.start();
         'actor: loop {
-            let state = self
-                .epoch_metadata
-                .get(&FixedBytes::new([]))
-                .expect("state has been initialized above")
-                .clone();
+            let (epoch, dkg_state) = state
+                .dkg_state()
+                .await
+                .expect("dkg_state should be initialized");
+            // Prune everything older than the previous epoch.
+            if let Some(prev) = epoch.previous() {
+                state.prune(prev).await;
+            }
             let (dealers, players, next_players) = if is_dkg {
                 (
                     self.peer_config.participants.clone(),
@@ -237,9 +171,9 @@ where
                 )
             } else {
                 (
-                    self.peer_config.dealers(state.round),
-                    self.peer_config.dealers(state.round + 1),
-                    self.peer_config.dealers(state.round + 2),
+                    self.peer_config.dealers(dkg_state.round),
+                    self.peer_config.dealers(dkg_state.round + 1),
+                    self.peer_config.dealers(dkg_state.round + 2),
                 )
             };
 
@@ -248,7 +182,7 @@ where
             // - Players for the next epoch
             self.manager
                 .update(
-                    state.epoch.get(),
+                    epoch.get(),
                     Set::from_iter_dedup(
                         dealers
                             .iter()
@@ -260,15 +194,17 @@ where
                 .await;
 
             let self_pk = self.signer.public_key();
-            let am_dealer = dealers.position(&self_pk).is_some();
+            // If we've already submitted a log, there's no point acting as the dealer.
+            let am_dealer = dealers.position(&self_pk).is_some()
+                && !state.has_submitted_log(epoch, &self_pk).await;
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
-            if let Some(output) = state.output.as_ref() {
+            if let Some(output) = dkg_state.output.as_ref() {
                 let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
-                    epoch: state.epoch,
+                    epoch,
                     poly: Some(output.public().clone()),
-                    share: state.share.clone(),
+                    share: dkg_state.share.clone(),
                     dealers: dealers.clone(),
                 };
                 orchestrator
@@ -278,8 +214,8 @@ where
 
             let round_info = Info::new(
                 namespace::APPLICATION,
-                state.epoch.get(),
-                state.output.clone(),
+                epoch.get(),
+                dkg_state.output.clone(),
                 dealers,
                 players,
             )
@@ -295,12 +231,12 @@ where
             let mut mb_dealer = if am_dealer {
                 let (dealer, mb) = dealer::Actor::init(
                     self.context.with_label("dealer"),
-                    format!("{}_dealer", &self.partition_prefix),
+                    dkg_state.rng_seed,
+                    state.clone(),
                     (to_players, from_players),
                     round_info.clone(),
-                    max_read_size,
                     self.signer.clone(),
-                    state.share.clone(),
+                    dkg_state.share.clone(),
                 )
                 .await;
                 dealer.start();
@@ -311,7 +247,7 @@ where
             let mut mb_player = if am_player {
                 let (player, mb) = player::Actor::init(
                     self.context.with_label("player"),
-                    format!("{}_player", &self.partition_prefix),
+                    state.clone(),
                     to_dealers,
                     from_dealers,
                     round_info.clone(),
@@ -324,13 +260,6 @@ where
             } else {
                 None
             };
-            let mut observer = Observer::load(
-                self.context.with_label("observer"),
-                format!("{}_observer", &self.partition_prefix),
-                state.epoch.get(),
-                max_read_size,
-            )
-            .await;
 
             let mut dealer_result: Option<SignedDealerLog<V, C>> = None;
 
@@ -361,7 +290,7 @@ where
                         }
                     }
                     Message::Finalized { block, response } => {
-                        let epoch = epoch(BLOCKS_PER_EPOCH, block.height);
+                        let epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
                         let relative_height =
                             relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
                         let mid_point = BLOCKS_PER_EPOCH / 2;
@@ -374,14 +303,14 @@ where
                         }
 
                         if let Some(log) = block.log {
-                            // If we see our dealing outcome in a public block,
-                            // make sure to take it, so that we don't post
-                            // it in a subsequent blocks (although that would be fine).
-                            match observer.put_log(&round_info, log).await {
-                                Some(d) if d == self_pk => {
+                            if let Some((dealer, log)) = log.check(&round_info) {
+                                // If we see our dealing outcome in a finalized block,
+                                // make sure to take it, so that we don't post
+                                // it in a subsequent blocks (although that would be fine).
+                                if dealer == self_pk {
                                     dealer_result.take();
                                 }
-                                _ => {}
+                                state.append_log(epoch, dealer, log).await;
                             }
                         }
 
@@ -426,7 +355,7 @@ where
                 }
             }
 
-            let logs = observer.logs().clone();
+            let logs = state.logs(epoch).await;
             let (success, next_round, next_output, next_share) = if let Some(mb_player) = mb_player
             {
                 let Ok(res) = mb_player.finalize(logs).await else {
@@ -435,23 +364,23 @@ where
                 };
                 match res {
                     Ok((new_output, new_share)) => {
-                        (true, state.round + 1, Some(new_output), Some(new_share))
+                        (true, dkg_state.round + 1, Some(new_output), Some(new_share))
                     }
                     Err(_) => (
                         false,
-                        state.round,
-                        state.output.clone(),
-                        state.share.clone(),
+                        dkg_state.round,
+                        dkg_state.output.clone(),
+                        dkg_state.share.clone(),
                     ),
                 }
             } else {
                 match observe(round_info, logs, 1) {
-                    Ok(output) => (true, state.round + 1, Some(output), None),
+                    Ok(output) => (true, dkg_state.round + 1, Some(output), None),
                     Err(_) => (
                         false,
-                        state.round,
-                        state.output.clone(),
-                        state.share.clone(),
+                        dkg_state.round,
+                        dkg_state.output.clone(),
+                        dkg_state.share.clone(),
                     ),
                 }
             };
@@ -461,31 +390,26 @@ where
 
             info!(
                 success,
-                ?state.epoch,
+                ?epoch,
                 "finalized epoch's reshare; instructing reconfiguration after reshare.",
             );
-            let next_epoch = state.epoch.next();
-
-            // Persist the next epoch information
-            let epoch_state = EpochState {
-                epoch: next_epoch,
-                round: next_round,
-                output: next_output.clone(),
-                share: next_share.clone(),
-            };
-            self.epoch_metadata
-                .put_sync(FixedBytes::new([]), epoch_state)
-                .await
-                .expect("epoch metadata must update");
+            state
+                .append_dkg_state(DkgState {
+                    round: next_round,
+                    rng_seed: Summary::random(&mut self.context),
+                    output: next_output.clone(),
+                    share: next_share.clone(),
+                })
+                .await;
 
             let update = if success {
                 Update::Success {
-                    epoch: state.epoch,
+                    epoch,
                     output: next_output.expect("success => output exists"),
                     share: next_share.clone(),
                 }
             } else {
-                Update::Failure { epoch: state.epoch }
+                Update::Failure { epoch }
             };
             if let PostUpdate::Stop = update_cb.on_update(update).await {
                 // Close the mailbox to prevent accepting any new messages.
@@ -493,7 +417,7 @@ where
                 // Exit last consensus instance to avoid useless work while we wait for shutdown (we
                 // won't need to finalize further blocks after the DKG completes).
                 orchestrator
-                    .report(orchestrator::Message::Exit(state.epoch))
+                    .report(orchestrator::Message::Exit(epoch))
                     .await;
                 // Keep running until killed to keep the orchestrator mailbox alive, allowing
                 // peers that may have gone offline to catch up.
