@@ -80,7 +80,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: u32 = 10;
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hints() {
+    fn test_fetch_hinted() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -941,7 +941,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hints_gradual_depletion() {
+    fn test_fetch_hinted_fallback() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1040,6 +1040,134 @@ mod tests {
             assert!(metrics.contains("_hint_miss_total 2"));
             // hint_hit should be 0 since peer 4 wasn't hinted
             assert!(metrics.contains("_hint_hit_total 0"));
+            assert!(metrics.contains("_hints_active 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_all_hinted() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let key3 = Key(3);
+
+            // Peer 2 has key1
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), Bytes::from("data for key 1"));
+
+            // Peer 3 has nothing (will cause hint miss for key2)
+            // Peer 4 has key2 and key3
+            let mut prod4 = Producer::default();
+            prod4.insert(key2.clone(), Bytes::from("data for key 2"));
+            prod4.insert(key3.clone(), Bytes::from("data for key 3"));
+
+            // Consumer expects all three keys
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key1.clone(), Bytes::from("data for key 1"));
+            cons1.add_expected(key2.clone(), Bytes::from("data for key 2"));
+            cons1.add_expected(key3.clone(), Bytes::from("data for key 3"));
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox4 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod4,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Fetch all keys with mixed hints:
+            // - key1 hinted to peer 2 (has data) -> should succeed directly
+            // - key2 hinted to peer 3 (no data) -> hint miss, fallback to peer 4
+            // - key3 has no hints -> fetched from any peer (peer 4 has it)
+            mailbox1
+                .fetch_all_hinted(vec![
+                    (key1.clone(), vec![peers[1].clone()]), // peer 2 has key1
+                    (key2.clone(), vec![peers[2].clone()]), // peer 3 doesn't have key2
+                    (key3.clone(), vec![]),                 // no hints for key3
+                ])
+                .await;
+
+            // Verify hints are registered (only 2: key1->peer2, key2->peer3; key3 has no hints)
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(metrics.contains("_hints_active 2"));
+
+            // Collect all three events
+            let mut results = HashMap::new();
+            for _ in 0..3 {
+                let event = cons_out1.next().await.unwrap();
+                match event {
+                    Event::Success(key, value) => {
+                        results.insert(key, value);
+                    }
+                    Event::Failed(key) => panic!("Fetch failed for key {:?}", key),
+                }
+            }
+
+            // Verify all keys received correct data
+            assert_eq!(results.len(), 3);
+            assert_eq!(results.get(&key1).unwrap(), &Bytes::from("data for key 1"));
+            assert_eq!(results.get(&key2).unwrap(), &Bytes::from("data for key 2"));
+            assert_eq!(results.get(&key3).unwrap(), &Bytes::from("data for key 3"));
+
+            // Verify hint metrics:
+            // - key1: hint hit (peer 2 had valid data)
+            // - key2: hint miss (peer 3 had no data, fallback to peer 4)
+            // - key3: no hints, so no hint hit/miss
+            let metrics = context.encode();
+            assert!(metrics.contains("_hint_hit_total 1"));
+            assert!(metrics.contains("_hint_miss_total 1"));
             assert!(metrics.contains("_hints_active 0"));
         });
     }
