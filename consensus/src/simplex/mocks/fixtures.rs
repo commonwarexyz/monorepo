@@ -8,7 +8,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{quorum, set::OrderedBijection};
+use commonware_utils::{quorum, set::OrderedInjection};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -26,7 +26,7 @@ pub struct Fixture<S> {
 pub fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
-) -> OrderedBijection<ed25519::PublicKey, ed25519::PrivateKey>
+) -> OrderedInjection<ed25519::PublicKey, ed25519::PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
@@ -88,7 +88,7 @@ where
         .clone()
         .into_iter()
         .zip(bls_public)
-        .collect::<OrderedBijection<_, _>>();
+        .collect::<OrderedInjection<_, _>>();
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))

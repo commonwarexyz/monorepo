@@ -491,14 +491,14 @@ impl<K, V> DoubleEndedIterator for OrderedAssociatedIntoIter<K, V> {
 /// [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the inner
 /// [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
 ///
-/// Consumers that only need the ordered keys can treat an [`OrderedBijection`] as an
+/// Consumers that only need the ordered keys can treat an [`OrderedInjection`] as an
 /// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OrderedBijection<K, V> {
+pub struct OrderedInjection<K, V> {
     inner: OrderedAssociated<K, V>,
 }
 
-impl<K, V> OrderedBijection<K, V> {
+impl<K, V> OrderedInjection<K, V> {
     /// Returns the number of entries in the map.
     pub const fn len(&self) -> usize {
         self.inner.len()
@@ -560,7 +560,7 @@ impl<K, V> OrderedBijection<K, V> {
         self.inner.iter()
     }
 
-    /// Attempts to create an [`OrderedBijection`] from an iterator of key-value pairs.
+    /// Attempts to create an [`OrderedInjection`] from an iterator of key-value pairs.
     ///
     /// Returns an error if any value is duplicated across different keys.
     pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
@@ -573,7 +573,7 @@ impl<K, V> OrderedBijection<K, V> {
     }
 }
 
-impl<K, V: Eq> TryFrom<OrderedAssociated<K, V>> for OrderedBijection<K, V> {
+impl<K, V: Eq> TryFrom<OrderedAssociated<K, V>> for OrderedInjection<K, V> {
     type Error = Error;
 
     fn try_from(map: OrderedAssociated<K, V>) -> Result<Self, Self::Error> {
@@ -586,15 +586,15 @@ impl<K, V: Eq> TryFrom<OrderedAssociated<K, V>> for OrderedBijection<K, V> {
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedBijection<K, V> {
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedInjection<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("OrderedBijection")
+        f.debug_tuple("OrderedInjection")
             .field(&self.inner.iter_pairs().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl<K: fmt::Display, V: fmt::Display> fmt::Display for OrderedBijection<K, V> {
+impl<K: fmt::Display, V: fmt::Display> fmt::Display for OrderedInjection<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[")?;
         for (i, (key, value)) in self.iter_pairs().enumerate() {
@@ -607,19 +607,19 @@ impl<K: fmt::Display, V: fmt::Display> fmt::Display for OrderedBijection<K, V> {
     }
 }
 
-impl<K, V> AsRef<[K]> for OrderedBijection<K, V> {
+impl<K, V> AsRef<[K]> for OrderedInjection<K, V> {
     fn as_ref(&self) -> &[K] {
         self.inner.as_ref()
     }
 }
 
-impl<K, V> AsRef<Ordered<K>> for OrderedBijection<K, V> {
+impl<K, V> AsRef<Ordered<K>> for OrderedInjection<K, V> {
     fn as_ref(&self) -> &Ordered<K> {
         self.inner.as_ref()
     }
 }
 
-impl<K, V> Deref for OrderedBijection<K, V> {
+impl<K, V> Deref for OrderedInjection<K, V> {
     type Target = Ordered<K>;
 
     fn deref(&self) -> &Self::Target {
@@ -627,70 +627,70 @@ impl<K, V> Deref for OrderedBijection<K, V> {
     }
 }
 
-impl<K: Ord, V: Eq> FromIterator<(K, V)> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq> FromIterator<(K, V)> for OrderedInjection<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self::try_from_iter(iter)
-            .expect("duplicate value detected during OrderedBijection construction")
+            .expect("duplicate value detected during OrderedInjection construction")
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Eq> From<&[(K, V)]> for OrderedBijection<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq> From<&[(K, V)]> for OrderedInjection<K, V> {
     fn from(items: &[(K, V)]) -> Self {
         items.iter().cloned().collect()
     }
 }
 
-impl<K: Ord, V: Eq> From<Vec<(K, V)>> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq> From<Vec<(K, V)>> for OrderedInjection<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V: Eq, const N: usize> From<[(K, V); N]> for OrderedBijection<K, V> {
+impl<K: Ord, V: Eq, const N: usize> From<[(K, V); N]> for OrderedInjection<K, V> {
     fn from(items: [(K, V); N]) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Eq, const N: usize> From<&[(K, V); N]> for OrderedBijection<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq, const N: usize> From<&[(K, V); N]> for OrderedInjection<K, V> {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
 }
 
-impl<K, V> From<OrderedBijection<K, V>> for Vec<(K, V)> {
-    fn from(wrapped: OrderedBijection<K, V>) -> Self {
+impl<K, V> From<OrderedInjection<K, V>> for Vec<(K, V)> {
+    fn from(wrapped: OrderedInjection<K, V>) -> Self {
         wrapped.inner.into()
     }
 }
 
-impl<K: Write, V: Write> Write for OrderedBijection<K, V> {
+impl<K: Write, V: Write> Write for OrderedInjection<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.inner.write(buf);
     }
 }
 
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedBijection<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedInjection<K, V> {
     fn encode_size(&self) -> usize {
         self.inner.encode_size()
     }
 }
 
-impl<K: Read, V: Eq + Read> Read for OrderedBijection<K, V> {
+impl<K: Read, V: Eq + Read> Read for OrderedInjection<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let inner = OrderedAssociated::<K, V>::read_cfg(buf, cfg)?;
         Self::try_from(inner).map_err(|_| {
             commonware_codec::Error::Invalid(
-                "OrderedBijection",
+                "OrderedInjection",
                 "duplicate value detected during deserialization",
             )
         })
     }
 }
 
-impl<K, V> IntoIterator for OrderedBijection<K, V> {
+impl<K, V> IntoIterator for OrderedInjection<K, V> {
     type Item = (K, V);
     type IntoIter = OrderedAssociatedIntoIter<K, V>;
 
@@ -699,7 +699,7 @@ impl<K, V> IntoIterator for OrderedBijection<K, V> {
     }
 }
 
-impl<'a, K, V> IntoIterator for &'a OrderedBijection<K, V> {
+impl<'a, K, V> IntoIterator for &'a OrderedInjection<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
 
@@ -857,22 +857,22 @@ mod test {
 
     #[test]
     #[should_panic(expected = "duplicate value detected")]
-    fn test_ordered_bijection_duplicate_value_panic() {
+    fn test_ordered_injection_duplicate_value_panic() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let _map: OrderedBijection<_, _> = items.into_iter().collect();
+        let _map: OrderedInjection<_, _> = items.into_iter().collect();
     }
 
     #[test]
-    fn test_ordered_bijection_duplicate_value_error() {
+    fn test_ordered_injection_duplicate_value_error() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let result = OrderedBijection::try_from_iter(items);
+        let result = OrderedInjection::try_from_iter(items);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 
     #[test]
-    fn test_ordered_bijection_no_duplicate_values() {
+    fn test_ordered_injection_no_duplicate_values() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
-        let result = OrderedBijection::try_from_iter(items);
+        let result = OrderedInjection::try_from_iter(items);
         assert!(result.is_ok());
         let map = result.unwrap();
         assert_eq!(map.len(), 3);
@@ -882,24 +882,24 @@ mod test {
     }
 
     #[test]
-    fn test_ordered_bijection_try_from_associated() {
+    fn test_ordered_injection_try_from_associated() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let bijection = OrderedBijection::try_from(associated).unwrap();
-        assert_eq!(bijection.len(), 3);
-        assert_eq!(bijection.get_value(&1), Some(&"a"));
+        let injection = OrderedInjection::try_from(associated).unwrap();
+        assert_eq!(injection.len(), 3);
+        assert_eq!(injection.get_value(&1), Some(&"a"));
     }
 
     #[test]
-    fn test_ordered_bijection_try_from_associated_duplicate() {
+    fn test_ordered_injection_try_from_associated_duplicate() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let result = OrderedBijection::try_from(associated);
+        let result = OrderedInjection::try_from(associated);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 
     #[test]
-    fn test_ordered_bijection_decode_rejects_duplicate_values() {
+    fn test_ordered_injection_decode_rejects_duplicate_values() {
         let items: [(u8, u8); 3] = [(1, 10), (2, 20), (3, 10)];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
 
@@ -907,7 +907,7 @@ mod test {
         associated.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), (), ());
-        let result = OrderedBijection::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = OrderedInjection::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
         assert!(result.is_err());
     }
 }

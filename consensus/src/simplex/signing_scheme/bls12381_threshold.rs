@@ -36,7 +36,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedBijection, OrderedQuorum};
+use commonware_utils::set::{Ordered, OrderedInjection, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -52,7 +52,7 @@ use std::{
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
-        participants: OrderedBijection<P, V::Public>,
+        participants: OrderedInjection<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
         /// Local share used to generate partial signatures.
@@ -60,7 +60,7 @@ pub enum Scheme<P: PublicKey, V: Variant> {
     },
     Verifier {
         /// Participants in the committee.
-        participants: OrderedBijection<P, V::Public>,
+        participants: OrderedInjection<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
@@ -94,7 +94,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedBijection<_, _>>();
+            .collect::<OrderedInjection<_, _>>();
 
         let public_key = share.public::<V>();
         if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
@@ -134,7 +134,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedBijection<_, _>>();
+            .collect::<OrderedInjection<_, _>>();
 
         Self::Verifier {
             participants,
