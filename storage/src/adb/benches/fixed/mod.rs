@@ -137,6 +137,19 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     }
 }
 
+/// Configuration for Store.
+fn store_cfg() -> StoreConfig<EightCap, ()> {
+    StoreConfig::<EightCap, ()> {
+        log_partition: format!("store_{PARTITION_SUFFIX}"),
+        log_write_buffer: WRITE_BUFFER_SIZE,
+        log_compression: None,
+        log_codec_config: (),
+        log_items_per_section: ITEMS_PER_BLOB,
+        translator: EightCap,
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+    }
+}
+
 fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
     VariableAnyConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -152,6 +165,12 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
         thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
+}
+
+/// Get a Store instance.
+async fn get_store(ctx: Context) -> StoreDb {
+    let cfg = store_cfg();
+    Store::init(ctx, cfg).await.unwrap()
 }
 
 /// Get an unordered any ADB instance.
@@ -194,25 +213,6 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
     VariableAny::init(ctx, variable_any_cfg).await.unwrap()
-}
-
-/// Configuration for Store.
-fn store_cfg() -> StoreConfig<EightCap, ()> {
-    StoreConfig::<EightCap, ()> {
-        log_partition: format!("store_{PARTITION_SUFFIX}"),
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
-        translator: EightCap,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    }
-}
-
-/// Get a Store instance.
-async fn get_store(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
-    Store::init(ctx, cfg).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`
