@@ -8,7 +8,7 @@ use commonware_consensus::{
     simplex::{
         mocks::reporter::Reporter,
         signing_scheme::Scheme,
-        types::{Artifact, Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
+        types::{Artifact, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,

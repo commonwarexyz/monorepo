@@ -27,7 +27,6 @@ members = [
     "broadcast/fuzz",
     "codec/fuzz",
     "coding/fuzz",
-    "consensus/fuzz",
     "collector/fuzz",
     "consensus/fuzz",
     "cryptography/fuzz",

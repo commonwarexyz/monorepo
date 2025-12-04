@@ -1,5 +1,4 @@
 use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
-use commonware_consensus::Viewable;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::quorum;
 use rand::{CryptoRng, Rng};
@@ -226,17 +225,14 @@ where
                 .collect();
 
             let nullifications = reporter.nullifications.lock().unwrap();
-            let nullification_data = nullifications
-                .iter()
-                .map(|(view, _cert)| {
-                    (
-                        view.get(),
-                        Nullification {
-                            signature_count: None, // Ed25519 doesn't expose signature count directly
-                        },
-                    )
-                })
-                .collect();
+            let nullification_data = nullifications.keys().map(|view| {
+                (
+                    view.get(),
+                    Nullification {
+                        signature_count: None, // Ed25519 doesn't expose signature count directly
+                    },
+                )
+            });
 
             let finalizations = reporter.finalizations.lock().unwrap();
             let finalization_data = finalizations
