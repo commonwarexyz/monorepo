@@ -295,14 +295,15 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Processes a response from a peer. Removes and returns the relevant key.
     ///
-    /// Returns the key that was fetched if the response was valid.
-    /// Returns None if the response was invalid or not needed.
+    /// Returns `(key, hinted)` if the response was valid, where `hinted` indicates
+    /// if the peer was hinted for this key. Returns None if the response was invalid
+    /// or not needed.
     ///
     /// On error response (`has_response=false`), only this peer is removed from hints.
     /// On data response (`has_response=true`), **no hint cleanup is performed** since the caller
     /// must validate the response data. On valid data it should then call `clear_hints()`,
     /// otherwise it should block the peer, which removes any hints associated with it.
-    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
+    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<(Key, bool)> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
 
@@ -314,17 +315,20 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
-        let result = self.active.remove_by_left(&id).map(|(_, key)| key);
+        self.active.remove_by_left(&id).map(|(_, key)| {
+            // On error response, remove this peer from hints and use return value
+            // On data response, just check if peer is hinted (caller handles hint cleanup)
+            let hinted = if has_response {
+                self.hints
+                    .get(&key)
+                    .map(|h| h.contains(peer))
+                    .unwrap_or(false)
+            } else {
+                self.remove_hint(&key, peer)
+            };
 
-        // On error response, remove this peer from hints
-        // On data response, caller handles hint cleanup after validation
-        if !has_response {
-            if let Some(ref key) = result {
-                self.remove_hint(key, peer);
-            }
-        }
-
-        result
+            (key, hinted)
+        })
     }
 
     /// Reconciles the list of peers that can be used to fetch data.
@@ -369,14 +373,17 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Removes a specific peer from hints for a key.
     ///
+    /// Returns `true` if the peer was in the hints (and thus removed).
     /// Removes the hints entry for the key if it becomes empty.
-    fn remove_hint(&mut self, key: &Key, peer: &P) {
-        if let Some(hints) = self.hints.get_mut(key) {
-            hints.remove(peer);
-            if hints.is_empty() {
-                self.clear_hints(key);
-            }
+    fn remove_hint(&mut self, key: &Key, peer: &P) -> bool {
+        let Some(hints) = self.hints.get_mut(key) else {
+            return false;
+        };
+        let removed = hints.remove(peer);
+        if hints.is_empty() {
+            self.clear_hints(key);
         }
+        removed
     }
 
     /// Returns the number of fetches.
@@ -397,6 +404,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
         self.requester.len_blocked()
+    }
+
+    /// Returns the total number of hints (sum of all hints across all keys).
+    pub fn len_hints(&self) -> usize {
+        self.hints.values().map(|v| v.len()).sum()
     }
 
     /// Returns true if the fetch is in progress.
@@ -1277,7 +1289,10 @@ mod tests {
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(fetcher.pop_by_id(id, &peer1, false), Some(MockKey(2)));
+            assert_eq!(
+                fetcher.pop_by_id(id, &peer1, false),
+                Some((MockKey(2), true))
+            );
             assert!(!fetcher.hints.contains_key(&MockKey(2)));
 
             // Data response preserves hints
@@ -1286,7 +1301,10 @@ mod tests {
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(fetcher.pop_by_id(id, &peer1, true), Some(MockKey(3)));
+            assert_eq!(
+                fetcher.pop_by_id(id, &peer1, true),
+                Some((MockKey(3), true))
+            );
             assert!(fetcher.hints.contains_key(&MockKey(3)));
         });
     }

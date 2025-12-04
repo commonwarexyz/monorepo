@@ -2,7 +2,7 @@ use commonware_runtime::{
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
 };
-use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
 /// Metrics for the peer actor.
@@ -25,6 +25,12 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub serve_duration: histogram::Timed<E>,
     /// Histogram of successful fetches
     pub fetch_duration: histogram::Timed<E>,
+    /// Number of fetches where a hinted peer returned valid data
+    pub hint_hit: Counter,
+    /// Number of fetches where a hinted peer returned no data
+    pub hint_miss: Counter,
+    /// Current total number of hints (across all keys)
+    pub hints_active: Gauge,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
@@ -76,6 +82,24 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of successful fetches",
             fetch_duration.clone(),
         );
+        let hint_hit = Counter::default();
+        context.register(
+            "hint_hit",
+            "Number of fetches where a hinted peer returned valid data",
+            hint_hit.clone(),
+        );
+        let hint_miss = Counter::default();
+        context.register(
+            "hint_miss",
+            "Number of fetches where a hinted peer returned no data",
+            hint_miss.clone(),
+        );
+        let hints_active = Gauge::default();
+        context.register(
+            "hints_active",
+            "Current total number of hints",
+            hints_active.clone(),
+        );
         let clock = Arc::new(context);
 
         Self {
@@ -88,6 +112,9 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             serve,
             fetch_duration: histogram::Timed::new(fetch_duration, clock.clone()),
             serve_duration: histogram::Timed::new(serve_duration, clock),
+            hint_hit,
+            hint_miss,
+            hints_active,
         }
     }
 }

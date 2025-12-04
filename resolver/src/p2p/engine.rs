@@ -171,6 +171,7 @@ impl<
                 .peers_blocked
                 .try_set(self.fetcher.len_blocked());
             let _ = self.metrics.serve_processing.try_set(self.serves.len());
+            let _ = self.metrics.hints_active.try_set(self.fetcher.len_hints());
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
@@ -383,7 +384,7 @@ impl<
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
+        let Some((key, hinted)) = self.fetcher.pop_by_id(id, &peer, true) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
@@ -393,6 +394,11 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+
+            // Hinted peer had valid data
+            if hinted {
+                self.metrics.hint_hit.inc();
+            }
 
             // Clear all hints for this key
             self.fetcher.clear_hints(&key);
@@ -412,10 +418,15 @@ impl<
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
+        let Some((key, hinted)) = self.fetcher.pop_by_id(id, &peer, false) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
+
+        // Hinted peer didn't have the data
+        if hinted {
+            self.metrics.hint_miss.inc();
+        }
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
