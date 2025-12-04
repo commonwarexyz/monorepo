@@ -464,6 +464,81 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: CHasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > crate::adb::store::LogStore for Immutable<E, K, V, H, T, S>
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    // All unpruned operations are active in an immutable store.
+    fn inactivity_floor_loc(&self) -> Location {
+        self.journal.pruning_boundary()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.op_count() == 0
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.get_metadata().await
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+    crate::adb::store::CleanStore for Immutable<E, K, V, H, T, Clean<H::Digest>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Dirty = Immutable<E, K, V, H, T, Dirty>;
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+    crate::adb::store::DirtyStore for Immutable<E, K, V, H, T, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Clean = Immutable<E, K, V, H, T, Clean<H::Digest>>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;

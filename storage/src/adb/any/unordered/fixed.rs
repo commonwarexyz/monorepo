@@ -79,9 +79,8 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::AnyDb,
             operation::fixed::unordered::Operation,
-            store::{batch_tests, Db as _},
+            store::{batch_tests, CleanStore as _},
             verify_proof,
         },
         index::Unordered as _,
@@ -795,14 +794,6 @@ pub(super) mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let ctx = context.clone();
-                async move { create_test_db(ctx.clone()).await }
-            })
-            .await
-            .unwrap();
-        });
+        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await });
     }
 }

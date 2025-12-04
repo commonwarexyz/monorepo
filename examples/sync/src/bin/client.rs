@@ -8,7 +8,7 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::adb::{store::Db as _, sync};
+use commonware_storage::adb::sync;
 use commonware_sync::{
     any, crate_version,
     databases::{DatabaseType, Syncable},

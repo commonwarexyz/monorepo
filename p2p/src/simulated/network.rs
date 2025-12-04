@@ -860,12 +860,14 @@ impl<P: PublicKey> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
-        context.with_label("router").spawn(|_| async move {
+        context.with_label("router").spawn(|context| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
             // Continually listen for control messages and outbound messages
             select_loop! {
+                context,
+                on_stopped => {},
                 // Listen for control messages, which are used to register channels
                 control = control_receiver.next() => {
                     // If control is closed, exit

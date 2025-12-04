@@ -1,10 +1,13 @@
 //! Support for batching changes to an underlying database.
 
-use crate::adb::{store::Db, Error};
+use crate::{
+    adb::Error,
+    store::{Store, StoreDeletable},
+};
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use core::future::Future;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A trait for getting values from a keyed database.
 pub trait Getter<K, V> {
@@ -13,14 +16,14 @@ pub trait Getter<K, V> {
 }
 
 /// All databases implement the [Getter] trait.
-impl<K, V, D> Getter<K, V> for D
+impl<D> Getter<D::Key, D::Value> for D
 where
-    K: Array,
-    V: Codec + Clone,
-    D: Db<K, V>,
+    D: Store<Error = Error>,
+    D::Key: Array,
+    D::Value: Codec + Clone,
 {
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
+    async fn get(&self, key: &D::Key) -> Result<Option<D::Value>, Error> {
+        Store::get(self, key).await
     }
 }
 
@@ -39,7 +42,9 @@ where
     ///
     /// If the value is Some, the key is being created or updated.
     /// If the value is None, the key is being deleted.
-    diff: HashMap<K, Option<V>>,
+    ///
+    /// We use a BTreeMap instead of HashMap to allow for a deterministic iteration order.
+    diff: BTreeMap<K, Option<V>>,
 }
 
 impl<'a, K, V, D> Batch<'a, K, V, D>
@@ -49,10 +54,10 @@ where
     D: Getter<K, V>,
 {
     /// Returns a new batch of changes that may be written to the database.
-    pub fn new(db: &'a D) -> Self {
+    pub const fn new(db: &'a D) -> Self {
         Self {
             db,
-            diff: HashMap::new(),
+            diff: BTreeMap::new(),
         }
     }
 
@@ -130,7 +135,7 @@ where
     D: Getter<K, V>,
 {
     type Item = (K, Option<V>);
-    type IntoIter = std::collections::hash_map::IntoIter<K, Option<V>>;
+    type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.diff.into_iter()
@@ -138,22 +143,22 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
+pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
-    fn start_batch(&self) -> Batch<'_, K, V, Self>
+    fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
         Self: Sized,
     {
         Batch {
             db: self,
-            diff: HashMap::new(),
+            diff: BTreeMap::new(),
         }
     }
 
     /// Writes a batch of changes to the database.
     fn write_batch(
         &mut self,
-        iter: impl Iterator<Item = (K, Option<V>)>,
+        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
     ) -> impl Future<Output = Result<(), Error>> {
         async {
             for (key, value) in iter {
@@ -168,19 +173,15 @@ pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
     }
 }
 
-/// Default implementation of [Batchable] for all databases.
-impl<K, V, D> Batchable<K, V> for D
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Db<K, V>,
-{
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::store::StorePersistable;
     use commonware_cryptography::{blake3, sha256};
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Runner as _,
+    };
     use core::{fmt::Debug, future::Future};
 
     pub trait TestKey: Array {
@@ -191,91 +192,129 @@ pub mod tests {
         fn from_seed(seed: u8) -> Self;
     }
 
+    /// Run the batch test suite against a database factory within a deterministic executor twice,
+    /// and test the auditor output for equality.
+    pub fn test_batch<D, F, Fut>(mut new_db: F)
+    where
+        F: FnMut(Context) -> Fut + Clone,
+        Fut: Future<Output = D>,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
+    {
+        let executor = deterministic::Runner::default();
+        let mut new_db_clone = new_db.clone();
+        let state1 = executor.start(|context| async move {
+            let ctx = context.clone();
+            run_batch_tests::<D, _, Fut>(&mut || new_db_clone(ctx.clone()))
+                .await
+                .unwrap();
+            ctx.auditor().state()
+        });
+
+        let executor = deterministic::Runner::default();
+        let state2 = executor.start(|context| async move {
+            let ctx = context.clone();
+            run_batch_tests::<D, _, Fut>(&mut || new_db(ctx.clone()))
+                .await
+                .unwrap();
+            ctx.auditor().state()
+        });
+
+        assert_eq!(state1, state2);
+    }
+
     /// Run the shared batch test suite against a database factory.
-    pub async fn run_batch_tests<K, V, D, F, Fut>(mut new_db: F) -> Result<(), Error>
+    pub async fn run_batch_tests<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
-        test_overlay_reads(&mut new_db).await?;
-        test_create(&mut new_db).await?;
-        test_delete(&mut new_db).await?;
-        test_delete_unchecked(&mut new_db).await?;
-        test_write_batch(&mut new_db).await?;
+        test_overlay_reads(new_db).await?;
+        test_create(new_db).await?;
+        test_delete(new_db).await?;
+        test_delete_unchecked(new_db).await?;
+        test_write_batch(new_db).await?;
         Ok(())
     }
 
-    async fn test_overlay_reads<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    async fn test_overlay_reads<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
         let mut db = new_db().await;
-        let key = K::from_seed(1);
-        db.update(key.clone(), V::from_seed(1)).await?;
+        let key = D::Key::from_seed(1);
+        db.update(key.clone(), D::Value::from_seed(1)).await?;
 
         let mut batch = db.start_batch();
-        assert_eq!(batch.get(&key).await?, Some(V::from_seed(1)));
+        assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(1)));
 
-        batch.update(key.clone(), V::from_seed(9)).await?;
-        assert_eq!(batch.get(&key).await?, Some(V::from_seed(9)));
+        batch.update(key.clone(), D::Value::from_seed(9)).await?;
+        assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(9)));
 
         db.destroy().await?;
         Ok(())
     }
 
-    async fn test_create<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    async fn test_create<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
-        let key = K::from_seed(2);
-        assert!(batch.create(key.clone(), V::from_seed(1)).await?);
-        assert!(!batch.create(key.clone(), V::from_seed(2)).await?);
+        let key = D::Key::from_seed(2);
+        assert!(batch.create(key.clone(), D::Value::from_seed(1)).await?);
+        assert!(!batch.create(key.clone(), D::Value::from_seed(2)).await?);
 
         batch.delete_unchecked(key.clone()).await?;
-        assert!(batch.create(key.clone(), V::from_seed(3)).await?);
-        assert_eq!(batch.get(&key).await?, Some(V::from_seed(3)));
+        assert!(batch.create(key.clone(), D::Value::from_seed(3)).await?);
+        assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(3)));
 
-        let existing = K::from_seed(3);
-        db.update(existing.clone(), V::from_seed(4)).await?;
+        let existing = D::Key::from_seed(3);
+        db.update(existing.clone(), D::Value::from_seed(4)).await?;
         let mut batch = db.start_batch();
-        assert!(!batch.create(existing.clone(), V::from_seed(5)).await?);
+        assert!(
+            !batch
+                .create(existing.clone(), D::Value::from_seed(5))
+                .await?
+        );
 
         db.destroy().await?;
         Ok(())
     }
 
-    async fn test_delete<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    async fn test_delete<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
         let mut db = new_db().await;
-        let base_key = K::from_seed(4);
-        db.update(base_key.clone(), V::from_seed(10)).await?;
+        let base_key = D::Key::from_seed(4);
+        db.update(base_key.clone(), D::Value::from_seed(10)).await?;
         let mut batch = db.start_batch();
         assert!(batch.delete(base_key.clone()).await?);
         assert_eq!(batch.get(&base_key).await?, None);
         assert!(!batch.delete(base_key.clone()).await?);
 
         let mut batch = db.start_batch();
-        let overlay_key = K::from_seed(5);
-        batch.update(overlay_key.clone(), V::from_seed(11)).await?;
+        let overlay_key = D::Key::from_seed(5);
+        batch
+            .update(overlay_key.clone(), D::Value::from_seed(11))
+            .await?;
         assert!(batch.delete(overlay_key.clone()).await?);
         assert_eq!(batch.get(&overlay_key).await?, None);
         assert!(!batch.delete(overlay_key).await?);
@@ -284,23 +323,23 @@ pub mod tests {
         Ok(())
     }
 
-    async fn test_delete_unchecked<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    async fn test_delete_unchecked<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
         let mut db = new_db().await;
-        let key = K::from_seed(6);
+        let key = D::Key::from_seed(6);
 
         let mut batch = db.start_batch();
-        batch.update(key.clone(), V::from_seed(12)).await?;
+        batch.update(key.clone(), D::Value::from_seed(12)).await?;
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.update(key.clone(), V::from_seed(13)).await?;
+        db.update(key.clone(), D::Value::from_seed(13)).await?;
         let mut batch = db.start_batch();
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
@@ -309,31 +348,41 @@ pub mod tests {
         Ok(())
     }
 
-    async fn test_write_batch<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    async fn test_write_batch<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable<K, V>,
-        K: TestKey,
-        V: TestValue,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
     {
         let mut db = new_db().await;
-        let existing = K::from_seed(7);
-        db.update(existing.clone(), V::from_seed(0)).await?;
+        let existing = D::Key::from_seed(7);
+        db.update(existing.clone(), D::Value::from_seed(0)).await?;
 
-        let created = K::from_seed(8);
+        let created = D::Key::from_seed(8);
         let mut batch = db.start_batch();
-        batch.update(existing.clone(), V::from_seed(8)).await?;
-        batch.create(created.clone(), V::from_seed(9)).await?;
+        batch
+            .update(existing.clone(), D::Value::from_seed(8))
+            .await?;
+        batch
+            .create(created.clone(), D::Value::from_seed(9))
+            .await?;
         db.write_batch(batch.into_iter()).await?;
 
-        assert_eq!(db.get(&existing).await?, Some(V::from_seed(8)));
-        assert_eq!(db.get(&created).await?, Some(V::from_seed(9)));
+        assert_eq!(
+            Store::get(&db, &existing).await?,
+            Some(D::Value::from_seed(8))
+        );
+        assert_eq!(
+            Store::get(&db, &created).await?,
+            Some(D::Value::from_seed(9))
+        );
 
         let mut delete_batch = db.start_batch();
         delete_batch.delete(existing.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(db.get(&existing).await?, None);
+        assert_eq!(Store::get(&db, &existing).await?, None);
 
         db.destroy().await?;
         Ok(())

@@ -301,6 +301,85 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Clean<H
     }
 }
 
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Dirty> {
+    /// Merkleize the database and compute the root digest.
+    pub fn merkleize(self) -> Keyless<E, V, H, Clean<H::Digest>> {
+        Keyless {
+            journal: self.journal.merkleize(),
+            last_commit_loc: self.last_commit_loc,
+        }
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>>
+    crate::adb::store::LogStore for Keyless<E, V, H, S>
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    // All unpruned operations are active in a keyless store.
+    fn inactivity_floor_loc(&self) -> Location {
+        self.journal.pruning_boundary()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.op_count() == 0
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.get_metadata().await
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::adb::store::CleanStore
+    for Keyless<E, V, H, Clean<H::Digest>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+    type Dirty = Keyless<E, V, H, Dirty>;
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::adb::store::DirtyStore
+    for Keyless<E, V, H, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+    type Clean = Keyless<E, V, H, Clean<H::Digest>>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

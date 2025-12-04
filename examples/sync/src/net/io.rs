@@ -10,6 +10,7 @@ use futures::{
     StreamExt,
 };
 use std::collections::HashMap;
+use tracing::debug;
 
 const REQUEST_BUFFER_SIZE: usize = 64;
 
@@ -22,17 +23,23 @@ pub(super) struct Request<M: Message> {
 /// Run the I/O loop which:
 /// - Receives requests from the request channel and sends them to the sink.
 /// - Receives responses from the stream and forwards them to their callback channel.
-async fn run_loop<Si, St, M>(
+async fn run_loop<E, Si, St, M>(
+    context: E,
     mut sink: Si,
     mut stream: St,
     mut request_rx: mpsc::Receiver<Request<M>>,
     mut pending_requests: HashMap<RequestId, oneshot::Sender<Result<M, Error>>>,
 ) where
+    E: Spawner,
     Si: Sink,
     St: Stream,
     M: Message,
 {
     select_loop! {
+        context,
+        on_stopped => {
+            debug!("context shutdown, terminating I/O task");
+        },
         outgoing = request_rx.next() => {
             match outgoing {
                 Some(Request { request, response_tx }) => {
@@ -88,6 +95,7 @@ where
     M: Message,
 {
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
-    let handle = context.spawn(move |_| run_loop(sink, stream, request_rx, HashMap::new()));
+    let handle =
+        context.spawn(move |context| run_loop(context, sink, stream, request_rx, HashMap::new()));
     Ok((request_tx, handle))
 }

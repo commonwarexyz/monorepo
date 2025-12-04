@@ -100,8 +100,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::AnyDb,
-            store::{batch_tests, Db as _},
+            store::{batch_tests, CleanStore as _},
             verify_proof,
         },
         index::Unordered as _,
@@ -614,18 +613,10 @@ pub(super) mod test {
 
     #[test_traced("DEBUG")]
     fn test_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            batch_tests::run_batch_tests(|| {
-                let mut ctx = context.clone();
-                async move {
-                    let seed = ctx.next_u64();
-                    let cfg = db_config(&format!("batch_{seed}"));
-                    AnyTest::init(ctx, cfg).await.unwrap()
-                }
-            })
-            .await
-            .unwrap();
+        batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let cfg = db_config(&format!("batch_{seed}"));
+            AnyTest::init(ctx, cfg).await.unwrap()
         });
     }
 }
