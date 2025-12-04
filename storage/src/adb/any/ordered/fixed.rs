@@ -84,8 +84,7 @@ mod test {
     use super::*;
     use crate::{
         adb::{
-            any::AnyDb as _,
-            store::{batch_tests, Db as _},
+            store::{batch_tests, CleanStore as _},
             verify_proof,
         },
         index::Unordered as _,

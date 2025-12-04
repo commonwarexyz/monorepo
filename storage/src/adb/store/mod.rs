@@ -23,13 +23,13 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [Store::prune].
 //!
 //! # Example
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, Db as _},
+//!     adb::store::{Config, Store},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -97,10 +97,11 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         MutableContiguous as _,
     },
-    mmr::Location,
+    mmr::{Location, Proof},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
+use commonware_cryptography::Digest;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::{future::Future, ops::Range};
@@ -138,7 +139,12 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec> {
+pub trait LogStore {
+    type Value: Codec;
+
+    /// Returns true if there are no active keys in the database.
+    fn is_empty(&self) -> bool;
+
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -147,75 +153,98 @@ pub trait Db<K: Array, V: Codec> {
     /// known to be inactive. Operations before this point can be safely pruned.
     fn inactivity_floor_loc(&self) -> Location;
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
-
     /// Get the metadata associated with the last commit, or None if no commit has been made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+}
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
-
-    /// Updates the value associated with the given key in the store, inserting a default value if
-    /// the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
-    /// store is closed without committing.
-    fn upsert(
-        &mut self,
-        key: K,
-        update: impl FnOnce(&mut V),
-    ) -> impl Future<Output = Result<(), Error>>
-    where
-        V: Default,
-    {
-        async {
-            let mut value = self.get(&key).await?.unwrap_or_default();
-            update(&mut value);
-
-            self.update(key, value).await
-        }
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    fn commit(
-        &mut self,
-        metadata: Option<V>,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
-
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
+/// A trait for log stores that support pruning.
+pub trait LogStorePrunable: LogStore {
+    /// Prune historical operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+}
 
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
+/// A trait for authenticated stores in a "dirty" state with unmerkleized operations.
+pub trait DirtyStore: LogStore {
+    /// The digest type used for authentication.
+    type Digest: Digest;
 
-    /// Destroy the db, removing all data from disk.
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+    /// The operation type stored in the log.
+    type Operation;
+
+    /// The clean state type that this dirty store transitions to.
+    type Clean: CleanStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Dirty = Self,
+        Value = Self::Value,
+    >;
+
+    /// Merkleize the store and compute the root digest.
+    ///
+    /// Consumes this dirty store and returns a clean store with the computed root.
+    fn merkleize(self) -> Self::Clean;
+}
+
+/// A trait for authenticated stores in a "clean" state where the MMR root is computed.
+pub trait CleanStore: LogStore {
+    /// The digest type used for authentication.
+    type Digest: Digest;
+
+    /// The operation type stored in the log.
+    type Operation;
+
+    /// The dirty state type that this clean store transitions to.
+    type Dirty: DirtyStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Clean = Self,
+        Value = Self::Value,
+    >;
+
+    /// Returns the root digest of the authenticated store.
+    fn root(&self) -> Self::Digest;
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the store in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    #[allow(clippy::type_complexity)]
+    fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the store in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// for the store when it had `historical_size` operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    #[allow(clippy::type_complexity)]
+    fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+
+    /// Convert this clean store into its dirty counterpart for batched updates.
+    fn into_dirty(self) -> Self::Dirty;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -359,28 +388,21 @@ where
             e => Error::Journal(e),
         })
     }
-}
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Value,
-    T: Translator,
-{
-    fn op_count(&self) -> Location {
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    pub const fn op_count(&self) -> Location {
         Location::new_unchecked(self.log.size())
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub const fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -392,7 +414,9 @@ where
         Ok(metadata)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if update_key(&mut self.snapshot, &self.log, &key, new_loc)
             .await?
@@ -408,7 +432,10 @@ where
         Ok(())
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
+    /// be subject to rollback until the next successful `commit`. Returns true if the key was
+    /// created, false if it already existed.
+    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         let new_loc = self.op_count();
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
@@ -420,7 +447,10 @@ where
         Ok(true)
     }
 
-    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_none() {
             return Ok(false);
@@ -433,7 +463,14 @@ where
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
+    /// includes the commit operation itself, and hence will always be equal to `op_count`.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = self
             .last_commit
             .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
@@ -467,11 +504,16 @@ where
         Ok(start_loc..self.op_count())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -495,12 +537,69 @@ where
         Ok(())
     }
 
-    async fn close(self) -> Result<(), Error> {
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
+    }
+}
+
+impl<E, K, V, T> LogStorePrunable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit(None).await.map(|_| ())
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
+    }
+}
+
+impl<E, K, V, T> LogStore for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Value,
+    T: Translator,
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.get_metadata().await
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -528,7 +627,7 @@ where
     T: Translator,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        Db::update(self, key, value).await
+        self.update(key, value).await
     }
 }
 
@@ -540,31 +639,14 @@ where
     T: Translator,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        Db::delete(self, key).await
-    }
-}
-
-impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Value,
-    T: Translator,
-{
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        Db::commit(self, None).await?;
-        Ok(())
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        Db::destroy(self).await
+        self.delete(key).await
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, translator::TwoCap};
+    use crate::{adb::store::batch_tests, store::StoreMut as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Digest as _, Hasher as _,

@@ -10,7 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::store::{Batchable, Db};
+use commonware_storage::adb::store::{Batchable, LogStore, LogStorePrunable};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ const NUM_ELEMENTS: u64 = 1_000;
 const NUM_OPERATIONS: u64 = 10_000;
 const COMMITS_PER_ITERATION: u64 = 100;
 
-/// Benchmark the generation of a large randomly generated [Db].
+/// Benchmark the generation of a large randomly generated database.
 fn bench_fixed_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
@@ -127,23 +127,29 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<
-    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
-        + Batchable<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
->(
+async fn test_db<A>(
     db: A,
     use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, commonware_storage::adb::Error> {
+) -> Result<Duration, commonware_storage::adb::Error>
+where
+    A: commonware_storage::store::Store<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = <Sha256 as Hasher>::Digest,
+        > + commonware_storage::store::StorePersistable
+        + LogStore<Value = <Sha256 as Hasher>::Digest>
+        + LogStorePrunable
+        + Batchable,
+{
     let start = Instant::now();
     let mut db = if use_batch {
         gen_random_kv_batched(db, elements, operations, Some(commit_frequency)).await
     } else {
         gen_random_kv(db, elements, operations, Some(commit_frequency)).await
     };
-    db.sync().await?;
+    db.commit().await?;
     db.prune(db.inactivity_floor_loc()).await?;
     let res = start.elapsed();
     db.destroy().await?; // don't time destroy

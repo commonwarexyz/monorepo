@@ -5,55 +5,85 @@
 use crate::{
     adb::{
         operation::{Committable, Keyed},
-        store::Db,
+        store::{CleanStore, DirtyStore},
         Error,
     },
     journal::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_utils::Array;
 use std::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
 };
 
 pub mod ordered;
 pub mod unordered;
 
-/// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
-/// associated with a key.
-pub trait AnyDb<O: Keyed, D: Digest>: Db<O::Key, O::Value> {
-    fn root(&self) -> D;
+/// Extension trait for Any ADBs in a clean (merkleized) state.
+pub trait CleanAny:
+    CleanStore<Dirty: DirtyAny<Key = Self::Key, Value = Self::Value, Clean = Self>>
+{
+    /// The key type for this database.
+    type Key: Array;
 
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
+    /// Get the value for a given key, or None if it has no value.
+    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
+    /// Commit pending operations to the database, ensuring durability.
+    /// Returns the location range of committed operations.
+    fn commit(
+        &mut self,
+        metadata: Option<Self::Value>,
+    ) -> impl Future<Output = Result<Range<Location>, Error>>;
 
-    /// Analagous to `proof`, but with respect to the state of the database when it had
-    /// `historical_size` operations.
-    fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
+    /// Sync all database state to disk.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Prune historical operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+
+    /// Close the db. Uncommitted operations will be lost or rolled back on restart.
+    fn close(self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Destroy the db, removing all data from disk.
+    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+}
+
+/// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
+pub trait DirtyAny: DirtyStore {
+    /// The key type for this database.
+    type Key: Array;
+
+    /// Get the value for a given key, or None if it has no value.
+    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+
+    /// Update `key` to have value `value`. Subject to rollback until next `commit`.
+    fn update(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>>;
+
+    /// Create a new key-value pair. Returns true if created, false if key already existed.
+    /// Subject to rollback until next `commit`.
+    fn create(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<bool, Error>>;
+
+    /// Delete `key` and its value. Returns true if deleted, false if already inactive.
+    /// Subject to rollback until next `commit`.
+    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.

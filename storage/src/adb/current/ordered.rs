@@ -3,13 +3,13 @@
 
 use crate::{
     adb::{
-        any::{ordered::fixed::Any, AnyDb as _},
+        any::ordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{
             fixed::{ordered::Operation, Value},
             Committable as _, KeyData, Keyed as _,
         },
-        store::Db,
+        store::LogStore,
         Error,
     },
     mmr::{
@@ -158,7 +158,7 @@ impl<
     }
 
     /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.any.is_empty()
     }
 
@@ -510,34 +510,32 @@ impl<
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops(None).await
     }
-}
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: Value,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
-{
-    fn op_count(&self) -> Location {
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    pub fn op_count(&self) -> Location {
         self.any.op_count()
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub const fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await
     }
 
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         self.any
             .update_with_callback(key, value, |loc| {
                 self.status.push(true);
@@ -548,7 +546,10 @@ impl<
             .await
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
+    /// be subject to rollback until the next successful `commit`. Returns true if the key was
+    /// created, false if it already existed.
+    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         self.any
             .create_with_callback(key, value, |loc| {
                 self.status.push(true);
@@ -559,7 +560,10 @@ impl<
             .await
     }
 
-    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let mut r = false;
         self.any
             .delete_with_callback(key, |append, loc| {
@@ -574,7 +578,10 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = self
             .any
             .last_commit
@@ -593,7 +600,8 @@ impl<
         Ok(start_loc..self.op_count())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// Sync all database state to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
@@ -607,7 +615,9 @@ impl<
             .map_err(Into::into)
     }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
@@ -620,13 +630,65 @@ impl<
 
         self.any.prune(prune_loc).await
     }
+}
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::store::StorePersistable for Current<E, K, V, H, T, N>
+{
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit(None).await.map(|_| ())
     }
 
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::adb::store::LogStorePrunable for Current<E, K, V, H, T, N>
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Value,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > LogStore for Current<E, K, V, H, T, N>
+{
+    type Value = V;
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.get_metadata().await
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -644,7 +706,7 @@ impl<
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        Db::get(self, key).await
+        self.get(key).await
     }
 }
 
@@ -658,7 +720,7 @@ impl<
     > crate::store::StoreMut for Current<E, K, V, H, T, N>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        Db::update(self, key, value).await
+        self.update(key, value).await
     }
 }
 
@@ -672,7 +734,7 @@ impl<
     > crate::store::StoreDeletable for Current<E, K, V, H, T, N>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        Db::delete(self, key).await
+        self.delete(key).await
     }
 }
 
