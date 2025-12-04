@@ -5,11 +5,11 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
-        any::fixed::{unordered::Any, Config},
+        any::{unordered::fixed::Any, AnyDb as _, FixedConfig as Config},
         operation::fixed::unordered::Operation as Fixed,
+        store::Db as _,
         sync,
     },
-    mmr::StandardHasher as Standard,
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -24,27 +24,16 @@ const MAX_OPERATIONS: usize = 50;
 #[derive(Debug)]
 enum Operation {
     // Basic ops to build source state
-    Update {
-        key: [u8; 32],
-        value: [u8; 32],
-    },
-    Delete {
-        key: [u8; 32],
-    },
+    Update { key: [u8; 32], value: [u8; 32] },
+    Delete { key: [u8; 32] },
     Commit,
     Prune,
 
     // Sync scenarios
-    SyncFull {
-        fetch_batch_size: u64,
-    },
+    SyncFull { fetch_batch_size: u64 },
 
     // Failure simulation
-    SimulateFailure {
-        sync_log: bool,
-        sync_mmr: bool,
-        write_limit: u8,
-    },
+    SimulateFailure { sync_log: bool },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -68,13 +57,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             6 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_mmr: bool = u.arbitrary()?;
-                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                })
+                Ok(Operation::SimulateFailure { sync_log })
             }
             7 => {
                 let key = u.arbitrary()?;
@@ -88,6 +71,7 @@ impl<'a> Arbitrary<'a> for Operation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Operation>,
+    commit_counter: u64,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -96,7 +80,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        Ok(FuzzInput {
+            ops,
+            commit_counter: 0,
+        })
     }
 }
 
@@ -145,8 +132,7 @@ async fn test_sync<
         };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let mut hasher = Standard::<Sha256>::new();
-        let actual_root = synced.root(&mut hasher);
+        let actual_root = synced.root();
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -158,16 +144,16 @@ async fn test_sync<
     }
 }
 
-fn fuzz(input: FuzzInput) {
+const TEST_NAME: &str = "adb_any_fixed_fuzz_test";
+
+fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = Any::<_, Key, Value, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("adb_any_fixed_fuzz_test"),
-        )
-        .await
-        .expect("Failed to init source db");
+        let mut db =
+            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
+                .await
+                .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -186,7 +172,21 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit => {
-                    db.commit().await.expect("Commit should not fail");
+                    let mut commit_id = [0u8; 32];
+                    if input.commit_counter == 0 {
+                        assert!(db.get_metadata().await.unwrap().is_none());
+                    } else {
+                        commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                        assert_eq!(
+                            db.get_metadata().await.unwrap().unwrap(),
+                            FixedBytes::new(commit_id),
+                        );
+                    }
+                    input.commit_counter += 1;
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    db.commit(Some(FixedBytes::new(commit_id)))
+                        .await
+                        .expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
@@ -199,13 +199,15 @@ fn fuzz(input: FuzzInput) {
                     if db.op_count() == 0 {
                         continue;
                     }
-                    db.commit()
+                    input.commit_counter += 1;
+                    let mut commit_id = [0u8; 32];
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    db.commit(Some(FixedBytes::new(commit_id)))
                         .await
-                        .expect("Commit before sync should not fail");
+                        .expect("Commit should not fail");
 
-                    let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
-                        root: db.root(&mut hasher),
+                        root: db.root(),
                         range: db.inactivity_floor_loc()..db.op_count(),
                     };
 
@@ -224,18 +226,14 @@ fn fuzz(input: FuzzInput) {
                     sync_id += 1;
                 }
 
-                Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                } => {
-                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                Operation::SimulateFailure { sync_log } => {
+                    db.simulate_failure(*sync_log)
                         .await
                         .expect("Simulate failure should not fail");
 
                     db = Any::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
-                        test_config("src"),
+                        test_config(TEST_NAME),
                     )
                     .await
                     .expect("Failed to init source db");

@@ -22,7 +22,7 @@
 //! 2. Deriving encryption randomness r = H3(sigma || message)
 //! 3. Computing the ciphertext components:
 //!    - U = r * G (commitment in G1)
-//!    - V = sigma ⊕ H2(e(r * P_pub, Q_id)) (masked random value)
+//!    - V = sigma ⊕ H2(e(P_pub, Q_id)^r) (masked random value)
 //!    - W = M ⊕ H4(sigma) (masked message)
 //!
 //! Where Q_id = H1(target) maps the target to a point in G2.
@@ -114,7 +114,7 @@ impl From<Digest> for Block {
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
     pub u: V::Public,
-    /// Encrypted random value V = sigma XOR H2(e(r * P_pub, Q_id)).
+    /// Encrypted random value V = sigma XOR H2(e(P_pub, Q_id)^r).
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Block,
@@ -169,7 +169,10 @@ mod hash {
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
-        // Map the combined bytes to a scalar via RFC9380 hash-to-field
+        // Map the combined bytes to a scalar via RFC9380 hash-to-field.
+        //
+        // Strictly speaking, this needs to not be 0, but the odds of this happening
+        // are negligible.
         Scalar::map(DST, &combined)
     }
 
@@ -273,12 +276,14 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let mut u = V::Public::one();
     u.mul(&r);
 
-    // Compute e(r * P_pub, Q_id)
+    // Compute e(P_pub, Q_id)^r = e(r * P_pub, Q_id).
+    //
+    // The latter expression is more efficient to compute.
     let mut r_pub = public;
     r_pub.mul(&r);
     let gt = V::pairing(&r_pub, &q_id);
 
-    // Compute V = sigma XOR H2(e(r * P_pub, Q_id))
+    // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
     let h2_value = hash::h2(&gt);
     let v = xor(&sigma, &h2_value);
 

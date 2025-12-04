@@ -184,7 +184,7 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
-    pub(crate) fn catch(&self) -> bool {
+    pub(crate) const fn catch(&self) -> bool {
         self.catch
     }
 
@@ -251,7 +251,7 @@ pub(crate) struct Aborter {
 
 impl Aborter {
     /// Creates a new [`Aborter`] for the provided abort handle and metric handle.
-    pub(crate) fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
+    pub(crate) const fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
         Self { inner, metric }
     }
 

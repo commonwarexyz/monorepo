@@ -18,17 +18,17 @@ pub trait Journal {
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    V: commonware_codec::Codec + Send,
+    V: commonware_codec::Codec,
 {
     type Op = V;
     type Error = crate::journal::Error;
 
     async fn size(&self) -> u64 {
-        crate::journal::contiguous::variable::Journal::size(self)
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        crate::journal::contiguous::variable::Journal::append(self, op).await?;
+        Self::append(self, op).await?;
         Ok(())
     }
 }

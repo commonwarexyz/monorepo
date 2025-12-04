@@ -1,0 +1,11 @@
+[test-groups]
+slow = { max-threads = "num-cpus" }
+
+[profile.default]
+default-filter = 'not test(/.*_slow_$/)'
+
+[profile.slow]
+default-filter = 'test(/.*_slow_$/)'
+
+[profile.all]
+default-filter = 'test(/.*/)'

@@ -11,6 +11,7 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
@@ -124,10 +125,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        while let Some(msg) = self.receiver.next().await {
-            self.handle_msg(msg).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping tracker");
+            },
+            msg = self.receiver.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping tracker");
+                    break;
+                };
+                self.handle_msg(msg).await;
+            }
         }
-        debug!("tracker shutdown");
     }
 
     /// Handle a [`Message`].
@@ -139,7 +149,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let len = peers.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
-                self.directory.add_set(index, peers.clone());
+
+                // Attempt to add the peer set
+                if !self.directory.add_set(index, peers.clone()) {
+                    return;
+                }
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -328,7 +342,7 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
+        let mut signature = signer.sign(ip_namespace, &(socket, timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
             let mut sig_bytes = signature.encode();

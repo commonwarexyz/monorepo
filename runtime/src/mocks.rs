@@ -29,7 +29,7 @@ pub struct Channel {
 impl Channel {
     /// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
     pub fn init() -> (Sink, Stream) {
-        let channel = Arc::new(Mutex::new(Channel {
+        let channel = Arc::new(Mutex::new(Self {
             buffer: VecDeque::new(),
             waiter: None,
             sink_alive: true,

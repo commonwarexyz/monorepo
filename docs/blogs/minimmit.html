@@ -20,7 +20,7 @@
     <meta property="article:author" content="https://x.com/_patrickogrady" />
     <meta property="article:author" content="https://x.com/B_Chou" />
     <meta property="article:published_time" content="2025-06-24T00:00:00Z" />
-    <meta property="article:modified_time" content="2025-06-24T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-08-14T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
@@ -81,6 +81,7 @@
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a> and <a href="https://x.com/B_Chou">Brendan Chou</a></div>
             <div class="date">June 24, 2025</div>
         </div>
+        <p><i>Update(8/14/2025): A formal specification of Minimmit and a proof of its correctness is now published on <a href="https://arxiv.org/abs/2508.10862">arXiv</a>.</i></p>
         <p>Over the last few months, there has been renewed interest in developing <i>propose-and-vote</i> consensus protocols that reach finality after just one round of voting (~100-200ms). "Two-Phase" protocols, not without tradeoff, only remain safe if a Byzantine adversary controls less than <i>~20%</i> of stake (rather than the <i>~33%</i> tolerance typically considered). Concerned primarily with addressing this drop in fault tolerance, recent constructions propose augmenting Byzantine fault tolerance with crash fault tolerance to retain some path to finality under a "blended" <i>~33%</i> assumption. Minimmit, a new <i>propose-and-vote</i> construction below, optimizes for a different goal: minimizing block time.</p>
         <div class="image-container">
             <img src="/imgs/phase-comparison.png" alt="Phase Comparison">
@@ -367,7 +368,7 @@ fn prune(view) {
         <p>Minimmit can be instantiated in several different ways to tune performance when deployed to production. Some examples are below:</p>
         <ul>
             <li>Use block digests (i.e. <code>c = hash(block)</code>) in <code>propose(c, v, (c', v'))</code>, <code>notarize(c, v)</code>, and <code>notarization(c, v)</code> messages.</li>
-            <li>Employ BLS multi-signatures or BLS threshold signatures, like <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">Threshold Simplex</a>, to cap <code>notarization(c, v)</code> and <code>nullification(v)</code> messages at a constant size regardless of the number of replicas.</li>
+            <li>Employ BLS multi-signatures or BLS threshold signatures, like <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">Threshold Simplex</a>, to cap <code>notarization(c, v)</code> and <code>nullification(v)</code> messages at a constant size regardless of the number of replicas.</li>
             <li>Attach some recent set of <code>proof(v)</code> messages to each <code>propose(c, v, (c', v'))</code> message (to ensure honest replicas that are not yet aware of recent proofs can still broadcast a <code>notarize(c, v)</code> message for valid blocks).</li>
             <li>If <code>≥ f + 1</code> <code>notarize(c, v)</code> messages are observed for some <code>proposal(c, v, (c', v'))</code> considered invalid, request the missing <code>notarization(c, v')</code> or <code>nullification(v')</code> not found in our <code>proofs</code> (that prohibited us from broadcasting a <code>notarize(c, v)</code>) from the peers that consider it valid.</li>
             <li>If stuck in the same view <code>v</code> for time <code>t_s</code>, re-broadcast some <code>proof(v - 1)</code> (to ensure all correct replicas enter <code>v</code>) and re-broadcast <code>notarized</code> (if not <code>⊥</code>) and <code>nullified</code> (if not <code>false</code>).</li>

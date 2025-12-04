@@ -6,7 +6,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
     types::{Round, View},
@@ -81,14 +81,14 @@ where
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             invalid: Arc::new(Mutex::new(0)),
-            latest: Arc::new(Mutex::new(0)),
+            latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
         // We use the seed from view N to select the leader for view N+1
-        let next_round = Round::new(round.epoch(), round.view() + 1);
+        let next_round = Round::new(round.epoch(), round.view().next());
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
             let (leader, _) = select_leader::<S, _>(self.participants.as_ref(), next_round, seed);
@@ -136,7 +136,7 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
@@ -180,7 +180,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Nullify {
+                    Subject::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -226,7 +226,7 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,

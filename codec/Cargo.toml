@@ -10,11 +10,14 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"
 documentation = "https://docs.rs/commonware-codec"
 
+[lints]
+workspace = true
+
 [features]
 default = ["std"]
 std = ["thiserror/std", "bytes/std"]
 
 [dependencies]
-thiserror = { workspace = true }
-bytes = { workspace = true }
-paste = { workspace = true }
+bytes.workspace = true
+paste.workspace = true
+thiserror.workspace = true

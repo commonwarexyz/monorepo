@@ -304,7 +304,6 @@ impl NetworkScheme for Lookup {
             peer.info.private_key.clone(),
             b"fuzz_namespace",
             peer.info.address,
-            peer.info.address,
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing

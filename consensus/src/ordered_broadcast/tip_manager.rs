@@ -101,7 +101,7 @@ mod tests {
             height: u64,
             payload: &str,
         ) -> Node<PublicKey, V, Digest> {
-            let node = create_dummy_node(key.clone(), height, payload);
+            let node = create_dummy_node(key, height, payload);
             manager.put(&node);
             node
         }
@@ -172,7 +172,7 @@ mod tests {
         let key = helpers::deterministic_public_key(4);
         let node1 = helpers::create_dummy_node(key.clone(), 2, "payload");
         assert!(manager.put(&node1));
-        let node2 = helpers::create_dummy_node(key.clone(), 1, "payload");
+        let node2 = helpers::create_dummy_node(key, 1, "payload");
         manager.put(&node2);
     }
 
@@ -184,7 +184,7 @@ mod tests {
         let key = helpers::deterministic_public_key(5);
         let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
         assert!(manager.put(&node1));
-        let node2 = helpers::create_dummy_node(key.clone(), 1, "payload2");
+        let node2 = helpers::create_dummy_node(key, 1, "payload2");
         manager.put(&node2);
     }
 

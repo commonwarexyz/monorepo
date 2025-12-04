@@ -10,25 +10,31 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
-[dependencies]
-commonware-codec = { workspace = true, default-features = false }
-bytes = { workspace = true }
-futures = { workspace = true, optional = true }
-rand = { workspace = true }
-thiserror = { workspace = true }
-cfg-if = { workspace = true }
-num-bigint = { workspace = true, optional = true }
-num-rational = { workspace = true, optional = true }
-num-integer = { workspace = true, optional = true }
-num-traits = { workspace = true, optional = true }
+[lints]
+workspace = true
 
-# Enable "js" feature when WASM is target
+[dependencies]
+bytes.workspace = true
+cfg-if.workspace = true
+commonware-codec = { workspace = true, default-features = false }
+futures = { workspace = true, optional = true }
+num-bigint = { workspace = true, optional = true }
+num-integer = { workspace = true, optional = true }
+num-rational = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
+pin-project.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+# Enable "js" feature when WASM is target
 version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
-num-bigint = { version = "0.4.6", default-features = false }
+criterion.workspace = true
+num-bigint = { workspace = true, default-features = false }
+rstest.workspace = true
 
 [features]
 default = ["std"]
@@ -48,3 +54,8 @@ std = [
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "utils"
+harness = false
+path = "src/benches/bench.rs"

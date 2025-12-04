@@ -7,7 +7,7 @@ use crate::authenticated::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -92,18 +92,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
-    ) -> Error {
+    ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
         let ping_rate_limiter =
-            RateLimiter::direct_with_clock(self.allowed_ping_rate, &self.context);
+            RateLimiter::direct_with_clock(self.allowed_ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
@@ -114,43 +114,45 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 let mut deadline = context.current();
 
                 // Enter into the main loop
-                loop {
-                    select! {
-                        _ = context.sleep_until(deadline) => {
-                            // Periodically send a ping to the peer
-                            Self::send(
-                                &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_ping(&peer),
-                                types::Message::Ping,
-                            ).await?;
+                select_loop! {
+                    context,
+                    on_stopped => {},
+                    _ = context.sleep_until(deadline) => {
+                        // Periodically send a ping to the peer
+                        Self::send(
+                            &mut conn_sender,
+                            &self.sent_messages,
+                            metrics::Message::new_ping(&peer),
+                            types::Message::Ping,
+                        ).await?;
 
-                            // Reset ticker
-                            deadline = context.current() + self.ping_frequency;
-                        },
-                        msg_control = self.control.next() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            match msg {
-                                Message::Kill => {
-                                    return Err(Error::PeerKilled(peer.to_string()))
-                                }
+                        // Reset ticker
+                        deadline = context.current() + self.ping_frequency;
+                    },
+                    msg_control = self.control.next() => {
+                        let msg = match msg_control {
+                            Some(msg_control) => msg_control,
+                            None => return Err(Error::PeerDisconnected),
+                        };
+                        match msg {
+                            Message::Kill => {
+                                return Err(Error::PeerKilled(peer.to_string()))
                             }
-                        },
-                        msg_high = self.high.next() => {
-                            let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
-                                .await?;
-                        },
-                        msg_low = self.low.next() => {
-                            let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
-                                .await?;
                         }
+                    },
+                    msg_high = self.high.next() => {
+                        let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                            .await?;
+                    },
+                    msg_low = self.low.next() => {
+                        let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                            .await?;
                     }
                 }
+
+                Ok(())
             }
         });
         let mut receive_handler: Handle<Result<(), Error>> = self
@@ -159,10 +161,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .spawn(move |context| async move {
                 loop {
                     // Receive a message from the peer
-                    let msg = conn_receiver
-                        .recv()
-                        .await
-                        .map_err(Error::ReceiveFailed)?;
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
                     let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
@@ -227,24 +226,26 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             });
 
-        // Wait for one of the handlers to finish
-        //
-        // It is only possible for a handler to exit if there is an error.
+        // Wait for one of the handlers to finish or shutdown
+        let mut shutdown = self.context.stopped();
         let result = select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping peer");
+                Ok(Ok(()))
+            },
             send_result = &mut send_handler => {
-                receive_handler.abort();
                 send_result
             },
             receive_result = &mut receive_handler => {
-                send_handler.abort();
                 receive_result
             }
         };
 
-        // Parse error
+        // Parse result
         match result {
-            Ok(e) => e.unwrap_err(),
-            Err(e) => Error::UnexpectedFailure(e),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Error::UnexpectedFailure(e)),
         }
     }
 }

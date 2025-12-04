@@ -31,7 +31,7 @@ impl<P: PublicKey> Set<P> {
     }
 
     /// Returns the number of peers in the set.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.ordered.len()
     }
 
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn test_single_peer_set() {
         let peers = vec![ed25519::PrivateKey::from_seed(42).public_key()];
-        let mut set = Set::new(peers.clone().into());
+        let mut set = Set::new(peers.into());
 
         assert_eq!(set.len(), 1);
         assert_eq!(

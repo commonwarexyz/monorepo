@@ -1,14 +1,14 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::fixed::unordered::Any] database.
+//! [commonware_storage::adb::any::unordered::fixed::Any] database.
 
 use clap::{Arg, Command};
-use commonware_codec::{DecodeExt, Encode};
-use commonware_macros::select;
+use commonware_codec::{DecodeExt, Encode, Read};
+use commonware_macros::select_loop;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
+use commonware_storage::adb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -108,31 +108,28 @@ where
 {
     let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-
     if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
         *last_time = now;
-
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
-
+        let new_operations_len = new_operations.len();
         // Add operations to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
+            if let Err(err) = DB::add_operations(&mut *database, new_operations).await {
                 error!(?err, "failed to add operations to database");
             }
-            DB::root(&*database, &mut Standard::new())
+            DB::root(&*database)
         };
-
-        state.ops_counter.inc_by(new_operations.len() as u64);
+        state.ops_counter.inc_by(new_operations_len as u64);
         let root_hex = root
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         info!(
-            operations_added = new_operations.len(),
+            new_operations_len,
             root = %root_hex,
             "added operations"
         );
@@ -153,13 +150,8 @@ where
 
     // Get the current database state
     let (root, lower_bound, upper_bound) = {
-        let mut hasher = Standard::new();
         let database = state.database.read().await;
-        (
-            database.root(&mut hasher),
-            database.lower_bound(),
-            database.op_count(),
-        )
+        (database.root(), database.lower_bound(), database.op_count())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
@@ -294,6 +286,7 @@ async fn handle_client<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
@@ -301,58 +294,62 @@ where
     // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
-    loop {
-        select! {
-            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                match incoming {
-                    Ok(message_data) => {
-                        // Parse the message.
-                        let message = match wire::Message::decode(&message_data[..]) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                warn!(client_addr = %client_addr, ?err, "failed to parse message");
-                                state.error_counter.inc();
-                                continue;
-                            }
-                        };
+    select_loop! {
+        context,
+        on_stopped => {
+            debug!("context shutdown, closing client connection");
+        },
+        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+            match incoming {
+                Ok(message_data) => {
+                    // Parse the message.
+                    let message = match wire::Message::decode(&message_data[..]) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                            state.error_counter.inc();
+                            continue;
+                        }
+                    };
 
-                        // Start a new task to handle the message.
-                        // The response will be sent on `response_sender`.
-                        context.with_label("request-handler").spawn({
-                            let state = state.clone();
-                            let mut response_sender = response_sender.clone();
-                            move |_| async move {
-                                let response = handle_message::<DB>(&state, message).await;
-                                if let Err(err) = response_sender.send(response).await {
-                                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
-                                }
+                    // Start a new task to handle the message.
+                    // The response will be sent on `response_sender`.
+                    context.with_label("request-handler").spawn({
+                        let state = state.clone();
+                        let mut response_sender = response_sender.clone();
+                        move |_| async move {
+                            let response = handle_message::<DB>(&state, message).await;
+                            if let Err(err) = response_sender.send(response).await {
+                                warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
                             }
-                        });
-                    }
-                    Err(err) => {
-                        info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
+                        }
+                    });
                 }
-            },
+                Err(err) => {
+                    info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
+                    state.error_counter.inc();
+                    return Ok(());
+                }
+            }
+        },
 
-            outgoing = response_receiver.next() => {
-                if let Some(response) = outgoing {
-                    // We have a response to send to the client.
-                    let response_data = response.encode().to_vec();
-                    if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-                        info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
-                } else {
-                    // Channel closed
-                    break Ok(());
+        outgoing = response_receiver.next() => {
+            if let Some(response) = outgoing {
+                // We have a response to send to the client.
+                let response_data = response.encode().to_vec();
+                if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+                    state.error_counter.inc();
+                    return Ok(());
                 }
+            } else {
+                // Channel closed
+                return Ok(());
             }
         }
     }
+
+    Ok(())
 }
 
 /// Initialize and display database state with initial operations.
@@ -379,8 +376,7 @@ where
     database.commit().await?;
 
     // Display database state
-    let mut hasher = Standard::new();
-    let root = database.root(&mut hasher);
+    let root = database.root();
     let root_hex = root
         .as_ref()
         .iter()
@@ -404,6 +400,7 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());
@@ -423,34 +420,38 @@ where
 
     let state = Arc::new(State::new(context.with_label("server"), database));
     let mut next_op_time = context.current() + config.op_interval;
-    loop {
-        select! {
-            _ = context.sleep_until(next_op_time) => {
-                // Add operations to the database
-                if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
-                    warn!(?err, "failed to add additional operations");
+    select_loop! {
+        context,
+        on_stopped => {
+            debug!("context shutdown, stopping server");
+        },
+        _ = context.sleep_until(next_op_time) => {
+            // Add operations to the database
+            if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
+                warn!(?err, "failed to add additional operations");
+            }
+            next_op_time = context.current() + config.op_interval;
+        },
+        client_result = listener.accept() => {
+            match client_result {
+                Ok((client_addr, sink, stream)) => {
+                    let state = state.clone();
+                    context.with_label("client").spawn(move|context|async move {
+                        if let Err(err) =
+                            handle_client::<DB, _>(context, state, sink, stream, client_addr).await
+                        {
+                            error!(client_addr = %client_addr, ?err, "❌ error handling client");
+                        }
+                    });
                 }
-                next_op_time = context.current() + config.op_interval;
-            },
-            client_result = listener.accept() => {
-                match client_result {
-                    Ok((client_addr, sink, stream)) => {
-                        let state = state.clone();
-                        context.with_label("client").spawn(move|context|async move {
-                            if let Err(err) =
-                                handle_client::<DB, _>(context, state, sink, stream, client_addr).await
-                            {
-                                error!(client_addr = %client_addr, ?err, "❌ error handling client");
-                            }
-                        });
-                    }
-                    Err(err) => {
-                        error!(?err, "❌ failed to accept client");
-                    }
+                Err(err) => {
+                    error!(?err, "❌ failed to accept client");
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 /// Run the Any database server.
@@ -590,16 +591,6 @@ fn main() {
         eprintln!("❌ {e}");
         std::process::exit(1);
     });
-    info!(
-        database_type = %config.database_type.as_str(),
-        port = config.port,
-        initial_ops = config.initial_ops,
-        storage_dir = %config.storage_dir,
-        metrics_port = config.metrics_port,
-        op_interval = ?config.op_interval,
-        ops_per_interval = config.ops_per_interval,
-        "configuration"
-    );
 
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
@@ -613,6 +604,16 @@ fn main() {
             },
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
             None,
+        );
+        info!(
+            database_type = %config.database_type.as_str(),
+            port = config.port,
+            initial_ops = config.initial_ops,
+            storage_dir = %config.storage_dir,
+            metrics_port = config.metrics_port,
+            op_interval = ?config.op_interval,
+            ops_per_interval = config.ops_per_interval,
+            "configuration"
         );
 
         // Run the appropriate server based on database type

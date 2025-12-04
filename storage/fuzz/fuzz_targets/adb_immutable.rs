@@ -35,13 +35,6 @@ enum ImmutableOperation {
     Get {
         key_seed: u64,
     },
-    GetLoc {
-        loc: u64,
-    },
-    GetFromLoc {
-        key_seed: u64,
-        loc: u64,
-    },
     Commit {
         has_metadata: bool,
         metadata_size: usize,
@@ -157,24 +150,6 @@ fn fuzz(input: FuzzInput) {
                     let _ = db.get(&key).await;
                 }
 
-                ImmutableOperation::GetLoc { loc } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 && loc < op_count {
-                        let loc = Location::new(loc).unwrap();
-                        let _ = db.get_loc(loc).await;
-                    }
-                }
-
-                ImmutableOperation::GetFromLoc { key_seed, loc } => {
-                    let key = generate_key(&mut rng, key_seed);
-
-                    if !set_locations.is_empty() {
-                        let idx = (loc as usize) % set_locations.len();
-                        let (_, set_loc) = set_locations[idx];
-                        let _ = db.get_from_loc(&key, set_loc).await;
-                    }
-                }
-
                 ImmutableOperation::Commit {
                     has_metadata,
                     metadata_size,
@@ -216,7 +191,7 @@ fn fuzz(input: FuzzInput) {
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
                     }
@@ -260,7 +235,7 @@ fn fuzz(input: FuzzInput) {
 
                 ImmutableOperation::Root => {
                     if uncommitted_ops.is_empty() {
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
             }

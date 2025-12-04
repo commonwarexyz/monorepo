@@ -10,25 +10,28 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
 documentation = "https://docs.rs/commonware-estimator"
 
+[lints]
+workspace = true
+
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-rand = { workspace = true }
-tracing = { workspace = true }
-futures = { workspace = true }
-clap = { workspace = true }
-prometheus-client = { workspace = true }
-governor = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
-serde_json = { workspace = true }
+bytes.workspace = true
+clap.workspace = true
+colored.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
-serde   = { workspace = true, features = ["derive"] }
-colored = "3.0.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 
 [lib]
 name = "estimator"

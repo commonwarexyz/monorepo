@@ -6,10 +6,11 @@ use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{
         self,
-        any::fixed::{unordered::Any, Config},
+        any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
+        store::Db,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -61,12 +62,12 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(Location::from(count)));
+        operations.push(Operation::CommitFloor(None, Location::from(count)));
         operations
     }
 
@@ -82,8 +83,8 @@ where
                 Operation::Delete(key) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                Operation::CommitFloor(metadata, _) => {
+                    Db::commit(database, metadata).await?;
                 }
             }
         }
@@ -91,19 +92,20 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+        Db::commit(self, None).await?;
+        Ok(())
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self) -> Key {
+        AnyDb::root(self)
     }
 
     fn op_count(&self) -> Location {
-        self.op_count()
+        Db::op_count(self)
     }
 
     fn lower_bound(&self) -> Location {
-        self.inactivity_floor_loc()
+        Db::inactivity_floor_loc(self)
     }
 
     fn historical_proof(
@@ -112,7 +114,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        AnyDb::historical_proof(self, op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
@@ -133,7 +135,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

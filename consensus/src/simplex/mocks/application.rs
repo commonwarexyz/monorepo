@@ -5,12 +5,12 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Epochable, Relay as Re,
+    Automaton as Au, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -23,6 +23,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
@@ -58,7 +59,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })
@@ -261,50 +262,52 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
-        loop {
-            select! {
-                message = self.mailbox.next() => {
-                    let message =match message {
-                        Some(message) => message,
-                        None => break,
-                    };
-                    match message {
-                        Message::Genesis { epoch, response } => {
-                            let digest = self.genesis(epoch);
-                            let _ = response.send(digest);
-                        }
-                        Message::Propose { context, response } => {
-                            let digest = self.propose(context).await;
-                            let _ = response.send(digest);
-                        }
-                        Message::Verify { context, payload, response } => {
-                            if let Some(contents) = seen.get(&payload) {
-                                let verified = self.verify(context, payload, contents.clone()).await;
-                                let _ = response.send(verified);
-                            } else {
-                                waiters
-                                    .entry(payload)
-                                    .or_default()
-                                    .push((context, response));
-                                continue;
-                            }
-                        }
-                        Message::Broadcast { payload } => {
-                            self.broadcast(payload).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping application");
+            },
+            message = self.mailbox.next() => {
+                let message =match message {
+                    Some(message) => message,
+                    None => break,
+                };
+                match message {
+                    Message::Genesis { epoch, response } => {
+                        let digest = self.genesis(epoch);
+                        let _ = response.send(digest);
+                    }
+                    Message::Propose { context, response } => {
+                        let digest = self.propose(context).await;
+                        let _ = response.send(digest);
+                    }
+                    Message::Verify { context, payload, response } => {
+                        if let Some(contents) = seen.get(&payload) {
+                            let verified = self.verify(context, payload, contents.clone()).await;
+                            let _ = response.send(verified);
+                        } else {
+                            waiters
+                                .entry(payload)
+                                .or_default()
+                                .push((context, response));
+                            continue;
                         }
                     }
-                },
-                broadcast = self.broadcast.next() => {
-                    // Record digest for future use
-                    let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest, contents.clone());
+                    Message::Broadcast { payload } => {
+                        self.broadcast(payload).await;
+                    }
+                }
+            },
+            broadcast = self.broadcast.next() => {
+                // Record digest for future use
+                let (digest, contents) = broadcast.expect("broadcast closed");
+                seen.insert(digest, contents.clone());
 
-                    // Check if we have a waiter
-                    if let Some(waiters) = waiters.remove(&digest) {
-                        for (context, sender) in waiters {
-                            let verified = self.verify(context, digest, contents.clone()).await;
-                            sender.send(verified).expect("Failed to send verification");
-                        }
+                // Check if we have a waiter
+                if let Some(waiters) = waiters.remove(&digest) {
+                    for (context, sender) in waiters {
+                        let verified = self.verify(context, digest, contents.clone()).await;
+                        sender.send(verified).expect("Failed to send verification");
                     }
                 }
             }

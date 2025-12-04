@@ -14,6 +14,7 @@ use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 50;
+const MAX_PROOF_OPS: u64 = 100;
 
 #[derive(Debug)]
 enum Operation {
@@ -44,7 +45,6 @@ enum Operation {
     },
     SimulateFailure {
         sync_log: bool,
-        sync_locations: bool,
         sync_mmr: bool,
     },
 }
@@ -101,13 +101,8 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             12 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_locations: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_locations,
-                    sync_mmr,
-                })
+                Ok(Operation::SimulateFailure { sync_log, sync_mmr })
             }
             _ => unreachable!(),
         }
@@ -138,14 +133,11 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         mmr_metadata_partition: format!("{test_name}_meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
-        locations_journal_partition: format!("{test_name}_locations"),
-        locations_items_per_blob: NZU64!(11),
-        locations_write_buffer: NZUsize!(1024),
         thread_pool: None,
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     }
@@ -157,7 +149,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
         let mut db =
-            Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
+            Keyless::<_, _, Sha256, _>::init(context.clone(), test_config("keyless_fuzz_test"))
                 .await
                 .expect("Failed to init keyless db");
 
@@ -212,13 +204,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc().await;
+                    let _ = db.oldest_retained_loc();
                 }
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let mut hasher = Standard::<Sha256>::new();
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
 
@@ -229,13 +220,13 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
+                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
+                        let root = db.root();
                         if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
-                            let root = db.root(&mut hasher);
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
-                                "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
+                                "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                         }
                     }
@@ -246,29 +237,35 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
+                    db.sync().await.expect("Sync should not fail");
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                         let size = Location::new(size).unwrap();
                         let start_loc = (*start_offset as u64) % *size;
                         let start_loc = Location::new(start_loc).unwrap();
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let _ = db
-                            .historical_proof(size, start_loc, NZU64!(max_ops_value))
-                            .await;
+                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                        let root = db.root();
+                        if let Ok((proof, ops)) = db
+                            .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
+                            .await {
+                            assert!(
+                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
+                            );
+                        }
                     }
                 }
 
                 Operation::SimulateFailure {
                     sync_log,
-                    sync_locations,
                     sync_mmr,
                 } => {
-                    db.simulate_failure(*sync_log, *sync_locations, *sync_mmr)
+                    db.simulate_failure(*sync_log, *sync_mmr)
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Keyless::<_, Vec<u8>, Sha256>::init(
+                    db = Keyless::init(
                         context.clone(),
                         test_config("keyless_fuzz_test"),
                     )

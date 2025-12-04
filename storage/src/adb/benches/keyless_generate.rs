@@ -1,4 +1,4 @@
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -6,7 +6,10 @@ use commonware_runtime::{
     tokio::{Config, Context},
     ThreadPool,
 };
-use commonware_storage::adb::keyless::{Config as KConfig, Keyless};
+use commonware_storage::{
+    adb::keyless::{Config as KConfig, Keyless},
+    mmr::mem::Clean,
+};
 use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -36,14 +39,11 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
-        locations_items_per_blob: ITEMS_PER_BLOB,
-        locations_write_buffer: NZUsize!(1024),
         thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
@@ -54,9 +54,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
-    let mut db = Keyless::<_, Vec<u8>, Sha256>::init(ctx, keyless_cfg)
-        .await
-        .unwrap();
+    let mut db = Keyless::init(ctx, keyless_cfg).await.unwrap();
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
@@ -73,12 +71,12 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     db
 }
 
-type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
+type KeylessDb = Keyless<Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>;
 
 /// Benchmark the generation of a large randomly generated keyless db.
 fn bench_keyless_generate(c: &mut Criterion) {
     let cfg = Config::default();
-    let runner = tokio::Runner::new(cfg.clone());
+    let runner = tokio::Runner::new(cfg);
     for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
         c.bench_function(
             &format!("{}/operations={}", module_path!(), operations,),

@@ -51,7 +51,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
     ) -> (Self, Mailbox<C, V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Reporter {
+            Self {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,
@@ -127,7 +127,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
                         .highest
                         .get(&chunk.sequencer)
                         .copied()
-                        .unwrap_or((0, 0));
+                        .unwrap_or((0, Epoch::zero()));
                     if chunk.height > highest.0 {
                         self.highest
                             .insert(chunk.sequencer.clone(), (chunk.height, lock.epoch));

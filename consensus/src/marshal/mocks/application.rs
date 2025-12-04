@@ -1,4 +1,5 @@
-use crate::{Block, Reporter};
+use crate::{marshal::Update, Block, Reporter};
+use commonware_utils::Acknowledgement;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -8,12 +9,15 @@ use std::{
 #[derive(Clone)]
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<u64, B>>>,
+    #[allow(clippy::type_complexity)]
+    tip: Arc<Mutex<Option<(u64, B::Commitment)>>>,
 }
 
 impl<B: Block> Default for Application<B> {
     fn default() -> Self {
         Self {
             blocks: Default::default(),
+            tip: Default::default(),
         }
     }
 }
@@ -23,15 +27,25 @@ impl<B: Block> Application<B> {
     pub fn blocks(&self) -> BTreeMap<u64, B> {
         self.blocks.lock().unwrap().clone()
     }
+
+    /// Returns the tip.
+    pub fn tip(&self) -> Option<(u64, B::Commitment)> {
+        *self.tip.lock().unwrap()
+    }
 }
 
 impl<B: Block> Reporter for Application<B> {
-    type Activity = B;
+    type Activity = Update<B>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        self.blocks
-            .lock()
-            .unwrap()
-            .insert(activity.height(), activity);
+        match activity {
+            Update::Block(block, ack_tx) => {
+                self.blocks.lock().unwrap().insert(block.height(), block);
+                ack_tx.acknowledge();
+            }
+            Update::Tip(height, commitment) => {
+                *self.tip.lock().unwrap() = Some((height, commitment));
+            }
+        }
     }
 }
