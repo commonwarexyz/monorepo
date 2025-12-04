@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::{resolver::state::State, voter},
         signing_scheme::Scheme,
-        types::Voter,
+        types::Certificate,
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -48,7 +48,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
 }
 
 impl<
@@ -152,14 +152,14 @@ impl<
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    fn validate(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
+    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
-            Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
+            Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
 
         // Validate message
         match incoming {
-            Voter::Notarization(notarization) => {
+            Certificate::Notarization(notarization) => {
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
@@ -177,9 +177,9 @@ impl<
                     return None;
                 }
                 debug!(%view, received = %notarization.view(), "received notarization for request");
-                Some(Voter::Notarization(notarization))
+                Some(Certificate::Notarization(notarization))
             }
-            Voter::Finalization(finalization) => {
+            Certificate::Finalization(finalization) => {
                 if finalization.view() < view {
                     debug!(%view, received = %finalization.view(), "finalization below view");
                     return None;
@@ -197,9 +197,9 @@ impl<
                     return None;
                 }
                 debug!(%view, received = %finalization.view(), "received finalization for request");
-                Some(Voter::Finalization(finalization))
+                Some(Certificate::Finalization(finalization))
             }
-            Voter::Nullification(nullification) => {
+            Certificate::Nullification(nullification) => {
                 if nullification.view() != view {
                     debug!(%view, received = %nullification.view(), "nullification view mismatch");
                     return None;
@@ -217,11 +217,7 @@ impl<
                     return None;
                 }
                 debug!(%view, received = %nullification.view(), "received nullification for request");
-                Some(Voter::Nullification(nullification))
-            }
-            msg => {
-                debug!(?msg, "rejecting unexpected message type");
-                None
+                Some(Certificate::Nullification(nullification))
             }
         }
     }
@@ -249,7 +245,7 @@ impl<
                 let _ = response.send(true);
 
                 // Notify voter as soon as possible
-                voter.verified(parsed.clone()).await;
+                voter.resolved(parsed.clone()).await;
 
                 // Process message
                 self.state.handle(parsed, resolver).await;

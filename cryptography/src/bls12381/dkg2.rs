@@ -727,7 +727,7 @@ impl<P: PublicKey> AckOrReveal<P> {
 impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Ack(x) => write!(f, "Ack({:?})", x),
+            Self::Ack(x) => write!(f, "Ack({x:?})"),
             Self::Reveal(_) => write!(f, "Reveal(REDACTED)"),
         }
     }
@@ -1564,20 +1564,12 @@ mod test_plan {
             // Check dealer/player ranges
             for &d in &self.dealers {
                 if d >= num_participants {
-                    return Err(anyhow!(
-                        "dealer {} out of range [1, {}]",
-                        d,
-                        num_participants
-                    ));
+                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]"));
                 }
             }
             for &p in &self.players {
                 if p >= num_participants {
-                    return Err(anyhow!(
-                        "player {} out of range [1, {}]",
-                        p,
-                        num_participants
-                    ));
+                    return Err(anyhow!("player {p} out of range [1, {num_participants}]"));
                 }
             }
 
@@ -1586,7 +1578,7 @@ mod test_plan {
                 // Every dealer must have been a player in the previous round
                 for &d in &self.dealers {
                     if !prev_players.contains(&d) {
-                        return Err(anyhow!("dealer {} was not a player in previous round", d));
+                        return Err(anyhow!("dealer {d} was not a player in previous round"));
                     }
                 }
                 // Must have >= quorum(prev_players) dealers
@@ -1920,8 +1912,7 @@ mod test_plan {
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
-                        "Round {} should have failed but succeeded",
-                        i_round
+                        "Round {i_round} should have failed but succeeded"
                     );
                     continue;
                 }
@@ -1966,7 +1957,7 @@ mod test_plan {
                 }
 
                 // Generate and verify threshold signature
-                let test_message = format!("test message round {}", i_round).into_bytes();
+                let test_message = format!("test message round {i_round}").into_bytes();
                 let namespace = Some(&b"test"[..]);
 
                 let mut partial_sigs = Vec::new();

@@ -724,6 +724,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Put a key-value pair into the [Freezer].
+    /// If the key already exists, the value is updated.
     pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
         self.puts.inc();
 
