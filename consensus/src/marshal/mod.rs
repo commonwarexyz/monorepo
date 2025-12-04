@@ -1800,7 +1800,9 @@ mod tests {
             let notarization = make_notarization(
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(1)),
+                    leader: 0,
                     parent: View::new(0),
+                    parent_payload: parent,
                     payload: commitment,
                 },
                 &schemes,
