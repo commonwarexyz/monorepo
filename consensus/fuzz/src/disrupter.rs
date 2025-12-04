@@ -364,7 +364,10 @@ where
         let real_view = self.view;
 
         let proposal = Proposal::new(
-            Round::new(Epoch::new(self.epoch), View::new(self.random_view(self.view))),
+            Round::new(
+                Epoch::new(self.epoch),
+                View::new(self.random_view(self.view)),
+            ),
             View::new(self.random_parent()),
             self.random_payload(),
         );
