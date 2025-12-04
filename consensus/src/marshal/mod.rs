@@ -513,7 +513,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(block.clone()).await;
+                actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -657,7 +657,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(block.clone()).await;
+                actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -1004,7 +1004,9 @@ mod tests {
             let sub5_rx = actor.subscribe(None, block5.digest()).await;
 
             // Block1: Broadcasted by the actor
-            actor.broadcast(block1.clone()).await;
+            actor
+                .proposed(Round::new(Epoch::zero(), View::new(1)), block1.clone())
+                .await;
             context.sleep(Duration::from_millis(20)).await;
 
             // Block1: delivered
@@ -1061,7 +1063,9 @@ mod tests {
 
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
-            remote_actor.broadcast(block5.clone()).await;
+            remote_actor
+                .proposed(Round::new(Epoch::zero(), View::new(5)), block5.clone())
+                .await;
             context.sleep(Duration::from_millis(20)).await;
 
             // Block5: delivered
@@ -1518,7 +1522,13 @@ mod tests {
             // we call broadcast() directly which makes it available for subscription
             let malicious_block = B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH + 15, 2000);
             let malicious_commitment = malicious_block.commitment();
-            marshal.clone().broadcast(malicious_block.clone()).await;
+            marshal
+                .clone()
+                .proposed(
+                    Round::new(Epoch::new(1), View::new(35)),
+                    malicious_block.clone(),
+                )
+                .await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1552,7 +1562,13 @@ mod tests {
             let malicious_block =
                 B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 2, 3000);
             let malicious_commitment = malicious_block.commitment();
-            marshal.clone().broadcast(malicious_block.clone()).await;
+            marshal
+                .clone()
+                .proposed(
+                    Round::new(Epoch::new(1), View::new(22)),
+                    malicious_block.clone(),
+                )
+                .await;
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1693,5 +1709,77 @@ mod tests {
             let fin0_after = actors[1].get_finalization(1).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
         })
+    }
+
+    #[test_traced("INFO")]
+    fn test_broadcast_caches_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Set up one validator
+            let (i, validator) = participants.iter().enumerate().next().unwrap();
+            let mut actor = setup_validator(
+                context.with_label(&format!("validator-{i}")),
+                &mut oracle,
+                validator.clone(),
+                schemes[i].clone().into(),
+            )
+            .await
+            .1;
+
+            // Create block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+
+            // Broadcast the block
+            actor
+                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+
+            // Ensure the block is cached and retrievable; This should hit the in-memory cache
+            // via `buffered::Mailbox`.
+            actor
+                .get_block(&commitment)
+                .await
+                .expect("block should be cached after broadcast");
+
+            // Restart marshal, removing any in-memory cache
+            let mut actor = setup_validator(
+                context.with_label(&format!("validator-{i}")),
+                &mut oracle,
+                validator.clone(),
+                schemes[i].clone().into(),
+            )
+            .await
+            .1;
+
+            // Put a notarization into the cache to re-initialize the ephemeral cache for the
+            // first epoch. Without this, the marshal cannot determine the epoch of the block being fetched,
+            // so it won't look to restore the cache for the epoch.
+            let notarization = make_notarization(
+                Proposal {
+                    round: Round::new(Epoch::new(0), View::new(1)),
+                    parent: View::new(0),
+                    payload: commitment,
+                },
+                &schemes,
+                QUORUM,
+            );
+            actor.report(Activity::Notarization(notarization)).await;
+
+            // Ensure the block is cached and retrievable
+            let fetched = actor
+                .get_block(&commitment)
+                .await
+                .expect("block should be cached after broadcast");
+            assert_eq!(fetched, block);
+        });
     }
 }
