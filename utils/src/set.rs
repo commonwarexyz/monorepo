@@ -17,7 +17,7 @@ type VecIntoIter<T> = alloc::vec::IntoIter<T>;
 #[cfg(feature = "std")]
 type VecIntoIter<T> = std::vec::IntoIter<T>;
 
-/// Errors that can occur when constructing [`OrderedAssociatedUnique`].
+/// Errors that can occur when constructing [`OrderedBijection`].
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A value was duplicated across different keys.
@@ -474,14 +474,14 @@ impl<K, V> DoubleEndedIterator for OrderedAssociatedIntoIter<K, V> {
 /// [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the inner
 /// [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
 ///
-/// Consumers that only need the ordered keys can treat an [`OrderedAssociatedUnique`] as an
+/// Consumers that only need the ordered keys can treat an [`OrderedBijection`] as an
 /// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OrderedAssociatedUnique<K, V> {
+pub struct OrderedBijection<K, V> {
     inner: OrderedAssociated<K, V>,
 }
 
-impl<K, V> OrderedAssociatedUnique<K, V> {
+impl<K, V> OrderedBijection<K, V> {
     /// Returns the number of entries in the map.
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -543,7 +543,7 @@ impl<K, V> OrderedAssociatedUnique<K, V> {
         self.inner.iter()
     }
 
-    /// Attempts to create an [`OrderedAssociatedUnique`] from an [`OrderedAssociated`].
+    /// Attempts to create an [`OrderedBijection`] from an [`OrderedAssociated`].
     ///
     /// Returns an error if any value is duplicated across different keys.
     pub fn try_from_associated(map: OrderedAssociated<K, V>) -> Result<Self, Error>
@@ -559,7 +559,7 @@ impl<K, V> OrderedAssociatedUnique<K, V> {
         Ok(Self { inner: map })
     }
 
-    /// Attempts to create an [`OrderedAssociatedUnique`] from an iterator of key-value pairs.
+    /// Attempts to create an [`OrderedBijection`] from an iterator of key-value pairs.
     ///
     /// Returns an error if any value is duplicated across different keys.
     pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
@@ -572,27 +572,27 @@ impl<K, V> OrderedAssociatedUnique<K, V> {
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedAssociatedUnique<K, V> {
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedBijection<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("OrderedAssociatedUnique")
+        f.debug_tuple("OrderedBijection")
             .field(&self.inner.iter_pairs().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl<K, V> AsRef<[K]> for OrderedAssociatedUnique<K, V> {
+impl<K, V> AsRef<[K]> for OrderedBijection<K, V> {
     fn as_ref(&self) -> &[K] {
         self.inner.as_ref()
     }
 }
 
-impl<K, V> AsRef<Ordered<K>> for OrderedAssociatedUnique<K, V> {
+impl<K, V> AsRef<Ordered<K>> for OrderedBijection<K, V> {
     fn as_ref(&self) -> &Ordered<K> {
         self.inner.as_ref()
     }
 }
 
-impl<K, V> Deref for OrderedAssociatedUnique<K, V> {
+impl<K, V> Deref for OrderedBijection<K, V> {
     type Target = Ordered<K>;
 
     fn deref(&self) -> &Self::Target {
@@ -600,58 +600,58 @@ impl<K, V> Deref for OrderedAssociatedUnique<K, V> {
     }
 }
 
-impl<K: Ord, V: Ord> FromIterator<(K, V)> for OrderedAssociatedUnique<K, V> {
+impl<K: Ord, V: Ord> FromIterator<(K, V)> for OrderedBijection<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self::try_from_iter(iter)
-            .expect("duplicate value detected during OrderedAssociatedUnique construction")
+            .expect("duplicate value detected during OrderedBijection construction")
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Ord> From<&[(K, V)]> for OrderedAssociatedUnique<K, V> {
+impl<K: Ord + Clone, V: Clone + Ord> From<&[(K, V)]> for OrderedBijection<K, V> {
     fn from(items: &[(K, V)]) -> Self {
         items.iter().cloned().collect()
     }
 }
 
-impl<K: Ord, V: Ord> From<Vec<(K, V)>> for OrderedAssociatedUnique<K, V> {
+impl<K: Ord, V: Ord> From<Vec<(K, V)>> for OrderedBijection<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V: Ord, const N: usize> From<[(K, V); N]> for OrderedAssociatedUnique<K, V> {
+impl<K: Ord, V: Ord, const N: usize> From<[(K, V); N]> for OrderedBijection<K, V> {
     fn from(items: [(K, V); N]) -> Self {
         items.into_iter().collect()
     }
 }
 
 impl<K: Ord + Clone, V: Clone + Ord, const N: usize> From<&[(K, V); N]>
-    for OrderedAssociatedUnique<K, V>
+    for OrderedBijection<K, V>
 {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
 }
 
-impl<K: Ord, V> From<OrderedAssociatedUnique<K, V>> for Vec<(K, V)> {
-    fn from(wrapped: OrderedAssociatedUnique<K, V>) -> Self {
+impl<K: Ord, V> From<OrderedBijection<K, V>> for Vec<(K, V)> {
+    fn from(wrapped: OrderedBijection<K, V>) -> Self {
         wrapped.inner.into()
     }
 }
 
-impl<K: Write, V: Write> Write for OrderedAssociatedUnique<K, V> {
+impl<K: Write, V: Write> Write for OrderedBijection<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.inner.write(buf);
     }
 }
 
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedAssociatedUnique<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedBijection<K, V> {
     fn encode_size(&self) -> usize {
         self.inner.encode_size()
     }
 }
 
-impl<K: Read, V: Read> Read for OrderedAssociatedUnique<K, V> {
+impl<K: Read, V: Read> Read for OrderedBijection<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -660,7 +660,7 @@ impl<K: Read, V: Read> Read for OrderedAssociatedUnique<K, V> {
     }
 }
 
-impl<K, V> IntoIterator for OrderedAssociatedUnique<K, V> {
+impl<K, V> IntoIterator for OrderedBijection<K, V> {
     type Item = (K, V);
     type IntoIter = OrderedAssociatedIntoIter<K, V>;
 
@@ -669,7 +669,7 @@ impl<K, V> IntoIterator for OrderedAssociatedUnique<K, V> {
     }
 }
 
-impl<'a, K, V> IntoIterator for &'a OrderedAssociatedUnique<K, V> {
+impl<'a, K, V> IntoIterator for &'a OrderedBijection<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
 
@@ -829,20 +829,20 @@ mod test {
     #[should_panic(expected = "duplicate value detected")]
     fn test_ordered_unique_duplicate_value_panic() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let _map: OrderedAssociatedUnique<_, _> = items.into_iter().collect();
+        let _map: OrderedBijection<_, _> = items.into_iter().collect();
     }
 
     #[test]
     fn test_ordered_unique_duplicate_value_error() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let result = OrderedAssociatedUnique::try_from_iter(items);
+        let result = OrderedBijection::try_from_iter(items);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 
     #[test]
     fn test_ordered_unique_no_duplicate_values() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
-        let result = OrderedAssociatedUnique::try_from_iter(items);
+        let result = OrderedBijection::try_from_iter(items);
         assert!(result.is_ok());
         let map = result.unwrap();
         assert_eq!(map.len(), 3);
@@ -855,7 +855,7 @@ mod test {
     fn test_ordered_unique_from_associated() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let unique = OrderedAssociatedUnique::try_from_associated(associated).unwrap();
+        let unique = OrderedBijection::try_from_associated(associated).unwrap();
         assert_eq!(unique.len(), 3);
         assert_eq!(unique.get_value(&1), Some(&"a"));
     }
@@ -864,7 +864,7 @@ mod test {
     fn test_ordered_unique_from_associated_duplicate() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
         let associated: OrderedAssociated<_, _> = items.into_iter().collect();
-        let result = OrderedAssociatedUnique::try_from_associated(associated);
+        let result = OrderedBijection::try_from_associated(associated);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 }

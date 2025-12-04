@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     quorum,
-    set::{OrderedAssociated, OrderedAssociatedUnique},
+    set::{OrderedAssociated, OrderedBijection},
 };
 use rand::{CryptoRng, RngCore};
 
@@ -91,7 +91,7 @@ where
         .clone()
         .into_iter()
         .zip(bls_public)
-        .collect::<OrderedAssociatedUnique<_, _>>();
+        .collect::<OrderedBijection<_, _>>();
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
