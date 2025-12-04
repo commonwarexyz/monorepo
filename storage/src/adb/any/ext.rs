@@ -37,7 +37,7 @@ impl<A: CleanAny> AnyExt<A> {
     /// Close the database without destroying it. Uncommitted operations may be lost.
     pub async fn close(mut self) -> Result<(), Error> {
         // Merkleize before close
-        self.ensure_clean().await;
+        self.ensure_clean().await?;
         match self.inner.take().expect("wrapper should never be empty") {
             State::Clean(clean) => clean.close().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
@@ -54,12 +54,13 @@ impl<A: CleanAny> AnyExt<A> {
     }
 
     /// Merkleize if in dirty state, ensuring we're in clean state.
-    async fn ensure_clean(&mut self) {
+    async fn ensure_clean(&mut self) -> Result<(), Error> {
         let state = self.inner.take().expect("wrapper should never be empty");
         self.inner = Some(match state {
             State::Clean(clean) => State::Clean(clean),
-            State::Dirty(dirty) => State::Clean(dirty.merkleize().await),
+            State::Dirty(dirty) => State::Clean(dirty.merkleize().await?),
         });
+        Ok(())
     }
 }
 
@@ -111,7 +112,7 @@ where
 {
     async fn commit(&mut self) -> Result<(), Self::Error> {
         // Merkleize before commit
-        self.ensure_clean().await;
+        self.ensure_clean().await?;
         match self.inner.as_mut().expect("wrapper should never be empty") {
             State::Clean(clean) => clean.commit(None).await.map(|_| ()),
             _ => unreachable!("ensure_clean guarantees Clean state"),
@@ -120,7 +121,7 @@ where
 
     async fn destroy(mut self) -> Result<(), Self::Error> {
         // Merkleize before destroy
-        self.ensure_clean().await;
+        self.ensure_clean().await?;
         match self.inner.take().expect("wrapper should never be empty") {
             State::Clean(clean) => clean.destroy().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
@@ -169,7 +170,7 @@ where
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Merkleize before prune
-        self.ensure_clean().await;
+        self.ensure_clean().await?;
         match self.inner.as_mut().expect("wrapper should never be empty") {
             State::Clean(clean) => clean.prune(prune_loc).await,
             _ => unreachable!("ensure_clean guarantees Clean state"),

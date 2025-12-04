@@ -690,8 +690,8 @@ impl<
     type Operation = Operation<K, V>;
     type Clean = Current<E, K, V, H, T, N, Clean<DigestOf<H>>>;
 
-    async fn merkleize(self) -> Self::Clean {
-        self.merkleize().await.expect("merkleize should not fail")
+    async fn merkleize(self) -> Result<Self::Clean, Error> {
+        self.merkleize().await
     }
 }
 
