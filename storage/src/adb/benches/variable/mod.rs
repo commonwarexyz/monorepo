@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{unordered::variable::Any, VariableConfig as AConfig},
-        store::{Batchable, Config as StoreConfig, LogStorePrunable, Store},
+        store::{Batchable, Config as SConfig, LogStorePrunable, Store},
     },
     store::{StoreDeletable, StorePersistable},
     translator::EightCap,
@@ -56,8 +56,8 @@ const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
-fn store_cfg() -> StoreConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-    StoreConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
@@ -108,8 +108,8 @@ async fn gen_random_kv<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StoreDeletable
-        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + StoreDeletable
         + LogStorePrunable,
     A::Error: std::fmt::Debug,
 {
@@ -136,6 +136,7 @@ where
     }
     db.commit().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
+
     db
 }
 
@@ -146,9 +147,8 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + StoreDeletable
-        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Batchable
         + LogStorePrunable,
     A::Error: std::fmt::Debug,
 {

@@ -12,7 +12,7 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Batchable, Config as StoreConfig, Store},
+        store::{Batchable, Config as SConfig, Store},
         Error,
     },
     store::{StoreDeletable, StorePersistable},
@@ -137,9 +137,8 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     }
 }
 
-/// Configuration for Store.
-fn store_cfg() -> StoreConfig<EightCap, ()> {
-    StoreConfig::<EightCap, ()> {
+fn store_cfg() -> SConfig<EightCap, ()> {
+    SConfig::<EightCap, ()> {
         log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
@@ -205,8 +204,8 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
 
 /// Get a Store instance.
 async fn get_store(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
-    Store::init(ctx, cfg).await.unwrap()
+    let store_cfg = store_cfg();
+    Store::init(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_variable_any(ctx: Context) -> VariableAnyDb {
@@ -268,9 +267,8 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + StoreDeletable
-        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>,
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + Batchable,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

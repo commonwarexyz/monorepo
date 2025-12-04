@@ -15,7 +15,7 @@ use commonware_storage::{
         any::AnyExt,
         store::{Batchable, LogStorePrunable},
     },
-    store::{Store as StoreTrait, StoreDeletable, StorePersistable},
+    store::{Store as StoreTrait, StorePersistable},
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -143,9 +143,8 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, <A as StoreTrait>::Error>
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + StoreDeletable
-        + StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + Batchable
         + LogStorePrunable,
 {
     let start = Instant::now();
