@@ -24,11 +24,11 @@ pub enum Message<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Write for Message<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Message::Request(epoch) => {
+            Self::Request(epoch) => {
                 0u8.write(writer);
                 epoch.write(writer);
             }
-            Message::Response(epoch, finalization) => {
+            Self::Response(epoch, finalization) => {
                 1u8.write(writer);
                 epoch.write(writer);
                 finalization.write(writer);
@@ -40,10 +40,8 @@ impl<S: Scheme, D: Digest> Write for Message<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Message<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Message::Request(epoch) => epoch.encode_size(),
-            Message::Response(epoch, finalization) => {
-                epoch.encode_size() + finalization.encode_size()
-            }
+            Self::Request(epoch) => epoch.encode_size(),
+            Self::Response(epoch, finalization) => epoch.encode_size() + finalization.encode_size(),
         }
     }
 }
@@ -69,7 +67,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         let epoch = Epoch::read(reader)?;
 
         match discriminant {
-            0 => Ok(Some(Message::Request(epoch))),
+            0 => Ok(Some(Self::Request(epoch))),
             1 => {
                 let Some(scheme) = scheme_provider.get_certificate_verifier(epoch) else {
                     return Ok(None);
@@ -84,7 +82,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
                     ));
                 }
 
-                Ok(Some(Message::Response(epoch, finalization)))
+                Ok(Some(Self::Response(epoch, finalization)))
             }
             _ => Err(Error::Invalid(
                 "reshare::orchestrator::wire::Message",
