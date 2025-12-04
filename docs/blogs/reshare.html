@@ -115,7 +115,7 @@
             When maintaining a threshold secret, changing the validator set requires more than updating a list. Whenever participants are added or removed, a new dealing of the secret must
             be performed to ensure new participants receive a share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
             must not be able to use shares across dealings or else it is trivial for a single malicious participant to acquire <i>f</i> shares over <i>f</i> epochs). Our original
-            <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
+            <a href="https://github.com/commonwarexyz/monorepo/tree/v0.0.63/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
             trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a> to ensure all participants received the same set of
             commitments. Removing that trusted coordinator requires some form of reliable broadcast such that all participants can each run their own arbiter (and all arrive at the same output). Fortunately,
             we get that out-of-the-box with a replicated log.
