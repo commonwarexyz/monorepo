@@ -11,7 +11,7 @@ use crate::{
             Keyed as _,
         },
         store::{CleanStore, DirtyStore, LogStore},
-        Error, FloorHelper,
+        Error,
     },
     bitmap::CleanBitMap,
     mmr::{
@@ -368,36 +368,13 @@ impl<
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let mut floor_helper = FloorHelper {
-            snapshot: &mut self.any.snapshot,
-            log: &mut self.any.log,
-        };
-        let inactivity_floor_loc = floor_helper
-            .raise_floor_with_bitmap(&mut status, start_loc)
-            .await?;
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut status).await?;
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
         let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
         self.any.apply_commit_op(commit_op).await?;
-
-        // Merkleize the bitmap so the struct is in a valid state
-        let height = Self::grafting_height();
-        self.status =
-            merkleize_grafted_bitmap(&mut self.any.log.hasher, status, &self.any.log.mmr, height)
-                .await?;
-
-        // Update cached root
-        self.cached_root = Some(
-            super::root(
-                &mut self.any.log.hasher,
-                height,
-                &self.status,
-                &self.any.log.mmr,
-            )
-            .await?,
-        );
 
         Ok(())
     }
@@ -421,21 +398,13 @@ impl<
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let mut floor_helper = FloorHelper {
-            snapshot: &mut self.any.snapshot,
-            log: &mut self.any.log,
-        };
-        let inactivity_floor_loc = floor_helper
-            .raise_floor_with_bitmap(&mut status, start_loc)
-            .await?;
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut status).await?;
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
         let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
-        self.any.apply_commit_op(commit_op).await?;
-
-        // self.commit_ops(metadata).await?; // recovery is ensured after this returns
+        self.any.apply_commit_op(commit_op).await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
         let mmr = &self.any.log.mmr;

@@ -14,8 +14,9 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
+    AuthenticatedBitMap,
 };
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
@@ -333,16 +334,7 @@ impl<
             active_keys,
         })
     }
-}
 
-/*
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, I, H, Dirty>
-{
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -388,14 +380,22 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, Dirty>> {
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
         }
     }
 }
-    */
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H, Dirty>
+{
+}
 
 impl<
         E: Storage + Clock + Metrics,
@@ -440,32 +440,11 @@ impl<
             .last_commit
             .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        // let inactivity_floor_loc = self.raise_floor().await?;
+        let inactivity_floor_loc = self.raise_floor().await?;
 
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                let mut floor_helper = FloorHelper {
-                    snapshot: &mut self.snapshot,
-                    log: &mut self.log,
-                };
-                self.inactivity_floor_loc = floor_helper.raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(
-            metadata,
-            self.inactivity_floor_loc,
-        ))
-        .await?;
+        // Append the commit operation with the new inactivity floor.
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
+            .await?;
 
         Ok(start_loc..self.op_count())
     }
