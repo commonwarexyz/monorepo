@@ -127,9 +127,33 @@ impl Simplex for SimplexBls12381MultisigMinSig {
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub seed: u64,
+    pub seed: u64, // Seed for deterministic runtime
     pub partition: PartitionStrategy,
     pub configuration: (u32, u32, u32), // (all nodes, correct nodes, faulty nodes)
+    pub raw_bytes: Vec<u8>,             // Raw fuzzer input for byte generation
+    pub offset: std::cell::RefCell<usize>, // Current offset in raw_bytes (RefCell for interior mutability)
+}
+
+impl FuzzInput {
+    pub fn get_next_random(&self, n: usize) -> Vec<u8> {
+        let mut offset = self.offset.borrow_mut();
+        let mut result = Vec::with_capacity(n);
+        for _ in 0..n {
+            if *offset < self.raw_bytes.len() {
+                result.push(self.raw_bytes[*offset]);
+                *offset += 1;
+            } else if !self.raw_bytes.is_empty() {
+                // Wrap around if we run out of bytes
+                *offset = *offset % self.raw_bytes.len();
+                result.push(self.raw_bytes[*offset]);
+                *offset += 1;
+            } else {
+                // If no raw bytes available, use zeros
+                result.push(0);
+            }
+        }
+        result
+    }
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -137,15 +161,26 @@ impl Arbitrary<'_> for FuzzInput {
         // (all nodes, correct nodes, faulty nodes)
         let test_cases = [(3, 2, 1), (4, 3, 1)];
 
+        let seed = u.arbitrary()?;
+        let partition = u.arbitrary()?;
+
         let configuration = {
             let index = u.int_in_range(0..=(test_cases.len() - 1))?;
             test_cases[index]
         };
 
+        // Capture remaining raw bytes for random data generation
+        // Read up to 1024 bytes of arbitrary data
+        let raw_bytes = (0..1024)
+            .map(|_| u.arbitrary::<u8>().unwrap_or(0))
+            .collect();
+
         Ok(Self {
-            seed: u.arbitrary()?,
-            partition: u.arbitrary()?,
+            seed,
+            partition,
             configuration,
+            raw_bytes,
+            offset: std::cell::RefCell::new(0),
         })
     }
 }
@@ -219,7 +254,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 scheme,
                 reporter,
                 namespace.clone(),
-                input.seed,
+                input.clone(),
             );
             actor.start(pending);
         }

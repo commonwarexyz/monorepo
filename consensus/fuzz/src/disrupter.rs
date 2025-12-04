@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::types::Message;
+use crate::{types::Message, FuzzInput};
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Encode, Read};
@@ -18,7 +18,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::set::OrderedQuorum;
-use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng};
 use std::time::Duration;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -49,7 +49,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest>
     scheme: S,
     reporter: Reporter<E, PublicKey, S, D>,
     namespace: Vec<u8>,
-    rng: StdRng,
+    fuzz_input: FuzzInput,
     view: u64,
     epoch: u64,
     last_finalized: u64,
@@ -67,7 +67,7 @@ where
         scheme: S,
         reporter: Reporter<E, PublicKey, S, D>,
         namespace: Vec<u8>,
-        seed: u64,
+        fuzz_input: FuzzInput,
     ) -> Self {
         Self {
             epoch: 333,
@@ -80,19 +80,17 @@ where
             scheme,
             reporter,
             namespace,
-            rng: StdRng::seed_from_u64(seed),
+            fuzz_input,
         }
     }
 
     fn get_mutation(&mut self) -> Mutation {
-        let mut buf = [0u8; 8];
-        self.rng.fill_bytes(&mut buf);
+        let buf = self.fuzz_input.get_next_random(8);
         Mutation::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Mutation::All)
     }
 
     fn random_message(&mut self) -> Message {
-        let mut buf = [0u8; 8];
-        self.rng.fill_bytes(&mut buf);
+        let buf = self.fuzz_input.get_next_random(8);
         Message::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Message::Random)
     }
 
@@ -101,7 +99,8 @@ where
         let lnz = self.last_notarized;
         let lnf = self.last_nullified;
 
-        match self.rng.gen_range(0..7) {
+        let choice = self.fuzz_input.get_next_random(1)[0] % 7;
+        match choice {
             // 0) Too old (pre-finalized) — should be filtered.
             0 => {
                 if lf == 0 {
@@ -112,7 +111,12 @@ where
                     if lo >= hi {
                         lo
                     } else {
-                        self.rng.gen_range(lo..=hi)
+                        lo + (self
+                            .fuzz_input
+                            .get_next_random(8)
+                            .iter()
+                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                            % (hi - lo + 1))
                     }
                 }
             }
@@ -124,7 +128,12 @@ where
                 if lo >= hi {
                     lo
                 } else {
-                    self.rng.gen_range(lo..=hi)
+                    lo + (self
+                        .fuzz_input
+                        .get_next_random(8)
+                        .iter()
+                        .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                        % (hi - lo + 1))
                 }
             }
 
@@ -135,7 +144,12 @@ where
                 if lo >= hi {
                     lo
                 } else {
-                    self.rng.gen_range(lo..=hi)
+                    lo + (self
+                        .fuzz_input
+                        .get_next_random(8)
+                        .iter()
+                        .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                        % (hi - lo + 1))
                 }
             }
 
@@ -146,7 +160,13 @@ where
                 if start >= end {
                     start
                 } else {
-                    self.rng.gen_range(start..=end)
+                    start
+                        + (self
+                            .fuzz_input
+                            .get_next_random(8)
+                            .iter()
+                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                            % (end - start + 1))
                 }
             }
 
@@ -157,7 +177,13 @@ where
                 if start >= end {
                     start
                 } else {
-                    self.rng.gen_range(start..=end)
+                    start
+                        + (self
+                            .fuzz_input
+                            .get_next_random(8)
+                            .iter()
+                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                            % (end - start + 1))
                 }
             }
 
@@ -170,35 +196,46 @@ where
                 if start >= end {
                     start
                 } else {
-                    self.rng.gen_range(start..=end)
+                    start
+                        + (self
+                            .fuzz_input
+                            .get_next_random(8)
+                            .iter()
+                            .fold(0u64, |acc, &x| (acc << 8) | x as u64)
+                            % (end - start + 1))
                 }
             }
 
             // 6) Pure random:
-            _ => self.rng.next_u64(),
+            _ => self
+                .fuzz_input
+                .get_next_random(8)
+                .iter()
+                .fold(0u64, |acc, &x| (acc << 8) | x as u64),
         }
     }
 
     fn random_parent(&mut self) -> u64 {
-        let mut buf = [0u8; 8];
-        self.rng.fill_bytes(&mut buf);
+        let buf = self.fuzz_input.get_next_random(8);
         let mut unstructured = Unstructured::new(&buf);
         u64::arbitrary(&mut unstructured).unwrap_or(0)
     }
 
     fn random_payload(&mut self) -> Sha256Digest {
-        Sha256Digest::random(&mut self.rng)
+        let bytes = self.fuzz_input.get_next_random(32);
+        // Convert Vec<u8> to [u8; 32]
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[..32.min(bytes.len())]);
+        Sha256Digest::from(arr)
     }
 
     fn random_bytes(&mut self) -> Vec<u8> {
-        let mut buf = [0u8; 8];
-        self.rng.fill_bytes(&mut buf);
-        let mut unstructured = Unstructured::new(&buf);
+        // First get a byte to determine length
+        let len_byte = self.fuzz_input.get_next_random(2);
+        let len = ((len_byte[0] as usize) << 8 | len_byte[1] as usize) % 1025;
 
-        let len = unstructured.int_in_range(0..=1024).unwrap_or(0);
-        (0..len)
-            .map(|_| u8::arbitrary(&mut unstructured).unwrap_or(0))
-            .collect()
+        // Now get the actual random bytes
+        self.fuzz_input.get_next_random(len)
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
@@ -211,7 +248,7 @@ where
 
         loop {
             // Send a random message each 10 loop
-            if let 0..10 = self.rng.gen_range(0..100) {
+            if self.fuzz_input.get_next_random(1)[0] % 100 < 10 {
                 self.send_random_message(&mut sender).await;
             }
 
@@ -242,7 +279,7 @@ where
         msg: Vec<u8>,
     ) {
         // just mirror the message
-        if let 0..10 = self.rng.gen_range(0..100) {
+        if self.fuzz_input.get_next_random(1)[0] % 100 < 10 {
             sender
                 .send(Recipients::All, Bytes::from(msg.clone()), true)
                 .await
