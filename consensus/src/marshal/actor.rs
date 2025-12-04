@@ -355,7 +355,7 @@ where
                             };
                             let _ = response.send(info);
                         }
-                        Message::Broadcast { round, block } => {
+                        Message::Proposed { round, block } => {
                             self.cache_verified(round, block.commitment(), block.clone()).await;
                             let _peers = buffer.broadcast(Recipients::All, block).await;
                         }

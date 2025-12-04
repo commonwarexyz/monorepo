@@ -451,7 +451,7 @@ where
             height = block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.broadcast(round, block).await;
+        self.marshal.proposed(round, block).await;
     }
 }
 

@@ -513,7 +513,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(round, block.clone()).await;
+                actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -657,7 +657,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(round, block.clone()).await;
+                actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -1005,7 +1005,7 @@ mod tests {
 
             // Block1: Broadcasted by the actor
             actor
-                .broadcast(Round::new(Epoch::zero(), View::new(1)), block1.clone())
+                .proposed(Round::new(Epoch::zero(), View::new(1)), block1.clone())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1064,7 +1064,7 @@ mod tests {
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
             remote_actor
-                .broadcast(Round::new(Epoch::zero(), View::new(5)), block5.clone())
+                .proposed(Round::new(Epoch::zero(), View::new(5)), block5.clone())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1524,7 +1524,7 @@ mod tests {
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
-                .broadcast(
+                .proposed(
                     Round::new(Epoch::new(1), View::new(35)),
                     malicious_block.clone(),
                 )
@@ -1564,7 +1564,7 @@ mod tests {
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
-                .broadcast(
+                .proposed(
                     Round::new(Epoch::new(1), View::new(22)),
                     malicious_block.clone(),
                 )
@@ -1740,7 +1740,7 @@ mod tests {
 
             // Broadcast the block
             actor
-                .broadcast(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
 
             // Ensure the block is cached and retrievable; This should hit the in-memory cache
