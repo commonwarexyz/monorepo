@@ -120,7 +120,10 @@ where
 
     let mut clean_db = db.merkleize().await;
     clean_db.commit(None).await.unwrap();
-    clean_db.prune(clean_db.inactivity_floor_loc()).await.unwrap();
+    clean_db
+        .prune(clean_db.inactivity_floor_loc())
+        .await
+        .unwrap();
     clean_db
 }
 

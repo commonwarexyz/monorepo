@@ -57,14 +57,9 @@ fn bench_variable_generate(c: &mut Criterion) {
                                                 .await
                                                 .unwrap()
                                             } else {
-                                                test_db(
-                                                    db,
-                                                    elements,
-                                                    operations,
-                                                    commit_frequency,
-                                                )
-                                                .await
-                                                .unwrap()
+                                                test_db(db, elements, operations, commit_frequency)
+                                                    .await
+                                                    .unwrap()
                                             }
                                         }
                                         // Store is skipped (doesn't support CleanAny)

@@ -67,12 +67,6 @@ pub trait BenchmarkableDb {
     type Value;
     type Error: std::fmt::Debug;
 
-    /// Get the value for a given key.
-    fn get(
-        &self,
-        key: &Self::Key,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
-
     /// Update a key with a new value.
     fn update(
         &mut self,
@@ -113,10 +107,6 @@ where
     type Key = K;
     type Value = V;
     type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        StoreTrait::get(self, key).await
-    }
 
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         StoreMut::update(self, key, value).await
@@ -197,13 +187,6 @@ where
     type Key = A::Key;
     type Value = <A as LogStore>::Value;
     type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        match self.inner.as_ref().expect("wrapper should never be empty") {
-            CleanAnyState::Clean(clean) => clean.get(key).await,
-            CleanAnyState::Dirty(dirty) => dirty.get(key).await,
-        }
-    }
 
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         // Ensure we're in dirty state, then update
