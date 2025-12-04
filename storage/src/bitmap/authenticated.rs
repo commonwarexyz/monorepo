@@ -516,10 +516,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     }
 }
 
-// =============================================================================
-// Dirty state impl block
-// =============================================================================
-
 impl<D: Digest, const N: usize> DirtyBitMap<D, N> {
     /// Add a single bit to the end of the bitmap.
     ///
@@ -638,7 +634,7 @@ mod tests {
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
-    impl<D: Digest, const N: usize> CleanBitMap<D, N> {
+    impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
         pub(crate) fn leaf_pos(bit: u64) -> Position {
             let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
@@ -1147,10 +1143,6 @@ mod tests {
             }
         });
     }
-
-    // Note: test_bitmap_prune_to_bit_dirty_state and test_bitmap_proof_dirty_state are no longer
-    // needed since the type system now enforces that prune_to_bit and proof can only be called
-    // on CleanBitMap, and set_bit can only be called on DirtyBitMap.
 
     #[test_traced]
     fn test_bitmap_proof_out_of_bounds() {
