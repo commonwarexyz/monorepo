@@ -14,9 +14,7 @@ fn bench_put(c: &mut Criterion) {
                     module_path!(),
                     variant.name(),
                     items,
-                    compression
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "off".into()),
+                    compression.map_or_else(|| "off".into(), |l| l.to_string()),
                 );
                 c.bench_function(&label, |b| {
                     b.to_async(&runner).iter_custom(move |iters| async move {

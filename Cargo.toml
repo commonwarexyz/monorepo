@@ -60,6 +60,11 @@ semicolon_if_nothing_returned = "warn"
 match_same_arms = "warn"
 flat_map_option = "warn"
 inconsistent_struct_constructor = "warn"
+map_unwrap_or = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+inefficient_to_string = "warn"
+trivially_copy_pass_by_ref = "warn"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }

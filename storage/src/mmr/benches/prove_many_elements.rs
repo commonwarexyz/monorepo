@@ -46,7 +46,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             let start_locs: Vec<u64> = (0u64..n as u64 - range).collect();
                             let start_loc_samples = start_locs
                                 .choose_multiple(&mut sampler, SAMPLE_SIZE)
-                                .cloned()
+                                .copied()
                                 .collect::<Vec<_>>();
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {

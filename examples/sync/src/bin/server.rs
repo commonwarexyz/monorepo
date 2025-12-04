@@ -559,10 +559,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .parse()
             .map_err(|e| format!("Invalid initial operations count: {e}"))?,
         storage_dir: {
-            let storage_dir = matches
-                .get_one::<String>("storage-dir")
-                .unwrap()
-                .to_string();
+            let storage_dir = matches.get_one::<String>("storage-dir").unwrap().clone();
             // Only add suffix if using the default value
             if storage_dir == "/tmp/commonware-sync/server" {
                 let suffix: u64 = rand::thread_rng().gen();

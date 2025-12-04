@@ -374,8 +374,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         self.views
             .get_mut(&proposal.view())
-            .map(|round| round.proposed(proposal))
-            .unwrap_or(false)
+            .is_some_and(|round| round.proposed(proposal))
     }
 
     /// Sets a proposal received from the batcher (leader's first notarize vote).
@@ -410,8 +409,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)
-            .map(|round| round.verified())
-            .unwrap_or(false)
+            .is_some_and(|round| round.verified())
     }
 
     /// Drops any views that fall below the activity horizon and returns them for logging.

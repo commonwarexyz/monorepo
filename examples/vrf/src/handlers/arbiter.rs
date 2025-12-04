@@ -109,9 +109,9 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
 
                         // Validate the signature of each ack
                         if !acks.iter().all(|ack| {
-                            self.contributors.get(ack.player as usize).map(|signer| {
+                            self.contributors.get(ack.player as usize).is_some_and(|signer| {
                                 ack.verify::<MinSig, _>(ACK_NAMESPACE, signer, round, &peer, &commitment)
-                            }).unwrap_or(false)
+                            })
                         }) {
                             arbiter.disqualify(peer).expect("failed to disqualify peer");
                             continue;

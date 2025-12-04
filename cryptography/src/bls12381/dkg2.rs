@@ -482,11 +482,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     fn required_commitments(&self) -> u32 {
         let dealer_quorum = self.dealers.quorum();
-        let prev_quorum = self
-            .previous
-            .as_ref()
-            .map(Output::quorum)
-            .unwrap_or(u32::MIN);
+        let prev_quorum = self.previous.as_ref().map_or(u32::MIN, Output::quorum);
         dealer_quorum.max(prev_quorum)
     }
 
@@ -1308,11 +1304,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
-                let share = self
-                    .view
-                    .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| {
+                let share = self.view.get(dealer).map_or_else(
+                    || {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
                                 unreachable!(
@@ -1321,7 +1314,9 @@ impl<V: Variant, S: Signer> Player<V, S> {
                             },
                             |priv_msg| priv_msg.share.clone(),
                         )
-                    });
+                    },
+                    |(_, priv_msg)| priv_msg.share.clone(),
+                );
                 let index = if let Some(previous) = self.info.previous.as_ref() {
                     previous
                         .players

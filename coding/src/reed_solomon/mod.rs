@@ -34,7 +34,7 @@ pub enum Error {
     TooManyTotalShards(u32),
 }
 
-fn total_shards(config: &Config) -> Result<u16, Error> {
+fn total_shards(config: Config) -> Result<u16, Error> {
     let total = config.total_shards();
     total
         .try_into()
@@ -508,7 +508,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         encode(
-            total_shards(config)?,
+            total_shards(*config)?,
             config.minimum_shards,
             data,
             concurrency,
@@ -555,7 +555,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
-            total_shards(config)?,
+            total_shards(*config)?,
             config.minimum_shards,
             commitment,
             shards,

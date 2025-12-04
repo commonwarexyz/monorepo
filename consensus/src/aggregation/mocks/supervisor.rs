@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
     }
 
     fn is_participant(&self, epoch: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.validators_maps.get(&epoch)?.get(candidate).cloned()
+        self.validators_maps.get(&epoch)?.get(candidate).copied()
     }
 }
 

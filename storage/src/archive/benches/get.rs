@@ -83,9 +83,7 @@ fn bench_get(c: &mut Criterion) {
                             variant.name(),
                             mode,
                             pattern,
-                            compression
-                                .map(|l| l.to_string())
-                                .unwrap_or_else(|| "off".into()),
+                            compression.map_or_else(|| "off".into(), |l| l.to_string()),
                             reads
                         );
                         c.bench_function(&label, |b| {

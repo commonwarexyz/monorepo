@@ -164,7 +164,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
-                let _ = responder.send(self.directory.get_set(&index).cloned());
+                let _ = responder.send(self.directory.get_set(index).cloned());
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
@@ -172,7 +172,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
-                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    let latest_set = self.directory.get_set(latest_set_id).cloned().unwrap();
                     sender
                         .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
                         .ok();

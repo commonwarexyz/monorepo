@@ -33,6 +33,6 @@ impl<P: PublicKey> Supervisor for Sequencers<P> {
     }
 
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.participants_map.get(candidate).cloned()
+        self.participants_map.get(candidate).copied()
     }
 }

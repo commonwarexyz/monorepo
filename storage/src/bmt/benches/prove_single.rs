@@ -27,7 +27,7 @@ fn bench_prove_single(c: &mut Criterion) {
                     || {
                         let samples = queries
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
-                            .cloned()
+                            .copied()
                             .collect::<Vec<_>>();
                         samples
                     },

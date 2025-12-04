@@ -528,7 +528,7 @@ mod tests {
 
         {
             let archive = creator(context, compression).await;
-            let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
+            let sorted_indices: Vec<u64> = keys.keys().copied().collect();
 
             // Check gap before the first element
             let (current_end, start_next) = archive.next_gap(0);

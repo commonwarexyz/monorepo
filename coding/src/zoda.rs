@@ -261,7 +261,7 @@ mod topology {
         }
 
         /// Figure out what size different values will have, based on the config and the data.
-        pub fn reckon(config: &Config, data_bytes: usize) -> Self {
+        pub fn reckon(config: Config, data_bytes: usize) -> Self {
             let n = config.minimum_shards as usize;
             let k = config.extra_shards as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
@@ -465,7 +465,7 @@ impl<H: Hasher> CheckingData<H> {
     ///
     /// We're also give a `checksum` matrix used to check the shards we receive.
     fn reckon(
-        config: &Config,
+        config: Config,
         commitment: &Summary,
         data_bytes: usize,
         root: H::Digest,
@@ -587,7 +587,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(*config, data_bytes);
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -678,7 +678,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             shard: shard.rows,
         };
         let checking_data = CheckingData::reckon(
-            config,
+            *config,
             commitment,
             shard.data_bytes,
             shard.root,
@@ -760,7 +760,7 @@ mod tests {
             minimum_shards: 3,
             extra_shards: 1,
         };
-        let topology = Topology::reckon(&config, 16);
+        let topology = Topology::reckon(config, 16);
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
 

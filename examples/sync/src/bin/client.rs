@@ -318,10 +318,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid batch size: {e}"))?;
 
     let storage_dir = {
-        let storage_dir = matches
-            .get_one::<String>("storage-dir")
-            .unwrap()
-            .to_string();
+        let storage_dir = matches.get_one::<String>("storage-dir").unwrap().clone();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
             let suffix: u64 = rand::thread_rng().gen();

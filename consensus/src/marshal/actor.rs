@@ -960,7 +960,7 @@ where
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
             // re-persist it to the database in the repair loop below.
-            let gap_start = gap_start.map(|s| s.saturating_add(1)).unwrap_or(start);
+            let gap_start = gap_start.map_or(start, |s| s.saturating_add(1));
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {

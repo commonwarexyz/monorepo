@@ -276,7 +276,7 @@ impl<P: PublicKey> State<P> {
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        let last_arrival = self.last_arrival_complete.get(&key).cloned();
+        let last_arrival = self.last_arrival_complete.get(&key).copied();
 
         let completions = if should_deliver {
             let ready_at = Self::compute_ready_at(None, now, last_arrival, latency);
@@ -348,7 +348,7 @@ impl<P: PublicKey> State<P> {
                 continue;
             }
 
-            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let last_arrival = self.last_arrival_complete.get(&key).copied();
             let Some(queue) = self.queued.get_mut(&key) else {
                 continue;
             };
@@ -577,7 +577,7 @@ impl<P: PublicKey> State<P> {
                 continue;
             }
 
-            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let last_arrival = self.last_arrival_complete.get(&key).copied();
             let Some(queue) = self.queued.get_mut(&key) else {
                 continue;
             };
@@ -603,7 +603,7 @@ impl<P: PublicKey> State<P> {
         let mut remove_queue = false;
 
         if let Some(queue) = self.queued.get_mut(&key) {
-            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let last_arrival = self.last_arrival_complete.get(&key).copied();
             match Self::refresh_front_ready_at(queue, now, last_arrival) {
                 Some(ready_at) if ready_at <= now => {
                     entry_to_start = queue.pop_front();

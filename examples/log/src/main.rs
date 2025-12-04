@@ -109,7 +109,7 @@ fn main() {
     let participants = matches
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
-        .cloned()
+        .copied()
         .collect::<Vec<_>>();
     if participants.is_empty() {
         panic!("Please provide at least one participant");

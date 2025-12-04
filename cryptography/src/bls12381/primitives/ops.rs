@@ -522,7 +522,7 @@ where
                 .map(|evals| {
                     threshold_signature_recover_with_weights::<V, _>(
                         &weights,
-                        evals.iter().cloned(),
+                        evals.iter().copied(),
                     )
                 })
                 .collect();
@@ -541,7 +541,7 @@ where
                 .map(|evals| {
                     threshold_signature_recover_with_weights::<V, _>(
                         &weights,
-                        evals.iter().cloned(),
+                        evals.iter().copied(),
                     )
                 })
                 .collect()

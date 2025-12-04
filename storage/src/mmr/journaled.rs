@@ -1959,7 +1959,7 @@ mod tests {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
-                    expected_nodes.get(&pos).cloned()
+                    expected_nodes.get(&pos).copied()
                 );
             }
 
@@ -2021,7 +2021,7 @@ mod tests {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
-                    expected_nodes.get(&pos).cloned()
+                    expected_nodes.get(&pos).copied()
                 );
             }
 

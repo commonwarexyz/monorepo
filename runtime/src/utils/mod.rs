@@ -72,7 +72,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
             err.downcast_ref::<String>()
                 .map_or_else(|| format!("{err:?}"), |s| s.clone())
         },
-        |s| s.to_string(),
+        |s| (*s).to_string(),
     )
 }
 

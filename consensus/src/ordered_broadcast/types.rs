@@ -383,7 +383,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Node<C, V, D> {
         );
 
         // Verify signature
-        let message = Ack::<_, V, _>::payload(&parent_chunk, &parent.epoch);
+        let message = Ack::<_, V, _>::payload(&parent_chunk, parent.epoch);
         let ack_namespace = ack_namespace(namespace);
         if ops::verify_message::<V>(
             public,
@@ -514,7 +514,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// This constructs the message that is signed by validators when acknowledging a chunk.
     /// It contains both the chunk and the epoch to ensure domain separation and prevent
     /// signature reuse across epochs.
-    fn payload(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
+    fn payload(chunk: &Chunk<P, D>, epoch: Epoch) -> Vec<u8> {
         let mut message = Vec::with_capacity(chunk.encode_size() + epoch.encode_size());
         chunk.write(&mut message);
         epoch.write(&mut message);
@@ -530,7 +530,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     pub fn verify(&self, namespace: &[u8], polynomial: &poly::Public<V>) -> bool {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
-        let message = Self::payload(&self.chunk, &self.epoch);
+        let message = Self::payload(&self.chunk, self.epoch);
 
         // Verify signature
         ops::partial_verify_message::<V>(
@@ -549,7 +549,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     pub fn sign(namespace: &[u8], share: &Share, chunk: Chunk<P, D>, epoch: Epoch) -> Self {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
-        let message = Self::payload(&chunk, &epoch);
+        let message = Self::payload(&chunk, epoch);
 
         // Sign message
         let signature =
@@ -761,7 +761,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lock<P, V, D> {
     ///
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
-        let message = Ack::<_, V, _>::payload(&self.chunk, &self.epoch);
+        let message = Ack::<_, V, _>::payload(&self.chunk, self.epoch);
         let ack_namespace = ack_namespace(namespace);
         ops::verify_message::<V>(
             public_key,
@@ -866,7 +866,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate partial signatures for the chunk
-        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -921,7 +921,7 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Generate partial signatures for the parent chunk
-        let parent_message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
+        let parent_message = Ack::<_, V, _>::payload(&parent_chunk, parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1021,7 +1021,7 @@ mod tests {
 
         let epoch = Epoch::new(5);
         // Generate partial signatures for the chunk
-        let lock_message = Ack::<_, V, _>::payload(&chunk, &epoch);
+        let lock_message = Ack::<_, V, _>::payload(&chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1092,7 +1092,7 @@ mod tests {
         let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Generate partial signatures for the chunk
-        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1148,7 +1148,7 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Create threshold signature for parent
-        let message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
+        let message = Ack::<_, V, _>::payload(&parent_chunk, parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let parent_sigs: Vec<_> = shares
             .iter()
@@ -1249,7 +1249,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Create threshold signature
-        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1309,7 +1309,7 @@ mod tests {
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = Epoch::new(5);
-        let parent_message = Ack::<_, MinSig, _>::payload(&parent_chunk, &parent_epoch);
+        let parent_message = Ack::<_, MinSig, _>::payload(&parent_chunk, parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1395,7 +1395,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate a valid threshold signature for the parent
-        let message = Ack::<_, V, _>::payload(&parent_chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&parent_chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
@@ -1528,7 +1528,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate threshold signature
-        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()

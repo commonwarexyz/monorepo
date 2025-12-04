@@ -129,7 +129,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     }
 
                     // Update the highest contiguous height
-                    let mut next_contiguous = self.contiguous.map(|c| c + 1).unwrap_or(0);
+                    let mut next_contiguous = self.contiguous.map_or(0, |c| c + 1);
                     while self.digests.contains_key(&next_contiguous) {
                         next_contiguous += 1;
                     }
@@ -149,7 +149,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     sender.send(self.contiguous).unwrap();
                 }
                 Message::Get(index, sender) => {
-                    let digest = self.digests.get(&index).cloned();
+                    let digest = self.digests.get(&index).copied();
                     sender.send(digest).unwrap();
                 }
             }

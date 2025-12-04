@@ -736,7 +736,7 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
 
     // Emit results
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-    let mut wait_lines: Vec<usize> = result.steps.all.keys().cloned().collect();
+    let mut wait_lines: Vec<usize> = result.steps.all.keys().copied().collect();
     wait_lines.sort();
     let mut wait_idx = 0;
     for (i, line) in dsl_lines.iter().enumerate() {
@@ -792,7 +792,7 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
     // Emit results
     let (observations, proposer_observations) = aggregate_simulation_results(results);
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-    let mut wait_lines: Vec<usize> = observations.keys().cloned().collect();
+    let mut wait_lines: Vec<usize> = observations.keys().copied().collect();
     wait_lines.sort();
     let mut wait_idx = 0;
     for (i, line) in dsl_lines.iter().enumerate() {

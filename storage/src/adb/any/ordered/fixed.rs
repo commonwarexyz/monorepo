@@ -567,7 +567,7 @@ mod test {
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
-            assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
+            assert_eq!(iter.copied().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -946,7 +946,7 @@ mod test {
 
                 // Delete some random keys and check order agreement again.
                 for _ in 0..500 {
-                    let key = keys.keys().choose(rng).cloned().unwrap();
+                    let key = keys.keys().choose(rng).copied().unwrap();
                     keys.remove(&key);
                     db.delete(key).await.unwrap();
                 }
@@ -964,7 +964,7 @@ mod test {
 
                 // Delete the rest of the keys and make sure we get back to empty.
                 for _ in 0..500 {
-                    let key = keys.keys().choose(rng).cloned().unwrap();
+                    let key = keys.keys().choose(rng).copied().unwrap();
                     keys.remove(&key);
                     db.delete(key).await.unwrap();
                 }
