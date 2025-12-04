@@ -1,7 +1,7 @@
 use super::{
     config::Config,
     fetcher::Fetcher,
-    ingress::{Mailbox, Message},
+    ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
 use crate::Consumer;
@@ -229,14 +229,8 @@ impl<
                         return;
                     };
                     match msg {
-                        Message::Fetch { keys, hints } => {
-                            // Add all hints first (we guarantee by construction that all hint keys are in `keys`)
-                            for (key, peers) in hints {
-                                self.fetcher.hint(key, peers);
-                            }
-
-                            // Then process all keys
-                            for key in keys {
+                        Message::Fetch(requests) => {
+                            for FetchRequest { key, hints } in requests {
                                 trace!(?key, "mailbox: fetch");
 
                                 // Check if the fetch is already in progress
@@ -244,6 +238,11 @@ impl<
                                     trace!(?key, "duplicate fetch");
                                     self.metrics.fetch.inc(Status::Dropped);
                                     continue;
+                                }
+
+                                // Add hints if provided
+                                if !hints.is_empty() {
+                                    self.fetcher.hint(key.clone(), hints);
                                 }
 
                                 // Record fetch start time

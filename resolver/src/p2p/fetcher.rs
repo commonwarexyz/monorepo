@@ -140,7 +140,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                     Err(err) => Err(err), // Hinted peers rate-limited, wait for them
                 }
             }
-            _ => self.requester.request(*retry),
+            None => self.requester.request(*retry),
         };
 
         let (peer, id) = match result {

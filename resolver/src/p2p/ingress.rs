@@ -5,13 +5,18 @@ use futures::{channel::mpsc, SinkExt};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
+/// A request to fetch data for a key, optionally with peer hints.
+pub struct FetchRequest<K, P> {
+    /// The key to fetch.
+    pub key: K,
+    /// Peers likely to have the data (tried first).
+    pub hints: Vec<P>,
+}
+
 /// Messages that can be sent to the peer actor.
 pub enum Message<K, P> {
-    /// Initiate a fetch request by key, optionally with hints.
-    Fetch {
-        keys: Vec<K>,
-        hints: Vec<(K, Vec<P>)>,
-    },
+    /// Initiate fetch requests.
+    Fetch(Vec<FetchRequest<K, P>>),
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
@@ -48,10 +53,10 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Panics if the send fails.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch {
-                keys: vec![key],
+            .send(Message::Fetch(vec![FetchRequest {
+                key,
                 hints: Vec::new(),
-            })
+            }]))
             .await
             .expect("Failed to send fetch");
     }
@@ -61,10 +66,14 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Panics if the send fails.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
         self.sender
-            .send(Message::Fetch {
-                keys,
-                hints: Vec::new(),
-            })
+            .send(Message::Fetch(
+                keys.into_iter()
+                    .map(|key| FetchRequest {
+                        key,
+                        hints: Vec::new(),
+                    })
+                    .collect(),
+            ))
             .await
             .expect("Failed to send fetch_all");
     }
@@ -117,10 +126,7 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Panics if the send fails.
     pub async fn fetch_hinted(&mut self, key: K, hints: Vec<P>) {
         self.sender
-            .send(Message::Fetch {
-                keys: vec![key.clone()],
-                hints: vec![(key, hints)],
-            })
+            .send(Message::Fetch(vec![FetchRequest { key, hints }]))
             .await
             .expect("Failed to send fetch_hinted");
     }
@@ -130,13 +136,14 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// See [`fetch_hinted`](Self::fetch_hinted) for details on hint behavior.
     ///
     /// Panics if the send fails.
-    pub async fn fetch_all_hinted(&mut self, keys_hinted: Vec<(K, Vec<P>)>) {
-        let keys = keys_hinted.iter().map(|(k, _)| k.clone()).collect();
+    pub async fn fetch_all_hinted(&mut self, requests: Vec<(K, Vec<P>)>) {
         self.sender
-            .send(Message::Fetch {
-                keys,
-                hints: keys_hinted,
-            })
+            .send(Message::Fetch(
+                requests
+                    .into_iter()
+                    .map(|(key, hints)| FetchRequest { key, hints })
+                    .collect(),
+            ))
             .await
             .expect("Failed to send fetch_all_hinted");
     }
