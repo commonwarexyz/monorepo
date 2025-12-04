@@ -82,6 +82,11 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
             1,
         );
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping arbiter");
+                return (None, HashSet::new());
+            },
             _ = self.context.sleep_until(timeout) => {
                 warn!(round, "timed out waiting for commitments");
                 break

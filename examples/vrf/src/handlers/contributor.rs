@@ -240,6 +240,11 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         // Respond to commitments and wait for acks
         let t = self.context.current() + 2 * self.dkg_phase_timeout;
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping round");
+                return (round, None);
+            },
             _ = self.context.sleep_until(t) => {
                 debug!(round, "ack timeout");
                 break;

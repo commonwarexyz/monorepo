@@ -196,6 +196,10 @@ where
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping orchestrator");
+            },
             message = pending_backup.next() => {
                 // If a message is received in an unregistered sub-channel in the pending network,
                 // attempt to forward the orchestrator for the epoch.
