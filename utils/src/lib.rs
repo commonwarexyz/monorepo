@@ -130,6 +130,27 @@ pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
     quorum(n)
 }
 
+/// Compute the maximum faulty weight that can be tolerated for a given total weight.
+///
+/// This is `floor((total_weight - 1) / 3)` for total_weight > 0, and 0 for total_weight == 0.
+pub const fn max_faulty_weight(total_weight: u64) -> u64 {
+    total_weight.saturating_sub(1) / 3
+}
+
+/// Compute the weighted quorum threshold for a given total weight.
+///
+/// For BFT safety, the quorum must be greater than 2/3 of the total weight.
+/// This returns `total_weight - max_faulty_weight` which is equivalent to
+/// `ceil(2 * total_weight / 3) + 1` for total_weight > 0.
+///
+/// # Panics
+///
+/// Panics if `total_weight` is zero.
+pub fn weighted_quorum(total_weight: u64) -> u64 {
+    assert!(total_weight > 0, "total_weight must not be zero");
+    total_weight - max_faulty_weight(total_weight)
+}
+
 /// Computes the union of two byte slices.
 pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut union = Vec::with_capacity(a.len() + b.len());
@@ -392,6 +413,41 @@ mod tests {
         assert_eq!(max_faults(n), expected_f);
         assert_eq!(quorum(n), expected_q);
         assert_eq!(n, expected_f + expected_q);
+    }
+
+    #[test]
+    fn test_max_faulty_weight_zero() {
+        assert_eq!(max_faulty_weight(0), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_weighted_quorum_zero() {
+        weighted_quorum(0);
+    }
+
+    #[rstest]
+    #[case(1, 0, 1)]
+    #[case(2, 0, 2)]
+    #[case(3, 0, 3)]
+    #[case(4, 1, 3)]
+    #[case(5, 1, 4)]
+    #[case(6, 1, 5)]
+    #[case(7, 2, 5)]
+    #[case(8, 2, 6)]
+    #[case(9, 2, 7)]
+    #[case(10, 3, 7)]
+    #[case(100, 33, 67)]
+    #[case(1000, 333, 667)]
+    #[case(10000, 3333, 6667)]
+    fn test_weighted_quorum_and_max_faulty_weight(
+        #[case] total: u64,
+        #[case] expected_f: u64,
+        #[case] expected_q: u64,
+    ) {
+        assert_eq!(max_faulty_weight(total), expected_f);
+        assert_eq!(weighted_quorum(total), expected_q);
+        assert_eq!(total, expected_f + expected_q);
     }
 
     #[test]

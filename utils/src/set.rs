@@ -457,6 +457,583 @@ impl<K, V> DoubleEndedIterator for OrderedAssociatedIntoIter<K, V> {
     }
 }
 
+/// An ordered, deduplicated slice of items with associated weights.
+///
+/// Each key has a u64 weight value. This is used for weighted quorum calculations
+/// where participants may have different voting power.
+///
+/// Consumers can treat an [`OrderedWeighted`] as an [`Ordered`] through deref coercions.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct OrderedWeighted<K> {
+    keys: Ordered<K>,
+    weights: Vec<u64>,
+    total_weight: u64,
+}
+
+impl<K> OrderedWeighted<K> {
+    /// Returns the number of entries in the set.
+    pub const fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Returns `true` if the set is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Returns a key by index, if it exists.
+    pub fn get(&self, index: usize) -> Option<&K> {
+        self.keys.get(index)
+    }
+
+    /// Returns the position of the provided key, if it exists.
+    pub fn position(&self, key: &K) -> Option<usize>
+    where
+        K: Ord,
+    {
+        self.keys.position(key)
+    }
+
+    /// Returns the ordered keys as an [`Ordered`] reference.
+    pub const fn keys(&self) -> &Ordered<K> {
+        &self.keys
+    }
+
+    /// Consumes the set and returns the ordered keys.
+    pub fn into_keys(self) -> Ordered<K> {
+        self.keys
+    }
+
+    /// Returns the weight at `index`, if it exists.
+    pub fn weight(&self, index: usize) -> Option<u64> {
+        self.weights.get(index).copied()
+    }
+
+    /// Returns the weight for `key`, if it exists.
+    pub fn get_weight(&self, key: &K) -> Option<u64>
+    where
+        K: Ord,
+    {
+        self.position(key).and_then(|index| self.weights.get(index).copied())
+    }
+
+    /// Returns the weights slice.
+    pub fn weights(&self) -> &[u64] {
+        &self.weights
+    }
+
+    /// Returns the total weight of all participants.
+    pub const fn total_weight(&self) -> u64 {
+        self.total_weight
+    }
+
+    /// Returns the weighted quorum threshold.
+    ///
+    /// For BFT safety, the quorum must be greater than 2/3 of the total weight.
+    /// This returns `ceil(2 * total_weight / 3) + 1` which is equivalent to
+    /// `total_weight - max_faulty_weight` where `max_faulty_weight = floor((total_weight - 1) / 3)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the total weight is zero.
+    pub fn weighted_quorum(&self) -> u64 {
+        crate::weighted_quorum(self.total_weight)
+    }
+
+    /// Returns the maximum faulty weight that can be tolerated.
+    ///
+    /// This is `floor((total_weight - 1) / 3)` for total_weight > 0.
+    pub fn max_faulty_weight(&self) -> u64 {
+        crate::max_faulty_weight(self.total_weight)
+    }
+
+    /// Returns a zipped iterator over keys and weights.
+    pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, u64)> {
+        self.keys.iter().zip(self.weights.iter().copied())
+    }
+
+    /// Returns an iterator over the ordered keys.
+    pub fn iter(&self) -> core::slice::Iter<'_, K> {
+        self.keys.iter()
+    }
+}
+
+impl<K: fmt::Debug> fmt::Debug for OrderedWeighted<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrderedWeighted")
+            .field("entries", &self.iter_pairs().collect::<Vec<_>>())
+            .field("total_weight", &self.total_weight)
+            .finish()
+    }
+}
+
+impl<K> AsRef<[K]> for OrderedWeighted<K> {
+    fn as_ref(&self) -> &[K] {
+        self.keys.as_ref()
+    }
+}
+
+impl<K> AsRef<Ordered<K>> for OrderedWeighted<K> {
+    fn as_ref(&self) -> &Ordered<K> {
+        &self.keys
+    }
+}
+
+impl<K> Deref for OrderedWeighted<K> {
+    type Target = Ordered<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.keys
+    }
+}
+
+impl<K: Ord> FromIterator<(K, u64)> for OrderedWeighted<K> {
+    fn from_iter<I: IntoIterator<Item = (K, u64)>>(iter: I) -> Self {
+        let mut items: Vec<(K, u64)> = iter.into_iter().collect();
+        items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        items.dedup_by(|l, r| l.0 == r.0);
+
+        let mut keys = Vec::with_capacity(items.len());
+        let mut weights = Vec::with_capacity(items.len());
+        let mut total_weight = 0u64;
+        for (key, weight) in items {
+            keys.push(key);
+            weights.push(weight);
+            total_weight = total_weight.saturating_add(weight);
+        }
+
+        Self {
+            keys: Ordered(keys),
+            weights,
+            total_weight,
+        }
+    }
+}
+
+impl<K: Ord + Clone> From<&[(K, u64)]> for OrderedWeighted<K> {
+    fn from(items: &[(K, u64)]) -> Self {
+        items.iter().cloned().collect()
+    }
+}
+
+impl<K: Ord> From<Vec<(K, u64)>> for OrderedWeighted<K> {
+    fn from(items: Vec<(K, u64)>) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord, const N: usize> From<[(K, u64); N]> for OrderedWeighted<K> {
+    fn from(items: [(K, u64); N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord + Clone, const N: usize> From<&[(K, u64); N]> for OrderedWeighted<K> {
+    fn from(items: &[(K, u64); N]) -> Self {
+        items.as_slice().into()
+    }
+}
+
+impl<K: Ord> From<OrderedWeighted<K>> for Vec<(K, u64)> {
+    fn from(weighted: OrderedWeighted<K>) -> Self {
+        weighted.into_iter().collect()
+    }
+}
+
+impl<K: Write> Write for OrderedWeighted<K> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.keys.write(buf);
+        self.weights.write(buf);
+    }
+}
+
+impl<K: EncodeSize> EncodeSize for OrderedWeighted<K> {
+    fn encode_size(&self) -> usize {
+        self.keys.encode_size() + self.weights.encode_size()
+    }
+}
+
+impl<K: Read> Read for OrderedWeighted<K> {
+    type Cfg = (RangeCfg<usize>, K::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let (range_cfg, key_cfg) = cfg;
+        let keys = Ordered::<K>::read_cfg(buf, &(*range_cfg, key_cfg.clone()))?;
+        let weights = Vec::<u64>::read_cfg(buf, &(RangeCfg::exact(keys.len()), ()))?;
+        let total_weight = weights.iter().copied().fold(0u64, u64::saturating_add);
+        Ok(Self { keys, weights, total_weight })
+    }
+}
+
+impl<K> IntoIterator for OrderedWeighted<K> {
+    type Item = (K, u64);
+    type IntoIter = OrderedWeightedIntoIter<K>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OrderedWeightedIntoIter {
+            keys: self.keys.into_iter(),
+            weights: self.weights.into_iter(),
+        }
+    }
+}
+
+impl<'a, K> IntoIterator for &'a OrderedWeighted<K> {
+    type Item = (&'a K, u64);
+    type IntoIter = OrderedWeightedRefIter<'a, K>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OrderedWeightedRefIter {
+            keys: self.keys.iter(),
+            weights: self.weights.iter(),
+        }
+    }
+}
+
+/// Owned iterator over [`OrderedWeighted`].
+pub struct OrderedWeightedIntoIter<K> {
+    keys: VecIntoIter<K>,
+    weights: VecIntoIter<u64>,
+}
+
+impl<K> Iterator for OrderedWeightedIntoIter<K> {
+    type Item = (K, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next()?;
+        let weight = self.weights.next()?;
+        Some((key, weight))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl<K> ExactSizeIterator for OrderedWeightedIntoIter<K> {}
+
+impl<K> DoubleEndedIterator for OrderedWeightedIntoIter<K> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next_back()?;
+        let weight = self.weights.next_back()?;
+        Some((key, weight))
+    }
+}
+
+/// Reference iterator over [`OrderedWeighted`].
+pub struct OrderedWeightedRefIter<'a, K> {
+    keys: core::slice::Iter<'a, K>,
+    weights: core::slice::Iter<'a, u64>,
+}
+
+impl<'a, K> Iterator for OrderedWeightedRefIter<'a, K> {
+    type Item = (&'a K, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next()?;
+        let weight = self.weights.next()?;
+        Some((key, *weight))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl<K> ExactSizeIterator for OrderedWeightedRefIter<'_, K> {}
+
+impl<K> DoubleEndedIterator for OrderedWeightedRefIter<'_, K> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next_back()?;
+        let weight = self.weights.next_back()?;
+        Some((key, *weight))
+    }
+}
+
+/// An ordered, deduplicated slice of items with associated values and weights.
+///
+/// Combines the functionality of [`OrderedAssociated`] (key-value pairs) with
+/// weighted quorum support. Each key has both an associated value and a weight.
+///
+/// Consumers can treat an [`OrderedWeightedAssociated`] as an [`Ordered`] through deref coercions.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct OrderedWeightedAssociated<K, V> {
+    keys: Ordered<K>,
+    values: Vec<V>,
+    weights: Vec<u64>,
+    total_weight: u64,
+}
+
+impl<K, V> OrderedWeightedAssociated<K, V> {
+    /// Returns the number of entries in the map.
+    pub const fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Returns `true` if the map is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Returns a key by index, if it exists.
+    pub fn get(&self, index: usize) -> Option<&K> {
+        self.keys.get(index)
+    }
+
+    /// Returns the position of the provided key, if it exists.
+    pub fn position(&self, key: &K) -> Option<usize>
+    where
+        K: Ord,
+    {
+        self.keys.position(key)
+    }
+
+    /// Returns the ordered keys as an [`Ordered`] reference.
+    pub const fn keys(&self) -> &Ordered<K> {
+        &self.keys
+    }
+
+    /// Consumes the map and returns the ordered keys.
+    pub fn into_keys(self) -> Ordered<K> {
+        self.keys
+    }
+
+    /// Returns the associated value at `index`, if it exists.
+    pub fn value(&self, index: usize) -> Option<&V> {
+        self.values.get(index)
+    }
+
+    /// Returns the associated value for `key`, if it exists.
+    pub fn get_value(&self, key: &K) -> Option<&V>
+    where
+        K: Ord,
+    {
+        self.position(key).and_then(|index| self.values.get(index))
+    }
+
+    /// Returns the associated values.
+    pub fn values(&self) -> &[V] {
+        &self.values
+    }
+
+    /// Returns the weight at `index`, if it exists.
+    pub fn weight(&self, index: usize) -> Option<u64> {
+        self.weights.get(index).copied()
+    }
+
+    /// Returns the weight for `key`, if it exists.
+    pub fn get_weight(&self, key: &K) -> Option<u64>
+    where
+        K: Ord,
+    {
+        self.position(key).and_then(|index| self.weights.get(index).copied())
+    }
+
+    /// Returns the weights slice.
+    pub fn weights(&self) -> &[u64] {
+        &self.weights
+    }
+
+    /// Returns the total weight of all participants.
+    pub const fn total_weight(&self) -> u64 {
+        self.total_weight
+    }
+
+    /// Returns the weighted quorum threshold.
+    ///
+    /// For BFT safety, the quorum must be greater than 2/3 of the total weight.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the total weight is zero.
+    pub fn weighted_quorum(&self) -> u64 {
+        crate::weighted_quorum(self.total_weight)
+    }
+
+    /// Returns the maximum faulty weight that can be tolerated.
+    pub fn max_faulty_weight(&self) -> u64 {
+        crate::max_faulty_weight(self.total_weight)
+    }
+
+    /// Returns a zipped iterator over keys, values, and weights.
+    pub fn iter_all(&self) -> impl Iterator<Item = (&K, &V, u64)> {
+        self.keys
+            .iter()
+            .zip(self.values.iter())
+            .zip(self.weights.iter())
+            .map(|((k, v), w)| (k, v, *w))
+    }
+
+    /// Returns an iterator over the ordered keys.
+    pub fn iter(&self) -> core::slice::Iter<'_, K> {
+        self.keys.iter()
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedWeightedAssociated<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrderedWeightedAssociated")
+            .field("entries", &self.iter_all().collect::<Vec<_>>())
+            .field("total_weight", &self.total_weight)
+            .finish()
+    }
+}
+
+impl<K, V> AsRef<[K]> for OrderedWeightedAssociated<K, V> {
+    fn as_ref(&self) -> &[K] {
+        self.keys.as_ref()
+    }
+}
+
+impl<K, V> AsRef<Ordered<K>> for OrderedWeightedAssociated<K, V> {
+    fn as_ref(&self) -> &Ordered<K> {
+        &self.keys
+    }
+}
+
+impl<K, V> Deref for OrderedWeightedAssociated<K, V> {
+    type Target = Ordered<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.keys
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V, u64)> for OrderedWeightedAssociated<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V, u64)>>(iter: I) -> Self {
+        let mut items: Vec<(K, V, u64)> = iter.into_iter().collect();
+        items.sort_by(|(lk, _, _), (rk, _, _)| lk.cmp(rk));
+        items.dedup_by(|l, r| l.0 == r.0);
+
+        let mut keys = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        let mut weights = Vec::with_capacity(items.len());
+        let mut total_weight = 0u64;
+        for (key, value, weight) in items {
+            keys.push(key);
+            values.push(value);
+            weights.push(weight);
+            total_weight = total_weight.saturating_add(weight);
+        }
+
+        Self {
+            keys: Ordered(keys),
+            values,
+            weights,
+            total_weight,
+        }
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> From<&[(K, V, u64)]> for OrderedWeightedAssociated<K, V> {
+    fn from(items: &[(K, V, u64)]) -> Self {
+        items.iter().cloned().collect()
+    }
+}
+
+impl<K: Ord, V> From<Vec<(K, V, u64)>> for OrderedWeightedAssociated<K, V> {
+    fn from(items: Vec<(K, V, u64)>) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord, V, const N: usize> From<[(K, V, u64); N]> for OrderedWeightedAssociated<K, V> {
+    fn from(items: [(K, V, u64); N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V, u64); N]>
+    for OrderedWeightedAssociated<K, V>
+{
+    fn from(items: &[(K, V, u64); N]) -> Self {
+        items.as_slice().into()
+    }
+}
+
+impl<K: Ord, V> From<OrderedWeightedAssociated<K, V>> for Vec<(K, V, u64)> {
+    fn from(weighted: OrderedWeightedAssociated<K, V>) -> Self {
+        weighted.into_iter().collect()
+    }
+}
+
+impl<K: Write, V: Write> Write for OrderedWeightedAssociated<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.keys.write(buf);
+        self.values.write(buf);
+        self.weights.write(buf);
+    }
+}
+
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedWeightedAssociated<K, V> {
+    fn encode_size(&self) -> usize {
+        self.keys.encode_size() + self.values.encode_size() + self.weights.encode_size()
+    }
+}
+
+impl<K: Read, V: Read> Read for OrderedWeightedAssociated<K, V> {
+    type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let (range_cfg, key_cfg, value_cfg) = cfg;
+        let keys = Ordered::<K>::read_cfg(buf, &(*range_cfg, key_cfg.clone()))?;
+        let values = Vec::<V>::read_cfg(buf, &(RangeCfg::exact(keys.len()), value_cfg.clone()))?;
+        let weights = Vec::<u64>::read_cfg(buf, &(RangeCfg::exact(keys.len()), ()))?;
+        let total_weight = weights.iter().copied().fold(0u64, u64::saturating_add);
+        Ok(Self {
+            keys,
+            values,
+            weights,
+            total_weight,
+        })
+    }
+}
+
+impl<K, V> IntoIterator for OrderedWeightedAssociated<K, V> {
+    type Item = (K, V, u64);
+    type IntoIter = OrderedWeightedAssociatedIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OrderedWeightedAssociatedIntoIter {
+            keys: self.keys.into_iter(),
+            values: self.values.into_iter(),
+            weights: self.weights.into_iter(),
+        }
+    }
+}
+
+/// Owned iterator over [`OrderedWeightedAssociated`].
+pub struct OrderedWeightedAssociatedIntoIter<K, V> {
+    keys: VecIntoIter<K>,
+    values: VecIntoIter<V>,
+    weights: VecIntoIter<u64>,
+}
+
+impl<K, V> Iterator for OrderedWeightedAssociatedIntoIter<K, V> {
+    type Item = (K, V, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next()?;
+        let value = self.values.next()?;
+        let weight = self.weights.next()?;
+        Some((key, value, weight))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl<K, V> ExactSizeIterator for OrderedWeightedAssociatedIntoIter<K, V> {}
+
+impl<K, V> DoubleEndedIterator for OrderedWeightedAssociatedIntoIter<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next_back()?;
+        let value = self.values.next_back()?;
+        let weight = self.weights.next_back()?;
+        Some((key, value, weight))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -593,5 +1170,115 @@ mod test {
             *value += 1;
         }
         assert_eq!(map.values(), &[11, 21]);
+    }
+
+    #[test]
+    fn test_ordered_weighted_construct() {
+        let items = vec![(3u8, 30u64), (1u8, 10u64), (2u8, 20u64)];
+        let weighted: OrderedWeighted<_> = items.into_iter().collect();
+
+        assert_eq!(weighted.len(), 3);
+        assert_eq!(weighted.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(weighted.total_weight(), 60);
+        assert_eq!(weighted.weight(0), Some(10));
+        assert_eq!(weighted.weight(1), Some(20));
+        assert_eq!(weighted.weight(2), Some(30));
+        assert_eq!(weighted.get_weight(&2), Some(20));
+        assert_eq!(weighted.get_weight(&4), None);
+    }
+
+    #[test]
+    fn test_ordered_weighted_quorum() {
+        // Total weight 60: quorum = 60 - floor((60-1)/3) = 60 - 19 = 41
+        let items = vec![(1u8, 10u64), (2u8, 20u64), (3u8, 30u64)];
+        let weighted: OrderedWeighted<_> = items.into_iter().collect();
+
+        assert_eq!(weighted.total_weight(), 60);
+        assert_eq!(weighted.max_faulty_weight(), 19);
+        assert_eq!(weighted.weighted_quorum(), 41);
+    }
+
+    #[test]
+    fn test_ordered_weighted_dedup() {
+        let items = vec![(1u8, 10u64), (2u8, 20u64), (1u8, 100u64)];
+        let weighted: OrderedWeighted<_> = items.into_iter().collect();
+
+        assert_eq!(weighted.len(), 2);
+        // First occurrence wins
+        assert_eq!(weighted.get_weight(&1), Some(10));
+    }
+
+    #[test]
+    fn test_ordered_weighted_into_iter() {
+        let items = vec![(2u8, 20u64), (1u8, 10u64)];
+        let weighted: OrderedWeighted<_> = items.into_iter().collect();
+
+        let collected: Vec<_> = weighted.into_iter().collect();
+        assert_eq!(collected, vec![(1u8, 10u64), (2u8, 20u64)]);
+    }
+
+    #[test]
+    fn test_ordered_weighted_ref_iter() {
+        let items = vec![(2u8, 20u64), (1u8, 10u64)];
+        let weighted: OrderedWeighted<_> = items.into_iter().collect();
+
+        let collected: Vec<_> = (&weighted).into_iter().collect();
+        assert_eq!(collected, vec![(&1u8, 10u64), (&2u8, 20u64)]);
+    }
+
+    #[test]
+    fn test_ordered_weighted_associated_construct() {
+        let items = vec![
+            (3u8, "c", 30u64),
+            (1u8, "a", 10u64),
+            (2u8, "b", 20u64),
+        ];
+        let weighted: OrderedWeightedAssociated<_, _> = items.into_iter().collect();
+
+        assert_eq!(weighted.len(), 3);
+        assert_eq!(weighted.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(weighted.total_weight(), 60);
+        assert_eq!(weighted.get_value(&2), Some(&"b"));
+        assert_eq!(weighted.get_weight(&2), Some(20));
+    }
+
+    #[test]
+    fn test_ordered_weighted_associated_quorum() {
+        let items: Vec<(u8, &str, u64)> = vec![
+            (1, "a", 100),
+            (2, "b", 200),
+            (3, "c", 300),
+        ];
+        let weighted: OrderedWeightedAssociated<_, _> = items.into_iter().collect();
+
+        assert_eq!(weighted.total_weight(), 600);
+        // max_faulty = floor((600-1)/3) = 199
+        assert_eq!(weighted.max_faulty_weight(), 199);
+        // weighted_quorum = 600 - 199 = 401
+        assert_eq!(weighted.weighted_quorum(), 401);
+    }
+
+    #[test]
+    fn test_ordered_weighted_associated_into_iter() {
+        let items = vec![
+            (2u8, "b", 20u64),
+            (1u8, "a", 10u64),
+        ];
+        let weighted: OrderedWeightedAssociated<_, _> = items.into_iter().collect();
+
+        let collected: Vec<_> = weighted.into_iter().collect();
+        assert_eq!(collected, vec![(1u8, "a", 10u64), (2u8, "b", 20u64)]);
+    }
+
+    #[test]
+    fn test_ordered_weighted_iter_all() {
+        let items = vec![
+            (2u8, "b", 20u64),
+            (1u8, "a", 10u64),
+        ];
+        let weighted: OrderedWeightedAssociated<_, _> = items.into_iter().collect();
+
+        let collected: Vec<_> = weighted.iter_all().collect();
+        assert_eq!(collected, vec![(&1u8, &"a", 10u64), (&2u8, &"b", 20u64)]);
     }
 }

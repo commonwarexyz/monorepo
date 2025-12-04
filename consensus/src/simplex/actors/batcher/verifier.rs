@@ -446,7 +446,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
+    use commonware_utils::{quorum, quorum_from_slice};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -481,10 +481,16 @@ mod tests {
     }
 
     fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
+        use commonware_utils::set::OrderedWeighted;
+
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
 
-        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+        // Create weighted participants with uniform weight of 1
+        let participants: OrderedWeighted<_> = private_keys
+            .iter()
+            .map(|p| (p.public_key(), 1u64))
+            .collect();
 
         private_keys
             .into_iter()
