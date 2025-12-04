@@ -1,2 +1,2 @@
 mod authenticated;
-pub use authenticated::{BitMap, CleanBitMap, DirtyBitMap};
+pub use authenticated::{BitMap, CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap};

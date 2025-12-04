@@ -12,7 +12,7 @@ use crate::{
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
-    bitmap::{CleanBitMap, DirtyBitMap},
+    bitmap::{CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap},
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, Mmr as MemMmr, State},
@@ -138,7 +138,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        CleanAuthenticatedBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
@@ -255,7 +255,7 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = BitMap::restore_pruned(
+        let mut status = CleanAuthenticatedBitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
@@ -372,7 +372,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanAuthenticatedBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -450,7 +450,7 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanAuthenticatedBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -467,7 +467,11 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        CleanAuthenticatedBitMap::<H::Digest, N>::destroy(
+            self.context,
+            &self.bitmap_metadata_partition,
+        )
+        .await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -490,7 +494,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != CleanAuthenticatedBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -523,8 +527,9 @@ impl<
     async fn commit_to_log(
         &mut self,
         metadata: Option<V>,
-    ) -> Result<DirtyBitMap<H::Digest, N>, Error> {
-        let empty_status = CleanBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
+    ) -> Result<DirtyAuthenticatedBitMap<H::Digest, N>, Error> {
+        let empty_status =
+            CleanAuthenticatedBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
         let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
 
         // Inactivate the current commit operation.
@@ -1227,8 +1232,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<Digest, 32>::leaf_pos(*info.loc)
+                CleanAuthenticatedBitMap::<Digest, 32>::leaf_pos(*active_loc),
+                CleanAuthenticatedBitMap::<Digest, 32>::leaf_pos(*info.loc)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
