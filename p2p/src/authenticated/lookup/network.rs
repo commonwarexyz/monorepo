@@ -137,6 +137,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 mailbox_size: self.cfg.mailbox_size,
                 ping_frequency: self.cfg.ping_frequency,
                 allowed_ping_rate: self.cfg.allowed_ping_rate,
+                rate_limit_outbound: self.cfg.rate_limit_outbound,
             },
         );
         let mut spawner_task =

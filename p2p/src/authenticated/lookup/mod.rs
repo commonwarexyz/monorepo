@@ -180,6 +180,7 @@ mod tests {
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
+    use rstest::rstest;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -630,9 +631,10 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    #[should_panic(expected = "no messages should be rate limited")]
-    fn test_rate_limiting() {
+    #[rstest]
+    #[case::outbound_disabled_triggers_inbound(false)]
+    #[case::outbound_enabled_prevents_inbound(true)]
+    fn test_rate_limiting(#[case] rate_limit_outbound: bool) {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
@@ -657,7 +659,8 @@ mod tests {
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 
             // Create network for peer 0
-            let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            let mut config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            config0.rate_limit_outbound = rate_limit_outbound;
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
             oracle0.update(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
@@ -696,9 +699,25 @@ mod tests {
             assert!(!sent.is_empty());
 
             // Loop until the metrics reflect the rate-limited message.
+            //
+            // When rate_limit_outbound is false, the sender sends without delay,
+            // causing the receiver to rate-limit inbound messages.
+            // When rate_limit_outbound is true, the sender delays outbound messages,
+            // preventing the receiver from needing to rate-limit.
             for _ in 0..10 {
-                assert_no_rate_limiting(&context);
+                if rate_limit_outbound {
+                    assert_no_rate_limiting(&context);
+                } else {
+                    let metrics = context.encode();
+                    if metrics.contains("messages_rate_limited_total{") {
+                        return; // Found rate limiting as expected
+                    }
+                }
                 context.sleep(Duration::from_millis(100)).await;
+            }
+
+            if !rate_limit_outbound {
+                panic!("expected inbound rate limiting to occur");
             }
         });
     }

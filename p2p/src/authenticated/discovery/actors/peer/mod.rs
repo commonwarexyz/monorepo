@@ -29,6 +29,11 @@ pub struct Config<C: PublicKey> {
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
     pub rate_limited: Family<metrics::Message, Counter>,
+    /// Whether to rate limit outbound messages using the same rate as inbound.
+    /// When enabled, outbound messages are delayed if they exceed the per-channel rate limit,
+    /// preventing the remote peer from rate limiting us.
+    pub rate_limit_outbound: bool,
+    pub outbound_rate_limited: Family<metrics::Message, Counter>,
 }
 
 #[derive(Error, Debug)]

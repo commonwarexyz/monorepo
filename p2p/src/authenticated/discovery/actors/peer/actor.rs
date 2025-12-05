@@ -17,11 +17,20 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
+use governor::{
+    clock::{Clock as GClock, ReasonablyRealtime},
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
+
+type ChannelRateLimiter<E> =
+    RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<<E as GClock>::Instant>>;
+type OutboundRateLimits<E> = Option<Arc<HashMap<u64, ChannelRateLimiter<E>>>>;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -42,6 +51,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
+    rate_limit_outbound: bool,
+    outbound_rate_limited: Family<metrics::Message, Counter>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
@@ -67,6 +78,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
+                rate_limit_outbound: cfg.rate_limit_outbound,
+                outbound_rate_limited: cfg.outbound_rate_limited,
             },
             control_sender,
             Relay::new(low_sender, high_sender),
@@ -102,6 +115,27 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         Ok(())
     }
 
+    /// Applies outbound rate limiting if enabled, sleeping until the rate limit allows.
+    async fn apply_outbound_rate_limit(
+        context: &E,
+        outbound_limits: &OutboundRateLimits<E>,
+        metric: &Family<metrics::Message, Counter>,
+        peer: &C,
+        channel: u64,
+    ) {
+        if let Some(ref limits) = outbound_limits {
+            if let Some(limiter) = limits.get(&channel) {
+                if let Err(wait_until) = limiter.check() {
+                    metric
+                        .get_or_create(&metrics::Message::new_data(peer, channel))
+                        .inc();
+                    let wait_duration = wait_until.wait_time_from(context.now());
+                    context.sleep(wait_duration).await;
+                }
+            }
+        }
+    }
+
     pub async fn run<O: Sink, I: Stream>(
         mut self,
         peer: C,
@@ -109,15 +143,32 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
-        // Instantiate rate limiters for each message type
+        // Collect channel info first so we can iterate twice
+        let channel_info = channels.collect();
+
+        // Instantiate rate limiters for each message type (inbound)
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
-            rate_limits.insert(channel, rate_limiter);
-            senders.insert(channel, sender);
+        for (channel, (rate, sender)) in &channel_info {
+            let rate_limiter = RateLimiter::direct_with_clock(*rate, self.context.clone());
+            rate_limits.insert(*channel, rate_limiter);
+            senders.insert(*channel, sender.clone());
         }
         let rate_limits = Arc::new(rate_limits);
+
+        // Instantiate outbound rate limiters if enabled
+        let outbound_rate_limits = if self.rate_limit_outbound {
+            let outbound = channel_info
+                .iter()
+                .map(|(channel, (rate, _))| {
+                    let rate_limiter = RateLimiter::direct_with_clock(*rate, self.context.clone());
+                    (*channel, rate_limiter)
+                })
+                .collect::<HashMap<_, _>>();
+            Some(Arc::new(outbound))
+        } else {
+            None
+        };
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
@@ -125,6 +176,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
+            let outbound_rate_limits = outbound_rate_limits.clone();
             move |context| async move {
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
@@ -159,11 +211,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     },
                     msg_high = self.high.next() => {
                         let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::apply_outbound_rate_limit(&context, &outbound_rate_limits, &self.outbound_rate_limited, &peer, msg.channel).await;
                         Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                             .await?;
                     },
                     msg_low = self.low.next() => {
                         let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::apply_outbound_rate_limit(&context, &outbound_rate_limits, &self.outbound_rate_limited, &peer, msg.channel).await;
                         Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                             .await?;
                     }

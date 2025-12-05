@@ -36,6 +36,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
+    rate_limit_outbound: bool,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
@@ -43,6 +44,7 @@ pub struct Actor<
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
+    outbound_rate_limited: Family<metrics::Message, Counter>,
 }
 
 impl<
@@ -58,6 +60,7 @@ impl<
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
+        let outbound_rate_limited = Family::<metrics::Message, Counter>::default();
         context.register(
             "connections",
             "number of connected peers",
@@ -74,6 +77,11 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
+        context.register(
+            "messages_outbound_rate_limited",
+            "outbound messages rate limited",
+            outbound_rate_limited.clone(),
+        );
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
@@ -86,11 +94,13 @@ impl<
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
+                rate_limit_outbound: cfg.rate_limit_outbound,
                 receiver,
                 connections,
                 sent_messages,
                 received_messages,
                 rate_limited,
+                outbound_rate_limited,
             },
             sender,
         )
@@ -135,6 +145,7 @@ impl<
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
                             let rate_limited = self.rate_limited.clone();
+                            let outbound_rate_limited = self.outbound_rate_limited.clone();
                             let mut tracker = tracker.clone();
                             let mut router = router.clone();
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
@@ -148,6 +159,8 @@ impl<
                                         sent_messages,
                                         received_messages,
                                         rate_limited,
+                                        rate_limit_outbound: self.rate_limit_outbound,
+                                        outbound_rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                         allowed_bit_vec_rate: self.allowed_bit_vec_rate,

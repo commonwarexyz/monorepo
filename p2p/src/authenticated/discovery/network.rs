@@ -147,6 +147,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
+                rate_limit_outbound: self.cfg.rate_limit_outbound,
             },
         );
         let mut spawner_task =
