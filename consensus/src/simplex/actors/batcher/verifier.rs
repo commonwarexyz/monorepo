@@ -446,7 +446,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
+    use commonware_utils::{ordered::Set, quorum, quorum_from_slice};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -484,7 +484,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
 
-        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+        let participants: Set<_> = private_keys.iter().map(|p| p.public_key()).collect();
 
         private_keys
             .into_iter()

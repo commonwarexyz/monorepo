@@ -55,7 +55,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{set::Ordered, union, NZUsize, NZU32};
+use commonware_utils::{ordered::Set, union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -121,7 +121,7 @@ fn main() {
             tracing::info!(key = ?verifier, "registered authorized key",);
             verifier
         })
-        .collect::<Ordered<_>>();
+        .collect::<Set<_>>();
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

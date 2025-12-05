@@ -228,8 +228,8 @@ mod tests {
         PrivateKeyExt as _, Signer as _,
     };
     use commonware_utils::{
+        ordered::{Quorum, Set},
         quorum,
-        set::{Ordered, OrderedQuorum},
     };
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
@@ -243,7 +243,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, _, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -275,7 +275,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -313,7 +313,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -355,7 +355,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -393,7 +393,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -422,7 +422,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -460,7 +460,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create invalid commitments
         let mut commitments = Vec::new();
@@ -506,7 +506,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -536,7 +536,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create arbiter
         let mut arb =
@@ -584,7 +584,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -622,7 +622,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -651,7 +651,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -688,7 +688,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -719,7 +719,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create arbiter
         let mut arb =
@@ -756,7 +756,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -785,7 +785,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -817,7 +817,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -850,7 +850,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -878,7 +878,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -906,7 +906,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -939,7 +939,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -964,7 +964,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -989,7 +989,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1012,7 +1012,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1035,7 +1035,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
@@ -1056,7 +1056,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1097,7 +1097,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1136,7 +1136,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1173,7 +1173,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1215,7 +1215,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1257,7 +1257,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1301,7 +1301,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1351,7 +1351,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let contributors = (0..n)
             .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1451,7 +1451,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(self.seed);
             let mut current_public: Option<poly::Public<V>> = None;
             let mut participant_states: HashMap<PublicKey, player::Output<V>> = HashMap::new();
-            let mut share_holders: Option<Ordered<PublicKey>> = None;
+            let mut share_holders: Option<Set<PublicKey>> = None;
 
             // Process rounds
             for (round_idx, round) in self.rounds.iter().enumerate() {
@@ -1525,7 +1525,7 @@ mod tests {
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
                 let mut expected_reveals = BTreeMap::new();
-                let expected_inactive: Ordered<u32> = absent_players
+                let expected_inactive: Set<u32> = absent_players
                     .iter()
                     .map(|player_pk| player_set.position(player_pk).unwrap() as u32)
                     .collect();
@@ -1705,10 +1705,10 @@ mod tests {
     }
 
     // Compute the participant set from a list of IDs
-    fn participants(ids: &[u64]) -> Ordered<PublicKey> {
+    fn participants(ids: &[u64]) -> Set<PublicKey> {
         ids.iter()
             .map(|id| PrivateKey::from_seed(*id).public_key())
-            .collect::<Ordered<_>>()
+            .collect::<Set<_>>()
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set as OrderedSet;
 use std::ops::Deref;
 
 // Use chunk size of 1 to minimize encoded size.
@@ -8,7 +8,7 @@ type BitMap = commonware_utils::bitmap::BitMap<1>;
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted and deduplicated.
-    ordered: Ordered<P>,
+    ordered: OrderedSet<P>,
 
     /// For each peer, whether I know their peer info or not.
     knowledge: BitMap,
@@ -16,7 +16,7 @@ pub struct Set<P: PublicKey> {
 
 impl<P: PublicKey> Set<P> {
     /// Creates a new [Set] for the given index.
-    pub fn new(ordered: Ordered<P>) -> Self {
+    pub fn new(ordered: OrderedSet<P>) -> Self {
         let knowledge = BitMap::zeroes(ordered.len() as u64);
         Self { ordered, knowledge }
     }
@@ -59,7 +59,7 @@ impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
 }
 
 impl<P: PublicKey> Deref for Set<P> {
-    type Target = Ordered<P>;
+    type Target = OrderedSet<P>;
 
     fn deref(&self) -> &Self::Target {
         &self.ordered

@@ -8,7 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{set::Ordered, SystemTimeExt};
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -176,7 +176,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) -> bool {
+    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -221,7 +221,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+    pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.sets.get(index).map(Deref::deref)
     }
 
@@ -264,7 +264,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns all tracked peers.
-    pub fn tracked(&self) -> Ordered<C> {
+    pub fn tracked(&self) -> OrderedSet<C> {
         self.peers.keys().cloned().collect()
     }
 

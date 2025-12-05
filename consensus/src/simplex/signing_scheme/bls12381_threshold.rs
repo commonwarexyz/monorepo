@@ -36,7 +36,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedInjection, OrderedQuorum};
+use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -52,7 +52,7 @@ use std::{
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
-        participants: OrderedInjection<P, V::Public>,
+        participants: BiMap<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
         /// Local share used to generate partial signatures.
@@ -60,7 +60,7 @@ pub enum Scheme<P: PublicKey, V: Variant> {
     },
     Verifier {
         /// Participants in the committee.
-        participants: OrderedInjection<P, V::Public>,
+        participants: BiMap<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
@@ -83,7 +83,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
+    pub fn new(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         assert_eq!(
             polynomial.required(),
@@ -94,7 +94,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedInjection<_, _>>();
+            .collect::<BiMap<_, _>>();
 
         let public_key = share.public::<V>();
         if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
@@ -123,7 +123,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
+    pub fn verifier(participants: Set<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         assert_eq!(
             polynomial.required(),
@@ -134,7 +134,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedInjection<_, _>>();
+            .collect::<BiMap<_, _>>();
 
         Self::Verifier {
             participants,
@@ -153,7 +153,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
-    pub fn participants(&self) -> &Ordered<P> {
+    pub fn participants(&self) -> &Set<P> {
         match self {
             Self::Signer { participants, .. } => participants,
             Self::Verifier { participants, .. } => participants,
@@ -374,7 +374,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> &Set<Self::PublicKey> {
         self.participants()
     }
 

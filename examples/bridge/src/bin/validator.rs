@@ -20,7 +20,7 @@ use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{
     from_hex,
-    set::{Ordered, OrderedQuorum},
+    ordered::{Quorum, Set},
     union, NZUsize, NZU32,
 };
 use governor::Quota;
@@ -93,7 +93,7 @@ fn main() {
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .collect::<Set<_>>();
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

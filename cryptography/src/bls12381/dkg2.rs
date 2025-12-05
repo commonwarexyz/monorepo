@@ -184,7 +184,7 @@
 //!     primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-//! use commonware_utils::set::Ordered;
+//! use commonware_utils::ordered::Set;
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
 //! use rand_chacha::ChaCha8Rng;
@@ -200,7 +200,7 @@
 //! }
 //!
 //! // All 4 participants are both dealers and players in initial DKG
-//! let dealer_set: Ordered<ed25519::PublicKey> = private_keys.iter()
+//! let dealer_set: Set<ed25519::PublicKey> = private_keys.iter()
 //!     .map(|k| k.public_key())
 //!     .collect();
 //! let player_set = dealer_set.clone();
@@ -291,9 +291,8 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
-    quorum,
-    set::{Ordered, OrderedAssociated, OrderedQuorum},
-    NZU32,
+    ordered::{Map, Quorum, Set},
+    quorum, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -378,7 +377,7 @@ fn recover_public_with_weights<V: Variant>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
-    players: Ordered<P>,
+    players: Set<P>,
     public: Public<V>,
 }
 
@@ -400,7 +399,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
     }
 
     /// Return the players who participated in this round of the DKG, and should have shares.
-    pub const fn players(&self) -> &Ordered<P> {
+    pub const fn players(&self) -> &Set<P> {
         &self.players
     }
 }
@@ -442,8 +441,8 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 pub struct Info<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
-    dealers: Ordered<P>,
-    players: Ordered<P>,
+    dealers: Set<P>,
+    players: Set<P>,
     summary: Summary,
 }
 
@@ -551,8 +550,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         namespace: &[u8],
         round: u64,
         previous: Option<Output<V, P>>,
-        dealers: Ordered<P>,
-        players: Ordered<P>,
+        dealers: Set<P>,
+        players: Set<P>,
     ) -> Result<Self, Error> {
         let participant_range = 1..u32::MAX as usize;
         if !participant_range.contains(&dealers.len()) {
@@ -775,7 +774,7 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 
 #[derive(Clone, Debug)]
 enum DealerResult<P: PublicKey> {
-    Ok(OrderedAssociated<P, AckOrReveal<P>>),
+    Ok(Map<P, AckOrReveal<P>>),
     TooManyReveals,
 }
 
@@ -883,7 +882,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
 
     fn zip_players<'a, 'b>(
         &'a self,
-        players: &'b Ordered<P>,
+        players: &'b Set<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
         match &self.results {
             DealerResult::TooManyReveals => None,
@@ -1003,7 +1002,7 @@ pub struct Dealer<V: Variant, S: Signer> {
     me: S,
     info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
-    results: OrderedAssociated<S::PublicKey, AckOrReveal<S::PublicKey>>,
+    results: Map<S::PublicKey, AckOrReveal<S::PublicKey>>,
     transcript: Transcript,
 }
 
@@ -1057,7 +1056,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .clone()
             .into_iter()
             .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg)))
-            .collect::<OrderedAssociated<_, _>>();
+            .collect::<Map<_, _>>();
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
@@ -1359,20 +1358,20 @@ impl<V: Variant, S: Signer> Player<V, S> {
 }
 
 /// The result of dealing shares to players.
-pub type DealResult<V, P> = Result<(Output<V, P>, OrderedAssociated<P, Share>), Error>;
+pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
 ) -> DealResult<V, P> {
-    let players = Ordered::from_iter(players);
+    let players = Set::from_iter(players);
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
     let private = poly::new_from(t - 1, &mut rng);
-    let shares: OrderedAssociated<_, _> = players
+    let shares: Map<_, _> = players
         .iter()
         .enumerate()
         .map(|(i, p)| {
@@ -1712,8 +1711,8 @@ mod test_plan {
                     .dealers
                     .iter()
                     .map(|&i| keys[i as usize].public_key())
-                    .collect::<Ordered<_>>();
-                let player_set: Ordered<ed25519::PublicKey> = round
+                    .collect::<Set<_>>();
+                let player_set: Set<ed25519::PublicKey> = round
                     .players
                     .iter()
                     .map(|&i| keys[i as usize].public_key())
@@ -1737,7 +1736,7 @@ mod test_plan {
                         let player = Player::new(info.clone(), sk)?;
                         Ok((pk, player))
                     })
-                    .collect::<anyhow::Result<OrderedAssociated<_, _>>>()?;
+                    .collect::<anyhow::Result<Map<_, _>>>()?;
 
                 // Run dealer protocol
                 let mut dealer_logs = BTreeMap::new();
@@ -2039,7 +2038,7 @@ mod test_plan {
         fn arbitrary_round<'a>(
             u: &mut Unstructured<'a>,
             num_participants: u32,
-            last_successful_players: Option<&Ordered<u32>>,
+            last_successful_players: Option<&Set<u32>>,
         ) -> arbitrary::Result<Round> {
             let dealers = if let Some(players) = last_successful_players {
                 let to_pick = u.int_in_range(players.quorum() as usize..=players.len())?;
@@ -2111,7 +2110,7 @@ mod test_plan {
             fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
                 let num_participants = u.int_in_range(1..=MAX_NUM_PARTICIPANTS)?;
                 let mut rounds = Vec::new();
-                let mut last_successful_players: Option<Ordered<u32>> = None;
+                let mut last_successful_players: Option<Set<u32>> = None;
                 u.arbitrary_loop(None, Some(MAX_ROUNDS), |u| {
                     let round =
                         arbitrary_round(u, num_participants, last_successful_players.as_ref())?;
@@ -2272,8 +2271,8 @@ mod test {
             &[],
             0,
             None,
-            Ordered::from(vec![sk.public_key()]),
-            Ordered::from(vec![sk.public_key()]),
+            Set::from(vec![sk.public_key()]),
+            Set::from(vec![sk.public_key()]),
         )?;
         let mut log0 = {
             let (dealer, _, _) = Dealer::start(

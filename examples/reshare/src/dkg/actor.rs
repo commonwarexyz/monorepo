@@ -22,9 +22,10 @@ use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    fixed_bytes, hex, quorum,
+    fixed_bytes, hex,
+    ordered::Set,
+    quorum,
     sequence::{FixedBytes, U64},
-    set::Ordered,
     Acknowledgement, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
@@ -56,7 +57,7 @@ pub struct Config<C, P> {
 pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -77,7 +78,7 @@ where
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -212,7 +213,7 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let dealers = dealers.into_iter().collect::<Ordered<_>>();
+        let dealers = dealers.into_iter().collect::<Set<_>>();
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -418,7 +419,7 @@ where
                                 next_epoch,
                             )
                             .into_iter()
-                            .collect::<Ordered<_>>()
+                            .collect::<Set<_>>()
                         };
 
                         // Register the players for the next epoch
@@ -557,7 +558,7 @@ where
     }
 
     fn choose_from_all(
-        participants: &Ordered<C::PublicKey>,
+        participants: &Set<C::PublicKey>,
         num_participants: u32,
         seed: Epoch,
     ) -> Vec<C::PublicKey> {
@@ -571,12 +572,12 @@ where
     fn collect_all(
         active_participants: &[C::PublicKey],
         inactive_participants: &[C::PublicKey],
-    ) -> Ordered<C::PublicKey> {
+    ) -> Set<C::PublicKey> {
         active_participants
             .iter()
             .chain(inactive_participants.iter())
             .cloned()
-            .collect::<Ordered<_>>()
+            .collect::<Set<_>>()
     }
 }
 
@@ -618,7 +619,7 @@ impl<V: Variant> Read for EpochState<V> {
 
 #[allow(clippy::type_complexity)]
 pub(crate) struct RoundInfo<V: Variant, C: Signer> {
-    pub deal: Option<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
+    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
     pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
     pub local_outcome: Option<DealOutcome<C, V>>,
     pub outcomes: Vec<DealOutcome<C, V>>,
@@ -662,15 +663,14 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            deal:
-                Option::<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
-                    buf,
-                    &(
-                        RangeCfg::exact(NZU32!(*cfg)),
-                        (RangeCfg::from(0..usize::MAX), ()),
-                        (RangeCfg::from(0..usize::MAX), ((), ())),
-                    ),
-                )?,
+            deal: Option::<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
+                buf,
+                &(
+                    RangeCfg::exact(NZU32!(*cfg)),
+                    (RangeCfg::from(0..usize::MAX), ()),
+                    (RangeCfg::from(0..usize::MAX), ((), ())),
+                ),
+            )?,
             received_shares: Vec::<(C::PublicKey, Public<V>, Share)>::read_cfg(
                 buf,
                 &(
