@@ -90,7 +90,7 @@
 //!
 //!     // Register a peer set
 //!     let mut manager = oracle.manager();
-//!     manager.update(0, peers.clone().into()).await;
+//!     manager.update(0, peers.clone().try_into().unwrap()).await;
 //!
 //!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0).await.unwrap();
 //!     let (sender2, receiver2) = oracle.control(peers[1].clone()).register(0).await.unwrap();

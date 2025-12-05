@@ -119,7 +119,7 @@
 //!     // the composition of a validator set changes).
 //!     oracle.update(
 //!         0,
-//!         Map::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
+//!         [(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)].try_into().unwrap()
 //!     ).await;
 //!
 //!     // Register some channel
