@@ -2,33 +2,36 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use std::collections::HashMap;
 
+/// Message types the disrupter can send.
 #[derive(Debug, Clone, Arbitrary)]
 pub enum Message {
     Notarize,
     Nullify,
     Finalize,
+    /// Random bytes (malformed message).
     Random,
 }
 
-// Generic data structures for invariant checking
 pub struct Notarization {
     pub payload: Sha256Digest,
-    pub signature_count: Option<usize>, // Some for Simplex, None for Threshold Simplex
+    /// None for threshold schemes where count is not exposed.
+    pub signature_count: Option<usize>,
 }
 
 pub struct Nullification {
-    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+    /// None for threshold schemes where count is not exposed.
+    pub signature_count: Option<usize>,
 }
 
 pub struct Finalization {
     pub payload: Sha256Digest,
-    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+    /// None for threshold schemes where count is not exposed.
+    pub signature_count: Option<usize>,
 }
 
-type View = u64;
-
+/// Per-replica state: (notarizations, nullifications, finalizations) keyed by view.
 pub type ReplicaState = (
-    HashMap<View, Notarization>,
-    HashMap<View, Nullification>,
-    HashMap<View, Finalization>,
+    HashMap<u64, Notarization>,
+    HashMap<u64, Nullification>,
+    HashMap<u64, Finalization>,
 );

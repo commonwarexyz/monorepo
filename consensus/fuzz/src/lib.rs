@@ -2,10 +2,10 @@ pub mod disrupter;
 pub mod invariants;
 pub mod types;
 pub mod utils;
+
 use crate::{
     disrupter::Disrupter,
-    invariants::{check_invariants, extract_simplex_state},
-    utils::{link_peers, register_validators, Action, PartitionStrategy},
+    utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
@@ -29,7 +29,6 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest,
     Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
@@ -49,31 +48,28 @@ use std::{
     time::Duration,
 };
 
-pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
-pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+pub const EPOCH: u64 = 333;
 
-const APPLICATION_VALID_PANICS: [&str; 3] = [
+const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+const REQUIRED_CONTAINERS: u64 = 50;
+const NAMESPACE: &[u8] = b"consensus_fuzz";
+const CONFIGURATIONS: [(u32, u32, u32); 2] = [(3, 2, 1), (4, 3, 1)];
+const MAX_RAW_BYTES: usize = 4096;
+
+const EXPECTED_PANICS: [&str; 3] = [
     "invalid payload:",
     "invalid parent (in payload):",
     "invalid round (in payload)",
 ];
 
-static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
+static IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 
 pub trait Simplex: 'static
 where
     <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
-
-    fn namespace() -> Vec<u8> {
-        b"consensus_fuzz".to_vec()
-    }
-
-    fn required_containers() -> u64 {
-        50
-    }
-
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
@@ -129,16 +125,16 @@ impl Simplex for SimplexBls12381MultisigMinSig {
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub seed: u64, // Seed for deterministic runtime
-    pub partition: PartitionStrategy,
-    pub configuration: (u32, u32, u32), // (all nodes, correct nodes, faulty nodes)
-    pub raw_bytes: Vec<u8>,             // Raw fuzzer input for message mutation
-    offset: RefCell<usize>, // Current offset in raw_bytes (RefCell for interior mutability)
-    rng: RefCell<StdRng>, // PRNG for generating random bytes if there are no fuzz input bytes left
+    pub seed: u64,
+    pub partition: Partition,
+    pub configuration: (u32, u32, u32),
+    pub raw_bytes: Vec<u8>,
+    offset: RefCell<usize>,
+    rng: RefCell<StdRng>,
 }
 
 impl FuzzInput {
-    pub fn get_next_random(&self, n: usize) -> Vec<u8> {
+    pub fn random(&self, n: usize) -> Vec<u8> {
         if n == 0 {
             return Vec::new();
         }
@@ -147,63 +143,49 @@ impl FuzzInput {
         let remaining = self.raw_bytes.len().saturating_sub(*offset);
 
         if remaining >= n {
-            // Have enough real bytes
             let result = self.raw_bytes[*offset..*offset + n].to_vec();
             *offset += n;
             result
         } else {
-            // Take what's left from real bytes
             let mut result = Vec::with_capacity(n);
             if remaining > 0 {
                 result.extend_from_slice(&self.raw_bytes[*offset..]);
                 *offset = self.raw_bytes.len();
             }
-
-            // Generate the rest from PRNG
-            let needed = n - result.len();
-            let mut extra = vec![0u8; needed];
+            let mut extra = vec![0u8; n - result.len()];
             self.rng.borrow_mut().fill_bytes(&mut extra);
             result.extend(extra);
             result
         }
     }
 
-    pub fn get_next_random_byte(&self) -> u8 {
-        self.get_next_random(1)[0]
+    pub fn random_byte(&self) -> u8 {
+        self.random(1)[0]
     }
 
-    pub fn get_next_random_bool(&self) -> bool {
-        self.get_next_random_byte() < 128
+    pub fn random_bool(&self) -> bool {
+        self.random_byte() < 128
     }
 
-    pub fn get_next_random_u64(&self) -> u64 {
-        u64::from_le_bytes(self.get_next_random(8).try_into().unwrap())
+    pub fn random_u64(&self) -> u64 {
+        u64::from_le_bytes(self.random(8).try_into().unwrap())
     }
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let test_cases = [(3, 2, 1), (4, 3, 1)];
-
         let seed = u.arbitrary()?;
         let partition = u.arbitrary()?;
+        let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
 
-        let configuration = {
-            let index = u.int_in_range(0..=(test_cases.len() - 1))?;
-            test_cases[index]
-        };
-
-        // Extract up to 4KB of arbitrary data for mutations
         let mut raw_bytes = Vec::new();
-        for _ in 0..4096 {
-            if let Ok(byte) = u.arbitrary::<u8>() {
-                raw_bytes.push(byte);
-            } else {
-                break;
+        for _ in 0..MAX_RAW_BYTES {
+            match u.arbitrary::<u8>() {
+                Ok(byte) => raw_bytes.push(byte),
+                Err(_) => break,
             }
         }
 
-        // Seed PRNG from raw_bytes for deterministic fallback
         let mut prng_seed = [0u8; 32];
         for (i, &b) in raw_bytes.iter().enumerate() {
             prng_seed[i % 32] ^= b;
@@ -220,96 +202,78 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-fn run_fuzz<P: Simplex>(input: FuzzInput) {
+fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
-    let required_containers = P::required_containers();
-    let namespace = P::namespace();
+    let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
+
     executor.start(|mut context| async move {
-        // Create a simulated network
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
             NetworkConfig {
                 max_size: 1024 * 1024,
-                disconnect_on_block: false, // Ignore blocking operation
+                disconnect_on_block: false,
                 tracked_peer_sets: None,
             },
         );
-
-        // Start network
         network.start();
 
-        // Register participants
-        //let (validator_keys, validators, signing_schemes, _) = P::fixture(&mut context, n);
         let Fixture {
             participants,
             schemes,
             verifier: _,
         } = P::fixture(&mut context, n);
-        let mut registrations = register_validators(&mut oracle, &participants).await;
 
-        // Link validators.
-        // The first validator is byzantine.
+        let mut registrations = register(&mut oracle, &participants).await;
+
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
-
         link_peers(
             &mut oracle,
             &participants,
             Action::Link(link),
-            input.partition.create(),
+            input.partition.filter(),
         )
         .await;
 
-        // Create engines
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
 
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{}", validator));
-            let reporter_config = reporter::Config {
-                namespace: namespace.clone(),
-                participants: participants.clone().into(),
-                scheme: scheme.clone(),
-            };
-            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let context = context.with_label(&format!("validator-{validator}"));
 
-            let (pending, _recovered, _resolver) = registrations
-                .remove(&validator)
-                .expect("validator should be registered");
-            let actor = Disrupter::<_, _, Sha256Digest>::new(
-                context.with_label("fuzzing_actor"),
+            let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
+            let disrupter = Disrupter::<_, _>::new(
+                context.with_label("disrupter"),
                 validator.clone(),
                 scheme,
-                reporter,
+                participants.clone().into(),
                 namespace.clone(),
                 input.clone(),
             );
-            actor.start(pending);
+            disrupter.start(vote_network, certificate_network);
         }
 
-        // Start regular consensus engines for the remaining correct validators.
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{}", validator));
-            let reporter_config = reporter::Config {
+            let context = context.with_label(&format!("validator-{validator}"));
+            let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().into(),
                 scheme: schemes[i].clone(),
             };
-            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
-            let (pending, recovered, resolver) = registrations
-                .remove(&validator)
-                .expect("validator should be registered");
 
-            let application_cfg = application::Config {
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+
+            let app_cfg = application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 me: validator.clone(),
@@ -317,10 +281,11 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 verify_latency: (10.0, 5.0),
             };
             let (actor, application) =
-                application::Application::new(context.with_label("application"), application_cfg);
+                application::Application::new(context.with_label("application"), app_cfg);
             actor.start();
+
             let blocker = oracle.control(validator.clone());
-            let cfg = config::Config {
+            let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
                 automaton: application.clone(),
@@ -328,7 +293,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
-                epoch: Epoch::new(333),
+                epoch: Epoch::new(EPOCH),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -342,68 +307,118 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let engine = Engine::new(context.with_label("engine"), cfg);
+            let engine = Engine::new(context.with_label("engine"), engine_cfg);
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == PartitionStrategy::Connected && max_faults(n) == f {
-            // Wait for all engines to finish if there are at least 3 correct validators
+        if input.partition == Partition::Connected && max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
+                    while latest.get() < REQUIRED_CONTAINERS {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
             }
             join_all(finalizers).await;
         } else {
-            // Just wait for a while if the validators are not fully connected
-            // or if there are only 2 correct validators
             context.sleep(Duration::from_secs(10)).await;
         }
 
-        let states = extract_simplex_state(reporters);
-        check_invariants(n, states);
+        let states = invariants::extract(reporters);
+        invariants::check(n, states);
     });
 }
 
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
-    // Set up a custom panic hook
     let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(|panic_info| {
-        let panic_message = format!("{panic_info}");
-
-        // Check if we should ignore this panic
-        for pattern in APPLICATION_VALID_PANICS {
-            if panic_message.contains(pattern) {
-                println!("Ignored panic: {panic_message}");
-                SHOULD_IGNORE_PANIC.store(true, Ordering::SeqCst);
+    panic::set_hook(Box::new(|info| {
+        let msg = format!("{info}");
+        for pattern in EXPECTED_PANICS {
+            if msg.contains(pattern) {
+                IGNORE_PANIC.store(true, Ordering::SeqCst);
                 return;
             }
         }
-
-        // Let the original hook handle unexpected panics
-        SHOULD_IGNORE_PANIC.store(false, Ordering::SeqCst);
-        println!("Unexpected panic: {panic_message}");
+        IGNORE_PANIC.store(false, Ordering::SeqCst);
     }));
 
-    // Try to catch the panic
-    let result = panic::catch_unwind(move || {
-        run_fuzz::<P>(input);
-    });
+    let result = panic::catch_unwind(move || run::<P>(input));
 
-    // Restore original hook
     panic::set_hook(original_hook);
 
-    // If we caught a panic, and it should be ignored, continue
-    if result.is_err() && SHOULD_IGNORE_PANIC.load(Ordering::SeqCst) {
-        return;
+    if result.is_err() && !IGNORE_PANIC.load(Ordering::SeqCst) {
+        panic!("unexpected panic");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ed25519_connected() {
+        let input = FuzzInput {
+            seed: 42,
+            partition: Partition::Connected,
+            configuration: (3, 2, 1),
+            raw_bytes: vec![0u8; 1024],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([0u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
     }
 
-    // If we caught a panic, and it shouldn't be ignored, re-panic
-    if result.is_err() {
-        panic!("Unexpected panic occurred");
+    #[test]
+    fn test_ed25519_isolated() {
+        let input = FuzzInput {
+            seed: 123,
+            partition: Partition::Isolated,
+            configuration: (3, 2, 1),
+            raw_bytes: vec![1u8; 512],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([1u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_two_partitions() {
+        let input = FuzzInput {
+            seed: 456,
+            partition: Partition::TwoPartitionsWithByzantine,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![2u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([2u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_many_partitions() {
+        let input = FuzzInput {
+            seed: 789,
+            partition: Partition::ManyPartitionsWithByzantine,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![3u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([3u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_linear() {
+        let input = FuzzInput {
+            seed: 999,
+            partition: Partition::Linear,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![4u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([4u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
     }
 }
