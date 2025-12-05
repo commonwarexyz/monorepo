@@ -23,7 +23,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {

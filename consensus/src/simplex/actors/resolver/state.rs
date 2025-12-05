@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Certificate, Finalization, Notarization, Nullification, Voter},
+        types::{Certificate, Finalization, Notarization, Nullification},
     },
     types::View,
     Viewable,
@@ -16,8 +16,6 @@ use std::collections::BTreeMap;
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
-    /// Highest certified view.
-    certified_view: View,
     /// Most recent finalized/certified certificate.
     floor: Option<Finalization<S, D>>,
     /// Notarizations for any view greater than the floor.
@@ -34,7 +32,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         Self {
             fetch_concurrent,
             current_view: View::zero(),
-            certified_view: View::zero(),
             floor: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
@@ -62,38 +59,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 if self.encounter_view(view) {
                     self.notarizations.insert(view, notarization);
                 }
-
-                // Set last notarized
-                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
-                    self.floor = Some(Certificate::Notarization(notarization));
-                }
-
-                // Prune old nullifications
-                self.prune(resolver).await;
             }
             Certificate::Finalization(finalization) => {
                 // Update current view
                 let view = finalization.view();
                 if self.encounter_view(view) {
                     self.floor = Some(finalization);
-                    self.prune(resolver).await;
-                }
-
-                // Set last finalized
-                if self.floor.as_ref().is_none_or(|floor| {
-                    (matches!(floor, Certificate::Notarization(_)) && view == floor.view())
-                        || view > floor.view()
-                }) {
-                    self.floor = Some(Certificate::Finalization(finalization));
-                }
-            }
-            Voter::Certification(round, success) => {
-                if !success {
-                    return;
-                }
-                let view = round.view();
-                if self.encounter_view(view) && view > self.certified_view {
-                    self.certified_view = view;
                     self.prune(resolver).await;
                 }
             }
@@ -109,7 +80,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
-                return Some(Voter::Finalization(floor.clone()));
+                return Some(Certificate::Finalization(floor.clone()));
             }
         }
 
@@ -139,8 +110,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved or pruned.
-        let start = self.certified_view.max(self.floor_view()).next();
-        let requests = View::range(start, self.current_view)
+        let requests = View::range(self.floor_view().next(), self.current_view)
             .filter(|view| !self.nullifications.contains_key(view))
             .take(self.fetch_concurrent)
             .map(U64::from)
@@ -148,19 +118,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
         resolver.fetch_all(requests).await;
     }
 
-    /// Prune stored certificates below the floor.
-    /// Prune requests for certificates above the highest certified view, which may be higher.
+    /// Prune stored certificates and requests that are not higher than the floor.
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
-        // Prune stored certificates.
-        let stored_floor = self.floor_view();
-        self.nullifications.retain(|view, _| *view > stored_floor);
-        self.notarizations.retain(|view, _| *view > stored_floor);
-
-        // Prune requests for certificates.
-        let resolver_floor = self.certified_view.max(stored_floor);
-        resolver
-            .retain(move |key| key > &resolver_floor.into())
-            .await;
+        let floor = self.floor_view();
+        self.nullifications.retain(|view, _| *view > floor);
+        self.notarizations.retain(|view, _| *view > floor);
+        resolver.retain(move |key| *key > floor.into()).await;
     }
 }
 
@@ -351,7 +314,7 @@ mod tests {
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
-        // Notarization alone does not set floor
+        // Notarization does not set floor
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
         state
             .handle(
@@ -360,22 +323,9 @@ mod tests {
             )
             .await;
 
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization)
-        );
+        assert!(state.floor.is_none());
         assert!(state.nullifications.is_empty());
         assert!(resolver.outstanding().is_empty());
-
-        // Certification of that notarization does not set floor
-        state
-            .handle(
-                Certificate::Finalization(finalization.clone()),
-                &mut resolver,
-            )
-            .await;
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization)
-        );
 
         // Finalization at the same view sets floor
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
@@ -385,9 +335,7 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
-        );
+        assert!(matches!(state.floor.as_ref(), Some(f) if f == &finalization));
     }
 
     #[test_async]
@@ -447,41 +395,5 @@ mod tests {
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
         );
         assert!(resolver.outstanding().is_empty());
-    }
-
-    #[test_async]
-    async fn certification_raises_request_floor() {
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
-        let mut resolver = MockResolver::default();
-
-        // Move to view 10
-        state.encounter_view(View::new(10));
-        state.fetch(&mut resolver).await;
-
-        // Should only request 1 and 2 (limited by fetch_concurrent)
-        assert_eq!(resolver.outstanding(), vec![1, 2]);
-
-        // Successful certification for view 5 raises certified_view
-        state
-            .handle(
-                Voter::Certification(Round::new(EPOCH, View::new(5)), true),
-                &mut resolver,
-            )
-            .await;
-
-        assert_eq!(state.certified_view, View::new(5));
-        assert!(state.floor.is_none()); // Floor unchanged (only finalization sets floor)
-        assert_eq!(resolver.outstanding(), vec![6, 7]); // Old requests pruned, new start from 6
-
-        // Failed certification is ignored
-        state
-            .handle(
-                Voter::Certification(Round::new(EPOCH, View::new(8)), false),
-                &mut resolver,
-            )
-            .await;
-
-        assert_eq!(state.certified_view, View::new(5)); // Unchanged
-        assert_eq!(resolver.outstanding(), vec![6, 7]); // Unchanged
     }
 }

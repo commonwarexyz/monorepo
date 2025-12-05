@@ -7,7 +7,7 @@ use crate::{
     types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{futures::Aborter, set::OrderedQuorum};
+use commonware_utils::futures::Aborter;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -185,21 +185,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the finalization certificate if we already reconstructed one.
     pub const fn finalization(&self) -> Option<&Finalization<S, D>> {
         self.finalization.as_ref()
-    }
-
-    /// Returns how many nullify votes we currently track.
-    pub fn len_nullifies(&self) -> usize {
-        self.votes.len_nullifies()
-    }
-
-    /// Returns how many notarize votes we currently track.
-    pub fn len_notarizes(&self) -> usize {
-        self.votes.len_notarizes()
-    }
-
-    /// Returns how many finalize votes we currently track.
-    pub fn len_finalizes(&self) -> usize {
-        self.votes.len_finalizes()
     }
 
     /// Returns true if we have explicitly certified the proposal.
@@ -520,7 +505,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
-            Voter::Certification(_, success) => {
+            Artifact::Certification(_, success) => {
                 self.certified(*success);
             }
         }

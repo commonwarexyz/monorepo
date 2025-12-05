@@ -68,12 +68,9 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::{select, test_traced};
-    use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network},
-        Receiver, Recipients, Sender,
-    };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_macros::test_traced;
+    use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{sync::Arc, time::Duration};
@@ -512,6 +509,7 @@ mod tests {
                 Certificate::Finalization(finalization) => {
                     assert_eq!(finalization.view(), View::new(50));
                 }
+                _ => panic!("unexpected resolver message"),
             }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
@@ -535,6 +533,7 @@ mod tests {
                 Certificate::Notarization(notarization) => {
                     assert_eq!(notarization.view(), journal_floor_target);
                 }
+                _ => panic!("unexpected resolver message"),
             }
 
             // Send notarization below oldest interesting view (42)
@@ -562,6 +561,7 @@ mod tests {
                 Certificate::Notarization(notarization) => {
                     assert_eq!(notarization.view(), problematic_view);
                 }
+                _ => panic!("unexpected resolver message"),
             }
 
             // Send Finalization via voter mailbox to new view (100)
@@ -1012,6 +1012,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1178,6 +1180,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (100_000.0, 0.0), // Very slow verification
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1918,6 +1922,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);

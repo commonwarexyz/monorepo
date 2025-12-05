@@ -329,7 +329,7 @@ impl<
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
         // Process nullify (and persist it if it is a first attempt)
-        let (retry, nullify, entries) = self.state.handle_timeout();
+        let (retry, nullify, entry) = self.state.handle_timeout();
         if let Some(nullify) = nullify {
             if !retry {
                 batcher.constructed(Vote::Nullify(nullify.clone())).await;
@@ -345,7 +345,7 @@ impl<
                 .await;
         }
 
-        // Broadcast entries to help others enter the view
+        // Broadcast entry certificate to help others enter the view
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
@@ -372,21 +372,15 @@ impl<
     ///
     /// The certification may succeed, in which case the proposal can be used in future views—
     /// or fail, in which case we should nullify the view as fast as possible.
-    async fn certified(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-        view: View,
-        success: bool,
-    ) {
+    async fn certified(&mut self, view: View, success: bool) {
         let Some(notarization) = self.state.certified(view, success) else {
             return;
         };
 
         // Persist certification result for recovery
-        let msg = Voter::Certification(Rnd::new(self.state.epoch(), view), success);
-        self.append_journal(view, msg.clone()).await;
+        let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
+        self.append_journal(view, artifact.clone()).await;
         self.sync_journal(view).await;
-        resolver.updated(msg).await;
 
         // Inform listeners of successful certification
         if success {
@@ -419,15 +413,11 @@ impl<
         }
         self.append_journal(view, artifact).await;
 
-        // If we were the leader, we should emit a certifiable chain of ancestor certificates such
-        // that other peers are able to verify my proposal in the future.
-        let Some(leader) = self.state.leader_index(view) else {
-            return Vec::new();
-        };
-        if self.state.is_me(leader) {
-            return self.state.get_certifiable_ancestry(view);
+        // If we were the proposer, we should emit the notarization that we built our proposal on
+        if self.state.is_me(self.state.leader_index(view)?) {
+            return self.state.emit_floor(view);
         }
-        Vec::new()
+        None
     }
 
     /// Persists our notarize vote to the journal for crash recovery.
@@ -768,10 +758,8 @@ impl<
                             .report(Activity::Finalization(finalization))
                             .await;
                     }
-                    Voter::Certification(round, success) => {
-                        let replay = Voter::Certification(round, success);
-                        self.certified(&mut resolver, round.view(), success).await;
-                        self.state.replay(&replay);
+                    Artifact::Certification(round, success) => {
+                        self.certified(round.view(), success).await;
                     }
                 }
             }
@@ -943,7 +931,7 @@ impl<
                     view = context.view();
                     match certified {
                         Ok(certified) => {
-                            self.certified(&mut resolver, view, certified).await;
+                            self.certified(view, certified).await;
                         }
                         Err(err) => {
                             debug!(
