@@ -8,10 +8,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{
-    ordered::{BiMap, TryCollect},
-    quorum,
-};
+use commonware_utils::{ordered::BiMap, quorum, TryCollect};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single

@@ -4,7 +4,10 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::ordered::{Map, Set, TryCollect};
+use commonware_utils::{
+    ordered::{Map, Set},
+    TryCollect,
+};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,

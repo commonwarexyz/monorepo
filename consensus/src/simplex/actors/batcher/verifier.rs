@@ -446,10 +446,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{
-        ordered::{Set, TryCollect},
-        quorum, quorum_from_slice,
-    };
+    use commonware_utils::{ordered::Set, quorum, quorum_from_slice, TryCollect};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,

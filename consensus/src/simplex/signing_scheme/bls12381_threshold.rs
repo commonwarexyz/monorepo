@@ -36,7 +36,10 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::ordered::{BiMap, Quorum, Set, TryCollect};
+use commonware_utils::{
+    ordered::{BiMap, Quorum, Set},
+    TryCollect,
+};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},

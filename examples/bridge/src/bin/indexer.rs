@@ -20,11 +20,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{
-    from_hex,
-    ordered::{Set, TryCollect},
-    union,
-};
+use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

@@ -11,8 +11,8 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::{
-    ordered::{Map, Set, TryCollect},
-    NZU32,
+    ordered::{Map, Set},
+    TryCollect, NZU32,
 };
 use governor::Quota;
 use rand::{seq::SliceRandom, Rng};

@@ -23,10 +23,10 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
     fixed_bytes, hex,
-    ordered::{Set, TryCollect},
+    ordered::Set,
     quorum,
     sequence::{FixedBytes, U64},
-    Acknowledgement, NZU32,
+    Acknowledgement, TryCollect, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};

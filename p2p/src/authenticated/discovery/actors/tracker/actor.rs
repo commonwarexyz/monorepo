@@ -295,11 +295,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{
-        bitmap::BitMap,
-        ordered::{Set, TryCollect},
-        NZU32,
-    };
+    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{

@@ -291,8 +291,8 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
-    ordered::{Map, Quorum, Set, TryCollect},
-    quorum, NZU32,
+    ordered::{Map, Quorum, Set},
+    quorum, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -1426,7 +1426,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{max_faults, ordered::TryCollect};
+    use commonware_utils::{max_faults, TryCollect};
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;

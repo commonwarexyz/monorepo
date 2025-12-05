@@ -5,10 +5,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::{
-    ordered::{Set, TryCollect},
-    quorum,
-};
+use commonware_utils::{ordered::Set, quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, hint::black_box};

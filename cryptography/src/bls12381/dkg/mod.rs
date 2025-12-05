@@ -228,8 +228,8 @@ mod tests {
         PrivateKeyExt as _, Signer as _,
     };
     use commonware_utils::{
-        ordered::{Quorum, Set, TryCollect},
-        quorum,
+        ordered::{Quorum, Set},
+        quorum, TryCollect,
     };
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};

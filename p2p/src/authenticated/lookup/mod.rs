@@ -174,8 +174,8 @@ mod tests {
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::{
-        ordered::{Map, Set, TryCollect},
-        NZU32,
+        ordered::{Map, Set},
+        TryCollect, NZU32,
     };
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};

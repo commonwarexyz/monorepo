@@ -20,8 +20,8 @@ use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{
     from_hex,
-    ordered::{Quorum, Set, TryCollect},
-    union, NZUsize, NZU32,
+    ordered::{Quorum, Set},
+    union, NZUsize, TryCollect, NZU32,
 };
 use governor::Quota;
 use std::{

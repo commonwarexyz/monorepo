@@ -8,10 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{
-    ordered::{Set as OrderedSet, TryCollect},
-    SystemTimeExt,
-};
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,

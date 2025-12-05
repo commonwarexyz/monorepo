@@ -85,10 +85,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{
-    ordered::{Set, TryCollect},
-    quorum, NZU32,
-};
+use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -15,7 +15,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::ordered::{Set, TryCollect};
+use commonware_utils::{ordered::Set, TryCollect};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
