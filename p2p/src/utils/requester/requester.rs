@@ -213,10 +213,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         // Increment failed metric if no participants are available
         self.metrics.created.inc(Status::Failure);
 
-        match next {
-            None => Err(Error::NoEligibleParticipants),
-            Some(wait) => Err(Error::RateLimited(wait)),
-        }
+        next.map_or_else(
+            || Err(Error::NoEligibleParticipants),
+            |wait| Err(Error::RateLimited(wait)),
+        )
     }
 
     /// Calculate a participant's new priority using exponential moving average.
