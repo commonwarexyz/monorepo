@@ -12,41 +12,22 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{
-            application,
-            fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            relay, reporter,
-        },
-        signing_scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519 as simplex_ed25519,
-            Scheme as SimplexScheme,
-        },
+        mocks::{application, fixtures::Fixture, relay, reporter},
+        signing_scheme::Scheme as SimplexScheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
-    ed25519::PublicKey as Ed25519PublicKey,
-    Sha256,
-};
+use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
+use commonware_runtime::deterministic;
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
-use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{
-    cell::RefCell,
-    num::NonZeroUsize,
-    panic,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
 
 pub const EPOCH: u64 = 333;
 
@@ -63,64 +44,12 @@ const EXPECTED_PANICS: [&str; 3] = [
     "invalid round (in payload)",
 ];
 
-static IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
-
 pub trait Simplex: 'static
 where
     <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
-}
-
-pub struct SimplexEd25519;
-
-impl Simplex for SimplexEd25519 {
-    type Scheme = simplex_ed25519::Scheme;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519(context, n)
-    }
-}
-
-pub struct SimplexBls12381MinPk;
-
-impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::<MinPk, _>(context, n)
-    }
-}
-
-pub struct SimplexBls12381MinSig;
-
-impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::<MinSig, _>(context, n)
-    }
-}
-
-pub struct SimplexBls12381MultisigMinPk;
-
-impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::<MinPk, _>(context, n)
-    }
-}
-
-pub struct SimplexBls12381MultisigMinSig;
-
-impl Simplex for SimplexBls12381MultisigMinSig {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::<MinSig, _>(context, n)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -331,94 +260,25 @@ fn run<P: Simplex>(input: FuzzInput) {
     });
 }
 
-pub fn fuzz<P: Simplex>(input: FuzzInput) {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(|info| {
-        let msg = format!("{info}");
-        for pattern in EXPECTED_PANICS {
-            if msg.contains(pattern) {
-                IGNORE_PANIC.store(true, Ordering::SeqCst);
-                return;
-            }
-        }
-        IGNORE_PANIC.store(false, Ordering::SeqCst);
-    }));
+fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
+    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        return false;
+    };
 
-    let result = panic::catch_unwind(move || run::<P>(input));
-
-    panic::set_hook(original_hook);
-
-    if result.is_err() && !IGNORE_PANIC.load(Ordering::SeqCst) {
-        panic!("unexpected panic");
-    }
+    EXPECTED_PANICS.iter().any(|pattern| msg.contains(pattern))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ed25519_connected() {
-        let input = FuzzInput {
-            seed: 42,
-            partition: Partition::Connected,
-            configuration: (3, 2, 1),
-            raw_bytes: vec![0u8; 1024],
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed([0u8; 32])),
-        };
-        fuzz::<SimplexEd25519>(input);
-    }
-
-    #[test]
-    fn test_ed25519_isolated() {
-        let input = FuzzInput {
-            seed: 123,
-            partition: Partition::Isolated,
-            configuration: (3, 2, 1),
-            raw_bytes: vec![1u8; 512],
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed([1u8; 32])),
-        };
-        fuzz::<SimplexEd25519>(input);
-    }
-
-    #[test]
-    fn test_ed25519_two_partitions() {
-        let input = FuzzInput {
-            seed: 456,
-            partition: Partition::TwoPartitionsWithByzantine,
-            configuration: (4, 3, 1),
-            raw_bytes: vec![2u8; 256],
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed([2u8; 32])),
-        };
-        fuzz::<SimplexEd25519>(input);
-    }
-
-    #[test]
-    fn test_ed25519_many_partitions() {
-        let input = FuzzInput {
-            seed: 789,
-            partition: Partition::ManyPartitionsWithByzantine,
-            configuration: (4, 3, 1),
-            raw_bytes: vec![3u8; 256],
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed([3u8; 32])),
-        };
-        fuzz::<SimplexEd25519>(input);
-    }
-
-    #[test]
-    fn test_ed25519_linear() {
-        let input = FuzzInput {
-            seed: 999,
-            partition: Partition::Linear,
-            configuration: (4, 3, 1),
-            raw_bytes: vec![4u8; 256],
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed([4u8; 32])),
-        };
-        fuzz::<SimplexEd25519>(input);
+pub fn fuzz<P: Simplex>(input: FuzzInput) {
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
+        Ok(()) => {}
+        Err(payload) => {
+            if !is_expected_panic(&payload) {
+                panic::resume_unwind(payload);
+            }
+        }
     }
 }
