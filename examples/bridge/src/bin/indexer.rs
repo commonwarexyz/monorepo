@@ -16,7 +16,7 @@ use commonware_cryptography::{
     },
     ed25519::{self},
     sha256::Digest as Sha256Digest,
-    Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
+    Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};

@@ -185,8 +185,10 @@
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
+//! use commonware_cryptography::{ed25519, Signer};
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
+//! use commonware_math::algebra::Random;
 //! use rand_chacha::ChaCha8Rng;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -195,7 +197,7 @@
 //! // Generate 4 Ed25519 private keys for participants
 //! let mut private_keys = Vec::new();
 //! for _ in 0..4 {
-//!     let private_key = ed25519::PrivateKey::from_rng(&mut rng);
+//!     let private_key = ed25519::PrivateKey::random(&mut rng);
 //!     private_keys.push(private_key);
 //! }
 //!
@@ -1371,10 +1373,11 @@ mod test_plan {
             },
             variant::Variant,
         },
-        ed25519, PrivateKeyExt as _, PublicKey,
+        ed25519, PublicKey,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_math::algebra::Random;
     use commonware_utils::{max_faults, TryCollect};
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
@@ -1640,7 +1643,7 @@ mod test_plan {
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
-                .map(|_| ed25519::PrivateKey::from_rng(&mut rng))
+                .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
             // The max_read_size needs to account for shifted polynomial degrees.
             // Find the maximum positive shift across all rounds.
@@ -2103,7 +2106,7 @@ pub use test_plan::Plan as FuzzPlan;
 #[cfg(test)]
 mod test {
     use super::{test_plan::*, *};
-    use crate::{bls12381::primitives::variant::MinPk, ed25519, PrivateKeyExt};
+    use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use core::num::NonZeroI32;
     use rand::SeedableRng;

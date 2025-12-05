@@ -292,7 +292,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
