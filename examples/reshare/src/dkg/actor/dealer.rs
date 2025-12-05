@@ -21,7 +21,7 @@ use futures::{
 };
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
-use tracing::{debug, info};
+use tracing::{debug, warn};
 
 enum Message<V: Variant, C: Signer> {
     Transmit,
@@ -102,7 +102,7 @@ where
         let replay = state.player_acks(epoch).await;
 
         let (dealer, pub_msg, priv_msgs) = Dealer::start(
-            Transcript::resume(rng_seed).noise(b"dealer rng"),
+            Transcript::resume(rng_seed).noise(b"dealer-rng"),
             round_info,
             me,
             share,
@@ -177,7 +177,7 @@ where
             return;
         }
         if let Err(e) = self.dealer.receive_player_ack(player.clone(), ack.clone()) {
-            info!("bad player ack: {}", e);
+            warn!(?player, ?e, "bad player ack");
             return;
         }
         self.unsent_priv_msgs.remove(&player);
