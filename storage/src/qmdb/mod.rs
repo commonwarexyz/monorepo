@@ -1,5 +1,4 @@
-//! A collection of authenticated databases.
-//!
+//! A collection of authenticated databases inspired by QMDB (Quick Merkle Database).
 //! # Terminology
 //!
 //! A _key_ in an authenticated database either has a _value_ or it doesn't. Two types of
@@ -9,6 +8,13 @@
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
+//!
+//! # Acknowledgments
+//!
+//! The following resources were used as references when implementing this crate:
+//!
+//! * [https://arxiv.org/abs/2501.05262](QMDB: Quick Merkle Database)
+//! * [https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md](Merkle Mountain Ranges)
 
 use crate::{
     index::{Cursor, Unordered as Index},
