@@ -25,15 +25,15 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
+use commonware_utils::set::{Ordered, OrderedWeightedAssociated};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
-    /// Participants in the committee.
-    participants: OrderedAssociated<P, V::Public>,
+    /// Participants in the committee with their consensus keys and weights.
+    participants: OrderedWeightedAssociated<P, V::Public>,
     /// Key used for generating signatures.
     signer: Option<(u32, Private)>,
 }
@@ -41,13 +41,13 @@ pub struct Scheme<P: PublicKey, V: Variant> {
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants have both an identity key and a consensus key. The identity key
-    /// is used for committee ordering and indexing, while the consensus key is used for
-    /// signing and verification.
+    /// Participants have an identity key, a consensus key, and a weight. The identity key
+    /// is used for committee ordering and indexing, the consensus key is used for
+    /// signing and verification, and the weight is used for weighted quorum calculations.
     ///
     /// If the provided private key does not match any consensus key in the committee,
     /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
+    pub fn new(participants: OrderedWeightedAssociated<P, V::Public>, private_key: Private) -> Self {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
@@ -63,14 +63,22 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Builds a verifier that can authenticate votes and certificates.
     ///
-    /// Participants have both an identity key and a consensus key. The identity key
-    /// is used for committee ordering and indexing, while the consensus key is used for
-    /// verification.
-    pub const fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
+    /// Participants have an identity key, a consensus key, and a weight. The identity key
+    /// is used for committee ordering and indexing, the consensus key is used for
+    /// verification, and the weight is used for weighted quorum calculations.
+    pub const fn verifier(participants: OrderedWeightedAssociated<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
         }
+    }
+
+    /// Computes the total weight of all signers in the certificate.
+    fn signers_weight(&self, signers: &Signers) -> u64 {
+        signers
+            .iter()
+            .filter_map(|index| self.participants.weight(index as usize))
+            .sum()
     }
 }
 
@@ -126,7 +134,15 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     }
 
     fn participants(&self) -> &Ordered<Self::PublicKey> {
-        &self.participants
+        self.participants.keys()
+    }
+
+    fn weighted_quorum(&self) -> u64 {
+        self.participants.weighted_quorum()
+    }
+
+    fn weight(&self, index: u32) -> u64 {
+        self.participants.weight(index as usize).unwrap_or(0)
     }
 
     fn sign_vote<D: Digest>(
@@ -235,16 +251,21 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     where
         I: IntoIterator<Item = Signature<Self>>,
     {
-        // Collect the signers and signatures.
+        // Collect the signers and signatures, computing total weight.
         let mut entries = Vec::new();
+        let mut total_weight = 0u64;
         for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
 
+            let weight = self.participants.weight(signer as usize).unwrap_or(0);
+            total_weight = total_weight.saturating_add(weight);
             entries.push((signer, signature));
         }
-        if entries.len() < self.participants.quorum() as usize {
+
+        // Check if the weighted quorum is met.
+        if total_weight < self.participants.weighted_quorum() {
             return None;
         }
 
@@ -268,8 +289,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             return false;
         }
 
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum() as usize {
+        // If the certificate does not meet the weighted quorum, return false.
+        if self.signers_weight(&certificate.signers) < self.participants.weighted_quorum() {
             return false;
         }
 
@@ -346,7 +367,7 @@ mod tests {
         seed: u64,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
-        OrderedAssociated<ed25519::PublicKey, V::Public>,
+        OrderedWeightedAssociated<ed25519::PublicKey, V::Public>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, n);

@@ -57,14 +57,14 @@ impl<
     > Round<P, S, B, D, R>
 {
     pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R) -> Self {
-        let quorum = participants.quorum();
+        let weighted_quorum = scheme.weighted_quorum();
         let len = participants.len();
         Self {
             participants,
 
             blocker,
             reporter,
-            verifier: Verifier::new(scheme, quorum),
+            verifier: Verifier::new(scheme, weighted_quorum),
 
             pending_votes: VoteTracker::new(len),
             verified_votes: VoteTracker::new(len),
@@ -303,7 +303,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -319,7 +319,7 @@ impl<
         self.verifier.verify_notarizes(rng, namespace)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -335,7 +335,7 @@ impl<
         self.verifier.verify_nullifies(rng, namespace)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
@@ -372,6 +372,30 @@ impl<
         }
     }
 
+    /// Computes the total weight of verified notarize votes.
+    fn verified_notarizes_weight(&self, scheme: &S) -> u64 {
+        self.verified_votes
+            .iter_notarizes()
+            .map(|n| scheme.weight(n.signer()))
+            .sum()
+    }
+
+    /// Computes the total weight of verified nullify votes.
+    fn verified_nullifies_weight(&self, scheme: &S) -> u64 {
+        self.verified_votes
+            .iter_nullifies()
+            .map(|n| scheme.weight(n.signer()))
+            .sum()
+    }
+
+    /// Computes the total weight of verified finalize votes.
+    fn verified_finalizes_weight(&self, scheme: &S) -> u64 {
+        self.verified_votes
+            .iter_finalizes()
+            .map(|f| scheme.weight(f.signer()))
+            .sum()
+    }
+
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
@@ -379,7 +403,7 @@ impl<
         if self.has_notarization() {
             return None;
         }
-        if self.verified_votes.len_notarizes() < self.participants.quorum() {
+        if self.verified_notarizes_weight(scheme) < scheme.weighted_quorum() {
             return None;
         }
         let notarization =
@@ -395,7 +419,7 @@ impl<
         if self.has_nullification() {
             return None;
         }
-        if self.verified_votes.len_nullifies() < self.participants.quorum() {
+        if self.verified_nullifies_weight(scheme) < scheme.weighted_quorum() {
             return None;
         }
         let nullification =
@@ -411,7 +435,7 @@ impl<
         if self.has_finalization() {
             return None;
         }
-        if self.verified_votes.len_finalizes() < self.participants.quorum() {
+        if self.verified_finalizes_weight(scheme) < scheme.weighted_quorum() {
             return None;
         }
         let finalization =

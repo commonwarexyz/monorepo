@@ -378,6 +378,20 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         self.participants()
     }
 
+    fn weighted_quorum(&self) -> u64 {
+        // bls12381_threshold uses uniform weights (each participant has weight 1)
+        self.participants().quorum() as u64
+    }
+
+    fn weight(&self, index: u32) -> u64 {
+        // bls12381_threshold uses uniform weights (each participant has weight 1)
+        if (index as usize) < self.participants().len() {
+            1
+        } else {
+            0
+        }
+    }
+
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],

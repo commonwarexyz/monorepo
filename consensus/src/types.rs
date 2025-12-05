@@ -16,6 +16,9 @@
 //!   type safety to prevent mixing epoch and view deltas. Type aliases [`EpochDelta`] and
 //!   [`ViewDelta`] are provided for convenience.
 //!
+//! - [`Weight`]: Represents a validator's consensus weight (stake). Used for weighted quorum
+//!   calculations where validators may have different voting power.
+//!
 //! # Arithmetic Safety
 //!
 //! Arithmetic operations avoid silent errors. Only `next()` panics on overflow. All other
@@ -23,9 +26,9 @@
 //!
 //! # Type Conversions
 //!
-//! Explicit type constructors (`Epoch::new()`, `View::new()`) are required to create instances
-//! from raw integers. Implicit conversions via, e.g. `From<u64>` are intentionally not provided
-//! to prevent accidental type misuse.
+//! Explicit type constructors (`Epoch::new()`, `View::new()`, `Weight::new()`) are required to
+//! create instances from raw integers. Implicit conversions via, e.g. `From<u64>` are intentionally
+//! not provided to prevent accidental type misuse.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
@@ -280,6 +283,105 @@ pub type EpochDelta = Delta<Epoch>;
 /// `ViewDelta` represents a distance between views or a duration measured in views.
 /// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
 pub type ViewDelta = Delta<View>;
+
+/// Represents a validator's consensus weight (stake).
+///
+/// Weight is used for weighted quorum calculations where validators may have different
+/// voting power. Unlike equal-weight consensus, a quorum is reached when the total
+/// weight of signers exceeds a threshold rather than a simple count.
+///
+/// # Type Safety
+///
+/// Like [`Epoch`] and [`View`], `Weight` requires explicit construction via [`Weight::new()`]
+/// or [`Weight::one()`] to prevent accidental misuse of raw integers as weights.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Weight(u64);
+
+impl Weight {
+    /// Returns a weight of zero.
+    pub const fn zero() -> Self {
+        Self(0)
+    }
+
+    /// Returns a weight of one.
+    ///
+    /// Useful for uniform-weight consensus where all validators have equal voting power.
+    pub const fn one() -> Self {
+        Self(1)
+    }
+
+    /// Creates a new weight from a u64 value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying u64 value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns true if this weight is zero.
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Adds another weight, saturating at u64::MAX.
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    /// Adds another weight, returning `None` if it would overflow.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    /// Subtracts another weight, returning `None` if it would underflow.
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
+    /// Subtracts another weight, saturating at zero.
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+
+    /// Multiplies by a scalar, saturating at u64::MAX.
+    pub const fn saturating_mul(self, scalar: u64) -> Self {
+        Self(self.0.saturating_mul(scalar))
+    }
+
+    /// Multiplies by a scalar, returning `None` if it would overflow.
+    pub fn checked_mul(self, scalar: u64) -> Option<Self> {
+        self.0.checked_mul(scalar).map(Self)
+    }
+}
+
+impl Display for Weight {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Read for Weight {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+        let value: u64 = UInt::read(buf)?.into();
+        Ok(Self(value))
+    }
+}
+
+impl Write for Weight {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.0).write(buf);
+    }
+}
+
+impl EncodeSize for Weight {
+    fn encode_size(&self) -> usize {
+        UInt(self.0).encode_size()
+    }
+}
 
 /// A unique identifier combining epoch and view for a consensus round.
 ///
@@ -740,5 +842,104 @@ mod tests {
         assert_eq!(range.next(), Some(View::new(7)));
         assert_eq!(range.next(), None);
         assert_eq!(range.next_back(), None);
+    }
+
+    #[test]
+    fn test_weight_constructors() {
+        assert_eq!(Weight::zero().get(), 0);
+        assert_eq!(Weight::one().get(), 1);
+        assert_eq!(Weight::new(42).get(), 42);
+        assert_eq!(Weight::default().get(), 0);
+    }
+
+    #[test]
+    fn test_weight_is_zero() {
+        assert!(Weight::zero().is_zero());
+        assert!(Weight::new(0).is_zero());
+        assert!(!Weight::one().is_zero());
+        assert!(!Weight::new(100).is_zero());
+    }
+
+    #[test]
+    fn test_weight_saturating_add() {
+        assert_eq!(
+            Weight::new(10).saturating_add(Weight::new(20)).get(),
+            30
+        );
+        assert_eq!(
+            Weight::new(u64::MAX).saturating_add(Weight::one()).get(),
+            u64::MAX
+        );
+        assert_eq!(
+            Weight::new(u64::MAX - 5).saturating_add(Weight::new(10)).get(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn test_weight_checked_add() {
+        assert_eq!(
+            Weight::new(10).checked_add(Weight::new(20)),
+            Some(Weight::new(30))
+        );
+        assert_eq!(Weight::new(u64::MAX).checked_add(Weight::one()), None);
+    }
+
+    #[test]
+    fn test_weight_checked_sub() {
+        assert_eq!(
+            Weight::new(30).checked_sub(Weight::new(10)),
+            Some(Weight::new(20))
+        );
+        assert_eq!(
+            Weight::new(10).checked_sub(Weight::new(10)),
+            Some(Weight::zero())
+        );
+        assert_eq!(Weight::new(5).checked_sub(Weight::new(10)), None);
+    }
+
+    #[test]
+    fn test_weight_saturating_sub() {
+        assert_eq!(Weight::new(30).saturating_sub(Weight::new(10)).get(), 20);
+        assert_eq!(Weight::new(5).saturating_sub(Weight::new(10)).get(), 0);
+    }
+
+    #[test]
+    fn test_weight_saturating_mul() {
+        assert_eq!(Weight::new(10).saturating_mul(3).get(), 30);
+        assert_eq!(Weight::new(u64::MAX).saturating_mul(2).get(), u64::MAX);
+    }
+
+    #[test]
+    fn test_weight_checked_mul() {
+        assert_eq!(Weight::new(10).checked_mul(3), Some(Weight::new(30)));
+        assert_eq!(Weight::new(u64::MAX).checked_mul(2), None);
+    }
+
+    #[test]
+    fn test_weight_display() {
+        assert_eq!(format!("{}", Weight::zero()), "0");
+        assert_eq!(format!("{}", Weight::one()), "1");
+        assert_eq!(format!("{}", Weight::new(42)), "42");
+    }
+
+    #[test]
+    fn test_weight_ordering() {
+        assert!(Weight::zero() < Weight::one());
+        assert!(Weight::new(5) < Weight::new(10));
+        assert!(Weight::new(10) > Weight::new(5));
+        assert_eq!(Weight::new(42), Weight::new(42));
+    }
+
+    #[test]
+    fn test_weight_encode_decode() {
+        let cases = vec![0u64, 1, 127, 128, 255, 256, u64::MAX];
+        for value in cases {
+            let weight = Weight::new(value);
+            let encoded = weight.encode();
+            assert_eq!(encoded.len(), weight.encode_size());
+            let decoded = Weight::decode(encoded).unwrap();
+            assert_eq!(weight, decoded);
+        }
     }
 }

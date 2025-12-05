@@ -76,6 +76,17 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Ordered<Self::PublicKey>;
 
+    /// Returns the weighted quorum threshold (total weight needed for a valid certificate).
+    ///
+    /// For weighted schemes, this is `total_weight - max_faulty_weight`.
+    /// For uniform schemes, this equals the count-based quorum.
+    fn weighted_quorum(&self) -> u64;
+
+    /// Returns the weight of a participant at the given index.
+    ///
+    /// Returns 0 if the index is out of bounds.
+    fn weight(&self, index: u32) -> u64;
+
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
     fn sign_vote<D: Digest>(

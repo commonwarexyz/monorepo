@@ -18,15 +18,15 @@ use commonware_cryptography::{
     ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::set::{Ordered, OrderedWeighted};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme {
-    /// Participants in the committee.
-    participants: Ordered<ed25519::PublicKey>,
+    /// Participants in the committee with their consensus weights.
+    participants: OrderedWeighted<ed25519::PublicKey>,
     /// Key used for generating signatures.
     signer: Option<(u32, ed25519::PrivateKey)>,
 }
@@ -34,12 +34,13 @@ pub struct Scheme {
 impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants use the same key for both identity and consensus.
+    /// Participants use the same key for both identity and consensus. Each participant
+    /// has an associated weight used for weighted quorum calculations.
     ///
     /// If the provided private key does not match any consensus key in the committee,
     /// the instance will act as a verifier (unable to generate signatures).
     pub fn new(
-        participants: Ordered<ed25519::PublicKey>,
+        participants: OrderedWeighted<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
     ) -> Self {
         let signer = participants
@@ -54,12 +55,21 @@ impl Scheme {
 
     /// Builds a verifier that can authenticate votes without generating signatures.
     ///
-    /// Participants use the same key for both identity and consensus.
-    pub const fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    /// Participants use the same key for both identity and consensus. Each participant
+    /// has an associated weight used for weighted quorum calculations.
+    pub const fn verifier(participants: OrderedWeighted<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
         }
+    }
+
+    /// Computes the total weight of all signers in the certificate.
+    fn signers_weight(&self, signers: &Signers) -> u64 {
+        signers
+            .iter()
+            .filter_map(|index| self.participants.weight(index as usize))
+            .sum()
     }
 
     /// Stage a certificate for batch verification.
@@ -80,8 +90,8 @@ impl Scheme {
             return false;
         }
 
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum() as usize {
+        // If the certificate does not meet the weighted quorum, return false.
+        if self.signers_weight(&certificate.signers) < self.participants.weighted_quorum() {
             return false;
         }
 
@@ -158,7 +168,15 @@ impl signing_scheme::Scheme for Scheme {
     }
 
     fn participants(&self) -> &Ordered<Self::PublicKey> {
-        &self.participants
+        self.participants.keys()
+    }
+
+    fn weighted_quorum(&self) -> u64 {
+        self.participants.weighted_quorum()
+    }
+
+    fn weight(&self, index: u32) -> u64 {
+        self.participants.weight(index as usize).unwrap_or(0)
     }
 
     fn sign_vote<D: Digest>(
@@ -252,16 +270,21 @@ impl signing_scheme::Scheme for Scheme {
     where
         I: IntoIterator<Item = Signature<Self>>,
     {
-        // Collect the signers and signatures.
+        // Collect the signers and signatures, computing total weight.
         let mut entries = Vec::new();
+        let mut total_weight = 0u64;
         for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
 
+            let weight = self.participants.weight(signer as usize).unwrap_or(0);
+            total_weight = total_weight.saturating_add(weight);
             entries.push((signer, signature));
         }
-        if entries.len() < self.participants.quorum() as usize {
+
+        // Check if the weighted quorum is met.
+        if total_weight < self.participants.weighted_quorum() {
             return None;
         }
 
@@ -350,15 +373,19 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
 
-    fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
+    fn setup_signers(
+        n: u32,
+        seed: u64,
+    ) -> (Vec<Scheme>, OrderedWeighted<ed25519::PublicKey>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
-            participants,
-            schemes,
-            ..
+            schemes, verifier, ..
         } = ed25519(&mut rng, n);
 
-        (schemes, participants.into())
+        // Get the weighted participants from the first scheme
+        let participants = schemes.first().unwrap().participants.clone();
+
+        (schemes, participants, verifier)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -371,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_sign_vote_roundtrip_for_each_context() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let scheme = &schemes[0];
 
         let proposal = sample_proposal(0, 2, 1);
@@ -426,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_verify_votes_filters_bad_signers() {
-        let (schemes, _) = setup_signers(5, 42);
+        let (schemes, ..) = setup_signers(5, 42);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
@@ -487,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_sorts_signers() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 7, 4);
 
         let votes = [
@@ -528,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_requires_quorum() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 9, 5);
 
         let votes: Vec<_> = schemes
@@ -551,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_rejects_out_of_range_signer() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 13, 7);
 
         let mut votes: Vec<_> = schemes
@@ -576,7 +603,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate signer index: 2")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 25, 13);
 
         let mut votes: Vec<_> = schemes
@@ -601,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_detects_corruption() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, _, verifier) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 15, 8);
 
         let votes: Vec<_> = schemes
@@ -623,7 +650,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -647,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_certificate_codec_roundtrip() {
-        let (schemes, _) = setup_signers(4, 42);
+        let (schemes, ..) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 17, 9);
 
         let votes: Vec<_> = schemes
@@ -675,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, _, verifier) = setup_signers(4, 42);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
 
@@ -691,7 +717,6 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::verifier(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -707,7 +732,8 @@ mod tests {
 
     #[test]
     fn test_certificate_decode_validation() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, participants, _) = setup_signers(4, 42);
+        let n = participants.len();
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes
@@ -732,39 +758,38 @@ mod tests {
         // Well-formed certificate decodes successfully.
         let encoded = certificate.encode();
         let mut cursor = &encoded[..];
-        let decoded =
-            Certificate::read_cfg(&mut cursor, &participants.len()).expect("decode certificate");
+        let decoded = Certificate::read_cfg(&mut cursor, &n).expect("decode certificate");
         assert_eq!(decoded, certificate);
 
         // Certificate with no signers is rejected.
         let empty = Certificate {
-            signers: Signers::from(participants.len(), std::iter::empty::<u32>()),
+            signers: Signers::from(n, std::iter::empty::<u32>()),
             signatures: Vec::new(),
         };
-        assert!(Certificate::decode_cfg(empty.encode(), &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(empty.encode(), &n).is_err());
 
         // Certificate with mismatched signature count is rejected.
         let mismatched = Certificate {
-            signers: Signers::from(participants.len(), [0u32, 1]),
+            signers: Signers::from(n, [0u32, 1]),
             signatures: vec![certificate.signatures[0].clone()],
         };
-        assert!(Certificate::decode_cfg(mismatched.encode(), &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(mismatched.encode(), &n).is_err());
 
         // Certificate containing more signers than the participant set is rejected.
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
-        signers.push(participants.len() as u32);
+        signers.push(n as u32);
         let mut signatures = certificate.signatures.clone();
         signatures.push(certificate.signatures[0].clone());
         let extended = Certificate {
-            signers: Signers::from(participants.len() + 1, signers),
+            signers: Signers::from(n + 1, signers),
             signatures,
         };
-        assert!(Certificate::decode_cfg(extended.encode(), &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(extended.encode(), &n).is_err());
     }
 
     #[test]
     fn test_verify_certificate() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, _, verifier) = setup_signers(4, 42);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 21, 11);
 
@@ -787,7 +812,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -800,7 +824,8 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_sub_quorum() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, participants, verifier) = setup_signers(4, 42);
+        let n = participants.len();
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
@@ -825,10 +850,9 @@ mod tests {
         let mut truncated = certificate;
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
-        truncated.signers = Signers::from(participants.len(), signers);
+        truncated.signers = Signers::from(n, signers);
         truncated.signatures.pop();
 
-        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -841,7 +865,8 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_unknown_signer() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, participants, verifier) = setup_signers(4, 42);
+        let n = participants.len();
         let proposal = sample_proposal(0, 25, 13);
 
         let votes: Vec<_> = schemes
@@ -864,13 +889,12 @@ mod tests {
             .expect("assemble certificate");
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
-        signers.push(participants.len() as u32);
-        certificate.signers = Signers::from(participants.len() + 1, signers);
+        signers.push(n as u32);
+        certificate.signers = Signers::from(n + 1, signers);
         certificate
             .signatures
             .push(certificate.signatures[0].clone());
 
-        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -883,7 +907,8 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, participants, verifier) = setup_signers(4, 42);
+        let n = participants.len();
         let proposal = sample_proposal(0, 26, 14);
 
         let votes: Vec<_> = schemes
@@ -906,7 +931,6 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier(participants.clone());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -918,7 +942,7 @@ mod tests {
 
         // Make the signers bitmap size smaller
         let signers: Vec<u32> = certificate.signers.iter().collect();
-        certificate.signers = Signers::from(participants.len() - 1, signers);
+        certificate.signers = Signers::from(n - 1, signers);
 
         // The certificate verification should fail
         assert!(!verifier.verify_certificate(
@@ -933,7 +957,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_mismatched_signature_count() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, _, verifier) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 27, 14);
 
         let votes: Vec<_> = schemes
@@ -956,7 +980,6 @@ mod tests {
             .expect("assemble certificate");
         certificate.signatures.pop();
 
-        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -969,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificates_batch_detects_failure() {
-        let (schemes, participants) = setup_signers(4, 42);
+        let (schemes, _, verifier) = setup_signers(4, 42);
         let proposal_a = sample_proposal(0, 23, 12);
         let proposal_b = sample_proposal(1, 24, 13);
 
@@ -1010,7 +1033,6 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
 
-        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 Subject::Notarize {
@@ -1028,5 +1050,96 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[test]
+    fn test_weighted_quorum_rejects_insufficient_weight() {
+        use crate::simplex::mocks::fixtures::ed25519_weighted;
+        use crate::simplex::signing_scheme::Scheme as _;
+
+        // Create participants with weights [10, 1, 1, 1]
+        // total_weight = 13
+        // max_faulty_weight = (13-1)/3 = 4
+        // weighted_quorum = 13 - 4 = 9
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { schemes, .. } = ed25519_weighted(&mut rng, &[10, 1, 1, 1]);
+
+        // Find the heavy participant (weight 10) by querying weights
+        let heavy_idx = (0..4)
+            .find(|&i| schemes[0].weight(i) == 10)
+            .expect("should find heavy participant");
+        let light_indices: Vec<_> = (0..4).filter(|&i| i != heavy_idx).collect();
+
+        let proposal = sample_proposal(0, 1, 1);
+
+        // Collect votes from the 3 lightweight participants (weights 1+1+1=3)
+        // This is 3 signers which would meet count-based quorum (3 out of 4)
+        // But weight 3 < weighted_quorum 9
+        let votes: Vec<_> = light_indices
+            .iter()
+            .map(|&i| {
+                schemes[i as usize]
+                    .sign_vote(
+                        NAMESPACE,
+                        Subject::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        // Assembly should fail - we have 3 signers but only 3 weight, need 9
+        assert!(
+            schemes[0].assemble_certificate(votes).is_none(),
+            "Certificate assembly should fail when weight is insufficient despite having quorum count"
+        );
+    }
+
+    #[test]
+    fn test_weighted_quorum_accepts_sufficient_weight() {
+        use crate::simplex::mocks::fixtures::ed25519_weighted;
+        use crate::simplex::signing_scheme::Scheme as _;
+
+        // Same setup: weights [10, 1, 1, 1]
+        // weighted_quorum = 9
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519_weighted(&mut rng, &[10, 1, 1, 1]);
+
+        // Find the heavy participant (weight 10) by querying weights
+        let heavy_idx = (0..4)
+            .find(|&i| schemes[0].weight(i) == 10)
+            .expect("should find heavy participant");
+
+        let proposal = sample_proposal(0, 1, 1);
+
+        // Collect vote from the heavy participant only
+        // This is just 1 signer, but weight 10 >= weighted_quorum 9
+        let votes: Vec<_> = [schemes[heavy_idx as usize]
+            .sign_vote(
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap()]
+        .into();
+
+        // Assembly should succeed - we have only 1 signer but 10 weight >= 9 quorum
+        let certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("Certificate assembly should succeed when weight is sufficient");
+
+        // Verify the certificate is valid
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
     }
 }

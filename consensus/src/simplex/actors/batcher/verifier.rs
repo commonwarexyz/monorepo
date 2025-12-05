@@ -14,14 +14,15 @@ use rand::{CryptoRng, Rng};
 /// and signals they are ready to be verified (when there exist enough messages to potentially reach
 /// a quorum).
 ///
-/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
-/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+/// To avoid unnecessary verification, it also tracks the accumulated weight of already verified
+/// messages (ensuring we no longer attempt to verify messages after a quorum weight of valid
+/// messages have already been verified).
 pub struct Verifier<S: Scheme, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
 
-    /// Required quorum size.
-    quorum: usize,
+    /// Required weighted quorum threshold.
+    quorum: u64,
 
     /// Current leader index.
     leader: Option<u32>,
@@ -30,18 +31,18 @@ pub struct Verifier<S: Scheme, D: Digest> {
 
     /// Pending notarize votes waiting to be verified.
     notarizes: Vec<Notarize<S, D>>,
-    /// Count of already-verified notarize votes.
-    notarizes_verified: usize,
+    /// Accumulated weight of already-verified notarize votes.
+    notarizes_verified_weight: u64,
 
     /// Pending nullify votes waiting to be verified.
     nullifies: Vec<Nullify<S>>,
-    /// Count of already-verified nullify votes.
-    nullifies_verified: usize,
+    /// Accumulated weight of already-verified nullify votes.
+    nullifies_verified_weight: u64,
 
     /// Pending finalize votes waiting to be verified.
     finalizes: Vec<Finalize<S, D>>,
-    /// Count of already-verified finalize votes.
-    finalizes_verified: usize,
+    /// Accumulated weight of already-verified finalize votes.
+    finalizes_verified_weight: u64,
 }
 
 impl<S: Scheme, D: Digest> Verifier<S, D> {
@@ -49,28 +50,25 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     ///
     /// # Arguments
     ///
-    /// * `signing` - Scheme handle used to verify and aggregate votes.
-    /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
-    ///   required to reach a quorum. If `None`, batch verification readiness
-    ///   checks based on quorum size are skipped.
-    pub const fn new(scheme: S, quorum: u32) -> Self {
+    /// * `scheme` - Scheme handle used to verify and aggregate votes.
+    /// * `quorum` - The weighted quorum threshold required to reach consensus.
+    pub const fn new(scheme: S, quorum: u64) -> Self {
         Self {
             scheme,
 
-            // Store quorum as usize to simplify comparisons against queue lengths.
-            quorum: quorum as usize,
+            quorum,
 
             leader: None,
             leader_proposal: None,
 
             notarizes: Vec::new(),
-            notarizes_verified: 0,
+            notarizes_verified_weight: 0,
 
             nullifies: Vec::new(),
-            nullifies_verified: 0,
+            nullifies_verified_weight: 0,
 
             finalizes: Vec::new(),
-            finalizes_verified: 0,
+            finalizes_verified_weight: 0,
         }
     }
 
@@ -94,8 +92,8 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Adds a [Vote] message to the batch for later verification.
     ///
-    /// If the message has already been verified (e.g., we built it), it increments
-    /// the count of verified messages directly. Otherwise, it adds the message to
+    /// If the message has already been verified (e.g., we built it), it adds the
+    /// signer's weight to the verified weight. Otherwise, it adds the message to
     /// the appropriate pending queue.
     ///
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
@@ -128,7 +126,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
                 // If we've made it this far, add the notarize
                 if verified {
-                    self.notarizes_verified += 1;
+                    self.notarizes_verified_weight += self.scheme.weight(notarize.signer());
                 } else {
                     self.notarizes.push(notarize);
                 }
@@ -136,7 +134,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             }
             Vote::Nullify(nullify) => {
                 if verified {
-                    self.nullifies_verified += 1;
+                    self.nullifies_verified_weight += self.scheme.weight(nullify.signer());
                 } else {
                     self.nullifies.push(nullify);
                 }
@@ -152,7 +150,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
                 // If we've made it this far, add the finalize
                 if verified {
-                    self.finalizes_verified += 1;
+                    self.finalizes_verified_weight += self.scheme.weight(finalize.signer());
                 } else {
                     self.finalizes.push(finalize);
                 }
@@ -175,6 +173,30 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return;
         };
         self.set_leader_proposal(notarize.proposal.clone());
+    }
+
+    /// Computes the total weight of pending notarize votes.
+    fn pending_notarizes_weight(&self) -> u64 {
+        self.notarizes
+            .iter()
+            .map(|n| self.scheme.weight(n.signer()))
+            .sum()
+    }
+
+    /// Computes the total weight of pending nullify votes.
+    fn pending_nullifies_weight(&self) -> u64 {
+        self.nullifies
+            .iter()
+            .map(|n| self.scheme.weight(n.signer()))
+            .sum()
+    }
+
+    /// Computes the total weight of pending finalize votes.
+    fn pending_finalizes_weight(&self) -> u64 {
+        self.finalizes
+            .iter()
+            .map(|f| self.scheme.weight(f.signer()))
+            .sum()
     }
 
     /// Verifies a batch of pending [Vote::Notarize] messages.
@@ -217,7 +239,10 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             .scheme
             .verify_votes(rng, namespace, Subject::Notarize { proposal }, signatures);
 
-        self.notarizes_verified += verified.len();
+        // Accumulate weight of verified votes
+        for sig in &verified {
+            self.notarizes_verified_weight += self.scheme.weight(sig.signer);
+        }
 
         (
             verified
@@ -239,9 +264,9 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     /// Verification is considered "ready" when all of the following are true:
     /// 1. There are pending notarize messages to verify.
     /// 2. The leader and their proposal are known (so we know which proposal to verify for).
-    /// 3. We haven't already verified enough messages to reach quorum.
-    /// 4. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_notarizes(&self) -> bool {
+    /// 3. We haven't already verified enough weight to reach quorum.
+    /// 4. The sum of verified and pending weight could potentially reach quorum.
+    pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
             return false;
@@ -253,13 +278,13 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If we have already verified enough messages, there is nothing more to do.
-        if self.notarizes_verified >= self.quorum {
+        // If we have already verified enough weight, there is nothing more to do.
+        if self.notarizes_verified_weight >= self.quorum {
             return false;
         }
 
-        // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.notarizes_verified + self.notarizes.len() < self.quorum {
+        // If we don't have enough weight to reach the quorum, there is nothing to do yet.
+        if self.notarizes_verified_weight + self.pending_notarizes_weight() < self.quorum {
             return false;
         }
 
@@ -304,7 +329,10 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             nullifies.into_iter().map(|nullify| nullify.signature),
         );
 
-        self.nullifies_verified += verified.len();
+        // Accumulate weight of verified votes
+        for sig in &verified {
+            self.nullifies_verified_weight += self.scheme.weight(sig.signer);
+        }
 
         (
             verified
@@ -319,21 +347,21 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     ///
     /// Verification is considered "ready" when all of the following are true:
     /// 1. There are pending nullify messages to verify.
-    /// 2. We haven't already verified enough messages to reach quorum.
-    /// 3. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_nullifies(&self) -> bool {
+    /// 2. We haven't already verified enough weight to reach quorum.
+    /// 3. The sum of verified and pending weight could potentially reach quorum.
+    pub fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
         if self.nullifies.is_empty() {
             return false;
         }
 
-        // If we have already verified enough messages, there is nothing more to do.
-        if self.nullifies_verified >= self.quorum {
+        // If we have already verified enough weight, there is nothing more to do.
+        if self.nullifies_verified_weight >= self.quorum {
             return false;
         }
 
-        // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.nullifies_verified + self.nullifies.len() < self.quorum {
+        // If we don't have enough weight to reach the quorum, there is nothing to do yet.
+        if self.nullifies_verified_weight + self.pending_nullifies_weight() < self.quorum {
             return false;
         }
 
@@ -380,7 +408,10 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             .scheme
             .verify_votes(rng, namespace, Subject::Finalize { proposal }, signatures);
 
-        self.finalizes_verified += verified.len();
+        // Accumulate weight of verified votes
+        for sig in &verified {
+            self.finalizes_verified_weight += self.scheme.weight(sig.signer);
+        }
 
         (
             verified
@@ -402,9 +433,9 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     /// Verification is considered "ready" when all of the following are true:
     /// 1. There are pending finalize messages to verify.
     /// 2. The leader and their proposal are known (so we know which proposal to verify for).
-    /// 3. We haven't already verified enough messages to reach quorum.
-    /// 4. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_finalizes(&self) -> bool {
+    /// 3. We haven't already verified enough weight to reach quorum.
+    /// 4. The sum of verified and pending weight could potentially reach quorum.
+    pub fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
         if self.finalizes.is_empty() {
             return false;
@@ -416,13 +447,13 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If we have already verified enough messages, there is nothing more to do.
-        if self.finalizes_verified >= self.quorum {
+        // If we have already verified enough weight, there is nothing more to do.
+        if self.finalizes_verified_weight >= self.quorum {
             return false;
         }
 
-        // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.finalizes_verified + self.finalizes.len() < self.quorum {
+        // If we don't have enough weight to reach the quorum, there is nothing to do yet.
+        if self.finalizes_verified_weight + self.pending_finalizes_weight() < self.quorum {
             return false;
         }
 
@@ -446,7 +477,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
+    use commonware_utils::quorum;
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -481,10 +512,16 @@ mod tests {
     }
 
     fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
+        use commonware_utils::set::OrderedWeighted;
+
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
 
-        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+        // Create weighted participants with uniform weight of 1
+        let participants: OrderedWeighted<_> = private_keys
+            .iter()
+            .map(|p| (p.public_key(), 1u64))
+            .collect();
 
         private_keys
             .into_iter()
@@ -520,7 +557,7 @@ mod tests {
     }
 
     fn add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -530,11 +567,11 @@ mod tests {
 
         verifier.add(Vote::Notarize(notarize1.clone()), false);
         assert_eq!(verifier.notarizes.len(), 1);
-        assert_eq!(verifier.notarizes_verified, 0);
+        assert_eq!(verifier.notarizes_verified_weight, 0);
 
         verifier.add(Vote::Notarize(notarize1.clone()), true);
         assert_eq!(verifier.notarizes.len(), 1);
-        assert_eq!(verifier.notarizes_verified, 1);
+        assert_eq!(verifier.notarizes_verified_weight, 1);
 
         verifier.set_leader(notarize1.signer());
         assert!(verifier.leader_proposal.is_some());
@@ -576,7 +613,7 @@ mod tests {
     }
 
     fn set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -608,7 +645,7 @@ mod tests {
     }
 
     fn ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -635,7 +672,7 @@ mod tests {
         let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng, NAMESPACE);
         assert_eq!(verified_bulk.len(), 4);
         assert!(failed_bulk.is_empty());
-        assert_eq!(verifier.notarizes_verified, 4);
+        assert_eq!(verifier.notarizes_verified_weight, 4);
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());
 
@@ -648,7 +685,10 @@ mod tests {
         faulty_vote.signature.signer = (schemes.len() as u32) + 10;
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
-        for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
+        // Add quorum - 1 more valid votes to reach quorum weight.
+        // The faulty vote has weight 0 (invalid signer), so we need quorum - 1 valid votes
+        // plus the leader vote (total quorum weight) to be ready.
+        for scheme in schemes.iter().skip(2).take(quorum as usize - 1) {
             verifier2.add(
                 Vote::Notarize(create_notarize(scheme, round2, View::new(1), 10)),
                 false,
@@ -670,18 +710,18 @@ mod tests {
     }
 
     fn add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
 
         verifier.add(Vote::Nullify(nullify.clone()), false);
         assert_eq!(verifier.nullifies.len(), 1);
-        assert_eq!(verifier.nullifies_verified, 0);
+        assert_eq!(verifier.nullifies_verified_weight, 0);
 
         verifier.add(Vote::Nullify(nullify), true);
         assert_eq!(verifier.nullifies.len(), 1);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.nullifies_verified_weight, 1);
     }
 
     #[test]
@@ -691,7 +731,7 @@ mod tests {
     }
 
     fn ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -701,7 +741,7 @@ mod tests {
             .collect();
 
         verifier.add(Vote::Nullify(nullifies[0].clone()), true);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.nullifies_verified_weight, 1);
 
         verifier.add(Vote::Nullify(nullifies[1].clone()), false);
         assert!(!verifier.ready_nullifies());
@@ -714,7 +754,7 @@ mod tests {
         let (verified, failed) = verifier.verify_nullifies(&mut rng, NAMESPACE);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
-        assert_eq!(verifier.nullifies_verified, 4);
+        assert_eq!(verifier.nullifies_verified_weight, 4);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
     }
@@ -726,7 +766,7 @@ mod tests {
     }
 
     fn add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -734,7 +774,7 @@ mod tests {
 
         verifier.add(Vote::Finalize(finalize_b.clone()), false);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.finalizes_verified_weight, 0);
 
         verifier.add(Vote::Finalize(finalize_a.clone()), false);
         assert_eq!(verifier.finalizes.len(), 2);
@@ -744,15 +784,15 @@ mod tests {
         verifier.set_leader_proposal(finalize_a.proposal.clone());
         assert_eq!(verifier.finalizes.len(), 1);
         assert_eq!(verifier.finalizes[0], finalize_a);
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.finalizes_verified_weight, 0);
 
         verifier.add(Vote::Finalize(finalize_a), true);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.finalizes_verified_weight, 1);
 
         verifier.add(Vote::Finalize(finalize_b), false);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.finalizes_verified_weight, 1);
     }
 
     #[test]
@@ -762,7 +802,7 @@ mod tests {
     }
 
     fn ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -777,7 +817,7 @@ mod tests {
         verifier.set_leader_proposal(finalizes[0].proposal.clone());
 
         verifier.add(Vote::Finalize(finalizes[0].clone()), true);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.finalizes_verified_weight, 1);
         assert!(verifier.finalizes.is_empty());
 
         verifier.add(Vote::Finalize(finalizes[1].clone()), false);
@@ -790,7 +830,7 @@ mod tests {
         let (verified, failed) = verifier.verify_finalizes(&mut rng, NAMESPACE);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
-        assert_eq!(verifier.finalizes_verified, 4);
+        assert_eq!(verifier.finalizes_verified_weight, 4);
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
     }
@@ -802,7 +842,7 @@ mod tests {
     }
 
     fn leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
@@ -853,7 +893,7 @@ mod tests {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
     fn notarizes_wait_for_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -886,7 +926,7 @@ mod tests {
     }
 
     fn ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -919,7 +959,7 @@ mod tests {
     }
 
     fn ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -951,7 +991,7 @@ mod tests {
     }
 
     fn verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
@@ -967,7 +1007,7 @@ mod tests {
     }
 
     fn verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         assert!(verifier.nullifies.is_empty());
@@ -975,7 +1015,7 @@ mod tests {
         let (verified, failed) = verifier.verify_nullifies(&mut rng, NAMESPACE);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
-        assert_eq!(verifier.nullifies_verified, 0);
+        assert_eq!(verifier.nullifies_verified_weight, 0);
     }
 
     #[test]
@@ -985,7 +1025,7 @@ mod tests {
     }
 
     fn verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         verifier.set_leader(0);
@@ -994,7 +1034,7 @@ mod tests {
         let (verified, failed) = verifier.verify_finalizes(&mut rng, NAMESPACE);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.finalizes_verified_weight, 0);
     }
 
     #[test]
@@ -1004,7 +1044,7 @@ mod tests {
     }
 
     fn ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1012,7 +1052,7 @@ mod tests {
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote), true);
-        assert_eq!(verifier.notarizes_verified, 1);
+        assert_eq!(verifier.notarizes_verified_weight, 1);
 
         for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
             let is_last = i == quorum as usize - 1;
@@ -1035,7 +1075,7 @@ mod tests {
         let (verified, failed) = verifier.verify_notarizes(&mut rng, NAMESPACE);
         assert_eq!(verified.len(), quorum as usize - 1);
         assert!(failed.is_empty());
-        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert_eq!(verifier.notarizes_verified_weight, quorum);
         assert!(!verifier.ready_notarizes());
     }
 
@@ -1046,12 +1086,12 @@ mod tests {
     }
 
     fn ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.nullifies_verified_weight, 1);
 
         for scheme in schemes.iter().take(quorum as usize).skip(1) {
             assert!(!verifier.ready_nullifies());
@@ -1068,14 +1108,14 @@ mod tests {
     }
 
     fn ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_finalize.signer());
         verifier.set_leader_proposal(leader_finalize.proposal.clone());
         verifier.add(Vote::Finalize(leader_finalize), true);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.finalizes_verified_weight, 1);
 
         for scheme in schemes.iter().take(quorum as usize).skip(1) {
             assert!(!verifier.ready_finalizes());
@@ -1095,7 +1135,7 @@ mod tests {
     }
 
     fn ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1115,7 +1155,7 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert_eq!(verifier.notarizes_verified_weight, quorum);
         assert!(
             !verifier.ready_notarizes(),
             "Should not be ready if quorum already met by verified messages"
@@ -1137,7 +1177,7 @@ mod tests {
     }
 
     fn ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1149,7 +1189,7 @@ mod tests {
         for scheme in schemes.iter().take(quorum as usize) {
             verifier.add(Vote::Nullify(create_nullify(scheme, round)), true);
         }
-        assert_eq!(verifier.nullifies_verified, quorum as usize);
+        assert_eq!(verifier.nullifies_verified_weight, quorum);
         assert!(
             !verifier.ready_nullifies(),
             "Should not be ready if quorum already met by verified messages"
@@ -1171,7 +1211,7 @@ mod tests {
     }
 
     fn ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = schemes[0].weighted_quorum();
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1191,7 +1231,7 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(verifier.finalizes_verified, quorum as usize);
+        assert_eq!(verifier.finalizes_verified_weight, quorum);
         assert!(
             !verifier.ready_finalizes(),
             "Should not be ready if quorum already met by verified messages"
