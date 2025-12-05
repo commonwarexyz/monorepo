@@ -637,10 +637,8 @@ pub struct Proposal<D: Digest> {
     pub round: Round,
     /// The index of the leader proposing this block
     pub leader: u32,
-    /// The view of the parent proposal that this one builds upon
-    pub parent: View,
-    /// The payload of the parent proposal
-    pub parent_payload: D,
+    /// The view and payload of the parent proposal that this one builds upon
+    pub parent: (View, D),
     /// The actual payload/content of the proposal (typically a digest of the block data)
     pub payload: D,
 }
@@ -648,9 +646,8 @@ pub struct Proposal<D: Digest> {
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
-        self.leader.write(writer);
+        UInt(self.leader).write(writer);
         self.parent.write(writer);
-        self.parent_payload.write(writer);
         self.payload.write(writer)
     }
 }
@@ -660,15 +657,13 @@ impl<D: Digest> Read for Proposal<D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let leader = u32::read(reader)?;
-        let parent = View::read(reader)?;
-        let parent_payload = D::read(reader)?;
+        let leader = UInt::<u32>::read(reader)?.into();
+        let parent = (View::read(reader)?, D::read(reader)?);
         let payload = D::read(reader)?;
         Ok(Self {
             round,
             leader,
             parent,
-            parent_payload,
             payload,
         })
     }
@@ -677,9 +672,8 @@ impl<D: Digest> Read for Proposal<D> {
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
-            + self.leader.encode_size()
+            + UInt(self.leader).encode_size()
             + self.parent.encode_size()
-            + self.parent_payload.encode_size()
             + self.payload.encode_size()
     }
 }
@@ -2190,8 +2184,7 @@ mod tests {
         let proposal = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let encoded = proposal.encode();
@@ -2204,8 +2197,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
@@ -2230,8 +2222,7 @@ mod tests {
         let proposal = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let notarizes: Vec<_> = schemes
@@ -2301,8 +2292,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
@@ -2326,8 +2316,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let finalizes: Vec<_> = schemes
@@ -2368,8 +2357,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let notarizes: Vec<_> = schemes
@@ -2417,8 +2405,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
 
@@ -2465,15 +2452,13 @@ mod tests {
         let proposal1 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let proposal2 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(2),
         };
         let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
@@ -2500,15 +2485,13 @@ mod tests {
         let proposal1 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let proposal2 = Proposal {
             round: Round::new(Epoch::new(0), View::new(10)),
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(2),
         };
         let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
@@ -2536,8 +2519,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
@@ -2565,8 +2547,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(1),
         };
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
@@ -2589,8 +2570,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(2),
         };
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
@@ -2615,8 +2595,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(3),
         };
         let quorum = quorum_from_slice(schemes) as usize;
@@ -2651,8 +2630,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(4),
         };
         let quorum = quorum_from_slice(schemes) as usize;
@@ -2687,8 +2665,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(5),
         };
         let notarizes: Vec<_> = schemes
@@ -2717,15 +2694,13 @@ mod tests {
         let proposal1 = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(6),
         };
         let proposal2 = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(7),
         };
 
@@ -2754,8 +2729,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(8),
         };
 
@@ -2784,8 +2758,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: sample_digest(0),
+            parent: (View::new(5), sample_digest(0)),
             payload: sample_digest(9),
         };
         let quorum = quorum_from_slice(schemes) as usize;

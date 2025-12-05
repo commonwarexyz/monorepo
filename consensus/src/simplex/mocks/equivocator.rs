@@ -132,15 +132,13 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             let proposal_a = Proposal {
                 round: next_round,
                 leader,
-                parent: view,
-                parent_payload: parent,
+                parent: (view, parent),
                 payload: digest_a,
             };
             let proposal_b = Proposal {
                 round: next_round,
                 leader,
-                parent: view,
-                parent_payload: parent,
+                parent: (view, parent),
                 payload: digest_b,
             };
 

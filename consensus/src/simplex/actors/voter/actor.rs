@@ -802,8 +802,7 @@ impl<
                     let proposal = Proposal {
                         round: context.round,
                         leader,
-                        parent: context.parent.0,
-                        parent_payload: context.parent.1,
+                        parent: context.parent,
                         payload: proposed,
                     };
                     if !self.state.proposed(proposal) {

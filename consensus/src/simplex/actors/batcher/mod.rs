@@ -201,8 +201,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader: 0,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
 
@@ -370,8 +369,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
 
@@ -529,8 +527,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
             let notarization = build_notarization(&schemes, &namespace, &proposal, quorum_size);
@@ -712,15 +709,13 @@ mod tests {
             let proposal_a = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"payload_a"),
             };
             let proposal_b = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"payload_b"),
             };
 
@@ -921,8 +916,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
@@ -1043,8 +1037,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
@@ -1192,8 +1185,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader,
-                parent: View::zero(),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::zero(), Sha256Digest::from([0u8; 32])),
                 payload: Sha256::hash(b"test_payload"),
             };
             let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal).unwrap();

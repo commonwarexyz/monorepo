@@ -170,8 +170,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([1u8; 32]),
         };
         slot.built(proposal);
@@ -187,8 +186,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(0),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([2u8; 32]),
         };
         slot.built(proposal.clone());
@@ -209,8 +207,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(1),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(1), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([10u8; 32]),
         };
 
@@ -229,8 +226,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(5),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(5), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([11u8; 32]),
         };
 
@@ -249,8 +245,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(1),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(1), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([12u8; 32]),
         };
 
@@ -266,15 +261,13 @@ mod tests {
         let proposal_a = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([13u8; 32]),
         };
         let proposal_b = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([14u8; 32]),
         };
 
@@ -298,15 +291,13 @@ mod tests {
         let compromised = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([42u8; 32]),
         };
         let honest = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([15u8; 32]),
         };
 
@@ -334,15 +325,13 @@ mod tests {
         let leader_proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(4),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(4), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([16u8; 32]),
         };
         let conflicting = Proposal {
             round,
             leader: 0,
-            parent: View::new(4),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(4), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([99u8; 32]),
         };
 
@@ -372,15 +361,13 @@ mod tests {
         let proposal_a = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([15u8; 32]),
         };
         let proposal_b = Proposal {
             round,
             leader: 0,
-            parent: View::new(2),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(2), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([16u8; 32]),
         };
 
@@ -404,15 +391,13 @@ mod tests {
         let proposal_a = Proposal {
             round,
             leader: 0,
-            parent: View::new(3),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(3), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([17u8; 32]),
         };
         let proposal_b = Proposal {
             round,
             leader: 0,
-            parent: View::new(3),
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (View::new(3), Sha256Digest::from([0u8; 32])),
             payload: Sha256Digest::from([18u8; 32]),
         };
 

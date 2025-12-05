@@ -89,8 +89,7 @@ mod tests {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 leader: 0,
-                parent: View::new(54321),
-                parent_payload: new_digest(),
+                parent: (View::new(54321), new_digest()),
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {

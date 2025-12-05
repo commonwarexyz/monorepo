@@ -502,8 +502,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: parent_view,
-            parent_payload: sample_digest(0),
+            parent: (parent_view, sample_digest(0)),
             payload: sample_digest(payload_val),
         };
         Notarize::sign(scheme, NAMESPACE, proposal).unwrap()
@@ -524,8 +523,7 @@ mod tests {
         let proposal = Proposal {
             round,
             leader: 0,
-            parent: parent_view,
-            parent_payload: sample_digest(0),
+            parent: (parent_view, sample_digest(0)),
             payload: sample_digest(payload_val),
         };
         Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
@@ -820,15 +818,13 @@ mod tests {
         let proposal_a = Proposal {
             round,
             leader: 0,
-            parent: View::new(0),
-            parent_payload: sample_digest(0),
+            parent: (View::new(0), sample_digest(0)),
             payload: sample_digest(10),
         };
         let proposal_b = Proposal {
             round,
             leader: 0,
-            parent: View::new(0),
-            parent_payload: sample_digest(0),
+            parent: (View::new(0), sample_digest(0)),
             payload: sample_digest(20),
         };
 
@@ -981,8 +977,7 @@ mod tests {
         let leader_proposal = Proposal {
             round,
             leader: 0,
-            parent: View::new(0),
-            parent_payload: sample_digest(0),
+            parent: (View::new(0), sample_digest(0)),
             payload: sample_digest(1),
         };
         verifier.set_leader_proposal(leader_proposal);

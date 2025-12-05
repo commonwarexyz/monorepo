@@ -168,8 +168,7 @@ mod tests {
         Proposal {
             round: Round::new(epoch, view),
             leader: 0,
-            parent: view,
-            parent_payload: Sha256Digest::from([0u8; 32]),
+            parent: (view, Sha256Digest::from([0u8; 32])),
             payload: hash,
         }
     }

@@ -524,8 +524,10 @@ mod tests {
                 let proposal = Proposal {
                     round,
                     leader: 0,
-                    parent: View::new(height.checked_sub(1).unwrap()),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (
+                        View::new(height.checked_sub(1).unwrap()),
+                        Sha256Digest::from([0u8; 32]),
+                    ),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -670,8 +672,10 @@ mod tests {
                 let proposal = Proposal {
                     round,
                     leader: 0,
-                    parent: View::new(height.checked_sub(1).unwrap()),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (
+                        View::new(height.checked_sub(1).unwrap()),
+                        Sha256Digest::from([0u8; 32]),
+                    ),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -810,8 +814,7 @@ mod tests {
             let proposal = Proposal {
                 round: Round::new(Epoch::new(0), View::new(1)),
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: commitment,
             };
             let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -880,8 +883,7 @@ mod tests {
                 let proposal = Proposal {
                     round: Round::new(Epoch::zero(), view),
                     leader: 0,
-                    parent: view.previous().unwrap(),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (view.previous().unwrap(), Sha256Digest::from([0u8; 32])),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -957,8 +959,7 @@ mod tests {
                 let proposal = Proposal {
                     round: Round::new(Epoch::zero(), view),
                     leader: 0,
-                    parent: view.previous().unwrap(),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (view.previous().unwrap(), Sha256Digest::from([0u8; 32])),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -1038,8 +1039,7 @@ mod tests {
             let proposal3 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(3)),
                 leader: 0,
-                parent: View::new(2),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(2), Sha256Digest::from([0u8; 32])),
                 payload: block3.digest(),
             };
             let notarization3 = make_notarization(proposal3.clone(), &schemes, QUORUM);
@@ -1058,8 +1058,7 @@ mod tests {
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(4)),
                     leader: 0,
-                    parent: View::new(3),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (View::new(3), Sha256Digest::from([0u8; 32])),
                     payload: block4.digest(),
                 },
                 &schemes,
@@ -1126,8 +1125,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: digest,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1186,8 +1184,7 @@ mod tests {
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(1)),
                     leader: 0,
-                    parent: View::new(0),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                     payload: d1,
                 },
                 &schemes,
@@ -1206,8 +1203,7 @@ mod tests {
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(2)),
                     leader: 0,
-                    parent: View::new(1),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (View::new(1), Sha256Digest::from([0u8; 32])),
                     payload: d2,
                 },
                 &schemes,
@@ -1226,8 +1222,7 @@ mod tests {
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(3)),
                     leader: 0,
-                    parent: View::new(2),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (View::new(2), Sha256Digest::from([0u8; 32])),
                     payload: d3,
                 },
                 &schemes,
@@ -1273,8 +1268,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1340,8 +1334,7 @@ mod tests {
             let proposal = Proposal {
                 round: round2,
                 leader: 0,
-                parent: View::new(1),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(1), Sha256Digest::from([0u8; 32])),
                 payload: fin_commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1393,8 +1386,7 @@ mod tests {
             let proposal = Proposal {
                 round,
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1405,7 +1397,7 @@ mod tests {
                 .get_finalization(1)
                 .await
                 .expect("missing finalization by height");
-            assert_eq!(finalization.proposal.parent, View::new(0));
+            assert_eq!(finalization.proposal.parent.0, View::new(0));
             assert_eq!(
                 finalization.proposal.round,
                 Round::new(Epoch::new(0), View::new(1))
@@ -1446,8 +1438,7 @@ mod tests {
                 let proposal = Proposal {
                     round,
                     leader: 0,
-                    parent: View::new(i - 1),
-                    parent_payload: Sha256Digest::from([0u8; 32]),
+                    parent: (View::new(i - 1), Sha256Digest::from([0u8; 32])),
                     payload: commitment,
                 };
                 let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1670,8 +1661,7 @@ mod tests {
             let proposal_v1 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(1)),
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: commitment,
             };
             let notarization_v1 = make_notarization(proposal_v1.clone(), &schemes, QUORUM);
@@ -1689,8 +1679,7 @@ mod tests {
             let proposal_v2 = Proposal {
                 round: Round::new(Epoch::new(0), View::new(2)), // Different view
                 leader: 0,
-                parent: View::new(0),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: (View::new(0), Sha256Digest::from([0u8; 32])),
                 payload: commitment, // Same block
             };
             let notarization_v2 = make_notarization(proposal_v2.clone(), &schemes, QUORUM);
@@ -1801,8 +1790,7 @@ mod tests {
                 Proposal {
                     round: Round::new(Epoch::new(0), View::new(1)),
                     leader: 0,
-                    parent: View::new(0),
-                    parent_payload: parent,
+                    parent: (View::new(0), parent),
                     payload: commitment,
                 },
                 &schemes,
