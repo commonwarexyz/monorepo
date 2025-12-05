@@ -646,23 +646,14 @@ impl<K, V> BiMap<K, V> {
     pub fn iter(&self) -> core::slice::Iter<'_, K> {
         self.inner.iter()
     }
-
-    /// Attempts to create a [`BiMap`] from an iterator of key-value pairs.
-    ///
-    /// Returns an error if any key or value is duplicated.
-    pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
-    where
-        K: Ord,
-        V: Eq + Hash,
-    {
-        let map = Map::try_from_iter(iter)?;
-        Self::try_from(map)
-    }
 }
 
 impl<K: Ord, V: Eq + Hash> TryFromIterator<(K, V)> for BiMap<K, V> {
     type Error = Error;
 
+    /// Attempts to create a [`BiMap`] from an iterator of key-value pairs.
+    ///
+    /// Returns an error if any key or value is duplicated.
     fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Self::Error> {
         let map = <Map<K, V> as TryFromIterator<(K, V)>>::try_from_iter(iter)?;
         Self::try_from(map)
