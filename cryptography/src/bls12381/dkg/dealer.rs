@@ -54,7 +54,7 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
                 _phantom: PhantomData,
             },
             commitment,
-            shares.into_iter().collect(),
+            Set::try_from_iter(shares).expect("shares are unique"),
         )
     }
 
@@ -91,8 +91,8 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
             }
         }
         Some(Output {
-            active: active.into_iter().collect(),
-            inactive: inactive.into_iter().collect(),
+            active: Set::try_from_iter(active).expect("indices are unique"),
+            inactive: Set::try_from_iter(inactive).expect("indices are unique"),
         })
     }
 }

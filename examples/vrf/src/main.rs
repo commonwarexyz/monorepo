@@ -185,14 +185,12 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let recipients = participants
-        .into_iter()
-        .map(|peer| {
-            let verifier = PrivateKey::from_seed(peer).public_key();
-            tracing::info!(key = ?verifier, "registered authorized key",);
-            verifier
-        })
-        .collect::<Set<_>>();
+    let recipients = Set::try_from_iter(participants.into_iter().map(|peer| {
+        let verifier = PrivateKey::from_seed(peer).public_key();
+        tracing::info!(key = ?verifier, "registered authorized key",);
+        verifier
+    }))
+    .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -271,7 +269,7 @@ fn main() {
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
-                contributors.clone().into_iter().collect(),
+                Set::try_from_iter(contributors.clone()).expect("public keys are unique"),
                 corrupt,
                 lazy,
                 forger,
@@ -302,7 +300,7 @@ fn main() {
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
-                contributors.into_iter().collect(),
+                Set::try_from_iter(contributors).expect("public keys are unique"),
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

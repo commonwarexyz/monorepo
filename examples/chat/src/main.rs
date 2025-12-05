@@ -126,14 +126,12 @@ fn main() {
     if allowed_keys.len() == 0 {
         panic!("Please provide at least one friend");
     }
-    let recipients = allowed_keys
-        .into_iter()
-        .map(|peer| {
-            let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
-            info!(key = ?verifier, "registered authorized key");
-            verifier
-        })
-        .collect::<Set<_>>();
+    let recipients = Set::try_from_iter(allowed_keys.into_iter().map(|peer| {
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
+        info!(key = ?verifier, "registered authorized key");
+        verifier
+    }))
+    .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

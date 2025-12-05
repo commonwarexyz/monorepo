@@ -231,7 +231,10 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::{ordered::Set, NZU32};
+    use commonware_utils::{
+        ordered::{Set, TryCollect},
+        NZU32,
+    };
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -313,7 +316,9 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.update(0, addresses.clone().into()).await;
+            oracle
+                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -576,12 +581,17 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
-                oracle.update(0, Set::from([addresses[0].clone()])).await;
                 oracle
-                    .update(1, Set::from([addresses[1].clone(), addresses[2].clone()]))
+                    .update(0, Set::try_from([addresses[0].clone()]).unwrap())
                     .await;
                 oracle
-                    .update(2, addresses.iter().skip(2).cloned().collect())
+                    .update(
+                        1,
+                        Set::try_from([addresses[1].clone(), addresses[2].clone()]).unwrap(),
+                    )
+                    .await;
+                oracle
+                    .update(2, addresses.iter().skip(2).cloned().try_collect().unwrap())
                     .await;
 
                 // Register basic application
@@ -647,7 +657,7 @@ mod tests {
             for i in 0..n {
                 peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Set<_>>();
+            let addresses: Set<_> = peers.iter().map(|p| p.public_key()).try_collect().unwrap();
 
             // Create network
             let signer = peers[0].clone();
@@ -708,7 +718,9 @@ mod tests {
                 1_024 * 1_024, // 1MB
             );
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
-            oracle0.update(0, addresses.clone().into()).await;
+            oracle0
+                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -722,7 +734,9 @@ mod tests {
                 1_024 * 1_024, // 1MB
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
-            oracle1.update(0, addresses.clone().into()).await;
+            oracle1
+                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
@@ -793,7 +807,8 @@ mod tests {
                 .iter()
                 .take(2)
                 .map(|(_, pk, _)| pk.clone())
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(10, set10.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 10);
@@ -805,7 +820,8 @@ mod tests {
                 .iter()
                 .skip(2)
                 .map(|(_, pk, _)| pk.clone())
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(9, set9.clone()).await;
 
             // Add new peer set
@@ -813,12 +829,17 @@ mod tests {
                 .iter()
                 .skip(4)
                 .map(|(_, pk, _)| pk.clone())
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(11, set11.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, set11);
-            let all_keys: Set<_> = set10.into_iter().chain(set11.into_iter()).collect();
+            let all_keys: Set<_> = set10
+                .into_iter()
+                .chain(set11.into_iter())
+                .try_collect()
+                .unwrap();
             assert_eq!(all, all_keys);
         });
     }
@@ -863,7 +884,9 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.update(0, addresses.clone().into()).await;
+                oracle
+                    .update(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);

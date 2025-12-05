@@ -265,7 +265,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Returns all tracked peers.
     pub fn tracked(&self) -> OrderedSet<C> {
-        self.peers.keys().cloned().collect()
+        OrderedSet::try_from_iter(self.peers.keys().cloned()).expect("HashMap keys are unique")
     }
 
     /// Returns the sharable information for a given peer.

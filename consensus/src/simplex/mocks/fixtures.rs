@@ -30,13 +30,12 @@ pub fn ed25519_participants<R>(
 where
     R: RngCore + CryptoRng,
 {
-    (0..n)
-        .map(|_| {
-            let private_key = ed25519::PrivateKey::from_rng(rng);
-            let public_key = private_key.public_key();
-            (public_key, private_key)
-        })
-        .collect()
+    BiMap::try_from_iter((0..n).map(|_| {
+        let private_key = ed25519::PrivateKey::from_rng(rng);
+        let public_key = private_key.public_key();
+        (public_key, private_key)
+    }))
+    .expect("ed25519 public keys are unique")
 }
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
@@ -84,11 +83,8 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
-    let signers = participants
-        .clone()
-        .into_iter()
-        .zip(bls_public)
-        .collect::<BiMap<_, _>>();
+    let signers = BiMap::try_from_iter(participants.clone().into_iter().zip(bls_public))
+        .expect("ed25519 public keys are unique");
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))

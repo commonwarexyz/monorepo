@@ -5,7 +5,10 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::{ordered::Set, quorum};
+use commonware_utils::{
+    ordered::{Set, TryCollect},
+    quorum,
+};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, hint::black_box};
@@ -29,7 +32,8 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     // Create contributors
                     let contributors = (0..n)
                         .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
-                        .collect::<Set<_>>();
+                        .try_collect::<Set<_>>()
+                        .unwrap();
 
                     // Create player
                     let me = contributors[0].clone();

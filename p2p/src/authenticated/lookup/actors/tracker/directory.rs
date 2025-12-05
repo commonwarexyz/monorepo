@@ -194,7 +194,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Returns all tracked peers.
     pub fn tracked(&self) -> Set<C> {
-        self.peers.keys().cloned().collect()
+        Set::try_from_iter(self.peers.keys().cloned()).expect("HashMap keys are unique")
     }
 
     /// Returns true if the peer is able to be connected to.
@@ -325,7 +325,7 @@ mod tests {
             let deleted = directory
                 .add_set(
                     0,
-                    Map::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                    Map::try_from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]).unwrap(),
                 )
                 .unwrap();
             assert!(
@@ -336,20 +336,20 @@ mod tests {
             let deleted = directory
                 .add_set(
                     1,
-                    Map::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
+                    Map::try_from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]).unwrap(),
                 )
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
             let deleted = directory
-                .add_set(2, vec![(pk_3.clone(), addr_3)].into())
+                .add_set(2, Map::try_from([(pk_3.clone(), addr_3)]).unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
             let deleted = directory
-                .add_set(3, vec![(pk_3.clone(), addr_3)].into())
+                .add_set(3, Map::try_from([(pk_3.clone(), addr_3)]).unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
@@ -381,7 +381,7 @@ mod tests {
 
             directory.add_set(
                 0,
-                Map::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                Map::try_from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]).unwrap(),
             );
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
@@ -389,14 +389,14 @@ mod tests {
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Update address
-            directory.add_set(1, Map::from([(pk_1.clone(), addr_4)]));
+            directory.add_set(1, Map::try_from([(pk_1.clone(), addr_4)]).unwrap());
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ignore update to me
-            directory.add_set(2, Map::from([(my_pk.clone(), addr_3)]));
+            directory.add_set(2, Map::try_from([(my_pk.clone(), addr_3)]).unwrap());
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
@@ -404,14 +404,14 @@ mod tests {
 
             // Ensure tracking works for static peers
             let deleted = directory
-                .add_set(3, Map::from([(my_pk.clone(), my_addr)]))
+                .add_set(3, Map::try_from([(my_pk.clone(), my_addr)]).unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
             // Ensure tracking works for dynamic peers
             let deleted = directory
-                .add_set(4, Map::from([(my_pk.clone(), addr_3)]))
+                .add_set(4, Map::try_from([(my_pk.clone(), addr_3)]).unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
@@ -419,7 +419,7 @@ mod tests {
             // Attempt to add an old peer set
             let deleted = directory.add_set(
                 0,
-                Map::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                Map::try_from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]).unwrap(),
             );
             assert!(deleted.is_none());
         });
@@ -444,7 +444,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            directory.add_set(0, Map::from([(pk_1.clone(), addr_1)]));
+            directory.add_set(0, Map::try_from([(pk_1.clone(), addr_1)]).unwrap());
             directory.block(&pk_1);
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
@@ -457,7 +457,7 @@ mod tests {
                 "Blocked peer should not have a socket"
             );
 
-            directory.add_set(1, Map::from([(pk_1.clone(), addr_2)]));
+            directory.add_set(1, Map::try_from([(pk_1.clone(), addr_2)]).unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
                 record.blocked(),

@@ -91,10 +91,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let participants = participants
-            .into_iter()
-            .zip(polynomial)
-            .collect::<BiMap<_, _>>();
+        let participants = BiMap::try_from_iter(participants.into_iter().zip(polynomial))
+            .expect("participants are unique");
 
         let public_key = share.public::<V>();
         if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
@@ -131,10 +129,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let participants = participants
-            .into_iter()
-            .zip(polynomial)
-            .collect::<BiMap<_, _>>();
+        let participants = BiMap::try_from_iter(participants.into_iter().zip(polynomial))
+            .expect("participants are unique");
 
         Self::Verifier {
             participants,

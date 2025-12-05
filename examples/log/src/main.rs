@@ -114,14 +114,12 @@ fn main() {
     if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
-        .iter()
-        .map(|peer| {
-            let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
-            tracing::info!(key = ?verifier, "registered authorized key",);
-            verifier
-        })
-        .collect::<Set<_>>();
+    let validators = Set::try_from_iter(participants.iter().map(|peer| {
+        let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
+        tracing::info!(key = ?verifier, "registered authorized key",);
+        verifier
+    }))
+    .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

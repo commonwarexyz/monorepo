@@ -96,7 +96,7 @@ fn main() {
         );
 
         // Configure peers and bootstrappers
-        let peer_keys = peers.keys().cloned().collect::<Set<_>>();
+        let peer_keys = Set::try_from_iter(peers.keys().cloned()).expect("public keys are unique");
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");

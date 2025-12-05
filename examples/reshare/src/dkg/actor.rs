@@ -23,7 +23,7 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
     fixed_bytes, hex,
-    ordered::Set,
+    ordered::{Set, TryCollect},
     quorum,
     sequence::{FixedBytes, U64},
     Acknowledgement, NZU32,
@@ -213,7 +213,7 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let dealers = dealers.into_iter().collect::<Set<_>>();
+        let dealers = Set::try_from_iter(dealers).expect("participants are unique");
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -247,7 +247,10 @@ where
             current_share,
             &mut self.signer,
             dealers,
-            players.into(),
+            players
+                .into_iter()
+                .try_collect::<Set<_>>()
+                .expect("participants are unique"),
             &mut dkg_mux,
             self.rate_limit,
             &mut self.round_metadata,
@@ -410,13 +413,12 @@ where
                             next_dealers.clone()
                         } else {
                             // Pseudorandomly select some random players to receive shares for the next epoch.
-                            Self::choose_from_all(
+                            Set::try_from_iter(Self::choose_from_all(
                                 &all_participants,
                                 self.num_participants_per_epoch,
                                 next_epoch,
-                            )
-                            .into_iter()
-                            .collect::<Set<_>>()
+                            ))
+                            .expect("participants are unique")
                         };
 
                         // Register the players for the next epoch
