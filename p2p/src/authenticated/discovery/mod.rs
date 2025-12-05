@@ -317,7 +317,7 @@ mod tests {
 
             // Register peers
             oracle
-                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .update(0, addresses.clone().try_into().unwrap())
                 .await;
 
             // Register basic application
@@ -582,12 +582,14 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .update(0, Set::try_from([addresses[0].clone()]).unwrap())
+                    .update(0, [addresses[0].clone()].try_into().unwrap())
                     .await;
                 oracle
                     .update(
                         1,
-                        Set::try_from([addresses[1].clone(), addresses[2].clone()]).unwrap(),
+                        [addresses[1].clone(), addresses[2].clone()]
+                            .try_into()
+                            .unwrap(),
                     )
                     .await;
                 oracle
@@ -719,7 +721,7 @@ mod tests {
             );
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
             oracle0
-                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -735,7 +737,7 @@ mod tests {
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
             oracle1
-                .update(0, Set::try_from(addresses.clone()).unwrap())
+                .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -885,7 +887,7 @@ mod tests {
 
                 // Register peer set
                 oracle
-                    .update(0, Set::try_from(addresses.clone()).unwrap())
+                    .update(0, addresses.clone().try_into().unwrap())
                     .await;
 
                 let (mut sender, mut receiver) =

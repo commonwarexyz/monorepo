@@ -248,9 +248,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle
-                .update(0, Map::try_from(peers.clone()).unwrap())
-                .await;
+            oracle.update(0, peers.clone().try_into().unwrap()).await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -520,13 +518,10 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .update(0, Map::try_from([peers[0].clone()]).unwrap())
+                    .update(0, [peers[0].clone()].try_into().unwrap())
                     .await;
                 oracle
-                    .update(
-                        1,
-                        Map::try_from([peers[1].clone(), peers[2].clone()]).unwrap(),
-                    )
+                    .update(1, [peers[1].clone(), peers[2].clone()].try_into().unwrap())
                     .await;
                 oracle
                     .update(2, peers.iter().skip(2).cloned().try_collect().unwrap())

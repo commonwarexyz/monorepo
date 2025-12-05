@@ -1094,7 +1094,7 @@ mod tests {
             // Register the peer set
             let mut manager = oracle.manager();
             manager
-                .update(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
             let mut control = oracle.control(pk1.clone());
             control.register(0).await.unwrap();
@@ -1148,7 +1148,9 @@ mod tests {
             manager
                 .update(
                     0,
-                    Set::try_from([twin.clone(), peer_a.clone(), peer_b.clone()]).unwrap(),
+                    [twin.clone(), peer_a.clone(), peer_b.clone()]
+                        .try_into()
+                        .unwrap(),
                 )
                 .await;
 
@@ -1270,7 +1272,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .update(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
+                .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
                 .await;
 
             // Register normal peer
@@ -1339,7 +1341,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .update(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
+                .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
                 .await;
 
             // Register normal peer
@@ -1426,7 +1428,7 @@ mod tests {
 
             // Register initial peer set
             manager
-                .update(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
+                .update(10, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 10);
@@ -1435,19 +1437,15 @@ mod tests {
 
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
-            manager
-                .update(9, Set::try_from([pk3.clone()]).unwrap())
-                .await;
+            manager.update(9, [pk3.clone()].try_into().unwrap()).await;
 
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
-            manager
-                .update(11, Set::try_from([pk4.clone()]).unwrap())
-                .await;
+            manager.update(11, [pk4.clone()].try_into().unwrap()).await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 11);
-            assert_eq!(new, Set::try_from([pk4.clone()]).unwrap());
-            assert_eq!(all, Set::try_from([pk1, pk2, pk4]).unwrap());
+            assert_eq!(new, [pk4.clone()].try_into().unwrap());
+            assert_eq!(all, [pk1, pk2, pk4].try_into().unwrap());
         });
     }
 
@@ -1506,7 +1504,9 @@ mod tests {
             manager
                 .update(
                     0,
-                    Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
+                    [sender_pk.clone(), recipient_pk.clone()]
+                        .try_into()
+                        .unwrap(),
                 )
                 .await;
             let (mut sender, _sender_recv) =
@@ -1582,7 +1582,8 @@ mod tests {
             manager
                 .update(
                     0,
-                    Set::try_from([sender_pk.clone(), recipient_a.clone(), recipient_b.clone()])
+                    [sender_pk.clone(), recipient_a.clone(), recipient_b.clone()]
+                        .try_into()
                         .unwrap(),
                 )
                 .await;

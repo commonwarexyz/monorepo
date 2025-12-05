@@ -237,7 +237,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
-    use commonware_utils::{ordered::Map, NZU32};
+    use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -316,7 +316,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, Map::try_from([(pk.clone(), addr)]).unwrap())
+                .update(0, [(pk.clone(), addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -345,7 +345,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, Map::try_from([(pk1.clone(), addr)]).unwrap())
+                .update(0, [(pk1.clone(), addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -401,7 +401,8 @@ mod tests {
             oracle
                 .update(
                     0,
-                    Map::try_from([(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)])
+                    [(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)]
+                        .try_into()
                         .unwrap(),
                 )
                 .await;
@@ -434,7 +435,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .update(0, Map::try_from([(peer_pk.clone(), peer_addr)]).unwrap())
+                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -469,7 +470,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .update(0, Map::try_from([(boot_pk.clone(), boot_addr)]).unwrap())
+                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -493,7 +494,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .update(0, Map::try_from([(boot_pk.clone(), boot_addr)]).unwrap())
+                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
                 .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
@@ -530,7 +531,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .update(0, Map::try_from([(peer_pk.clone(), peer_addr)]).unwrap())
+                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -584,7 +585,9 @@ mod tests {
             oracle
                 .update(
                     0,
-                    Map::try_from([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]).unwrap(),
+                    [(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]
+                        .try_into()
+                        .unwrap(),
                 )
                 .await;
             // let the register take effect
@@ -605,7 +608,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .update(1, Map::try_from([(pk_2.clone(), addr_2)]).unwrap())
+                .update(1, [(pk_2.clone(), addr_2)].try_into().unwrap())
                 .await;
 
             // Wait for a listener update

@@ -2278,8 +2278,8 @@ mod test {
             &[],
             0,
             None,
-            Set::try_from(vec![sk.public_key()]).unwrap(),
-            Set::try_from(vec![sk.public_key()]).unwrap(),
+            vec![sk.public_key()].try_into().unwrap(),
+            vec![sk.public_key()].try_into().unwrap(),
         )?;
         let mut log0 = {
             let (dealer, _, _) = Dealer::start(
