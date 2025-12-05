@@ -8,6 +8,7 @@ use commonware_cryptography::{
     },
     PublicKey, Signer,
 };
+use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use futures::{
@@ -15,7 +16,7 @@ use futures::{
         mpsc,
         oneshot::{self, Canceled},
     },
-    select_biased, FutureExt, SinkExt as _, StreamExt as _,
+    SinkExt as _, StreamExt as _,
 };
 use std::{collections::BTreeMap, num::NonZeroU32};
 use tracing::debug;
@@ -141,40 +142,44 @@ where
     }
 
     async fn run(mut self) {
-        let mut stopped = self.ctx.stopped().fuse();
+        let mut finalize = None;
         // Exiting this loop is stopping the actor.
-        let finalize = loop {
-            select_biased! {
-                // Context has stopped, so terminate the actor.
-                _ = stopped => break None,
-                // Some dealer sent us a message, or the network is dead.
-                msg = self.from_dealers.recv().fuse() => {
-                    // The network is dead, just terminate the actor.
-                    let Ok((dealer, mut msg_bytes)) = msg else {
-                        break None;
-                    };
-                    let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
-                        &mut msg_bytes,
-                        &(self.max_read_size, ()),
-                    ) else {
-                        // If we can't read the message, ignore it.
-                        continue;
-                    };
-                    self.dealer_message(false, dealer, pub_msg, priv_msg).await;
-                }
-                res = self.inbox.next() => {
-                    let Some(msg) = res else {
-                        break None;
-                    };
-                    match msg {
-                        Message::Transmit => if self.transmit().await.is_err() {
-                            break None;
-                        },
-                        Message::Finalize { logs, output } => break Some((logs, output)),
+        select_loop! {
+            self.ctx,
+            // Context has stopped, so terminate the actor.
+            on_stopped => {
+                break;
+            },
+            // Some dealer sent us a message, or the network is dead.
+            msg = self.from_dealers.recv() => {
+                // The network is dead, just terminate the actor.
+                let Ok((dealer, mut msg_bytes)) = msg else {
+                    break;
+                };
+                let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
+                    &mut msg_bytes,
+                    &(self.max_read_size, ()),
+                ) else {
+                    // If we can't read the message, ignore it.
+                    continue;
+                };
+                self.dealer_message(false, dealer, pub_msg, priv_msg).await;
+            },
+            res = self.inbox.next() => {
+                let Some(msg) = res else {
+                    break;
+                };
+                match msg {
+                    Message::Transmit => if self.transmit().await.is_err() {
+                        break;
+                    },
+                    Message::Finalize { logs, output } => {
+                        finalize = Some((logs, output));
+                        break;
                     }
                 }
             }
-        };
+        }
         if let Some((logs, cb_in)) = finalize {
             self.finalize(logs, cb_in);
         }
