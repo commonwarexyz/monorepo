@@ -106,13 +106,25 @@ cfg_if::cfg_if! {
 }
 
 fn benchmark_dkg(c: &mut Criterion, previous: bool) {
+    let suffix = if previous {
+        "_reshare_recovery"
+    } else {
+        "_recovery"
+    };
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, previous, n);
         for &concurrency in CONCURRENCY {
             c.bench_function(
-                &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
+                &format!(
+                    "{}{}/n={} t={} conc={}",
+                    module_path!(),
+                    suffix,
+                    n,
+                    t,
+                    concurrency
+                ),
                 |b| {
                     b.iter_batched(
                         || bench.pre_finalize(),
