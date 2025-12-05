@@ -8,7 +8,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::ordered::{Quorum, Set, TryCollect};
+use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, marker::PhantomData};
 
@@ -54,7 +54,7 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
                 _phantom: PhantomData,
             },
             commitment,
-            shares.into_iter().try_collect().expect("shares are unique"),
+            shares.try_into().expect("shares are unique"),
         )
     }
 
