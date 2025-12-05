@@ -50,7 +50,7 @@ pub struct Mailbox<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Mailbox<D, P> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
+    pub(super) const fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
