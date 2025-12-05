@@ -13,7 +13,6 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.keys().cloned())
         .collect();
-
     for view in all_views {
         let finalizations_for_view: Vec<(usize, Sha256Digest)> = replicas
             .iter()
@@ -39,7 +38,6 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
-
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
             assert!(
@@ -74,7 +72,6 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
             }
         }
     }
-
     for (v, payloads) in per_view {
         assert!(
             payloads.len() <= 1,
@@ -88,7 +85,6 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(_, nulls, _)| nulls.keys().cloned())
         .collect();
-
     for (idx, (_, _, finals)) in replicas.iter().enumerate() {
         for v in finals.keys() {
             assert!(
@@ -104,7 +100,6 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
         .collect();
-
     for (_, _, finalizations) in replicas.iter() {
         for (&v, d) in finalizations.iter() {
             assert!(
@@ -115,7 +110,7 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
-    // Per-replica invariants
+    // Enforce per-replica invariants
     for (notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid
         // Certificates have correct number of signatures.
