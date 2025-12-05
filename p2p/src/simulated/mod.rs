@@ -2255,10 +2255,7 @@ mod tests {
             network.start();
 
             let mut manager = oracle.manager();
-            assert_eq!(
-                manager.peer_set(0).await,
-                Some(Vec::<PublicKey>::new().try_into().unwrap())
-            );
+            assert_eq!(manager.peer_set(0).await, Some([].try_into().unwrap()));
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
