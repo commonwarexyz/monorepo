@@ -129,30 +129,24 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Try pending keys until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
-        for i in 0..self.pending.len() {
-            // Get the next key to try
-            let (key, retry) = self
-                .pending
-                .nth(i)
-                .map(|(k, (_, r))| (k.clone(), *r))
-                .unwrap();
-
+        let mut selected: Option<(Key, P, ID)> = None;
+        for (key, (_, retry)) in self.pending.iter() {
             // Try to find a peer for the key
-            let (result, is_targeted) = match self.targets.get(&key) {
+            let (result, is_targeted) = match self.targets.get(key) {
                 Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
                 Some(targets) => (
                     self.requester
-                        .request_filtered(retry, |p| targets.contains(p)),
+                        .request_filtered(*retry, |p| targets.contains(p)),
                     true,
                 ),
-                None => (self.requester.request(retry), false),
+                None => (self.requester.request(*retry), false),
             };
 
             // Handle the result
             match result {
                 Ok((peer, id)) => {
-                    self.pending.remove(&key);
-                    return self.send_request(sender, key, peer, id).await;
+                    selected = Some((key.clone(), peer, id));
+                    break;
                 }
                 Err(Error::RateLimited(wait)) => {
                     min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
@@ -167,6 +161,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                     // should skip it (may eventually become fetchable if the peer set changes).
                 }
             }
+        }
+
+        // Send request if we found a key to fetch
+        if let Some((key, peer, id)) = selected {
+            self.pending.remove(&key);
+            return self.send_request(sender, key, peer, id).await;
         }
 
         // No keys could be fetched, set waiter to the next time

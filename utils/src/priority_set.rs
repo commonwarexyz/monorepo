@@ -148,16 +148,6 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
             .map(|entry| (&entry.item, &entry.priority))
     }
 
-    /// Returns the nth item in priority-ascending order.
-    ///
-    /// This is O(n) as it iterates through the underlying `BTreeSet`.
-    pub fn nth(&self, n: usize) -> Option<(&I, &P)> {
-        self.entries
-            .iter()
-            .nth(n)
-            .map(|entry| (&entry.item, &entry.priority))
-    }
-
     /// Returns the number of items in the set.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -297,24 +287,5 @@ mod tests {
         assert!(pq.is_empty());
         assert!(pq.iter().next().is_none());
         assert!(pq.peek().is_none());
-    }
-
-    #[test]
-    fn test_nth() {
-        let mut pq = PrioritySet::new();
-
-        // Empty set
-        assert!(pq.nth(0).is_none());
-
-        // Add items with different priorities
-        pq.put("key1", Duration::from_secs(10));
-        pq.put("key2", Duration::from_secs(5));
-        pq.put("key3", Duration::from_secs(15));
-
-        // Items should be in priority order: key2(5), key1(10), key3(15)
-        assert_eq!(pq.nth(0), Some((&"key2", &Duration::from_secs(5))));
-        assert_eq!(pq.nth(1), Some((&"key1", &Duration::from_secs(10))));
-        assert_eq!(pq.nth(2), Some((&"key3", &Duration::from_secs(15))));
-        assert!(pq.nth(3).is_none());
     }
 }
