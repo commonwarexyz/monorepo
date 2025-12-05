@@ -30,7 +30,7 @@ pub mod channels;
 pub mod hex_literal;
 #[cfg(feature = "std")]
 pub mod net;
-pub mod set;
+pub mod ordered;
 #[cfg(feature = "std")]
 pub use net::IpAddrExt;
 #[cfg(feature = "std")]

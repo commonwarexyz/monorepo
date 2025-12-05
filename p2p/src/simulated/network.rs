@@ -15,7 +15,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
@@ -128,7 +128,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     peers: BTreeMap<P, Peer<P>>,
 
     // Peer sets indexed by their ID
-    peer_sets: BTreeMap<u64, Ordered<P>>,
+    peer_sets: BTreeMap<u64, Set<P>>,
 
     // Reference count for each peer (number of peer sets they belong to)
     peer_refs: BTreeMap<P, usize>,
@@ -144,7 +144,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Subscribers to peer set updates
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -435,7 +435,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     /// Get all tracked peers as an ordered set.
-    fn all_tracked_peers(&self) -> Ordered<P> {
+    fn all_tracked_peers(&self) -> Set<P> {
         self.peer_refs.keys().cloned().collect()
     }
 }

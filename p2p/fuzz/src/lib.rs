@@ -11,7 +11,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::{
-    set::{Ordered, OrderedAssociated},
+    ordered::{Map, Set},
     NZU32,
 };
 use governor::Quota;
@@ -279,7 +279,7 @@ impl NetworkScheme for Discovery {
         peer_ids: &'a [PeerId],
     ) {
         // Discovery only needs public keys (addresses discovered via protocol)
-        let peer_pks: Ordered<_> = peer_ids
+        let peer_pks: Set<_> = peer_ids
             .iter()
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .collect();
@@ -357,7 +357,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: OrderedAssociated<_, _> = peer_ids
+        let peer_list: Map<_, _> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];

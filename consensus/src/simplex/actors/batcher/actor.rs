@@ -18,7 +18,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
@@ -35,7 +35,7 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    participants: Ordered<P>,
+    participants: Set<P>,
     scheme: S,
 
     blocker: B,

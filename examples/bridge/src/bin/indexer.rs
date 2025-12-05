@@ -20,7 +20,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, set::Ordered, union};
+use commonware_utils::{from_hex, ordered::Set, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -112,7 +112,7 @@ fn main() {
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .collect::<Set<_>>();
 
     // Configure networks
     let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();

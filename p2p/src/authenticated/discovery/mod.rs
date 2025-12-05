@@ -231,7 +231,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::{set::Ordered, NZU32};
+    use commonware_utils::{ordered::Set, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -576,14 +576,9 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
+                oracle.update(0, Set::from([addresses[0].clone()])).await;
                 oracle
-                    .update(0, Ordered::from([addresses[0].clone()]))
-                    .await;
-                oracle
-                    .update(
-                        1,
-                        Ordered::from([addresses[1].clone(), addresses[2].clone()]),
-                    )
+                    .update(1, Set::from([addresses[1].clone(), addresses[2].clone()]))
                     .await;
                 oracle
                     .update(2, addresses.iter().skip(2).cloned().collect())
@@ -652,7 +647,7 @@ mod tests {
             for i in 0..n {
                 peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Ordered<_>>();
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Set<_>>();
 
             // Create network
             let signer = peers[0].clone();
@@ -794,7 +789,7 @@ mod tests {
             let mut subscription = oracle.subscribe().await;
 
             // Register initial peer set
-            let set10: Ordered<_> = peers_and_sks
+            let set10: Set<_> = peers_and_sks
                 .iter()
                 .take(2)
                 .map(|(_, pk, _)| pk.clone())
@@ -806,7 +801,7 @@ mod tests {
             assert_eq!(all, set10);
 
             // Register old peer sets (ignored)
-            let set9: Ordered<_> = peers_and_sks
+            let set9: Set<_> = peers_and_sks
                 .iter()
                 .skip(2)
                 .map(|(_, pk, _)| pk.clone())
@@ -814,7 +809,7 @@ mod tests {
             oracle.update(9, set9.clone()).await;
 
             // Add new peer set
-            let set11: Ordered<_> = peers_and_sks
+            let set11: Set<_> = peers_and_sks
                 .iter()
                 .skip(4)
                 .map(|(_, pk, _)| pk.clone())
@@ -823,7 +818,7 @@ mod tests {
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, set11);
-            let all_keys: Ordered<_> = set10.into_iter().chain(set11.into_iter()).collect();
+            let all_keys: Set<_> = set10.into_iter().chain(set11.into_iter()).collect();
             assert_eq!(all, all_keys);
         });
     }
