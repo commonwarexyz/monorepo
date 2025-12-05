@@ -306,35 +306,40 @@ where
         mutation: Mutation,
     ) -> Proposal<Sha256Digest> {
         match mutation {
-            Mutation::Payload => Proposal::new(
-                Round::new(original.epoch(), original.view()),
-                original.parent,
-                self.payload(),
-            ),
-            Mutation::View => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view(self.view))),
-                original.parent,
-                original.payload,
-            ),
-            Mutation::Parent => Proposal::new(
-                Round::new(original.epoch(), original.view()),
-                View::new(self.parent()),
-                original.payload,
-            ),
-            Mutation::All => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view(self.view))),
-                View::new(self.parent()),
-                self.payload(),
-            ),
+            Mutation::Payload => Proposal {
+                round: Round::new(original.epoch(), original.view()),
+                leader: original.leader,
+                parent: original.parent,
+                payload: self.payload(),
+            },
+            Mutation::View => Proposal {
+                round: Round::new(original.epoch(), View::new(self.random_view(self.view))),
+                leader: original.leader,
+                parent: original.parent,
+                payload: original.payload,
+            },
+            Mutation::Parent => Proposal {
+                round: Round::new(original.epoch(), original.view()),
+                leader: original.leader,
+                parent: (View::new(self.parent()), self.payload()),
+                payload: original.payload,
+            },
+            Mutation::All => Proposal {
+                round: Round::new(original.epoch(), View::new(self.random_view(self.view))),
+                leader: original.leader,
+                parent: (View::new(self.parent()), self.payload()),
+                payload: self.payload(),
+            },
         }
     }
 
     async fn send_random(&mut self, sender: &mut impl Sender) {
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view))),
-            View::new(self.parent()),
-            self.payload(),
-        );
+        let proposal = Proposal {
+            round: Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view))),
+            leader: 0,
+            parent: (View::new(self.parent()), self.payload()),
+            payload: self.payload(),
+        };
 
         if self.participants.index(&self.validator).is_none() {
             let bytes = self.bytes();
