@@ -96,6 +96,7 @@ pub enum ExclusionProofInfo<K: Array, V: Value, const N: usize> {
     /// completely empty (having no operations at all against which to prove).
     DbEmpty,
 }
+
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,

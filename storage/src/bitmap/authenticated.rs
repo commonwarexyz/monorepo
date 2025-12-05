@@ -411,10 +411,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     ///
     /// If `bit` equals the bitmap length, this prunes all complete chunks while retaining
     /// the empty trailing chunk, preparing the bitmap for appending new data.
-    ///
-    /// # Warning
-    ///
-    /// - Returns [Error::DirtyState] if there are unmerkleized updates.
     pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
         let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
         if chunk < self.bitmap.pruned_chunks() {
@@ -460,7 +456,6 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     /// # Errors
     ///
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
-    /// Returns [Error::DirtyState] if there are unmerkleized updates.
     pub async fn proof(
         &self,
         hasher: &mut impl Hasher<D>,
