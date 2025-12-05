@@ -1,10 +1,6 @@
 use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        poly::{public, Public},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, poly::Public, variant::Variant},
     PublicKey,
 };
 use std::{collections::HashMap, marker::PhantomData};
@@ -59,7 +55,7 @@ impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
     type Seed = V::Signature;
 
     fn identity(&self) -> &Self::Identity {
-        public::<V>(&self.polynomial)
+        self.polynomial.constant()
     }
 
     fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {

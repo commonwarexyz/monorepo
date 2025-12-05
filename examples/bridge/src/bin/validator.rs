@@ -13,7 +13,7 @@ use commonware_cryptography::{
         poly::{Poly, Public},
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
@@ -123,7 +123,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
+        Poly::decode_cfg(identity.as_ref(), &(RangeCfg::exact(NZU32!(threshold)), ()))
             .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")

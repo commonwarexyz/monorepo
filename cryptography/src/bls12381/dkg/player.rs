@@ -4,18 +4,19 @@
 use crate::{
     bls12381::{
         dkg::{
-            ops::{recover_public_with_weights, verify_commitment, verify_share},
+            ops::{verify_commitment, verify_share},
             Error,
         },
         primitives::{
-            group::{self, Element, Share},
-            poly::{self, Eval},
+            group::{self, Scalar, Share},
+            poly::{self},
             variant::Variant,
         },
     },
     PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_math::{algebra::Additive, poly::Interpolator};
+use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
 use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Output of a DKG/Resharing procedure.
@@ -178,51 +179,49 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
 
         // Construct secret
         let mut public = poly::Public::<V>::zero();
-        let mut secret = group::Private::zero();
+        let mut secret = <group::Private as Additive>::zero();
         match self.previous {
             None => {
                 // Add all valid commitments/dealings
                 for (commitment, private) in self.dealings.values() {
-                    public.add(commitment);
-                    secret.add(private.as_ref());
+                    public += commitment;
+                    secret += private.as_ref();
                 }
             }
             Some(previous) => {
                 // Construct commitments and shares
-                let mut indices = Vec::with_capacity(self.dealings.len());
-                let mut commitments = BTreeMap::new();
-                let mut dealings = Vec::with_capacity(self.dealings.len());
-                for (dealer, (commitment, share)) in self.dealings.into_iter() {
-                    indices.push(dealer);
-                    commitments.insert(dealer, commitment);
-                    dealings.push(Eval {
-                        index: dealer,
-                        value: share.private,
-                    });
-                }
+                let dealings = self
+                    .dealings
+                    .iter()
+                    .map(|(&dealer, (_, share))| (dealer, share.private.clone()))
+                    .collect::<OrderedAssociated<_, _>>();
+                let commitments = self
+                    .dealings
+                    .into_iter()
+                    .map(|(dealer, (commitment, _))| (dealer, commitment))
+                    .collect::<OrderedAssociated<_, _>>();
 
                 // Compute weights
-                let weights = poly::compute_weights(indices)
-                    .map_err(|_| Error::PublicKeyInterpolationFailed)?;
+                let interpolator =
+                    Interpolator::new(dealings.iter().map(|&i| (i, Scalar::from_index(i))));
 
                 // Recover public via interpolation
                 //
                 // While it is tempting to remove this work (given we only need the secret
                 // to generate a threshold signature), this polynomial is required to verify
                 // dealings of future resharings.
-                public = recover_public_with_weights::<V>(
-                    &previous,
-                    &commitments,
-                    &weights,
-                    self.player_threshold,
-                    self.concurrency,
-                )?;
+                public = interpolator
+                    .interpolate(&commitments, self.concurrency)
+                    .ok_or(Error::PublicKeyInterpolationFailed)?;
 
-                // Recover share via interpolation
-                secret = match poly::Private::recover_with_weights(&weights, &dealings) {
-                    Ok(share) => share,
-                    Err(_) => return Err(Error::ShareInterpolationFailed),
-                };
+                // Ensure public key matches
+                if previous.constant() != public.constant() {
+                    return Err(Error::ReshareMismatch);
+                }
+
+                secret = interpolator
+                    .interpolate(&dealings, self.concurrency)
+                    .ok_or(Error::ShareInterpolationFailed)?;
             }
         }
 

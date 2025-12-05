@@ -4,15 +4,15 @@ use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
         group::{
-            Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
-            SCALAR_LENGTH,
+            Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, SCALAR_LENGTH,
         },
-        poly::{compute_weights, Eval, Poly, Weight},
+        poly::{Eval, Poly},
         variant::{MinPk, MinSig, Variant},
     },
     tle::{Block, Ciphertext},
 };
-use std::collections::BTreeMap;
+use commonware_math::algebra::{Additive, CryptoGroup};
+use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(unused)]
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -22,7 +22,7 @@ pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
         Err(_) => Ok(if u.arbitrary()? {
             G1::zero()
         } else {
-            G1::one()
+            G1::generator()
         }),
     }
 }
@@ -35,7 +35,7 @@ pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
         Err(_) => Ok(if u.arbitrary()? {
             G2::zero()
         } else {
-            G2::one()
+            G2::generator()
         }),
     }
 }
@@ -118,8 +118,10 @@ pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> 
 #[allow(unused)]
 pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
-    let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
+    let seed: [u8; 32] = u.arbitrary()?;
+    let constant = arbitrary_scalar(u)?;
+    let mut rng = StdRng::from_seed(seed);
+    Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
 
 #[allow(unused)]
@@ -226,33 +228,6 @@ pub fn arbitrary_vec_pending_minsig(
     (0..len)
         .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?, arbitrary_g1(u)?)))
         .collect()
-}
-
-#[allow(unused)]
-pub fn arbitrary_weights(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<BTreeMap<u32, Weight>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    if len == 0 {
-        return Ok(BTreeMap::new());
-    }
-
-    let mut indices = Vec::new();
-    for _ in 0..len {
-        let index = u.int_in_range(1..=100)?;
-        if !indices.contains(&index) {
-            indices.push(index);
-        }
-    }
-
-    if indices.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    indices.sort();
-    compute_weights(indices).or_else(|_| Ok(BTreeMap::new()))
 }
 
 #[allow(unused)]

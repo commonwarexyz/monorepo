@@ -7,11 +7,12 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
+//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
+//! use commonware_math::algebra::Random;
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = bls12381::PrivateKey::from_rng(&mut OsRng);
+//! let mut signer = bls12381::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
 //! let namespace = &b"demo"[..];
@@ -29,7 +30,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, PrivateKeyExt, Signer as _};
+use crate::{Array, BatchVerifier, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
@@ -38,6 +39,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -155,9 +157,9 @@ impl PrivateKey {
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(rng);
+impl Random for PrivateKey {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
         let raw = private.encode_fixed();
         Self { raw, key: private }
     }

@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::{dkg, primitives::variant::MinSig};
+use commonware_cryptography::bls12381::{
+    dkg,
+    primitives::{group::Scalar, variant::MinSig},
+};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -17,7 +20,7 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
                 },
                 |(mut rng, polynomial)| {
                     let idx = rng.gen_range(0..n);
-                    black_box(polynomial.evaluate(idx));
+                    black_box(polynomial.eval(&Scalar::from_index(idx)));
                 },
                 BatchSize::SmallInput,
             );

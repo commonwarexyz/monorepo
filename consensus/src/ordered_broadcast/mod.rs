@@ -67,7 +67,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -217,7 +217,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                 namespace,
-                *poly::public::<V>(&polynomial),
+                *polynomial.constant(),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -859,7 +859,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.constant(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -905,7 +905,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.constant(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());

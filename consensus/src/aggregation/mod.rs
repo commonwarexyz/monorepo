@@ -83,7 +83,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -214,7 +214,7 @@ mod tests {
             let monitor = mocks::Monitor::new(Epoch::new(111));
             monitors.insert(validator.clone(), monitor.clone());
             let supervisor = {
-                let identity = *poly::public::<V>(&polynomial);
+                let identity = *polynomial.constant();
                 let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                 s.add_epoch(
                     Epoch::new(111),
@@ -442,7 +442,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
             ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
-        let identity = *poly::public::<V>(&polynomial);
+        let identity = *polynomial.constant();
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
@@ -610,7 +610,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
             ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
-        let identity = *poly::public::<V>(&polynomial);
+        let identity = *polynomial.constant();
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // First run: let validators skip signing at skip_index and reach beyond it
@@ -1032,7 +1032,7 @@ mod tests {
             let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-            let identity = *poly::public::<V>(&polynomial);
+            let identity = *polynomial.constant();
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),

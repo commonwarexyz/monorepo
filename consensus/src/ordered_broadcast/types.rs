@@ -810,16 +810,17 @@ mod tests {
         bls12381::{
             dkg::ops,
             primitives::{
-                group::{Element, Share},
+                group::Share,
                 ops::{partial_sign_message, threshold_signature_recover},
-                poly::{self, public},
+                poly,
                 variant::{MinPk, MinSig},
             },
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
+    use commonware_math::algebra::CryptoGroup;
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -884,7 +885,7 @@ mod tests {
         assert_eq!(parent, decoded);
 
         // Verify the signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
         let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -953,7 +954,7 @@ mod tests {
         assert_eq!(decoded2.parent, node2.parent);
 
         // Verify that the parent signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
         let lock = Lock::<_, V, _>::new(parent_chunk, parent_epoch, parent_signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -1034,7 +1035,7 @@ mod tests {
 
         // Create lock and verify it
         let lock = Lock::new(chunk.clone(), epoch, bls_signature);
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
         assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
@@ -1113,7 +1114,7 @@ mod tests {
         assert_eq!(decoded.signature, lock.signature);
 
         // Verify the signature in the decoded lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
         assert!(decoded.verify(NAMESPACE, identity));
     }
 
@@ -1129,7 +1130,7 @@ mod tests {
         let n = 4;
         let t = quorum(n as u32);
         let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
-        let identity = public::<V>(&polynomial);
+        let identity = polynomial.constant();
 
         // Test genesis node (no parent)
         let node = Node::<PublicKey, V, Sha256Digest>::sign(
@@ -1228,7 +1229,7 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
         assert!(lock.verify(NAMESPACE, identity));
     }
 
@@ -1242,7 +1243,7 @@ mod tests {
         let n = 4;
         let t = quorum(n as u32);
         let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1347,7 +1348,7 @@ mod tests {
         let n = 4;
         let t = quorum(n as u32);
         let (polynomial, _) = generate_test_data::<V>(n, t, 0);
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
 
         // Create a valid chunk
         let chunk = Chunk::new(public_key, 0, sample_digest(1));
@@ -1418,7 +1419,7 @@ mod tests {
         );
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&commitment);
+        let identity = commitment.constant();
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, identity).is_ok());
@@ -1476,7 +1477,7 @@ mod tests {
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature;
-        invalid_signature.value.add(&V::Signature::one());
+        invalid_signature.value += &V::Signature::generator();
         let invalid_ack = Ack::<_, V, _>::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
@@ -1541,7 +1542,7 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk.clone(), epoch, signature);
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.constant();
 
         // Verification should succeed
         assert!(lock.verify(NAMESPACE, identity));
@@ -1564,7 +1565,7 @@ mod tests {
         assert!(!wrong_lock.verify(NAMESPACE, identity));
 
         // But succeed with the matching wrong identity
-        let wrong_identity = poly::public::<V>(&wrong_polynomial);
+        let wrong_identity = wrong_polynomial.constant();
         assert!(wrong_lock.verify(NAMESPACE, wrong_identity));
     }
 

@@ -10,7 +10,7 @@ use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
+    Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};

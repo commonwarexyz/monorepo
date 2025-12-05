@@ -231,7 +231,7 @@ mod tests {
     };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_runtime::{
         deterministic::{self},

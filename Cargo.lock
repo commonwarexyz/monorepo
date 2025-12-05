@@ -963,6 +963,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-storage",
@@ -1058,6 +1059,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-math",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1132,6 +1134,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1157,6 +1160,7 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-math",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]
@@ -1173,12 +1177,14 @@ dependencies = [
  "cfg-if",
  "chacha20poly1305",
  "commonware-codec",
+ "commonware-math",
  "commonware-utils",
  "criterion",
  "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
  "p256",
+ "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1199,6 +1205,7 @@ dependencies = [
  "blst",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-math",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
@@ -1258,6 +1265,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -1313,6 +1321,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-math"
+version = "0.0.63"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-utils",
+ "proptest",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "rayon",
+]
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.63"
 dependencies = [
@@ -1320,6 +1342,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
@@ -1367,6 +1390,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1459,6 +1483,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -1595,6 +1620,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",

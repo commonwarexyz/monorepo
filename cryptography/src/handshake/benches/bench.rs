@@ -3,8 +3,9 @@ use commonware_cryptography::{
     handshake::{
         dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
     },
-    PrivateKeyExt as _, Signer,
+    Signer,
 };
+use commonware_math::algebra::Random;
 use criterion::criterion_main;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
@@ -14,8 +15,8 @@ mod transport;
 
 fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let dialer_crypto = PrivateKey::from_rng(&mut rng);
-    let listener_crypto = PrivateKey::from_rng(&mut rng);
+    let dialer_crypto = PrivateKey::random(&mut rng);
+    let listener_crypto = PrivateKey::random(&mut rng);
 
     let (d_state, msg1) = dial_start(
         &mut rng,

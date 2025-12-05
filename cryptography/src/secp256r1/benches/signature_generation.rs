@@ -1,9 +1,9 @@
-use commonware_cryptography::{secp256r1, PrivateKeyExt};
+use commonware_cryptography::{secp256r1, PrivateKey};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_signature_generation<S: PrivateKeyExt>(variant: impl AsRef<str>, c: &mut Criterion) {
+fn benchmark_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -17,7 +17,7 @@ fn benchmark_signature_generation<S: PrivateKeyExt>(variant: impl AsRef<str>, c:
         ),
         |b| {
             b.iter_batched(
-                || S::from_rng(&mut thread_rng()),
+                || S::random(&mut thread_rng()),
                 |signer| {
                     black_box(signer.sign(namespace, &msg));
                 },

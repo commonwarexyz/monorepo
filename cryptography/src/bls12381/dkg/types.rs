@@ -57,7 +57,7 @@ impl<V: Variant> Read for Share<V> {
     fn read_cfg(buf: &mut impl Buf, n: &u32) -> Result<Self, commonware_codec::Error> {
         let t = quorum(*n);
         Ok(Self {
-            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
+            commitment: Public::<V>::read_cfg(buf, &(RangeCfg::exact(NZU32!(t)), ()))?,
             share: group::Share::read(buf)?,
         })
     }
@@ -167,8 +167,9 @@ mod test {
             primitives::{group, poly::Public, variant::MinSig},
         },
         ed25519::PrivateKey,
-        PrivateKeyExt, Signer,
+        Signer,
     };
+    use commonware_math::algebra::Random;
     use commonware_utils::quorum;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -185,7 +186,7 @@ mod test {
 
         // Generate p2p private keys
         let mut peer_signers = (0..num_peers)
-            .map(|_| PrivateKey::from_rng(&mut rng))
+            .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
         peer_signers.sort_by_key(|signer| signer.public_key());
 

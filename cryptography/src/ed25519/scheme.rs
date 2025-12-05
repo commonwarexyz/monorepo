@@ -1,4 +1,4 @@
-use crate::{Array, PrivateKeyExt};
+use crate::Array;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use crate::BatchVerifier;
@@ -9,6 +9,7 @@ cfg_if::cfg_if! {
 }
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display},
@@ -61,8 +62,8 @@ impl PrivateKey {
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl Random for PrivateKey {
+    fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
         let raw = key.to_bytes();
         Self { raw, key }
@@ -394,6 +395,7 @@ mod tests {
     use super::*;
     use crate::ed25519;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
     use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
@@ -549,7 +551,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::from_rng(&mut OsRng);
+        let private_key_2 = PrivateKey::random(&mut OsRng);
         let bad_signature = private_key_2.sign_inner(None, message.as_ref());
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }

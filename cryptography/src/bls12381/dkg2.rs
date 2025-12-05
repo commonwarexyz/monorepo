@@ -183,10 +183,11 @@
 //!     dkg2::{Dealer, Player, Info, SignedDealerLog, observe},
 //!     primitives::variant::MinSig,
 //! };
-//! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+//! use commonware_cryptography::{ed25519, Signer};
 //! use commonware_utils::set::Ordered;
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
+//! use commonware_math::algebra::Random;
 //! use rand_chacha::ChaCha8Rng;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -195,7 +196,7 @@
 //! // Generate 4 Ed25519 private keys for participants
 //! let mut private_keys = Vec::new();
 //! for _ in 0..4 {
-//!     let private_key = ed25519::PrivateKey::from_rng(&mut rng);
+//!     let private_key = ed25519::PrivateKey::random(&mut rng);
 //!     private_keys.push(private_key);
 //! }
 //!
@@ -281,15 +282,18 @@
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
-        group::{Element, Scalar},
-        ops::msm_interpolate,
-        poly::{self, new_with_constant, Eval, Poly, Public, Weight},
+        group::Scalar,
+        poly::{Poly, Public},
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    Digest, PublicKey, Signer,
+    PublicKey, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_math::{
+    algebra::{Additive, Random},
+    poly::Interpolator,
+};
 use commonware_utils::{
     quorum,
     set::{Ordered, OrderedAssociated, OrderedQuorum},
@@ -297,10 +301,6 @@ use commonware_utils::{
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
-use rayon::{
-    iter::{IntoParallelIterator, ParallelIterator as _},
-    ThreadPoolBuilder,
-};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -329,51 +329,6 @@ pub enum Error {
     DkgFailed,
 }
 
-/// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials using precomputed Barycentric Weights.
-///
-/// It is assumed that the required number of commitments are provided.
-fn recover_public_with_weights<V: Variant>(
-    commitments: &BTreeMap<u32, poly::Public<V>>,
-    weights: &BTreeMap<u32, poly::Weight>,
-    threshold: u32,
-    concurrency: usize,
-) -> poly::Public<V> {
-    let work = |coeff| {
-        // Extract evaluations for this coefficient from all commitments
-        let evals = commitments
-            .iter()
-            .map(|(dealer, commitment)| poly::Eval {
-                index: *dealer,
-                value: commitment.get(coeff),
-            })
-            .collect::<Vec<_>>();
-
-        // Use precomputed weights for interpolation
-        msm_interpolate(weights, &evals).expect("interpolation should not fail")
-    };
-    let range = 0..threshold;
-    if concurrency <= 1 || threshold <= 1 {
-        range.map(work).collect()
-    } else {
-        // Build a thread pool with the specified concurrency
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // Recover signatures
-        pool.install(move || {
-            range
-                .into_par_iter()
-                .map(work)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .collect()
-        })
-    }
-}
-
 /// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
@@ -384,7 +339,10 @@ pub struct Output<V: Variant, P> {
 
 impl<V: Variant, P: Ord> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
-        Some(self.public.evaluate(self.players.index(player)?).value)
+        Some(
+            self.public
+                .eval_msm(&Scalar::from_index(self.players.index(player)?)),
+        )
     }
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
@@ -429,7 +387,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
         Ok(Self {
             summary: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            public: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_players))?,
+            public: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_players), ()))?,
         })
     }
 }
@@ -474,10 +432,6 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     fn degree(&self) -> u32 {
         self.players.quorum().saturating_sub(1)
-    }
-
-    fn threshold(&self) -> u32 {
-        self.degree() + 1
     }
 
     fn required_commitments(&self) -> u32 {
@@ -611,7 +565,7 @@ impl<V: Variant> Eq for DealerPubMsg<V> {}
 
 impl<V: Variant> DealerPubMsg<V> {
     fn check_share(&self, share: &Share) -> bool {
-        self.commitment.evaluate(share.index).value == share.public::<V>()
+        self.commitment.eval_msm(&Scalar::from_index(share.index)) == share.public::<V>()
     }
 }
 
@@ -635,7 +589,7 @@ impl<V: Variant> Read for DealerPubMsg<V> {
         &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            commitment: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_size))?,
+            commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_size), ()))?,
         })
     }
 }
@@ -1039,7 +993,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
         let share = info.unwrap_or_random_share(&mut rng, share.map(|x| x.private))?;
-        let my_poly = new_with_constant(info.degree(), &mut rng, share);
+        let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
             .iter()
@@ -1048,7 +1002,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                 (
                     pk.clone(),
                     DealerPrivMsg {
-                        share: my_poly.evaluate(i as u32).value,
+                        share: my_poly.eval(&Scalar::from_index(i as u32)),
                     },
                 )
             })
@@ -1165,7 +1119,7 @@ fn select<V: Variant, P: PublicKey>(
 
 struct ObserveInner<V: Variant, P: PublicKey> {
     output: Output<V, P>,
-    weights: Option<BTreeMap<u32, Weight>>,
+    interpolator: Option<Interpolator<u32, Scalar>>,
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
@@ -1175,34 +1129,30 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         concurrency: usize,
     ) -> Result<Self, Error> {
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
-            let (indices, commitments) = selected
+            let commitments = selected
                 .into_iter()
                 .map(|(dealer, log)| {
                     let index = previous
                         .players()
                         .index(&dealer)
                         .expect("select checks that dealer exists, via our signature");
-                    (index, (index, log.pub_msg.commitment))
+                    (index, log.pub_msg.commitment)
                 })
-                .collect::<(Vec<_>, BTreeMap<_, _>)>();
+                .collect::<OrderedAssociated<_, _>>();
 
-            let weights =
-                poly::compute_weights(indices).expect("should be able to compute weights");
-            let public = recover_public_with_weights::<V>(
-                &commitments,
-                &weights,
-                info.threshold(),
-                concurrency,
-            );
+            let interpolator =
+                Interpolator::new(commitments.iter().map(|&i| (i, Scalar::from_index(i))));
+            let public = interpolator
+                .interpolate(&commitments, concurrency)
+                .expect("select should ensure we're able to interpolate");
             if previous.public().constant() != public.constant() {
                 return Err(Error::DkgFailed);
             }
-            (public, Some(weights))
+            (public, Some(interpolator))
         } else {
-            let mut public = Poly::zero();
-            for (_, log) in selected.iter() {
-                public.add(&log.pub_msg.commitment);
-            }
+            let public = selected
+                .iter()
+                .fold(Poly::zero(), |acc, (_, log)| acc + &log.pub_msg.commitment);
             (public, None)
         };
         let output = Output {
@@ -1210,7 +1160,10 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             players: info.players,
             public,
         };
-        Ok(Self { output, weights })
+        Ok(Self {
+            output,
+            interpolator: weights,
+        })
     }
 }
 
@@ -1332,24 +1285,26 @@ impl<V: Variant, S: Signer> Player<V, S> {
                         .dealer_index(dealer)
                         .expect("select should check dealer")
                 };
-                Eval {
-                    index,
-                    value: share,
-                }
+                (index, share)
             })
-            .collect::<Vec<_>>();
-        let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, concurrency)?;
-        let private = if let Some(weights) = weights {
-            poly::Private::recover_with_weights(&weights, dealings.iter())
-                .expect("should be able to recover share")
-        } else {
-            let mut out = Scalar::zero();
-            for s in dealings {
-                out.add(&s.value);
-            }
-            out
-        };
+            .collect::<OrderedAssociated<_, _>>();
+        let ObserveInner {
+            output,
+            interpolator,
+        } = ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, concurrency)?;
+        let private = interpolator.map_or_else(
+            || {
+                dealings
+                    .values()
+                    .iter()
+                    .fold(<Scalar as Additive>::zero(), |acc, x| acc + x)
+            },
+            |interpolator| {
+                interpolator
+                    .interpolate(&dealings, concurrency)
+                    .expect("should be able to recover share")
+            },
+        );
         let share = Share {
             index: self.index,
             private,
@@ -1371,15 +1326,15 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
-    let private = poly::new_from(t - 1, &mut rng);
+    let private = Poly::new(&mut rng, t - 1);
     let shares: OrderedAssociated<_, _> = players
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let eval = private.evaluate(i as u32);
+            let index = i as u32;
             let share = Share {
-                index: eval.index,
-                private: eval.value,
+                index,
+                private: private.eval(&Scalar::from_index(index)),
             };
             (p.clone(), share)
         })
@@ -1416,10 +1371,11 @@ mod test_plan {
             },
             variant::Variant,
         },
-        ed25519, PrivateKeyExt as _, PublicKey,
+        ed25519, PublicKey,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_math::algebra::Random;
     use commonware_utils::max_faults;
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
@@ -1685,7 +1641,7 @@ mod test_plan {
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
-                .map(|_| ed25519::PrivateKey::from_rng(&mut rng))
+                .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
             // The max_read_size needs to account for shifted polynomial degrees.
             // Find the maximum positive shift across all rounds.
@@ -1765,7 +1721,7 @@ mod test_plan {
                                 .unwrap_or_random_share(&mut rng, share.map(|s| s.private))
                                 .expect("Failed to generate dealer share");
 
-                            let my_poly = poly::new_with_constant(degree, &mut rng, share);
+                            let my_poly = Poly::new_with_constant(&mut rng, degree, share);
                             let priv_msgs = info
                                 .players
                                 .iter()
@@ -1774,7 +1730,7 @@ mod test_plan {
                                     (
                                         pk.clone(),
                                         DealerPrivMsg {
-                                            share: my_poly.evaluate(i as u32).value,
+                                            share: my_poly.eval(&Scalar::from_index(i as u32)),
                                         },
                                     )
                                 })
@@ -1783,7 +1739,7 @@ mod test_plan {
                                 .iter()
                                 .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
                                 .collect();
-                            let commitment = poly::Poly::commit(my_poly);
+                            let commitment = Poly::commit(my_poly);
                             let pub_msg = DealerPubMsg { commitment };
                             let transcript = {
                                 let t = transcript_for_round(&info);
@@ -1934,10 +1890,12 @@ mod test_plan {
                     );
 
                     // Verify share matches public polynomial
-                    let expected_public = observer_output.public.evaluate(share.index);
+                    let expected_public = observer_output
+                        .public
+                        .eval_msm(&Scalar::from_index(share.index));
                     let actual_public = share.public::<V>();
                     assert_eq!(
-                        expected_public.value, actual_public,
+                        expected_public, actual_public,
                         "Share should match public polynomial"
                     );
 
@@ -1945,7 +1903,7 @@ mod test_plan {
                 }
 
                 // Initialize or verify threshold public key
-                let current_public = *poly::public::<V>(observer_output.public());
+                let current_public = *observer_output.public().constant();
                 match threshold_public_key {
                     None => threshold_public_key = Some(current_public),
                     Some(tpk) => {
@@ -2141,7 +2099,7 @@ pub use test_plan::Plan as FuzzPlan;
 #[cfg(test)]
 mod test {
     use super::{test_plan::*, *};
-    use crate::{bls12381::primitives::variant::MinPk, ed25519, PrivateKeyExt};
+    use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use core::num::NonZeroI32;
     use rand::SeedableRng;
