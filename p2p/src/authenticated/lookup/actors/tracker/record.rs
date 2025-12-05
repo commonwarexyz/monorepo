@@ -64,7 +64,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            tracked_ips: BTreeSet::from_iter(vec![socket.ip()]),
+            tracked_ips: BTreeSet::from([socket.ip()]),
         }
     }
 
