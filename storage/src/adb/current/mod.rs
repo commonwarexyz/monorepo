@@ -191,7 +191,14 @@ async fn range_proof<
     Ok((proof, ops, chunks))
 }
 
-/// Performs merkleization of a grafted bitmap.
+/// Consumes a `DirtyBitMap`, performs merkleization using the provided hasher and MMR storage,
+/// and returns a `CleanBitMap` containing the merkleized result.
+///
+/// # Arguments
+/// * `hasher` - The hasher used for merkleization.
+/// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
+/// * `mmr` - The MMR storage used for grafting.
+/// * `grafting_height` - The height at which grafting occurs.
 async fn merkleize_grafted_bitmap<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
     status: DirtyBitMap<H::Digest, N>,
