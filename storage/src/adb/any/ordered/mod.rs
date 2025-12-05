@@ -698,7 +698,7 @@ impl<
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N>,
+        status: &mut AuthenticatedBitMap<D, N, Dirty>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
@@ -997,8 +997,8 @@ impl<
     type Operation = C::Item;
     type Clean = IndexedLog<E, C, I, H>;
 
-    fn merkleize(self) -> Self::Clean {
-        self.merkleize()
+    async fn merkleize(self) -> Result<Self::Clean, Error> {
+        Ok(self.merkleize())
     }
 }
 
@@ -1220,7 +1220,7 @@ mod test {
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
         assert_eq!(db.op_count(), 8);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let mut db = db.into_dirty();
 
@@ -1234,7 +1234,7 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let root = db.root();
 
@@ -1243,7 +1243,7 @@ mod test {
         let mut db = db.into_dirty();
         assert!(!db.delete(key1).await.unwrap());
         assert_eq!(db.op_count(), prev_op_count);
-        let db = db.merkleize();
+        let db = db.merkleize().await.unwrap();
         assert_eq!(db.root(), root);
         let mut db = db.into_dirty();
 
@@ -1253,7 +1253,7 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let op_count = db.op_count();
         let root = db.root();
@@ -1269,7 +1269,7 @@ mod test {
         db.update(key2, val1).await.unwrap();
         db.update(key1, val2).await.unwrap();
 
-        let mut db = db.merkleize();
+        let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.

@@ -15,7 +15,7 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::Location,
-    AuthenticatedBitMap as BitMap,
+    DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;
@@ -71,9 +71,6 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
-
-    #[error("uncommitted operations present")]
-    UncommittedOperations,
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
@@ -357,7 +354,7 @@ where
     /// Panics if there is not at least one active operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut BitMap<D, N>,
+        status: &mut DirtyAuthenticatedBitMap<D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

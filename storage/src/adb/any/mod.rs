@@ -25,8 +25,11 @@ use std::{
     ops::Range,
 };
 
+mod ext;
 pub mod ordered;
 pub mod unordered;
+
+pub use ext::AnyExt;
 
 /// Extension trait for Any ADBs in a clean (merkleized) state.
 pub trait CleanAny:

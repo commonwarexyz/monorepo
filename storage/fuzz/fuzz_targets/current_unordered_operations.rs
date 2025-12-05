@@ -106,7 +106,9 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    db.update(k, v).await.expect("Update should not fail");
+                    let mut dirty_db = db.into_dirty();
+                    dirty_db.update(k, v).await.expect("Update should not fail");
+                    db = dirty_db.merkleize().await.unwrap();
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -117,7 +119,9 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     // Check if key exists before deletion
                     let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some();
-                    db.delete(k).await.expect("Delete should not fail");
+                    let mut dirty_db = db.into_dirty();
+                    dirty_db.delete(k).await.expect("Delete should not fail");
+                    db = dirty_db.merkleize().await.unwrap();
                     if key_existed {
                         expected_state.insert(*key, None);
                         all_keys.insert(*key);
@@ -171,7 +175,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let _root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
@@ -184,7 +188,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                        let current_root = db.root();
 
                         // Adjust start_loc and max_ops to be within the valid range
                         let start_loc = Location::new(start_loc % *current_op_count).unwrap();
@@ -224,7 +228,7 @@ fn fuzz(data: FuzzInput) {
                     };
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let root = db.root();
 
                     if let Ok(res) = db
                         .range_proof(hasher.inner(), start_loc, *max_ops)
@@ -252,7 +256,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let current_root = db.root();
 
                     match db.key_value_proof(hasher.inner(), k).await {
                         Ok((proof, info)) => {

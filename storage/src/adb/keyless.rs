@@ -375,8 +375,8 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::adb::store::Dirty
     type Operation = Operation<V>;
     type Clean = Keyless<E, V, H, Clean<H::Digest>>;
 
-    fn merkleize(self) -> Self::Clean {
-        self.merkleize()
+    async fn merkleize(self) -> Result<Self::Clean, Error> {
+        Ok(self.merkleize())
     }
 }
 

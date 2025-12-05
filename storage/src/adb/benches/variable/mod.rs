@@ -7,6 +7,7 @@ use commonware_storage::{
         any::{unordered::variable::Any, VariableConfig as AConfig},
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
     },
+    store::{StoreDeletable, StorePersistable},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -95,7 +96,7 @@ async fn get_any(ctx: Context) -> AnyDb {
     Any::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
+/// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
@@ -107,13 +108,10 @@ async fn gen_random_kv<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: commonware_storage::store::Store<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = Vec<u8>,
-            Error: std::fmt::Debug,
-        > + LogStorePrunable
-        + commonware_storage::store::StorePersistable
-        + commonware_storage::store::StoreDeletable,
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + StoreDeletable
+        + LogStorePrunable,
+    A::Error: std::fmt::Debug,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -149,10 +147,10 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: Batchable
-        + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + commonware_storage::store::StorePersistable
-        + LogStorePrunable<Value = Vec<u8>>,
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Batchable
+        + LogStorePrunable,
+    A::Error: std::fmt::Debug,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

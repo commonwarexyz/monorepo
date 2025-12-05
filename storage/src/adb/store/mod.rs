@@ -182,7 +182,7 @@ pub trait DirtyStore: LogStore {
     /// Merkleize the store and compute the root digest.
     ///
     /// Consumes this dirty store and returns a clean store with the computed root.
-    fn merkleize(self) -> Self::Clean;
+    fn merkleize(self) -> impl Future<Output = Result<Self::Clean, Error>>;
 }
 
 /// A trait for authenticated stores in a "clean" state where the MMR root is computed.

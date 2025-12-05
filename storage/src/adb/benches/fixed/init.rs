@@ -11,6 +11,10 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _,
 };
+use commonware_storage::adb::{
+    any::AnyExt,
+    store::{LogStore, LogStorePrunable},
+};
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 
@@ -63,6 +67,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                         }
                         Variant::CurrentUnordered => {
                             let db = get_unordered_current(ctx.clone()).await;
+                            let db = AnyExt::new(db);
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
@@ -71,6 +76,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                         }
                         Variant::CurrentOrdered => {
                             let db = get_ordered_current(ctx.clone()).await;
+                            let db = AnyExt::new(db);
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
@@ -163,37 +169,30 @@ fn bench_fixed_init(c: &mut Criterion) {
 
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                    let any_cfg = any_cfg(pool.clone());
-                    let current_cfg = current_cfg(pool.clone());
-                    let variable_any_cfg = variable_any_cfg(pool);
-                    let store_cfg = store_cfg();
                     // Clean up the database after the benchmark.
                     match variant {
                         Variant::Store => {
-                            let db = StoreDb::init(ctx.clone(), store_cfg).await.unwrap();
+                            let db = get_store(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                         Variant::AnyUnordered => {
-                            let db = UAnyDb::init(ctx.clone(), any_cfg).await.unwrap();
+                            let db = get_unordered_any(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                         Variant::AnyOrdered => {
-                            let db = OAnyDb::init(ctx.clone(), any_cfg).await.unwrap();
+                            let db = get_ordered_any(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                         Variant::CurrentUnordered => {
-                            let db = UCurrentDb::init(ctx.clone(), current_cfg).await.unwrap();
+                            let db = get_unordered_current(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                         Variant::CurrentOrdered => {
-                            let db = OCurrentDb::init(ctx.clone(), current_cfg).await.unwrap();
+                            let db = get_ordered_current(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                         Variant::Variable => {
-                            let db = VariableAnyDb::init(ctx.clone(), variable_any_cfg)
-                                .await
-                                .unwrap();
+                            let db = get_variable_any(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                     }

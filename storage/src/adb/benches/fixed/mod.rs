@@ -13,7 +13,9 @@ use commonware_storage::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
         store::{Batchable, Config as SConfig, Store},
+        Error,
     },
+    store::{StoreDeletable, StorePersistable},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -211,7 +213,7 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
     VariableAny::init(ctx, variable_any_cfg).await.unwrap()
 }
 
-/// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
+/// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// database is committed after every `commit_frequency` operations (if Some), or at the end (if
@@ -223,11 +225,11 @@ async fn gen_random_kv<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: commonware_storage::store::Store<
+    A: StorePersistable<
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
-        > + Batchable
-        + commonware_storage::store::StorePersistable,
+            Error = Error,
+        > + StoreDeletable,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -264,11 +266,8 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: commonware_storage::store::Store<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-        > + Batchable
-        + commonware_storage::store::StorePersistable,
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + Batchable,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

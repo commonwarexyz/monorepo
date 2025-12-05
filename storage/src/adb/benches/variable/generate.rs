@@ -9,9 +9,12 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::{
-    store::{Batchable, LogStorePrunable},
-    Error,
+use commonware_storage::{
+    adb::{
+        store::{Batchable, LogStorePrunable},
+        Error,
+    },
+    store::{StoreDeletable, StorePersistable},
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -90,10 +93,10 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    A: Batchable
-        + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + commonware_storage::store::StorePersistable
-        + LogStorePrunable<Value = Vec<u8>>,
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Batchable
+        + StoreDeletable
+        + LogStorePrunable,
 {
     let start = Instant::now();
     let db = if use_batch {
