@@ -130,12 +130,14 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Try pending keys until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
         for i in 0..self.pending.len() {
+            // Get the next key to try
             let (key, retry) = self
                 .pending
                 .nth(i)
                 .map(|(k, (_, r))| (k.clone(), *r))
                 .unwrap();
 
+            // Try to find a peer for the key
             let (result, is_targeted) = match self.targets.get(&key) {
                 Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
                 Some(targets) => (
@@ -146,6 +148,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 None => (self.requester.request(retry), false),
             };
 
+            // Handle the result
             match result {
                 Ok((peer, id)) => {
                     self.pending.remove(&key);
