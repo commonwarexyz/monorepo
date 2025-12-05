@@ -80,7 +80,7 @@ Extensive technical writing in `docs/blogs/` provides deep insights into design 
 - **commonware-deployer.html**: Infrastructure deployment automation
 
 ### Algorithms & Data Structures
-- **qmdb-current.html** / **qmdb-any.html**: Authenticated data broadcast protocols
+- **adb-current.html** / **adb-any.html**: Authenticated data broadcast protocols
 - **mmr.html**: Merkle Mountain Range implementation
 - **minimmit.html**: Minimal commit protocol
 - **buffered-signatures.html**: Efficient signature aggregation
