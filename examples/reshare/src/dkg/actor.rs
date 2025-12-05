@@ -418,8 +418,7 @@ where
                                 self.num_participants_per_epoch,
                                 next_epoch,
                             )
-                            .into_iter()
-                            .try_collect()
+                            .try_into()
                             .expect("participants are unique")
                         };
 

@@ -190,7 +190,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::ordered::{Map, TryCollect};
+    use commonware_utils::ordered::Map;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
@@ -2290,9 +2290,8 @@ mod tests {
             let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
 
             let mut manager = oracle.socket_manager();
-            let peers: Map<_, _> = vec![(pk1.clone(), addr1), (pk2.clone(), addr2)]
-                .into_iter()
-                .try_collect()
+            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+                .try_into()
                 .unwrap();
             manager.update(1, peers).await;
 
@@ -2308,10 +2307,7 @@ mod tests {
             let all_keys: Vec<_> = Vec::from(all.clone());
             assert_eq!(all_keys, vec![pk1.clone(), pk2.clone()]);
 
-            let peers: Map<_, _> = vec![(pk2.clone(), addr2)]
-                .into_iter()
-                .try_collect()
-                .unwrap();
+            let peers: Map<_, _> = [(pk2.clone(), addr2)].try_into().unwrap();
             manager.update(2, peers).await;
 
             let (id, latest, all) = subscription.next().await.unwrap();

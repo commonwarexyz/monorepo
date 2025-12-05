@@ -1746,8 +1746,7 @@ mod test_plan {
                         Ok((pk, player))
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?
-                    .into_iter()
-                    .try_collect()
+                    .try_into()
                     .unwrap();
 
                 // Run dealer protocol
