@@ -13,7 +13,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
-commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std", "fuzz"] }
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
@@ -122,6 +122,13 @@ bench = false
 [[bin]]
 name = "metamorph_lthash"
 path = "fuzz_targets/metamorph_lthash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_dkg"
+path = "fuzz_targets/bls12381_dkg.rs"
 test = false
 doc = false
 bench = false

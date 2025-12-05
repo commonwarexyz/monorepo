@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::{dkg, primitives::variant::MinSig};
+use commonware_cryptography::bls12381::primitives::{
+    group::G1,
+    poly::{self, Poly},
+};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -11,8 +14,7 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut rng = StdRng::seed_from_u64(0);
-                    let (polynomial, _) =
-                        dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+                    let polynomial: Poly<G1> = Poly::commit(poly::new_from(&mut rng, t - 1));
                     (rng, polynomial)
                 },
                 |(mut rng, polynomial)| {

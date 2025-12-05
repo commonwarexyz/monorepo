@@ -156,12 +156,13 @@ mod tests {
     use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops::generate_shares,
+            dkg,
             primitives::variant::{MinPk, MinSig},
         },
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_utils::quorum;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -169,14 +170,15 @@ mod tests {
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
         use commonware_cryptography::{bls12381::primitives::group::Share, Hasher};
+        use commonware_utils::NZU32;
         use rand::{rngs::StdRng, SeedableRng as _};
 
         const NAMESPACE: &[u8] = b"1234";
 
         /// Generate shares using a seeded RNG.
-        pub fn setup_shares<V: Variant>(num_validators: u32, quorum: u32) -> Vec<Share> {
+        pub fn setup_shares<V: Variant>(num_validators: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_, shares) = generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+            let (_, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
             shares
         }
 
@@ -254,9 +256,8 @@ mod tests {
     /// Different payloads for the same chunk produce distinct thresholds.
     fn chunk_different_payloads<V: Variant>() {
         let num_validators = 6;
-        let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
+        let quorum = quorum(num_validators);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
         let epoch = Epoch::new(5);
@@ -264,10 +265,22 @@ mod tests {
         let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload1"));
         let chunk2 = Chunk::new(sequencer, height, Sha256::hash(b"payload2"));
 
-        let threshold1 =
-            helpers::add_acks_for_indices(&mut acks, &shares, chunk1, epoch, quorum, &[0, 1, 2]);
-        let threshold2 =
-            helpers::add_acks_for_indices(&mut acks, &shares, chunk2, epoch, quorum, &[3, 4, 5]);
+        let threshold1 = helpers::add_acks_for_indices(
+            &mut AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new(),
+            &shares,
+            chunk1,
+            epoch,
+            quorum,
+            &[0, 1, 2, 3, 4],
+        );
+        let threshold2 = helpers::add_acks_for_indices(
+            &mut AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new(),
+            &shares,
+            chunk2,
+            epoch,
+            quorum,
+            &[1, 2, 3, 4, 5],
+        );
 
         let t1 = threshold1.expect("Expected threshold signature for payload1");
         let t2 = threshold2.expect("Expected threshold signature for payload2");
@@ -284,7 +297,7 @@ mod tests {
     fn sequencer_different_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(10);
@@ -332,7 +345,7 @@ mod tests {
     fn sequencer_contiguous_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(10);
@@ -401,7 +414,7 @@ mod tests {
     fn chunk_different_epochs<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 30;
@@ -444,7 +457,7 @@ mod tests {
     fn add_threshold<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = helpers::gen_public_key(1);
@@ -482,7 +495,7 @@ mod tests {
     fn duplicate_partial_submission<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -504,7 +517,7 @@ mod tests {
     fn subsequent_acks_after_threshold_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -534,7 +547,7 @@ mod tests {
     fn multiple_sequencers<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
 
         let sequencer1 = helpers::gen_public_key(1);
@@ -567,7 +580,7 @@ mod tests {
     fn partial_quorum_never_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -590,8 +603,8 @@ mod tests {
     /// Interleaved acks for different payloads are aggregated separately.
     fn interleaved_payloads<V: Variant>() {
         let num_validators = 6;
-        let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let quorum = quorum(num_validators);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -603,17 +616,12 @@ mod tests {
         let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
         let chunk2 = Chunk::new(sequencer, height, payload2);
 
-        let submissions = [
-            (0, &chunk1),
-            (1, &chunk2),
-            (2, &chunk1),
-            (3, &chunk2),
-            (4, &chunk1),
-            (5, &chunk2),
-        ];
+        let submissions = (0..2 * quorum)
+            .map(|i| ((i >> 1) + (i & 1)) % num_validators)
+            .zip([&chunk1, &chunk2].into_iter().cycle());
         let mut thresholds = Vec::new();
-        for (i, chunk) in submissions.into_iter() {
-            let ack = helpers::create_ack(&shares[i], chunk.clone(), epoch);
+        for (i, chunk) in submissions {
+            let ack = helpers::create_ack(&shares[i as usize], chunk.clone(), epoch);
             if let Some(threshold) = acks.add_ack(&ack, quorum) {
                 thresholds.push((chunk.payload, threshold));
             }

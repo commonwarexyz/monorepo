@@ -180,11 +180,11 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg2::{Dealer, Player, Info, SignedDealerLog, observe},
+//!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
 //!     primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-//! use commonware_utils::{ordered::Set, TryCollect};
+//! use commonware_utils::ordered::Set;
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
 //! use rand_chacha::ChaCha8Rng;
@@ -200,9 +200,7 @@
 //! }
 //!
 //! // All 4 participants are both dealers and players in initial DKG
-//! let dealer_set: Set<ed25519::PublicKey> = private_keys.iter()
-//!     .map(|k| k.public_key())
-//!     .try_collect()?;
+//! let dealer_set = Set::from_iter_dedup(private_keys.iter().map(|k| k.public_key()));
 //! let player_set = dealer_set.clone();
 //!
 //! // Step 1: Create round info for initial DKG
@@ -292,7 +290,7 @@ use crate::{
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    quorum, TryCollect, NZU32,
+    quorum, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -324,8 +322,6 @@ pub enum Error {
     NumDealers(usize),
     #[error("invalid number of players: {0}")]
     NumPlayers(usize),
-    #[error("duplicate players")]
-    DuplicatePlayers,
     #[error("dkg failed for some reason")]
     DkgFailed,
 }
@@ -1054,12 +1050,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                 )
             })
             .collect::<Vec<_>>();
-        let results: Map<_, _> = priv_msgs
-            .clone()
-            .into_iter()
-            .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg)))
-            .try_collect()
-            .expect("players are unique");
+        let results = Map::from_iter_dedup(
+            priv_msgs
+                .clone()
+                .into_iter()
+                .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg))),
+        );
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
@@ -1368,28 +1364,20 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
 ) -> DealResult<V, P> {
-    let players: Set<_> = players
-        .into_iter()
-        .try_collect()
-        .map_err(|_| Error::DuplicatePlayers)?;
+    let players = Set::from_iter_dedup(players);
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
-    let private = poly::new_from(t - 1, &mut rng);
-    let shares: Map<_, _> = players
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let eval = private.evaluate(i as u32);
-            let share = Share {
-                index: eval.index,
-                private: eval.value,
-            };
-            (p.clone(), share)
-        })
-        .try_collect()
-        .expect("players are unique");
+    let private = poly::new_from(&mut rng, t - 1);
+    let shares = Map::from_iter_dedup(players.iter().enumerate().map(|(i, p)| {
+        let eval = private.evaluate(i as u32);
+        let share = Share {
+            index: eval.index,
+            private: eval.value,
+        };
+        (p.clone(), share)
+    }));
     let output = Output {
         summary: Summary::random(&mut rng),
         players,
@@ -1426,7 +1414,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{max_faults, TryCollect};
+    use commonware_utils::max_faults;
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
@@ -1570,12 +1558,12 @@ mod test_plan {
             // Check dealer/player ranges
             for &d in &self.dealers {
                 if d >= num_participants {
-                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]"));
+                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]",));
                 }
             }
             for &p in &self.players {
                 if p >= num_participants {
-                    return Err(anyhow!("player {p} out of range [1, {num_participants}]"));
+                    return Err(anyhow!("player {p} out of range [1, {num_participants}]",));
                 }
             }
 
@@ -1714,18 +1702,12 @@ mod test_plan {
                 let previous_successful_round =
                     previous_output.as_ref().map(|o| o.players.len() as u32);
 
-                let dealer_set = round
-                    .dealers
-                    .iter()
-                    .map(|&i| keys[i as usize].public_key())
-                    .try_collect::<Set<_>>()
-                    .unwrap();
-                let player_set: Set<ed25519::PublicKey> = round
-                    .players
-                    .iter()
-                    .map(|&i| keys[i as usize].public_key())
-                    .try_collect()
-                    .unwrap();
+                let dealer_set = Set::from_iter_dedup(
+                    round.dealers.iter().map(|&i| keys[i as usize].public_key()),
+                );
+                let player_set = Set::from_iter_dedup(
+                    round.players.iter().map(|&i| keys[i as usize].public_key()),
+                );
 
                 // Create round info
                 let info = Info::new(
@@ -1736,7 +1718,7 @@ mod test_plan {
                     player_set.clone(),
                 )?;
 
-                let mut players: Map<_, _> = round
+                let players_vec: Vec<_> = round
                     .players
                     .iter()
                     .map(|&i| {
@@ -1745,9 +1727,8 @@ mod test_plan {
                         let player = Player::new(info.clone(), sk)?;
                         Ok((pk, player))
                     })
-                    .collect::<anyhow::Result<Vec<_>>>()?
-                    .try_into()
-                    .unwrap();
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut players = Map::from_iter_dedup(players_vec);
 
                 // Run dealer protocol
                 let mut dealer_logs = BTreeMap::new();
@@ -1789,11 +1770,11 @@ mod test_plan {
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            let results: Map<_, _> = priv_msgs
-                                .iter()
-                                .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
-                                .try_collect()
-                                .unwrap();
+                            let results = Map::from_iter_dedup(
+                                priv_msgs
+                                    .iter()
+                                    .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone()))),
+                            );
                             let commitment = poly::Poly::commit(my_poly);
                             let pub_msg = DealerPubMsg { commitment };
                             let transcript = {
@@ -1923,7 +1904,7 @@ mod test_plan {
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
-                        "Round {i_round} should have failed but succeeded"
+                        "Round {i_round} should have failed but succeeded",
                     );
                     continue;
                 }
@@ -2129,12 +2110,13 @@ mod test_plan {
                     if !round
                         .expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32))
                     {
-                        last_successful_players = Some(round.players.iter().cloned().collect());
+                        last_successful_players =
+                            Some(Set::from_iter_dedup(round.players.iter().cloned()));
                     }
                     rounds.push(round);
                     Ok(ControlFlow::Continue(()))
                 })?;
-                let plan = Plan {
+                let plan = Self {
                     num_participants: NZU32!(num_participants),
                     rounds,
                 };
