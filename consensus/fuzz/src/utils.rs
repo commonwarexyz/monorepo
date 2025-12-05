@@ -10,53 +10,23 @@ pub enum Action {
     Unlink,
 }
 
-#[derive(Debug, Clone, Arbitrary)]
-pub enum PartitionStrategy {
-    /// All validators can communicate with all others (full mesh)
+#[derive(Debug, Clone, Arbitrary, PartialEq)]
+pub enum Partition {
     Connected,
-
-    /// Validator 0 acts as byzantine, can talk to itself and both halves
-    /// Other validators are split into two partitions that cannot communicate
     TwoPartitionsWithByzantine,
-
-    /// The byzantine validator can send messages to all other validators.
-    /// Other validators cannot communicate with each other.
     ManyPartitionsWithByzantine,
-
-    /// No validator can communicate with any other (complete isolation)
     Isolated,
-
-    /// Validator i can send messages to itself or the next validator
     Linear,
 }
 
-impl PartialEq for PartitionStrategy {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (PartitionStrategy::Connected, PartitionStrategy::Connected)
-                | (PartitionStrategy::Isolated, PartitionStrategy::Isolated)
-                | (
-                    PartitionStrategy::TwoPartitionsWithByzantine,
-                    PartitionStrategy::TwoPartitionsWithByzantine,
-                )
-                | (
-                    PartitionStrategy::ManyPartitionsWithByzantine,
-                    PartitionStrategy::ManyPartitionsWithByzantine,
-                )
-                | (PartitionStrategy::Linear, PartitionStrategy::Linear)
-        )
-    }
-}
-
-impl PartitionStrategy {
-    pub fn create(&self) -> Option<fn(usize, usize, usize) -> bool> {
+impl Partition {
+    pub fn filter(&self) -> Option<fn(usize, usize, usize) -> bool> {
         match self {
-            PartitionStrategy::Connected => None,
-            PartitionStrategy::Isolated => Some(|_n, i, j| i == j),
-            PartitionStrategy::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
-            PartitionStrategy::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            PartitionStrategy::Linear => Some(linear),
+            Partition::Connected => None,
+            Partition::Isolated => Some(|_, i, j| i == j),
+            Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
+            Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
+            Partition::Linear => Some(linear),
         }
     }
 }
@@ -65,11 +35,9 @@ fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
     if i == 0 || j == 0 {
         return true;
     }
-
     let mid = n / 2;
     let i_partition = if i <= mid { 1 } else { 2 };
     let j_partition = if j <= mid { 1 } else { 2 };
-
     i_partition == j_partition
 }
 
@@ -85,14 +53,14 @@ pub async fn link_peers<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
     action: Action,
-    restrict_to: Option<fn(usize, usize, usize) -> bool>,
+    filter: Option<fn(usize, usize, usize) -> bool>,
 ) {
     for (i1, v1) in validators.iter().enumerate() {
         for (i2, v2) in validators.iter().enumerate() {
             if v2 == v1 {
                 continue;
             }
-            if let Some(f) = restrict_to {
+            if let Some(f) = filter {
                 if !f(validators.len(), i1, i2) {
                     continue;
                 }
@@ -116,7 +84,7 @@ pub async fn link_peers<P: PublicKey>(
     }
 }
 
-pub async fn register_validators<P: PublicKey>(
+pub async fn register<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
 ) -> HashMap<
@@ -130,17 +98,10 @@ pub async fn register_validators<P: PublicKey>(
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
         let mut control = oracle.control(validator.clone());
-        let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
-        let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
-        let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
-        registrations.insert(
-            validator.clone(),
-            (
-                (pending_sender, pending_receiver),
-                (recovered_sender, recovered_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
-        );
+        let pending = control.register(0).await.unwrap();
+        let recovered = control.register(1).await.unwrap();
+        let resolver = control.register(2).await.unwrap();
+        registrations.insert(validator.clone(), (pending, recovered, resolver));
     }
     registrations
 }

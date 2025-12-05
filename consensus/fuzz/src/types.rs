@@ -10,25 +10,22 @@ pub enum Message {
     Random,
 }
 
-// Generic data structures for invariant checking
 pub struct Notarization {
     pub payload: Sha256Digest,
-    pub signature_count: Option<usize>, // Some for Simplex, None for Threshold Simplex
+    pub signature_count: Option<usize>,
 }
 
 pub struct Nullification {
-    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+    pub signature_count: Option<usize>,
 }
 
 pub struct Finalization {
     pub payload: Sha256Digest,
-    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+    pub signature_count: Option<usize>,
 }
 
-type View = u64;
-
 pub type ReplicaState = (
-    HashMap<View, Notarization>,
-    HashMap<View, Nullification>,
-    HashMap<View, Finalization>,
+    HashMap<u64, Notarization>,
+    HashMap<u64, Nullification>,
+    HashMap<u64, Finalization>,
 );
