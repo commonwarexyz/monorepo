@@ -21,7 +21,7 @@ pub enum Partition {
     ManyPartitionsWithByzantine,
     /// No connections between any validators.
     Isolated,
-    /// Chain topology: each node only connected to its neighbors.
+    /// Ring topology: node i connects to i-1 and i+1 (with wraparound).
     Linear,
 }
 
@@ -53,9 +53,9 @@ fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
     i == 0 || j == 0
 }
 
-// Ring topology where each node connects to its successor.
+// Ring topology: node i connects to i-1 and i+1 (with wraparound).
 fn linear(n: usize, i: usize, j: usize) -> bool {
-    (i + 1) % n == j % n || i == j
+    i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
 pub async fn link_peers<P: PublicKey>(
