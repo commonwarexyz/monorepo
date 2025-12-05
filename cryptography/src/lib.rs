@@ -37,7 +37,7 @@ pub mod secp256r1;
 pub mod transcript;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
-pub trait Signer: Send + Sync + Clone + 'static {
+pub trait Signer: Random + Send + Sync + Clone + 'static {
     /// The type of [Signature] produced by this [Signer].
     type Signature: Signature;
 
@@ -58,27 +58,20 @@ pub trait Signer: Send + Sync + Clone + 'static {
     /// layer can't accidentally spend funds on the execution layer). See
     /// [commonware_utils::union_unique] for details.
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
-}
 
-/// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
-
-/// A [PrivateKey] that can be generated from a seed or RNG.
-pub trait PrivateKeyExt: PrivateKey {
-    /// Create a [PrivateKey] from a seed.
+    /// Create a [Signer] from a seed.
     ///
     /// # Warning
     ///
     /// This function is insecure and should only be used for examples
     /// and testing.
     fn from_seed(seed: u64) -> Self {
-        let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        Self::from_rng(&mut rng)
+        Self::random(&mut ChaCha20Rng::seed_from_u64(seed))
     }
-
-    /// Create a fresh [PrivateKey] using the supplied RNG.
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
+
+/// A [Signer] that can be serialized/deserialized.
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
 
 /// Verifies [Signature]s over messages.
 pub trait Verifier {
@@ -244,8 +237,8 @@ mod tests {
     use commonware_codec::{DecodeExt, FixedSize};
     use rand::rngs::OsRng;
 
-    fn test_validate<C: PrivateKeyExt>() {
-        let private_key = C::from_rng(&mut OsRng);
+    fn test_validate<C: PrivateKey>() {
+        let private_key = C::random(&mut OsRng);
         let public_key = private_key.public_key();
         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }
@@ -255,7 +248,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn test_sign_and_verify<C: PrivateKeyExt>() {
+    fn test_sign_and_verify<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let namespace = &b"test_namespace"[..];
         let message = b"test_message";
@@ -264,7 +257,7 @@ mod tests {
         assert!(public_key.verify(namespace, message, &signature));
     }
 
-    fn test_sign_and_verify_wrong_message<C: PrivateKeyExt>() {
+    fn test_sign_and_verify_wrong_message<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let namespace = &b"test_namespace"[..];
         let message = b"test_message";
@@ -274,7 +267,7 @@ mod tests {
         assert!(!public_key.verify(namespace, wrong_message, &signature));
     }
 
-    fn test_sign_and_verify_wrong_namespace<C: PrivateKeyExt>() {
+    fn test_sign_and_verify_wrong_namespace<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let namespace = &b"test_namespace"[..];
         let wrong_namespace = &b"wrong_namespace"[..];
@@ -284,7 +277,7 @@ mod tests {
         assert!(!public_key.verify(wrong_namespace, message, &signature));
     }
 
-    fn test_empty_namespace<C: PrivateKeyExt>() {
+    fn test_empty_namespace<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let empty_namespace = &b""[..];
         let message = b"test_message";
@@ -293,7 +286,7 @@ mod tests {
         assert!(public_key.verify(empty_namespace, message, &signature));
     }
 
-    fn test_signature_determinism<C: PrivateKeyExt>() {
+    fn test_signature_determinism<C: PrivateKey>() {
         let private_key_1 = C::from_seed(0);
         let private_key_2 = C::from_seed(0);
         let namespace = &b"test_namespace"[..];
@@ -304,7 +297,7 @@ mod tests {
         assert_eq!(signature_1, signature_2);
     }
 
-    fn test_invalid_signature_publickey_pair<C: PrivateKeyExt>() {
+    fn test_invalid_signature_publickey_pair<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let private_key_2 = C::from_seed(1);
         let namespace = &b"test_namespace"[..];

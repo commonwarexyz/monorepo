@@ -38,7 +38,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
+        Committable, Digestible, Hasher, Sha256, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{

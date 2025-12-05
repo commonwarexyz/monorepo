@@ -165,7 +165,7 @@ mod test {
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt, Signer,
+        Signer,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{

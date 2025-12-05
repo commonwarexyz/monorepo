@@ -4,7 +4,7 @@ use commonware_cryptography::{
         primitives::{self, variant::MinSig},
     },
     ed25519::PrivateKey,
-    PrivateKeyExt, Signer,
+    Signer,
 };
 use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};

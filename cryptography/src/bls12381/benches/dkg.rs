@@ -4,8 +4,9 @@ use commonware_cryptography::{
         primitives::variant::MinSig,
     },
     ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt as _, Signer as _,
+    Signer as _,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{ordered::Set, quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -23,7 +24,7 @@ struct Bench {
 impl Bench {
     fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
-            .map(|_| PrivateKey::from_rng(&mut rng))
+            .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
         let me = private_keys.first().unwrap().clone();
         let me_pk = me.public_key();

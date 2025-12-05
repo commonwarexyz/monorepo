@@ -2,7 +2,7 @@
 
 use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},

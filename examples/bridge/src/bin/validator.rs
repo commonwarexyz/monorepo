@@ -13,7 +13,7 @@ use commonware_cryptography::{
         sharing::Sharing,
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};

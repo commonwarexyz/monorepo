@@ -380,8 +380,9 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use crate::{ed25519::PrivateKey, Signer};
     use commonware_codec::{Codec, DecodeExt};
+    use commonware_math::algebra::Random;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -392,8 +393,8 @@ mod test {
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let dialer_crypto = PrivateKey::from_rng(&mut rng);
-        let listener_crypto = PrivateKey::from_rng(&mut rng);
+        let dialer_crypto = PrivateKey::random(&mut rng);
+        let listener_crypto = PrivateKey::random(&mut rng);
 
         let (d_state, msg1) = dial_start(
             &mut rng,

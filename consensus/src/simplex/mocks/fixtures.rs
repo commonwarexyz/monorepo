@@ -6,8 +6,9 @@ use commonware_cryptography::{
         dkg::deal,
         primitives::{group, variant::Variant},
     },
-    ed25519, PrivateKeyExt, Signer,
+    ed25519, Signer,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{ordered::BiMap, TryCollect};
 use rand::{CryptoRng, RngCore};
 
@@ -32,7 +33,7 @@ where
 {
     (0..n)
         .map(|_| {
-            let private_key = ed25519::PrivateKey::from_rng(rng);
+            let private_key = ed25519::PrivateKey::random(&mut *rng);
             let public_key = private_key.public_key();
             (public_key, private_key)
         })

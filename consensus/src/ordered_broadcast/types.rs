@@ -937,7 +937,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_math::algebra::CryptoGroup;
     use commonware_utils::{quorum, NZU32};

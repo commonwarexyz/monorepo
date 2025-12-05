@@ -183,7 +183,8 @@
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
 //!     primitives::{variant::MinSig, sharing::Mode},
 //! };
-//! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+//! use commonware_cryptography::{ed25519, Signer};
+//! use commonware_math::algebra::Random;
 //! use commonware_utils::{ordered::Set, TryCollect};
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
@@ -195,7 +196,7 @@
 //! // Generate 4 Ed25519 private keys for participants
 //! let mut private_keys = Vec::new();
 //! for _ in 0..4 {
-//!     let private_key = ed25519::PrivateKey::from_rng(&mut rng);
+//!     let private_key = ed25519::PrivateKey::random(&mut rng);
 //!     private_keys.push(private_key);
 //! }
 //!
@@ -283,7 +284,7 @@ use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
         group::Scalar,
-        poly::{self, Poly, Public},
+        poly::{Poly, Public},
         sharing::{Mode, Sharing},
         variant::Variant,
     },
@@ -1497,7 +1498,7 @@ mod test_plan {
             },
             variant::Variant,
         },
-        ed25519, PrivateKeyExt as _, PublicKey,
+        ed25519, PublicKey,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
@@ -1766,7 +1767,7 @@ mod test_plan {
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
-                .map(|_| ed25519::PrivateKey::from_rng(&mut rng))
+                .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
             // The max_read_size needs to account for shifted polynomial degrees.
             // Find the maximum positive shift across all rounds.
@@ -1870,7 +1871,7 @@ mod test_plan {
                                 .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
                                 .try_collect()
                                 .unwrap();
-                            let commitment = poly::Poly::commit(my_poly);
+                            let commitment = Poly::commit(my_poly);
                             let pub_msg = DealerPubMsg { commitment };
                             let transcript = {
                                 let t = transcript_for_round(&info);
@@ -2232,7 +2233,7 @@ pub use test_plan::Plan as FuzzPlan;
 #[cfg(test)]
 mod test {
     use super::{test_plan::*, *};
-    use crate::{bls12381::primitives::variant::MinPk, ed25519, PrivateKeyExt};
+    use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use core::num::NonZeroI32;
     use rand::SeedableRng;
