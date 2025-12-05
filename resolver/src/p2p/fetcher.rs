@@ -132,7 +132,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Try pending keys until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
         for i in 0..self.pending.len() {
-            let (key, retry) = self.pending.nth(i).map(|(k, (_, r))| (k.clone(), *r)).unwrap();
+            let (key, retry) = self
+                .pending
+                .nth(i)
+                .map(|(k, (_, r))| (k.clone(), *r))
+                .unwrap();
 
             let (result, is_targeted) = match self.targets.get(&key) {
                 Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
@@ -152,16 +156,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 Err(Error::RateLimited(wait)) => {
                     min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
                     if !is_targeted {
-                        // Untargeted request rate-limited means all participants are busy
+                        // If a request with no targets fails to find a peer, all participants are busy
                         break;
                     }
-                    // Targeted request rate-limited - other keys may have different targets
+                    // If a request with targets fails to find a peer, other keys may still be fetchable
                 }
                 Err(Error::NoEligibleParticipants) => {}
             }
         }
 
-        // No keys could be fetched - set waiter based on what we found
+        // No keys could be fetched, set waiter to the next time
         self.waiter = Some(
             self.context
                 .current()
