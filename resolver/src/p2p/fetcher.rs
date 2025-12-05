@@ -116,13 +116,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Attempts to send a fetch request for a pending key.
     ///
-    /// Scans pending keys to find one that can be fetched (has eligible peers that
-    /// aren't rate-limited). This avoids head-of-line blocking where a targeted
-    /// request blocks untargeted requests that could proceed.
-    ///
-    /// If targets exist for a key, only target peers are considered. There is no
-    /// fallback to other peers. Keys with unavailable targets are skipped in favor
-    /// of keys that can proceed.
+    /// Iterates through pending keys in priority order until one succeeds or all
+    /// participants are rate-limited. Targeted requests that fail due to rate limiting
+    /// are skipped, allowing untargeted requests (or requests with different targets)
+    /// to proceed. Once an untargeted request is rate-limited, iteration stops since
+    /// all participants are busy.
     ///
     /// On send failure, the key is retried. Targets are not removed on send failure.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
