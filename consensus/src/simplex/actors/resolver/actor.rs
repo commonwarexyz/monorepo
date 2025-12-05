@@ -266,16 +266,11 @@ impl<
         }
     }
 
-    async fn broadcast_to_observers(observer: &mut Option<observer::Mailbox<S, D>>, voter: Voter<S, D>) {
-        // Control what we broadcast out.
-        if !matches!(voter, Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_)) {
-            return;
-        }
-
+    async fn broadcast_to_observers(observer: &mut Option<observer::Mailbox<S, D>>, cert: Certificate<S, D>) {
         let Some(observer) = observer else {
             return;
         };
 
-        observer.send(voter).await;
+        observer.send(cert).await;
     }
 }

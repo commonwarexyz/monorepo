@@ -20,7 +20,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:8001".parse().unwrap(),
-            max_observers: 1000,
+            max_observers: 100,
         }
     }
 }
