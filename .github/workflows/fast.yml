@@ -31,9 +31,15 @@ jobs:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
+            flags: "--features commonware-runtime/external"
+          - os: ubuntu-latest
             flags: ""
           - os: windows-latest
+            flags: "--features commonware-runtime/external"
+          - os: windows-latest
             flags: ""
+          - os: macos-latest
+            flags: "--features commonware-runtime/external"
           - os: macos-latest
             flags: ""
     steps:
@@ -55,6 +61,8 @@ jobs:
       run: just clippy ${{ matrix.flags }}
     - name: Check docs
       run: just check-docs ${{ matrix.flags }}
+    - name: Test docs
+      run: just test-docs ${{ matrix.flags }}
 
   Tests:
     name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
@@ -97,8 +105,6 @@ jobs:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run tests
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
-    - name: Run doc tests
-      run: just test-docs ${{ matrix.flags }}
 
   Tests-Subset:
     name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\")"
@@ -129,8 +135,6 @@ jobs:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run subset tests
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
-    - name: Run subset doc tests
-      run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Tests-Gate:
     name: "Fast-Tests"
