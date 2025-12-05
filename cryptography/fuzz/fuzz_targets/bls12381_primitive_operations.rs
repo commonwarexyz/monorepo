@@ -3,13 +3,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{
-        Element, Point, Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH,
-    },
+    group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH},
     ops::*,
     poly::Poly,
     variant::{MinPk, MinSig, Variant},
 };
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Ring, Space};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -418,7 +417,7 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
             if u.arbitrary()? {
                 Ok(G1::zero())
             } else {
-                Ok(G1::one())
+                Ok(G1::generator())
             }
         }
     }
@@ -433,7 +432,7 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
             if u.arbitrary()? {
                 Ok(G2::zero())
             } else {
-                Ok(G2::one())
+                Ok(G2::generator())
             }
         }
     }
@@ -494,18 +493,18 @@ fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::ScalarArithmetic { mut a, b } => {
             let mut a_clone = a.clone();
-            a.add(&b);
-            a_clone.mul(&b);
+            a += &b;
+            a_clone *= &b;
         }
 
         FuzzOperation::ScalarSubtraction { mut a, b } => {
-            a.sub(&b);
+            a -= &b;
         }
 
         FuzzOperation::ScalarInverse { scalar } => {
             if let Some(inv) = scalar.inverse() {
                 let mut check = scalar.clone();
-                check.mul(&inv);
+                check *= &inv;
                 assert_eq!(check, Scalar::one());
             }
         }
@@ -515,43 +514,41 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::G1Arithmetic { mut a, b } => {
-            a.add(&b);
+            a += &b;
         }
 
         FuzzOperation::G1ScalarMul { mut point, scalar } => {
-            point.mul(&scalar);
+            point *= &scalar;
         }
 
         FuzzOperation::G1Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G1::msm(&points[..len], &scalars[..len]);
+                let _ = G1::msm(&points[..len], &scalars[..len], 1);
             }
         }
 
         FuzzOperation::G1HashToPoint { message } => {
-            let mut point = G1::zero();
-            point.map(G1_MESSAGE, &message);
+            let _ = G1::hash_to_group(G1_MESSAGE, &message);
         }
 
         FuzzOperation::G2Arithmetic { mut a, b } => {
-            a.add(&b);
+            a += &b;
         }
 
         FuzzOperation::G2ScalarMul { mut point, scalar } => {
-            point.mul(&scalar);
+            point *= &scalar;
         }
 
         FuzzOperation::G2Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G2::msm(&points[..len], &scalars[..len]);
+                let _ = G2::msm(&points[..len], &scalars[..len], 1);
             }
         }
 
         FuzzOperation::G2HashToPoint { message } => {
-            let mut point = G2::zero();
-            point.map(G2_MESSAGE, &message);
+            let _ = G2::hash_to_group(G2_MESSAGE, &message);
         }
 
         FuzzOperation::KeypairGeneration => {
