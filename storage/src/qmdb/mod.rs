@@ -13,8 +13,8 @@
 //!
 //! The following resources were used as references when implementing this crate:
 //!
-//! * [https://arxiv.org/abs/2501.05262](QMDB: Quick Merkle Database)
-//! * [https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md](Merkle Mountain Ranges)
+//! * [QMDB: Quick Merkle Database](https://arxiv.org/abs/2501.05262)
+//! * [Merkle Mountain Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
     index::{Cursor, Unordered as Index},
