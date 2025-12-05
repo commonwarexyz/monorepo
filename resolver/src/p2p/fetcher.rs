@@ -114,45 +114,77 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         }
     }
 
-    /// Attempts to send a fetch request for the next pending key.
+    /// Attempts to send a fetch request for a pending key.
     ///
-    /// If targets exist for the key, only target peers are considered. There is no
-    /// fallback to other peers, if all target peers are unavailable, the fetch waits.
-    /// If target peers are rate-limited, the fetch also waits.
+    /// Iterates through pending keys in priority order until one succeeds or all
+    /// participants are rate-limited. Targeted requests that fail due to rate limiting
+    /// are skipped, allowing untargeted requests (or requests with different targets)
+    /// to proceed. Once an untargeted request is rate-limited, iteration stops since
+    /// all participants are busy.
     ///
     /// On send failure, the key is retried. Targets are not removed on send failure.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
 
-        // Peek at the pending key to check for targets
-        let (key, (_, retry)) = self.pending.peek().unwrap();
+        // Try pending keys until one succeeds or all participants are rate-limited
+        let mut min_wait: Option<Duration> = None;
+        for i in 0..self.pending.len() {
+            // Get the next key to try
+            let (key, retry) = self
+                .pending
+                .nth(i)
+                .map(|(k, (_, r))| (k.clone(), *r))
+                .unwrap();
 
-        // Get peer to send request to, using targets if available
-        let result = match self.targets.get(key) {
-            Some(targets) if targets.is_empty() => Err(Error::NoEligibleParticipants),
-            Some(targets) => self
-                .requester
-                .request_filtered(*retry, |p| targets.contains(p)),
-            None => self.requester.request(*retry),
-        };
+            // Try to find a peer for the key
+            let (result, is_targeted) = match self.targets.get(&key) {
+                Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
+                Some(targets) => (
+                    self.requester
+                        .request_filtered(retry, |p| targets.contains(p)),
+                    true,
+                ),
+                None => (self.requester.request(retry), false),
+            };
 
-        let (peer, id) = match result {
-            Ok(selection) => selection,
-            Err(Error::RateLimited(wait)) => {
-                self.waiter = Some(self.context.current().saturating_add(wait));
-                return;
+            // Handle the result
+            match result {
+                Ok((peer, id)) => {
+                    self.pending.remove(&key);
+                    return self.send_request(sender, key, peer, id).await;
+                }
+                Err(Error::RateLimited(wait)) => {
+                    min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
+                    if !is_targeted {
+                        // If a request with no targets fails to find a peer, all participants are busy
+                        break;
+                    }
+                    // If a request with targets fails to find a peer, other keys may still be fetchable
+                }
+                Err(Error::NoEligibleParticipants) => {
+                    // If a request with no valid targets exists (blocked or targets no longer allowed), we
+                    // should skip it (may eventually become fetchable if the peer set changes).
+                }
             }
-            Err(Error::NoEligibleParticipants) => {
-                // No peers available at all - set waiter to far future to avoid busy loop
-                self.waiter = Some(self.context.current().saturating_add(Duration::MAX));
-                return;
-            }
-        };
+        }
 
-        // Wait to pop a key until we know we can make a request
-        let key = self.pop_pending();
+        // No keys could be fetched, set waiter to the next time
+        self.waiter = Some(
+            self.context
+                .current()
+                .saturating_add(min_wait.unwrap_or(Duration::MAX)),
+        );
+    }
 
+    /// Sends a fetch request to a peer.
+    async fn send_request(
+        &mut self,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        key: Key,
+        peer: <NetS as Sender>::PublicKey,
+        id: ID,
+    ) {
         // Send message to peer
         let result = sender
             .send(
@@ -253,14 +285,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the deadline for the next requester timeout.
     pub fn get_active_deadline(&self) -> Option<SystemTime> {
         self.requester.next().map(|(_, deadline)| deadline)
-    }
-
-    /// Removes and returns the pending key with the earliest deadline.
-    ///
-    /// Panics if there are no pending keys.
-    pub fn pop_pending(&mut self) -> Key {
-        let (key, _) = self.pending.pop().unwrap();
-        key
     }
 
     /// Removes and returns the key with the next requester timeout.
@@ -771,41 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pop_pending() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-
-            // Add keys
-            fetcher.add_retry(MockKey(1));
-            fetcher.add_retry(MockKey(2));
-            assert_eq!(fetcher.len_pending(), 2);
-
-            // Pop first key
-            let key = fetcher.pop_pending();
-            assert!(key == MockKey(1) || key == MockKey(2)); // Order may vary due to priority queue
-            assert_eq!(fetcher.len_pending(), 1);
-
-            // Pop second key
-            let key2 = fetcher.pop_pending();
-            assert!(key2 == MockKey(1) || key2 == MockKey(2));
-            assert_ne!(key, key2); // Should be different keys
-            assert_eq!(fetcher.len_pending(), 0);
-        });
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_pop_pending_empty_panics() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            // This should panic
-            fetcher.pop_pending();
-        });
-    }
-
-    #[test]
     fn test_pop_active() {
         let runner = Runner::default();
         runner.start(|context| async {
@@ -980,20 +969,20 @@ mod tests {
             assert_eq!(fetcher.len_pending(), 2);
             assert_eq!(fetcher.len_active(), 0);
 
-            // Get next
+            // Get next (should be the ready key with current time deadline)
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert_eq!(deadline, context.current());
 
-            // Pop key
-            let key = fetcher.pop_pending();
+            // Pop key (ready key should come first)
+            let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(2));
 
-            // Get next
+            // Get next (should be the retry key with delayed deadline)
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert_eq!(deadline, context.current() + Duration::from_millis(100));
 
             // Pop key
-            let key = fetcher.pop_pending();
+            let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(1));
         });
     }
@@ -1381,6 +1370,68 @@ mod tests {
             // clear_targets() remaining key
             fetcher.clear_targets(&MockKey(2));
             assert!(fetcher.targets.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_skips_keys_with_rate_limited_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher with rate limit of 1 per second
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(SuccessMockSender {});
+
+            // Add three keys with different targets:
+            // - MockKey(1) targeted to peer1
+            // - MockKey(2) targeted to peer1 (same peer, will be rate-limited after first)
+            // - MockKey(3) targeted to peer2
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2.clone()]);
+            fetcher.add_ready(MockKey(1));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(2));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(3));
+
+            // First fetch: should pick MockKey(1) targeting peer1
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(!fetcher.pending.contains(&MockKey(1))); // MockKey(1) was fetched
+
+            // Second fetch: MockKey(2) is blocked (peer1 rate-limited), should skip to MockKey(3)
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(fetcher.pending.contains(&MockKey(2))); // MockKey(2) is still pending
+            assert!(!fetcher.pending.contains(&MockKey(3))); // MockKey(3) was fetched
+
+            // Third fetch: only MockKey(2) remains, but peer1 is still rate-limited
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2); // No change
+            assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
+            assert!(fetcher.waiter.is_some()); // Waiter set
+
+            // Wait for rate limit to reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Now MockKey(2) can be fetched
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 3);
+            assert_eq!(fetcher.len_pending(), 0);
         });
     }
 }

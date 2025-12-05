@@ -1020,7 +1020,7 @@ mod tests {
             // The fetch should not succeed because peer 4 (which has data) is not targeted
             select! {
                 event = cons_out1.next() => {
-                    panic!("Fetch should not succeed, but got: {:?}", event);
+                    panic!("Fetch should not succeed, but got: {event:?}");
                 },
                 _ = context.sleep(Duration::from_secs(3)) => {
                     // Expected: no success event because peer 4 is not targeted
@@ -1133,7 +1133,7 @@ mod tests {
                     Event::Success(key, value) => {
                         results.insert(key, value);
                     }
-                    Event::Failed(key) => panic!("Fetch failed for key {:?}", key),
+                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
                 }
             }
 
