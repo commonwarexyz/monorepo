@@ -7,7 +7,7 @@
 use super::{CleanAny, DirtyAny};
 use crate::{
     adb::{
-        store::{Batchable, DirtyStore, LogStore, LogStorePrunable},
+        store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
     mmr::Location,
@@ -181,6 +181,16 @@ where
 impl<A> Batchable for AnyExt<A>
 where
     A: CleanAny,
-    <A as LogStore>::Value: Clone,
+    <A as CleanStore>::Dirty: Batchable<Key = A::Key, Value = A::Value>,
 {
+    async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
+    ) -> Result<(), Error> {
+        self.ensure_dirty();
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Dirty(dirty) => dirty.write_batch(iter).await,
+            _ => unreachable!("ensure_dirty guarantees Dirty state"),
+        }
+    }
 }
