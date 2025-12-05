@@ -489,15 +489,14 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// intermediate views are nullified.
     fn has_valid_proposal_context(&self, proposal: &Proposal<D>) -> bool {
         // Sanity check that the parent view is less than the proposal view.
-        let (view, parent) = (proposal.view(), proposal.parent.0);
-
-        // Invalid parent view - parent must be less than the proposal view.
-        if parent >= view {
+        let (parent_view, parent_payload) = proposal.parent;
+        let view = proposal.view();
+        if view <= parent_view {
             return false;
         }
 
         // Ignore any requests for outdated parent views.
-        if parent < self.last_finalized {
+        if parent_view < self.last_finalized {
             return false;
         }
 
@@ -507,12 +506,12 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Ensure we have a certificate at the parent view.
-        if Some(&proposal.parent.1) != self.quorum_payload(parent) {
+        if Some(&parent_payload) != self.quorum_payload(parent_view) {
             return false;
         };
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        View::range(parent.next(), view).all(|v| self.is_nullified(v))
+        View::range(parent_view.next(), view).all(|v| self.is_nullified(v))
     }
 
     /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
