@@ -15,6 +15,7 @@
 extern crate alloc;
 
 use commonware_codec::{Encode, ReadExt};
+use commonware_math::algebra::Random;
 use commonware_utils::Array;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
@@ -154,15 +155,12 @@ pub trait BatchVerifier<K: PublicKey> {
 
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
-pub trait Digest: Array + Copy {
-    /// Generate a random [Digest].
-    ///
-    /// # Warning
-    ///
-    /// This function is typically used for testing and is not recommended
-    /// for production use.
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self;
-}
+///
+/// # Warning
+///
+/// This trait requires [`Random::random`], but generating a digest at random is
+/// typically reserved for testing, and not production use.
+pub trait Digest: Array + Copy + Random {}
 
 /// An object that can be uniquely represented as a [Digest].
 pub trait Digestible: Clone + Sized + Send + Sync + 'static {

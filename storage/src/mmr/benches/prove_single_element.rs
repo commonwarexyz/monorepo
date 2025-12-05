@@ -1,4 +1,5 @@
-use commonware_cryptography::{sha256, Digest as _, Sha256};
+use commonware_cryptography::{sha256, Sha256};
+use commonware_math::algebra::Random as _;
 use commonware_storage::mmr::{mem::CleanMmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
