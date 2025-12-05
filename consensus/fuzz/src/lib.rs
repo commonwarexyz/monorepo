@@ -20,9 +20,8 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
-use commonware_runtime::deterministic;
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Runner, Spawner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
