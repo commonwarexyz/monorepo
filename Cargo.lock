@@ -1479,6 +1479,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
