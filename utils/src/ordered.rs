@@ -38,10 +38,8 @@ impl<T: fmt::Debug> fmt::Debug for Set<T> {
 }
 
 impl<T: Ord> Set<T> {
-    /// Creates a new [`Set`] from an iterator, ignoring duplicates.
-    ///
-    /// Items are sorted and deduplicated, keeping the first occurrence of each item.
-    pub fn new_lossy<I: IntoIterator<Item = T>>(iter: I) -> Self {
+    /// Creates a new [`Set`] from an iterator, removing duplicates.
+    pub fn from_iter_dedup<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut items: Vec<T> = iter.into_iter().collect();
         items.sort();
         items.dedup();
@@ -272,10 +270,8 @@ pub struct Map<K, V> {
 }
 
 impl<K: Ord, V> Map<K, V> {
-    /// Creates a new [`Map`] from an iterator, ignoring duplicates.
-    ///
-    /// Items are sorted by key and deduplicated, keeping the first occurrence of each key.
-    pub fn new_lossy<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+    /// Creates a new [`Map`] from an iterator, removing duplicates.
+    pub fn from_iter_dedup<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut items: Vec<(K, V)> = iter.into_iter().collect();
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
         items.dedup_by(|l, r| l.0 == r.0);
@@ -774,7 +770,7 @@ mod test {
         const CASE: [u8; 12] = [1, 3, 2, 5, 4, 3, 1, 7, 9, 6, 8, 4];
         const EXPECTED: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-        let sorted = Set::new_lossy(CASE);
+        let sorted = Set::from_iter_dedup(CASE);
         assert_eq!(sorted.iter().copied().collect::<Vec<_>>(), EXPECTED);
 
         let unsealed: Vec<_> = sorted.into();
@@ -813,9 +809,9 @@ mod test {
     }
 
     #[test]
-    fn test_set_new_lossy() {
+    fn test_set_from_iter_dedup() {
         let items = [3u8, 1u8, 2u8, 2u8];
-        let set = Set::new_lossy(items);
+        let set = Set::from_iter_dedup(items);
         assert_eq!(set.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
@@ -835,9 +831,9 @@ mod test {
     }
 
     #[test]
-    fn test_map_new_lossy() {
+    fn test_map_from_iter_dedup() {
         let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
-        let map = Map::new_lossy(items);
+        let map = Map::from_iter_dedup(items);
 
         assert_eq!(map.len(), 3);
         assert_eq!(map.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
