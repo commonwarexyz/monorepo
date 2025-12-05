@@ -21,12 +21,14 @@
 //! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
 //! it responds to.
 //!
-//! # Hints
+//! # Targeting
 //!
-//! Callers can register "hints" indicating which peers likely have data for a specific key. When
-//! fetching, hinted peers are tried first. If a hinted peer fails (timeout, error response, or
-//! send failure), that peer is removed from hints. As hints deplete through failures, the resolver
-//! naturally falls back to trying all peers. Hints are cleared on successful fetch.
+//! Callers can restrict fetches to specific target peers. Only target peers are tried, there is no
+//! automatic fallback to other peers. Targets persist through transient failures (timeout, "no
+//! data" response, send failure) since the peer might be slow or receive the data later. To fall
+//! back to any peer, callers must explicitly call `untarget`. Targets are cleared when the fetch
+//! succeeds, is canceled, or when a peer is blocked for sending invalid data (only that peer is
+//! removed from targets).
 //!
 //! # Performance Considerations
 //!

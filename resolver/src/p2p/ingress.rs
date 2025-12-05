@@ -118,7 +118,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
 impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Send a fetch request restricted to specific target peers.
     ///
-    /// Only target peers are tried - there is no fallback to other peers. Targets
+    /// Only target peers are tried, there is no fallback to other peers. Targets
     /// persist through transient failures (timeout, "no data" response, send failure)
     /// since the peer might be slow or might receive the data later.
     ///
@@ -167,8 +167,8 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// To provide targets when starting a fetch, use [`fetch_targeted`](Self::fetch_targeted)
     /// or [`fetch_all_targeted`](Self::fetch_all_targeted) instead.
     ///
-    /// Only target peers are tried - there is no fallback to other peers. Targets
-    /// persist through transient failures (timeout, "no data" response, send failure).
+    /// Only target peers are tried, there is no fallback to other peers. Targets persist
+    /// through transient failures (timeout, "no data" response, send failure).
     ///
     /// Multiple calls add to the existing target set. Use [`retarget`](Self::retarget)
     /// to replace targets, or [`untarget`](Self::untarget) to clear targeting.
