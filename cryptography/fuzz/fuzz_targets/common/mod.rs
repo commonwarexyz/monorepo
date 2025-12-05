@@ -4,14 +4,14 @@ use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
         group::{
-            Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
-            SCALAR_LENGTH,
+            Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, SCALAR_LENGTH,
         },
         poly::{Eval, Poly},
         variant::{MinPk, MinSig, Variant},
     },
     tle::{Block, Ciphertext},
 };
+use commonware_math::algebra::{Additive, CryptoGroup};
 use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(unused)]
@@ -22,7 +22,7 @@ pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
         Err(_) => Ok(if u.arbitrary()? {
             G1::zero()
         } else {
-            G1::one()
+            G1::generator()
         }),
     }
 }
@@ -35,7 +35,7 @@ pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
         Err(_) => Ok(if u.arbitrary()? {
             G2::zero()
         } else {
-            G2::one()
+            G2::generator()
         }),
     }
 }

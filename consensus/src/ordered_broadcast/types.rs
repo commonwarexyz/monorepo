@@ -931,7 +931,6 @@ mod tests {
         bls12381::{
             dkg::{self, deal_anonymous},
             primitives::{
-                group::Element,
                 ops::{partial_sign_message, threshold_signature_recover},
                 variant::{MinPk, MinSig},
             },
@@ -940,6 +939,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         PrivateKeyExt as _, Signer,
     };
+    use commonware_math::algebra::CryptoGroup;
     use commonware_utils::{quorum, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -1596,7 +1596,7 @@ mod tests {
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature;
-        invalid_signature.value.add(&V::Signature::one());
+        invalid_signature.value += &V::Signature::generator();
         let invalid_ack = Ack::<_, V, _>::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
