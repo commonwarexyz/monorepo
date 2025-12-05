@@ -1390,26 +1390,31 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let mut sender = WrappedSender::new(SuccessMockSender {});
 
-            // Add two keys:
-            // - MockKey(1) is targeted to peer1
-            // - MockKey(2) is untargeted (can go to any peer)
+            // Add three keys:
+            // - MockKey(1) targeted to peer1
+            // - MockKey(2) targeted to peer1
+            // - MockKey(3) untargeted
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(1));
             fetcher.add_ready(MockKey(2));
+            fetcher.add_ready(MockKey(3));
+            assert_eq!(fetcher.len_pending(), 3);
 
-            // First fetch should succeed (either key can be fetched)
+            // First fetch picks MockKey(1), rate-limiting peer1
             fetcher.fetch(&mut sender).await;
             assert_eq!(fetcher.len_active(), 1);
-            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(!fetcher.pending.contains(&MockKey(1)));
+            assert!(fetcher.pending.contains(&MockKey(2)));
+            assert!(fetcher.pending.contains(&MockKey(3)));
 
-            // Now peer1 is rate-limited. If MockKey(1) is still pending and we had
-            // the old head-of-line blocking behavior, we would be stuck waiting.
-            // With the new behavior, we should be able to fetch MockKey(2) from peer2.
-
-            // Second fetch should also succeed by finding an alternative key/peer
+            // Second fetch should skip MockKey(2) (peer1 rate-limited) and pick MockKey(3)
             fetcher.fetch(&mut sender).await;
             assert_eq!(fetcher.len_active(), 2);
-            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(fetcher.pending.contains(&MockKey(2))); // Skipped (peer1 rate-limited)
+            assert!(!fetcher.pending.contains(&MockKey(3))); // Fetched via peer2
         });
     }
 
