@@ -27,7 +27,7 @@ pub enum Error {
     #[error("duplicate key")]
     DuplicateKey,
 
-    /// A value was duplicated across different keys.
+    /// A value was duplicated.
     #[error("duplicate value")]
     DuplicateValue,
 }
