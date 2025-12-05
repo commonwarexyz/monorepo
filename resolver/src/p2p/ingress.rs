@@ -195,7 +195,7 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Atomically replaces the target set. Use this when you want to change
     /// which peers are tried without adding to the existing set.
     ///
-    /// If `peers` is empty, the fetch will wait until targets are added via
+    /// If `targets` is empty, the fetch will wait until targets are added via
     /// [`target`](Self::target). To clear targeting and try any peer, use
     /// [`untarget`](Self::untarget) instead.
     ///

@@ -244,10 +244,8 @@ impl<
                                 }
 
                                 // Set targets if targeting is enabled
-                                // None = no targeting (try any peer)
-                                // Some(peers) = only try these peers (even if empty)
-                                if let Some(peers) = targets {
-                                    self.fetcher.retarget(key.clone(), peers);
+                                if let Some(targets) = targets {
+                                    self.fetcher.add_targets(key.clone(), targets, true);
                                 }
 
                                 // Record fetch start time
@@ -295,15 +293,11 @@ impl<
                             match targets {
                                 None => {
                                     trace!(?key, "mailbox: untarget");
-                                    self.fetcher.untarget(&key);
+                                    self.fetcher.clear_targets(&key);
                                 }
-                                Some((targets, true)) => {
-                                    trace!(?key, ?targets, "mailbox: retarget");
-                                    self.fetcher.retarget(key, targets);
-                                }
-                                Some((targets, false)) => {
-                                    trace!(?key, ?targets, "mailbox: target");
-                                    self.fetcher.target(key, targets);
+                                Some((targets, replace)) => {
+                                    trace!(?key, ?targets, ?replace, "mailbox: target");
+                                    self.fetcher.add_targets(key, targets, replace);
                                 }
                             }
                         }
