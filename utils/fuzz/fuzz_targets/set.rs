@@ -35,7 +35,7 @@ enum FuzzInput {
 fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::FromVec { data } => {
-            let set = Set::from(data.clone());
+            let set = Set::from_iter_dedup(data);
             let _ = set.len();
             let _ = set.is_empty();
             let _ = set.iter().count();
@@ -43,13 +43,13 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::FromSlice { data } => {
-            let set = Set::from(data.as_slice());
+            let set = Set::from_iter_dedup(data.iter().cloned());
             let _ = set.len();
             let _ = set.is_empty();
         }
 
         FuzzInput::FromArray { data } => {
-            let set = Set::from(data);
+            let set = Set::from_iter_dedup(data);
             let _ = set.len();
         }
 
@@ -58,19 +58,15 @@ fn fuzz(input: FuzzInput) {
             index,
             search,
         } => {
-            let set = Set::from(data);
+            let set = Set::from_iter_dedup(data);
             let _ = set.get(index);
             let _ = set.position(&search);
             let _ = set.iter().count();
         }
 
         FuzzInput::AssociatedInsert { keys, values } => {
-            let pairs: Vec<(u32, u64)> = keys
-                .iter()
-                .zip(values.iter())
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            let map = Map::from(pairs);
+            let pairs = keys.iter().zip(values.iter()).map(|(k, v)| (*k, *v));
+            let map = Map::from_iter_dedup(pairs);
 
             let _ = map.is_empty();
             let _ = map.len();
@@ -86,12 +82,8 @@ fn fuzz(input: FuzzInput) {
             search_key,
             index,
         } => {
-            let pairs: Vec<(u32, u64)> = keys
-                .iter()
-                .zip(values.iter())
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            let map = Map::from(pairs);
+            let pairs = keys.iter().zip(values.iter()).map(|(k, v)| (*k, *v));
+            let map = Map::from_iter_dedup(pairs);
 
             let _ = map.len();
             let _ = map.position(&search_key);
@@ -101,9 +93,7 @@ fn fuzz(input: FuzzInput) {
             let _ = map.keys();
             let _ = map.values();
 
-            for _ in map.iter_pairs() {
-                // Just iterate, no checks
-            }
+            for _ in map.iter_pairs() {}
         }
     }
 }

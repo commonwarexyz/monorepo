@@ -119,7 +119,7 @@
 //!     // the composition of a validator set changes).
 //!     oracle.update(
 //!         0,
-//!         Map::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
+//!         [(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)].try_into().unwrap()
 //!     ).await;
 //!
 //!     // Register some channel
@@ -175,7 +175,7 @@ mod tests {
     };
     use commonware_utils::{
         ordered::{Map, Set},
-        NZU32,
+        TryCollect, NZU32,
     };
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
@@ -248,7 +248,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.update(0, Map::from(peers.clone())).await;
+            oracle.update(0, peers.clone().try_into().unwrap()).await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -517,12 +517,14 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
-                oracle.update(0, Map::from([peers[0].clone()])).await;
                 oracle
-                    .update(1, Map::from([peers[1].clone(), peers[2].clone()]))
+                    .update(0, [peers[0].clone()].try_into().unwrap())
                     .await;
                 oracle
-                    .update(2, peers.iter().skip(2).cloned().collect())
+                    .update(1, [peers[1].clone(), peers[2].clone()].try_into().unwrap())
+                    .await;
+                oracle
+                    .update(2, peers.iter().skip(2).cloned().try_collect().unwrap())
                     .await;
 
                 // Register basic application
@@ -595,7 +597,8 @@ mod tests {
             let peers: Map<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
 
             // Create network
             let (sk, _, addr) = peers_and_sks[0].clone();
@@ -648,7 +651,8 @@ mod tests {
             let peers: Map<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 
@@ -725,7 +729,8 @@ mod tests {
                 .iter()
                 .take(2)
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(10, set10.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 10);
@@ -737,7 +742,8 @@ mod tests {
                 .iter()
                 .skip(2)
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(9, set9.clone()).await;
 
             // Add new peer set
@@ -745,7 +751,8 @@ mod tests {
                 .iter()
                 .skip(4)
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(11, set11.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 11);
@@ -754,7 +761,8 @@ mod tests {
                 .into_keys()
                 .into_iter()
                 .chain(set11.into_keys().into_iter())
-                .collect();
+                .try_collect()
+                .unwrap();
             assert_eq!(all, all_keys);
         });
     }
@@ -777,7 +785,8 @@ mod tests {
             let peers: Map<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect();
+                .try_collect()
+                .unwrap();
 
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);

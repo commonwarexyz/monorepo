@@ -26,7 +26,7 @@ use commonware_utils::{
     ordered::Set,
     quorum,
     sequence::{FixedBytes, U64},
-    Acknowledgement, NZU32,
+    Acknowledgement, TryCollect, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
@@ -213,7 +213,7 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let dealers = dealers.into_iter().collect::<Set<_>>();
+        let dealers: Set<_> = dealers.try_into().expect("participants are unique");
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -247,7 +247,10 @@ where
             current_share,
             &mut self.signer,
             dealers,
-            players.into(),
+            players
+                .into_iter()
+                .try_collect::<Set<_>>()
+                .expect("participants are unique"),
             &mut dkg_mux,
             self.rate_limit,
             &mut self.round_metadata,
@@ -415,8 +418,8 @@ where
                                 self.num_participants_per_epoch,
                                 next_epoch,
                             )
-                            .into_iter()
-                            .collect::<Set<_>>()
+                            .try_into()
+                            .expect("participants are unique")
                         };
 
                         // Register the players for the next epoch

@@ -32,6 +32,8 @@ pub enum Error {
     DuplicateValue,
 }
 
+use crate::TryFromIterator;
+
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Set<T>(Vec<T>);
@@ -130,33 +132,50 @@ impl<T: Ord> Set<T> {
     }
 }
 
-impl<T: Ord> FromIterator<T> for Set<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self::try_from_iter(iter).expect("duplicate item in Set")
+impl<T: Ord> TryFromIterator<T> for Set<T> {
+    type Error = Error;
+
+    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error> {
+        let mut items: Vec<T> = iter.into_iter().collect();
+        items.sort();
+        let len = items.len();
+        items.dedup();
+        if items.len() != len {
+            return Err(Error::DuplicateKey);
+        }
+        Ok(Self(items))
     }
 }
 
-impl<T: Ord> From<Vec<T>> for Set<T> {
-    fn from(items: Vec<T>) -> Self {
-        Self::try_from_iter(items).expect("duplicate item in Set")
+impl<T: Ord> TryFrom<Vec<T>> for Set<T> {
+    type Error = Error;
+
+    fn try_from(items: Vec<T>) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<T: Ord + Clone> From<&[T]> for Set<T> {
-    fn from(items: &[T]) -> Self {
-        items.iter().cloned().collect()
+impl<T: Ord + Clone> TryFrom<&[T]> for Set<T> {
+    type Error = Error;
+
+    fn try_from(items: &[T]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items.iter().cloned())
     }
 }
 
-impl<T: Ord, const N: usize> From<[T; N]> for Set<T> {
-    fn from(items: [T; N]) -> Self {
-        items.into_iter().collect()
+impl<T: Ord, const N: usize> TryFrom<[T; N]> for Set<T> {
+    type Error = Error;
+
+    fn try_from(items: [T; N]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<T: Ord + Clone, const N: usize> From<&[T; N]> for Set<T> {
-    fn from(items: &[T; N]) -> Self {
-        items.as_slice().into()
+impl<T: Ord + Clone, const N: usize> TryFrom<&[T; N]> for Set<T> {
+    type Error = Error;
+
+    fn try_from(items: &[T; N]) -> Result<Self, Self::Error> {
+        Self::try_from(items.as_slice())
     }
 }
 
@@ -446,33 +465,61 @@ impl<K: Ord, V> Map<K, V> {
     }
 }
 
-impl<K: Ord, V> FromIterator<(K, V)> for Map<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        Self::try_from_iter(iter).expect("duplicate key in Map")
+impl<K: Ord, V> TryFromIterator<(K, V)> for Map<K, V> {
+    type Error = Error;
+
+    fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Self::Error> {
+        let mut items: Vec<(K, V)> = iter.into_iter().collect();
+        items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        let len = items.len();
+        items.dedup_by(|l, r| l.0 == r.0);
+        if items.len() != len {
+            return Err(Error::DuplicateKey);
+        }
+
+        let mut keys = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            keys.push(key);
+            values.push(value);
+        }
+
+        Ok(Self {
+            keys: Set(keys),
+            values,
+        })
     }
 }
 
-impl<K: Ord, V> From<Vec<(K, V)>> for Map<K, V> {
-    fn from(items: Vec<(K, V)>) -> Self {
-        Self::try_from_iter(items).expect("duplicate key in Map")
+impl<K: Ord, V> TryFrom<Vec<(K, V)>> for Map<K, V> {
+    type Error = Error;
+
+    fn try_from(items: Vec<(K, V)>) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<K: Ord + Clone, V: Clone> From<&[(K, V)]> for Map<K, V> {
-    fn from(items: &[(K, V)]) -> Self {
-        items.iter().cloned().collect()
+impl<K: Ord + Clone, V: Clone> TryFrom<&[(K, V)]> for Map<K, V> {
+    type Error = Error;
+
+    fn try_from(items: &[(K, V)]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items.iter().cloned())
     }
 }
 
-impl<K: Ord, V, const N: usize> From<[(K, V); N]> for Map<K, V> {
-    fn from(items: [(K, V); N]) -> Self {
-        items.into_iter().collect()
+impl<K: Ord, V, const N: usize> TryFrom<[(K, V); N]> for Map<K, V> {
+    type Error = Error;
+
+    fn try_from(items: [(K, V); N]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for Map<K, V> {
-    fn from(items: &[(K, V); N]) -> Self {
-        items.as_slice().into()
+impl<K: Ord + Clone, V: Clone, const N: usize> TryFrom<&[(K, V); N]> for Map<K, V> {
+    type Error = Error;
+
+    fn try_from(items: &[(K, V); N]) -> Result<Self, Self::Error> {
+        Self::try_from(items.as_slice())
     }
 }
 
@@ -650,6 +697,15 @@ impl<K, V> BiMap<K, V> {
     }
 }
 
+impl<K: Ord, V: Eq + Hash> TryFromIterator<(K, V)> for BiMap<K, V> {
+    type Error = Error;
+
+    fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Self::Error> {
+        let map = <Map<K, V> as TryFromIterator<(K, V)>>::try_from_iter(iter)?;
+        Self::try_from(map)
+    }
+}
+
 impl<K, V: Eq + Hash> TryFrom<Map<K, V>> for BiMap<K, V> {
     type Error = Error;
 
@@ -707,33 +763,35 @@ impl<K, V> Deref for BiMap<K, V> {
     }
 }
 
-impl<K: Ord, V: Eq + Hash> FromIterator<(K, V)> for BiMap<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        Self::try_from_iter(iter).expect("duplicate value detected during BiMap construction")
+impl<K: Ord + Clone, V: Clone + Eq + Hash> TryFrom<&[(K, V)]> for BiMap<K, V> {
+    type Error = Error;
+
+    fn try_from(items: &[(K, V)]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items.iter().cloned())
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Eq + Hash> From<&[(K, V)]> for BiMap<K, V> {
-    fn from(items: &[(K, V)]) -> Self {
-        items.iter().cloned().collect()
+impl<K: Ord, V: Eq + Hash> TryFrom<Vec<(K, V)>> for BiMap<K, V> {
+    type Error = Error;
+
+    fn try_from(items: Vec<(K, V)>) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<K: Ord, V: Eq + Hash> From<Vec<(K, V)>> for BiMap<K, V> {
-    fn from(items: Vec<(K, V)>) -> Self {
-        items.into_iter().collect()
+impl<K: Ord, V: Eq + Hash, const N: usize> TryFrom<[(K, V); N]> for BiMap<K, V> {
+    type Error = Error;
+
+    fn try_from(items: [(K, V); N]) -> Result<Self, Self::Error> {
+        Self::try_from_iter(items)
     }
 }
 
-impl<K: Ord, V: Eq + Hash, const N: usize> From<[(K, V); N]> for BiMap<K, V> {
-    fn from(items: [(K, V); N]) -> Self {
-        items.into_iter().collect()
-    }
-}
+impl<K: Ord + Clone, V: Clone + Eq + Hash, const N: usize> TryFrom<&[(K, V); N]> for BiMap<K, V> {
+    type Error = Error;
 
-impl<K: Ord + Clone, V: Clone + Eq + Hash, const N: usize> From<&[(K, V); N]> for BiMap<K, V> {
-    fn from(items: &[(K, V); N]) -> Self {
-        items.as_slice().into()
+    fn try_from(items: &[(K, V); N]) -> Result<Self, Self::Error> {
+        Self::try_from(items.as_slice())
     }
 }
 
@@ -806,7 +864,7 @@ mod test {
     #[test]
     fn test_sorted_unique_codec_roundtrip() {
         const CASE: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let sorted = Set::from(CASE);
+        let sorted: Set<_> = CASE.try_into().unwrap();
 
         let mut buf = Vec::with_capacity(sorted.encode_size());
         sorted.write(&mut buf);
@@ -827,7 +885,7 @@ mod test {
                 write!(f, "ex({})", self.0)
             }
         }
-        let sorted: Set<_> = CASE.into_iter().map(Example).collect();
+        let sorted: Set<_> = Set::try_from_iter(CASE.into_iter().map(Example)).unwrap();
         assert_eq!(
             sorted.to_string(),
             "[ex(1), ex(2), ex(3), ex(4), ex(5), ex(6), ex(7), ex(8), ex(9)]"
@@ -842,11 +900,9 @@ mod test {
     }
 
     #[test]
-    fn test_set_from_panics_on_duplicate() {
-        let result = std::panic::catch_unwind(|| {
-            let _: Set<u8> = vec![3u8, 1u8, 2u8, 2u8].into();
-        });
-        assert!(result.is_err());
+    fn test_set_try_from_duplicate() {
+        let result: Result<Set<u8>, _> = vec![3u8, 1u8, 2u8, 2u8].try_into();
+        assert_eq!(result, Err(Error::DuplicateKey));
     }
 
     #[test]
@@ -869,21 +925,19 @@ mod test {
     }
 
     #[test]
-    fn test_map_from() {
+    fn test_map_try_from() {
         let pairs = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")];
-        let wrapped = Map::from(pairs);
+        let wrapped: Map<_, _> = pairs.try_into().unwrap();
 
         assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(wrapped.get_value(&2), Some(&"b"));
     }
 
     #[test]
-    fn test_map_from_panics_on_duplicate() {
-        let result = std::panic::catch_unwind(|| {
-            let _: Map<u8, &str> =
-                vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")].into();
-        });
-        assert!(result.is_err());
+    fn test_map_try_from_duplicate() {
+        let result: Result<Map<u8, &str>, _> =
+            vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")].try_into();
+        assert_eq!(result, Err(Error::DuplicateKey));
     }
 
     #[test]
@@ -899,14 +953,14 @@ mod test {
             set.iter().map(|v| *v as u32).sum()
         }
 
-        let map: Map<_, _> = vec![(2u8, "b"), (1u8, "a")].into();
+        let map: Map<_, _> = vec![(2u8, "b"), (1u8, "a")].try_into().unwrap();
         assert_eq!(sum(&map), 3);
     }
 
     #[test]
     fn test_map_from_set() {
-        let set: Set<_> = vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')].into();
-        let wrapped: Map<_, _> = set.clone().into_iter().collect();
+        let set: Set<_> = vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')].try_into().unwrap();
+        let wrapped: Map<_, _> = Map::try_from_iter(set.clone()).unwrap();
 
         assert_eq!(
             set.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
@@ -916,14 +970,14 @@ mod test {
 
     #[test]
     fn test_map_into_keys() {
-        let map: Map<_, _> = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")].into();
+        let map: Map<_, _> = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")].try_into().unwrap();
         let keys = map.into_keys();
         assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]
     fn test_values_mut() {
-        let mut map: Map<u8, u8> = vec![(1u8, 10u8), (2, 20)].into();
+        let mut map: Map<u8, u8> = vec![(1u8, 10u8), (2, 20)].try_into().unwrap();
         for value in map.values_mut() {
             *value += 1;
         }
@@ -933,17 +987,10 @@ mod test {
     #[test]
     fn test_map_allows_duplicate_values() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let map: Map<_, _> = items.into();
+        let map: Map<_, _> = items.try_into().unwrap();
         assert_eq!(map.len(), 3);
         assert_eq!(map.get_value(&1), Some(&"a"));
         assert_eq!(map.get_value(&3), Some(&"a"));
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate value detected")]
-    fn test_bimap_duplicate_value_panic() {
-        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let _map: BiMap<_, _> = items.into_iter().collect();
     }
 
     #[test]
@@ -968,7 +1015,7 @@ mod test {
     #[test]
     fn test_bimap_try_from_map() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
-        let map: Map<_, _> = items.into();
+        let map: Map<_, _> = items.try_into().unwrap();
         let bimap = BiMap::try_from(map).unwrap();
         assert_eq!(bimap.len(), 3);
         assert_eq!(bimap.get_value(&1), Some(&"a"));
@@ -977,7 +1024,7 @@ mod test {
     #[test]
     fn test_bimap_get_key() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
-        let bimap: BiMap<_, _> = items.into();
+        let bimap: BiMap<_, _> = items.try_into().unwrap();
         assert_eq!(bimap.get_key(&"a"), Some(&1));
         assert_eq!(bimap.get_key(&"b"), Some(&2));
         assert_eq!(bimap.get_key(&"c"), Some(&3));
@@ -987,7 +1034,7 @@ mod test {
     #[test]
     fn test_bimap_try_from_map_duplicate() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let map: Map<_, _> = items.into();
+        let map: Map<_, _> = items.try_into().unwrap();
         let result = BiMap::try_from(map);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
@@ -995,7 +1042,7 @@ mod test {
     #[test]
     fn test_bimap_decode_rejects_duplicate_values() {
         let items = vec![(1u8, 10u8), (2, 20), (3, 10)];
-        let map: Map<_, _> = items.into();
+        let map: Map<_, _> = items.try_into().unwrap();
 
         let mut buf = Vec::with_capacity(map.encode_size());
         map.write(&mut buf);

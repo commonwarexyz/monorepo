@@ -21,7 +21,7 @@ use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{
     from_hex,
     ordered::{Quorum, Set},
-    union, NZUsize, NZU32,
+    union, NZUsize, TryCollect, NZU32,
 };
 use governor::Quota;
 use std::{
@@ -86,14 +86,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
+    let validators: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Set<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

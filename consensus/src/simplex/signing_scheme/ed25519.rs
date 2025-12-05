@@ -355,7 +355,7 @@ mod tests {
             ..
         } = ed25519(&mut rng, n);
 
-        (schemes, participants.into())
+        (schemes, participants.try_into().unwrap())
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {

@@ -8,7 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt};
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -265,7 +265,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Returns all tracked peers.
     pub fn tracked(&self) -> OrderedSet<C> {
-        self.peers.keys().cloned().collect()
+        self.peers
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("HashMap keys are unique")
     }
 
     /// Returns the sharable information for a given peer.

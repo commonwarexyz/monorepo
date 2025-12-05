@@ -181,7 +181,10 @@ fn run<P: Simplex>(input: FuzzInput) {
                 context.with_label("disrupter"),
                 validator.clone(),
                 scheme,
-                participants.clone().into(),
+                participants
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 namespace.clone(),
                 input.clone(),
             );
@@ -193,7 +196,10 @@ fn run<P: Simplex>(input: FuzzInput) {
             let context = context.with_label(&format!("validator-{validator}"));
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);

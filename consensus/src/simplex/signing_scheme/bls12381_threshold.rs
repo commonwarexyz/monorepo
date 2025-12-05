@@ -36,7 +36,10 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::ordered::{BiMap, Quorum, Set};
+use commonware_utils::{
+    ordered::{BiMap, Quorum, Set},
+    TryCollect,
+};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -91,10 +94,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let participants = participants
+        let participants: BiMap<_, _> = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<BiMap<_, _>>();
+            .try_collect()
+            .expect("participants are unique");
 
         let public_key = share.public::<V>();
         if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
@@ -131,10 +135,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let participants = participants
+        let participants: BiMap<_, _> = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<BiMap<_, _>>();
+            .try_collect()
+            .expect("participants are unique");
 
         Self::Verifier {
             participants,

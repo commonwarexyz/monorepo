@@ -116,7 +116,7 @@ mod tests {
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
         let mut manager = oracle.manager();
-        manager.update(0, peers.clone().into()).await;
+        manager.update(0, peers.clone().try_into().unwrap()).await;
 
         let mut connections = Vec::new();
         for peer in &peers {
