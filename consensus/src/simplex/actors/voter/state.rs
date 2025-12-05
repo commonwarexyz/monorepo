@@ -395,8 +395,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let view = self.view;
         let (leader, proposal) = self.views.get(&view)?.should_verify()?;
 
-        // Ensure the parent payload is valid
-        if !self.validate_parent_payload(&proposal) {
+        // Ensure the proposal has valid context
+        if !self.has_valid_proposal_context(&proposal) {
             return None;
         }
 
@@ -484,8 +484,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
-    /// Returns true if we know that the parent payload is valid for the proposal.
-    fn validate_parent_payload(&self, proposal: &Proposal<D>) -> bool {
+    /// Returns true if the proposal has valid ancestry: the parent view is valid,
+    /// the leader is expected, the parent payload matches our record, and all
+    /// intermediate views are nullified.
+    fn has_valid_proposal_context(&self, proposal: &Proposal<D>) -> bool {
         // Sanity check that the parent view is less than the proposal view.
         let (view, parent) = (proposal.view(), proposal.parent);
 
@@ -582,7 +584,7 @@ mod tests {
                 round: notarize_round,
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([50u8; 32]),
             };
             let notarize_votes: Vec<_> = schemes
@@ -626,7 +628,7 @@ mod tests {
                 round: finalize_round,
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([51u8; 32]),
             };
             let finalize_votes: Vec<_> = schemes
@@ -681,7 +683,7 @@ mod tests {
                 round: parent_round,
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([11u8; 32]),
             };
             let votes: Vec<_> = schemes
@@ -709,7 +711,7 @@ mod tests {
                 round: Rnd::new(state.epoch(), View::new(2)),
                 leader: 0,
                 parent: View::new(1),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: parent_proposal.payload,
                 payload: Sha256Digest::from([22u8; 32]),
             };
             state.proposed(proposal);
@@ -719,7 +721,7 @@ mod tests {
                 round: Rnd::new(state.epoch(), View::new(99)),
                 leader: 0,
                 parent: View::new(97),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: Sha256Digest::from([97u8; 32]),
                 payload: Sha256Digest::from([11u8; 32]),
             };
             let votes: Vec<_> = schemes
@@ -828,7 +830,7 @@ mod tests {
                 round: Rnd::new(Epoch::new(1), View::new(20)),
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([1u8; 32]),
             };
             let finalization_votes: Vec<_> = schemes
@@ -883,19 +885,9 @@ mod tests {
                 round: Rnd::new(Epoch::new(1), parent_view),
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: parent_payload,
             };
-
-            // Parent payload validation fails without certificate
-            let proposal = Proposal {
-                round: Rnd::new(Epoch::new(1), View::new(2)),
-                leader: 0,
-                parent: parent_view,
-                parent_payload: Sha256Digest::from([0u8; 32]),
-                payload: Sha256Digest::from([9u8; 32]),
-            };
-            assert!(!state.validate_parent_payload(&proposal));
 
             // Add notarization certificate
             let notarization_votes: Vec<_> = schemes
@@ -906,8 +898,20 @@ mod tests {
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
             state.add_notarization(notarization);
 
+            // Get the expected leader for child_view (set when entering view after notarization)
+            let child_view = parent_view.next();
+            let expected_leader = state.leader_index(child_view).expect("leader should exist");
+
             // Parent payload validation succeeds with certificate
-            assert!(state.validate_parent_payload(&proposal));
+            let child_payload = Sha256Digest::from([9u8; 32]);
+            let child_proposal = Proposal {
+                round: Rnd::new(Epoch::new(4), child_view),
+                leader: expected_leader,
+                parent: parent_view,
+                parent_payload,
+                payload: child_payload,
+            };
+            assert!(state.has_valid_proposal_context(&child_proposal));
         });
     }
 
@@ -933,12 +937,13 @@ mod tests {
 
             // Create parent proposal and certificate
             let parent_view = View::new(1);
+            let parent_payload = Sha256Digest::from([2u8; 32]);
             let parent_proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), parent_view),
-                leader: 0,
+                leader: state.leader_index(parent_view).unwrap(),
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
-                payload: Sha256Digest::from([2u8; 32]),
+                parent_payload: test_genesis(),
+                payload: parent_payload,
             };
             let notarization_votes: Vec<_> = schemes
                 .iter()
@@ -947,17 +952,37 @@ mod tests {
             let notarization =
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
             state.add_notarization(notarization);
-            state.create_round(View::new(2));
 
-            // Parent payload validation fails without nullification
-            let proposal = Proposal {
-                round: Rnd::new(Epoch::new(1), View::new(3)),
-                leader: 0,
+            // Create round for child_view and set its leader using no seed.
+            let child_view = parent_view.next().next();
+            state.create_round(child_view).set_leader(None);
+            let child_payload = Sha256Digest::from([3u8; 32]);
+            let child_proposal = Proposal {
+                round: Rnd::new(Epoch::new(1), child_view),
+                leader: state.leader_index(child_view).unwrap(),
                 parent: parent_view,
-                parent_payload: Sha256Digest::from([0u8; 32]),
-                payload: Sha256Digest::from([3u8; 32]),
+                parent_payload,
+                payload: child_payload,
             };
-            assert!(!state.validate_parent_payload(&proposal));
+            assert!(!state.has_valid_proposal_context(&child_proposal));
+
+            // Parent payload validation succeeds with nullification
+            let intermediate_view = parent_view.next();
+            let nullification_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(
+                        scheme,
+                        &namespace,
+                        Rnd::new(Epoch::new(1), intermediate_view),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, nullification_votes.iter()).unwrap();
+            state.add_nullification(nullification);
+            assert!(state.has_valid_proposal_context(&child_proposal));
         });
     }
 
@@ -998,14 +1023,15 @@ mod tests {
 
             // Get genesis payload
             let genesis_payload = Sha256Digest::from([0u8; 32]);
+            let view = View::new(2);
             let proposal = Proposal {
-                round: Rnd::new(Epoch::new(1), View::new(2)),
-                leader: 0,
+                round: Rnd::new(Epoch::new(1), view),
+                leader: state.leader_index(view).unwrap(),
                 parent: GENESIS_VIEW,
                 parent_payload: genesis_payload,
                 payload: Sha256Digest::from([8u8; 32]),
             };
-            assert!(state.validate_parent_payload(&proposal));
+            assert!(state.has_valid_proposal_context(&proposal));
         });
     }
 
@@ -1034,9 +1060,9 @@ mod tests {
             let parent_view = View::new(1);
             let parent_proposal = Proposal {
                 round: Rnd::new(epoch, parent_view),
-                leader: 0,
+                leader: state.leader_index(parent_view).unwrap(),
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([1u8; 32]),
             };
             let notarization_votes: Vec<_> = schemes
@@ -1048,31 +1074,30 @@ mod tests {
             state.add_notarization(notarization);
 
             // Get the expected leader for view 2
-            let expected_leader = state
-                .leader_index(View::new(2))
-                .expect("leader should exist");
+            let new_view = parent_view.next();
+            let expected_leader = state.leader_index(new_view).unwrap();
 
             // Proposal with correct leader should pass validation
             let valid_proposal = Proposal {
-                round: Rnd::new(epoch, View::new(2)),
+                round: Rnd::new(epoch, new_view),
                 leader: expected_leader,
                 parent: parent_view,
-                parent_payload: Sha256Digest::from([1u8; 32]),
+                parent_payload: parent_proposal.payload,
                 payload: Sha256Digest::from([2u8; 32]),
             };
-            assert!(state.validate_parent_payload(&valid_proposal));
+            assert!(state.has_valid_proposal_context(&valid_proposal));
 
             // Proposal with wrong leader should fail validation
             let wrong_leader = (expected_leader + 1) % 4;
             let invalid_proposal = Proposal {
-                round: Rnd::new(epoch, View::new(2)),
+                round: Rnd::new(epoch, new_view),
                 leader: wrong_leader,
                 parent: parent_view,
-                parent_payload: Sha256Digest::from([1u8; 32]),
+                parent_payload: parent_proposal.payload,
                 payload: Sha256Digest::from([3u8; 32]),
             };
             assert!(
-                !state.validate_parent_payload(&invalid_proposal),
+                !state.has_valid_proposal_context(&invalid_proposal),
                 "expected validation to fail with wrong leader"
             );
         });
@@ -1103,7 +1128,7 @@ mod tests {
                 round: Rnd::new(Epoch::new(1), View::new(3)),
                 leader: 0,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([1u8; 32]),
             };
             let finalization_votes: Vec<_> = schemes
@@ -1118,11 +1143,11 @@ mod tests {
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), View::new(4)),
                 leader: 0,
-                parent: View::new(2),
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent: GENESIS_VIEW,
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([6u8; 32]),
             };
-            assert!(!state.validate_parent_payload(&proposal));
+            assert!(!state.has_valid_proposal_context(&proposal));
         });
     }
 
@@ -1153,18 +1178,20 @@ mod tests {
             state.set_genesis(test_genesis());
             let view = View::new(4);
             let round = Rnd::new(epoch, view);
+            state.create_round(view).set_leader(None);
+            let leader = state.leader_index(view).unwrap();
             let proposal_a = Proposal {
                 round,
-                leader: 0,
+                leader,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([21u8; 32]),
             };
             let proposal_b = Proposal {
                 round,
-                leader: 0,
+                leader,
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([22u8; 32]),
             };
             let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a).unwrap();
@@ -1231,9 +1258,9 @@ mod tests {
             // Set proposal
             let proposal = Proposal {
                 round: Rnd::new(Epoch::new(1), view),
-                leader: 0,
+                leader: state.leader_index(view).unwrap(),
                 parent: GENESIS_VIEW,
-                parent_payload: Sha256Digest::from([0u8; 32]),
+                parent_payload: test_genesis(),
                 payload: Sha256Digest::from([1u8; 32]),
             };
             state.set_proposal(view, proposal);
