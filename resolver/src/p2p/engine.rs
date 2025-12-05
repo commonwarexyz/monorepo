@@ -171,7 +171,10 @@ impl<
                 .peers_blocked
                 .try_set(self.fetcher.len_blocked());
             let _ = self.metrics.serve_processing.try_set(self.serves.len());
-            let _ = self.metrics.hints_active.try_set(self.fetcher.len_hints());
+            let _ = self
+                .metrics
+                .targets_active
+                .try_set(self.fetcher.len_targets());
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
@@ -230,7 +233,7 @@ impl<
                     };
                     match msg {
                         Message::Fetch(requests) => {
-                            for FetchRequest { key, hints } in requests {
+                            for FetchRequest { key, targets } in requests {
                                 trace!(?key, "mailbox: fetch");
 
                                 // Check if the fetch is already in progress
@@ -240,9 +243,9 @@ impl<
                                     continue;
                                 }
 
-                                // Add hints if provided
-                                if !hints.is_empty() {
-                                    self.fetcher.hint(key.clone(), hints);
+                                // Add targets if provided
+                                if !targets.is_empty() {
+                                    self.fetcher.target(key.clone(), targets);
                                 }
 
                                 // Record fetch start time
@@ -281,13 +284,31 @@ impl<
                                 self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
                             }
                         }
-                        Message::Hint { key, peer } => {
-                            // Only add hint if key is being fetched
+                        Message::Target { key, peers } => {
+                            // Only add targets if key is being fetched
                             if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, ?peer, "mailbox: hint");
-                                self.fetcher.hint(key, [peer]);
+                                trace!(?key, ?peers, "mailbox: target");
+                                self.fetcher.target(key, peers);
                             } else {
-                                trace!(?key, ?peer, "mailbox: hint ignored (no active fetch)");
+                                trace!(?key, ?peers, "mailbox: target ignored (no active fetch)");
+                            }
+                        }
+                        Message::Retarget { key, peers } => {
+                            // Only retarget if key is being fetched
+                            if self.fetch_timers.contains_key(&key) {
+                                trace!(?key, ?peers, "mailbox: retarget");
+                                self.fetcher.retarget(key, peers);
+                            } else {
+                                trace!(?key, ?peers, "mailbox: retarget ignored (no active fetch)");
+                            }
+                        }
+                        Message::Untarget { key } => {
+                            // Only untarget if key is being fetched
+                            if self.fetch_timers.contains_key(&key) {
+                                trace!(?key, "mailbox: untarget");
+                                self.fetcher.untarget(&key);
+                            } else {
+                                trace!(?key, "mailbox: untarget ignored (no active fetch)");
                             }
                         }
                     }
@@ -394,7 +415,7 @@ impl<
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some((key, hinted)) = self.fetcher.pop_by_id(id, &peer, true) else {
+        let Some((key, targeted)) = self.fetcher.pop_by_id(id, &peer, true) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
@@ -405,18 +426,18 @@ impl<
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
 
-            // Hinted peer had valid data
-            if hinted {
-                self.metrics.hint_hit.inc();
+            // Target peer had valid data
+            if targeted {
+                self.metrics.target_hit.inc();
             }
 
-            // Clear all hints for this key
-            self.fetcher.clear_hints(&key);
+            // Clear all targets for this key
+            self.fetcher.clear_targets(&key);
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
-        // (blocking the peer also removes any hints associated with it)
+        // (blocking the peer also removes any targets associated with it)
         self.blocker.block(peer.clone()).await;
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
@@ -428,14 +449,14 @@ impl<
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
-        let Some((key, hinted)) = self.fetcher.pop_by_id(id, &peer, false) else {
+        let Some((key, targeted)) = self.fetcher.pop_by_id(id, &peer, false) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
 
-        // Hinted peer didn't have the data
-        if hinted {
-            self.metrics.hint_miss.inc();
+        // Target peer didn't have the data
+        if targeted {
+            self.metrics.target_miss.inc();
         }
 
         // The peer did not have the data, so we need to try again

@@ -38,12 +38,17 @@ enum SendError<S: Sender> {
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancellation). Upon retry, requests may either be placed in active or pending state again.
 ///
-/// # Hints
+/// # Targets
 ///
-/// Peers can be registered as "hints" for specific keys, indicating they likely have the data.
-/// When fetching, hinted peers are tried first. On failure (timeout, error, send failure),
-/// only the failing peer is removed from hints. When all hints fail, the fetcher falls back
-/// to trying any peer. Hints are cleared on successful fetch.
+/// Peers can be registered as "targets" for specific keys, restricting fetches to only those
+/// peers. Targets represent "the only peers who might eventually have the data". When fetching,
+/// only target peers are tried. There is no fallback to other peers - if all targets are
+/// unavailable, the fetch waits for them.
+///
+/// Targets persist through transient failures (timeout, "no data" response, send failure) since
+/// the peer might be slow or might receive the data later. Targets are only removed when:
+/// - A peer is blocked (sent invalid data)
+/// - The fetch succeeds (all targets for that key are cleared)
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
@@ -75,12 +80,11 @@ pub struct Fetcher<
     /// Whether requests are sent with priority over other network messages
     priority_requests: bool,
 
-    /// Per-key hint peers indicating which peers likely have data for each key.
-    /// Hinted peers are tried first, waiting for them if rate-limited. If all hinted
-    /// peers are unavailable (disconnected or blocked), hints are cleared and any peer
-    /// is tried. On failure, only the failing peer is removed; on success, all hints
-    /// for that key are cleared.
-    hints: HashMap<Key, HashSet<P>>,
+    /// Per-key target peers restricting which peers are used to fetch each key.
+    /// Only target peers are tried, waiting for them if rate-limited. There is no
+    /// fallback to other peers. Targets persist through transient failures; they are
+    /// only removed when blocked (invalid data) or cleared on successful fetch.
+    targets: HashMap<Key, HashSet<P>>,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -105,41 +109,30 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             waiter: None,
             retry_timeout,
             priority_requests,
-            hints: HashMap::new(),
+            targets: HashMap::new(),
             _s: PhantomData,
         }
     }
 
     /// Attempts to send a fetch request for the next pending key.
     ///
-    /// If hints exist for the key, only hinted peers are considered. If all hinted
-    /// peers are unavailable (disconnected or blocked), hints are cleared and any peer
-    /// is tried. If hinted peers exist but are rate-limited, the fetch waits for them.
+    /// If targets exist for the key, only target peers are considered. There is no
+    /// fallback to other peers - if all target peers are unavailable, the fetch waits.
+    /// If target peers are rate-limited, the fetch also waits.
     ///
-    /// On send failure, the key is retried (and if the peer was hinted, it is removed).
+    /// On send failure, the key is retried. Targets are not removed on send failure.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
 
-        // Peek at the pending key to check for hints
+        // Peek at the pending key to check for targets
         let (key, (_, retry)) = self.pending.peek().unwrap();
 
-        // Get peer to send request to, using hints if available
-        let result = match self.hints.get(key) {
-            Some(hints) => {
-                match self
-                    .requester
-                    .request_filtered(*retry, |p| hints.contains(p))
-                {
-                    Ok(selection) => Ok(selection),
-                    Err(Error::NoEligibleParticipants) => {
-                        // No hinted peers available - clear hints, try any peer
-                        self.hints.remove(key);
-                        self.requester.request(*retry)
-                    }
-                    Err(err) => Err(err), // Hinted peers rate-limited, wait for them
-                }
-            }
+        // Get peer to send request to, using targets if available
+        let result = match self.targets.get(key) {
+            Some(targets) => self
+                .requester
+                .request_filtered(*retry, |p| targets.contains(p)),
             None => self.requester.request(*retry),
         };
 
@@ -183,7 +176,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 debug!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
                 self.requester.fail(req);
-                self.remove_hint(&key, &peer);
                 self.add_retry(key);
             }
             // If the message was sent to someone, add the request to the map
@@ -197,15 +189,15 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
         self.active.retain(|_, k| predicate(k));
         self.pending.retain(&predicate);
-        self.hints.retain(|k, _| predicate(k));
+        self.targets.retain(|k, _| predicate(k));
     }
 
     /// Cancels a fetch request.
     ///
     /// Returns `true` if the fetch was canceled.
     pub fn cancel(&mut self, key: &Key) -> bool {
-        // Remove hints for this key
-        self.clear_hints(key);
+        // Remove targets for this key
+        self.clear_targets(key);
 
         // Check the pending queue first
         if self.pending.remove(key) {
@@ -224,7 +216,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     pub fn clear(&mut self) {
         self.pending.clear();
         self.active.clear();
-        self.hints.clear();
+        self.targets.clear();
     }
 
     /// Adds a key to the front of the pending queue.
@@ -267,8 +259,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         key
     }
 
-    /// Removes and returns the key with the next requester timeout. If the peer
-    /// was hinted for this key, it is removed from hints.
+    /// Removes and returns the key with the next requester timeout.
+    ///
+    /// Note: Targets are NOT removed on timeout - the peer might just be slow.
+    /// Targets are only removed when a peer is blocked (invalid data).
     ///
     /// Panics if there are no timeouts.
     pub fn pop_active(&mut self) -> Option<Key> {
@@ -277,31 +271,23 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // The request must exist
         let request = self.requester.cancel(id).unwrap();
-        let peer = request.participant.clone();
         self.requester.timeout(request);
 
         // Remove the existing request information, if any.
         // It is possible that the request was canceled before it timed out.
-        let result = self.active.remove_by_left(&id).map(|(_, key)| key);
-
-        // Remove the timed-out peer from hints
-        if let Some(ref key) = result {
-            self.remove_hint(key, &peer);
-        }
-
-        result
+        self.active.remove_by_left(&id).map(|(_, key)| key)
     }
 
     /// Processes a response from a peer. Removes and returns the relevant key.
     ///
-    /// Returns `(key, hinted)` if the response was valid, where `hinted` indicates
-    /// if the peer was hinted for this key. Returns None if the response was invalid
+    /// Returns `(key, targeted)` if the response was valid, where `targeted` indicates
+    /// if the peer was a target for this key. Returns None if the response was invalid
     /// or not needed.
     ///
-    /// On error response (`has_response=false`), only this peer is removed from hints.
-    /// On data response (`has_response=true`), **no hint cleanup is performed** since the caller
-    /// must validate the response data. On valid data it should then call `clear_hints()`,
-    /// otherwise it should block the peer, which removes any hints associated with it.
+    /// Note: Targets are NOT removed here, regardless of response type. Targets persist
+    /// through "no data" responses (peer might get data later). On valid data response,
+    /// caller should call `clear_targets()`. On invalid data, caller should block the peer
+    /// which removes them from all target sets.
     pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<(Key, bool)> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
@@ -315,18 +301,14 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
         self.active.remove_by_left(&id).map(|(_, key)| {
-            // On error response, remove this peer from hints and use return value
-            // On data response, just check if peer is hinted (caller handles hint cleanup)
-            let hinted = if has_response {
-                self.hints
-                    .get(&key)
-                    .map(|h| h.contains(peer))
-                    .unwrap_or(false)
-            } else {
-                self.remove_hint(&key, peer)
-            };
+            // Check if peer was a target (don't remove - they might get data later)
+            let targeted = self
+                .targets
+                .get(&key)
+                .map(|t| t.contains(peer))
+                .unwrap_or(false);
 
-            (key, hinted)
+            (key, targeted)
         })
     }
 
@@ -340,49 +322,49 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Blocks a peer from being used to fetch data.
     ///
-    /// Also removes the peer from all hint sets.
+    /// Also removes the peer from all target sets (but keeps empty entries to prevent fallback).
     pub fn block(&mut self, peer: P) {
-        // Remove peer from all hint sets
-        for hints in self.hints.values_mut() {
-            hints.remove(&peer);
+        // Remove peer from all target sets (keeping empty entries)
+        for targets in self.targets.values_mut() {
+            targets.remove(&peer);
         }
-
-        // Clean up empty hint sets
-        self.hints.retain(|_, v| !v.is_empty());
 
         self.requester.block(peer);
     }
 
-    /// Register peers as likely having data for a key.
+    /// Register target peers for fetching a key.
     ///
-    /// Hinted peers are tried first when fetching. If a hinted peer fails
-    /// (timeout, error response, or send failure), only that peer is removed.
-    /// When hints become empty, all peers are used as fallback.
+    /// Only target peers will be used when fetching this key. Targets persist through
+    /// transient failures (timeout, "no data" response, send failure) since the peer
+    /// might be slow or might receive the data later. Targets are only removed when
+    /// the peer is blocked (sent invalid data). On successful fetch, all targets for
+    /// the key are cleared.
     ///
-    /// Multiple hints can be registered for the same key. Hints can be added
-    /// before or after the fetch starts - new hints will be used on retry.
-    pub fn hint(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
-        self.hints.entry(key).or_default().extend(peers);
+    /// Multiple targets can be registered for the same key. Targets can be added
+    /// before or after the fetch starts - new targets will be used on retry.
+    pub fn target(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
+        self.targets.entry(key).or_default().extend(peers);
     }
 
-    /// Clear all hints for a key.
-    pub fn clear_hints(&mut self, key: &Key) {
-        self.hints.remove(key);
+    /// Replace all targets for a key.
+    ///
+    /// Atomically replaces the target set. If `peers` is empty, the fetch will
+    /// wait until targets are added via [`target`](Self::target).
+    pub fn retarget(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
+        self.targets.insert(key, peers.into_iter().collect());
     }
 
-    /// Removes a specific peer from hints for a key.
+    /// Clear targeting for a key.
     ///
-    /// Returns `true` if the peer was in the hints (and thus removed).
-    /// Removes the hints entry for the key if it becomes empty.
-    fn remove_hint(&mut self, key: &Key, peer: &P) -> bool {
-        let Some(hints) = self.hints.get_mut(key) else {
-            return false;
-        };
-        let removed = hints.remove(peer);
-        if hints.is_empty() {
-            self.clear_hints(key);
-        }
-        removed
+    /// After this call, the fetch will try any available peer instead of being
+    /// restricted to targets.
+    pub fn untarget(&mut self, key: &Key) {
+        self.targets.remove(key);
+    }
+
+    /// Clear all targets for a key (alias for untarget, used internally).
+    pub fn clear_targets(&mut self, key: &Key) {
+        self.targets.remove(key);
     }
 
     /// Returns the number of fetches.
@@ -405,9 +387,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.len_blocked()
     }
 
-    /// Returns the total number of hints (sum of all hints across all keys).
-    pub fn len_hints(&self) -> usize {
-        self.hints.values().map(|v| v.len()).sum()
+    /// Returns the total number of targets (sum of all targets across all keys).
+    pub fn len_targets(&self) -> usize {
+        self.targets.values().map(|v| v.len()).sum()
     }
 
     /// Returns true if the fetch is in progress.
@@ -1087,90 +1069,90 @@ mod tests {
     }
 
     #[test]
-    fn test_hint() {
+    fn test_target() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Initially no hints
-            assert!(fetcher.hints.is_empty());
+            // Initially no targets
+            assert!(fetcher.targets.is_empty());
 
-            // Add hint for a key
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            assert_eq!(fetcher.hints.len(), 1);
-            assert!(fetcher.hints.get(&MockKey(1)).unwrap().contains(&peer1));
+            // Add target for a key
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            assert_eq!(fetcher.targets.len(), 1);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
 
-            // Add another hint for the same key
-            fetcher.hint(MockKey(1), [peer2.clone()]);
-            assert_eq!(fetcher.hints.len(), 1);
-            let hints = fetcher.hints.get(&MockKey(1)).unwrap();
-            assert_eq!(hints.len(), 2);
-            assert!(hints.contains(&peer1));
-            assert!(hints.contains(&peer2));
+            // Add another target for the same key
+            fetcher.target(MockKey(1), [peer2.clone()]);
+            assert_eq!(fetcher.targets.len(), 1);
+            let targets = fetcher.targets.get(&MockKey(1)).unwrap();
+            assert_eq!(targets.len(), 2);
+            assert!(targets.contains(&peer1));
+            assert!(targets.contains(&peer2));
 
-            // Add hint for a different key
-            fetcher.hint(MockKey(2), [peer1.clone()]);
-            assert_eq!(fetcher.hints.len(), 2);
-            assert!(fetcher.hints.get(&MockKey(2)).unwrap().contains(&peer1));
+            // Add target for a different key
+            fetcher.target(MockKey(2), [peer1.clone()]);
+            assert_eq!(fetcher.targets.len(), 2);
+            assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
 
-            // Adding duplicate hint is idempotent
-            fetcher.hint(MockKey(1), [peer1]);
-            assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
+            // Adding duplicate target is idempotent
+            fetcher.target(MockKey(1), [peer1]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
         });
     }
 
     #[test]
-    fn test_hints_cleanup() {
+    fn test_targets_cleanup() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
-            // cancel() clears hints for key
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            fetcher.hint(MockKey(2), [peer1.clone()]);
+            // cancel() clears targets for key
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            fetcher.target(MockKey(2), [peer1.clone()]);
             fetcher.add_retry(MockKey(1));
             fetcher.add_retry(MockKey(2));
-            assert_eq!(fetcher.hints.len(), 2);
+            assert_eq!(fetcher.targets.len(), 2);
 
             assert!(fetcher.cancel(&MockKey(1)));
-            assert!(!fetcher.hints.contains_key(&MockKey(1)));
-            assert!(fetcher.hints.contains_key(&MockKey(2)));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
 
             assert!(fetcher.cancel(&MockKey(2)));
-            assert!(fetcher.hints.is_empty());
+            assert!(fetcher.targets.is_empty());
 
-            // clear() clears all hints
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            fetcher.hint(MockKey(1), [peer2.clone()]);
-            fetcher.hint(MockKey(2), [peer1.clone()]);
-            fetcher.hint(MockKey(3), [peer2]);
-            assert_eq!(fetcher.hints.len(), 3);
+            // clear() clears all targets
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            fetcher.target(MockKey(1), [peer2.clone()]);
+            fetcher.target(MockKey(2), [peer1.clone()]);
+            fetcher.target(MockKey(3), [peer2]);
+            assert_eq!(fetcher.targets.len(), 3);
 
             fetcher.clear();
-            assert!(fetcher.hints.is_empty());
+            assert!(fetcher.targets.is_empty());
 
-            // retain() filters hints
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            fetcher.hint(MockKey(2), [peer1.clone()]);
-            fetcher.hint(MockKey(10), [peer1.clone()]);
-            fetcher.hint(MockKey(20), [peer1]);
-            assert_eq!(fetcher.hints.len(), 4);
+            // retain() filters targets
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            fetcher.target(MockKey(2), [peer1.clone()]);
+            fetcher.target(MockKey(10), [peer1.clone()]);
+            fetcher.target(MockKey(20), [peer1]);
+            assert_eq!(fetcher.targets.len(), 4);
 
             fetcher.retain(|key| key.0 <= 5);
-            assert_eq!(fetcher.hints.len(), 2);
-            assert!(fetcher.hints.contains_key(&MockKey(1)));
-            assert!(fetcher.hints.contains_key(&MockKey(2)));
-            assert!(!fetcher.hints.contains_key(&MockKey(10)));
-            assert!(!fetcher.hints.contains_key(&MockKey(20)));
+            assert_eq!(fetcher.targets.len(), 2);
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
+            assert!(!fetcher.targets.contains_key(&MockKey(10)));
+            assert!(!fetcher.targets.contains_key(&MockKey(20)));
         });
     }
 
     #[test]
-    fn test_block_removes_from_hints() {
+    fn test_block_removes_from_targets() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
@@ -1178,55 +1160,57 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
             let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
 
-            // Add hints for multiple keys with various peers
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            fetcher.hint(MockKey(1), [peer2.clone()]);
-            fetcher.hint(MockKey(2), [peer1.clone()]);
-            fetcher.hint(MockKey(2), [peer3.clone()]);
-            fetcher.hint(MockKey(3), [peer2.clone()]);
+            // Add targets for multiple keys with various peers
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            fetcher.target(MockKey(1), [peer2.clone()]);
+            fetcher.target(MockKey(2), [peer1.clone()]);
+            fetcher.target(MockKey(2), [peer3.clone()]);
+            fetcher.target(MockKey(3), [peer2.clone()]);
 
             // Verify initial state
-            assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
-            assert_eq!(fetcher.hints.get(&MockKey(2)).unwrap().len(), 2);
-            assert_eq!(fetcher.hints.get(&MockKey(3)).unwrap().len(), 1);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(3)).unwrap().len(), 1);
 
             // Block peer1
             fetcher.block(peer1.clone());
 
-            // peer1 should be removed from all hint sets
-            let key1_hints = fetcher.hints.get(&MockKey(1)).unwrap();
-            assert_eq!(key1_hints.len(), 1);
-            assert!(!key1_hints.contains(&peer1));
-            assert!(key1_hints.contains(&peer2));
+            // peer1 should be removed from all target sets
+            let key1_targets = fetcher.targets.get(&MockKey(1)).unwrap();
+            assert_eq!(key1_targets.len(), 1);
+            assert!(!key1_targets.contains(&peer1));
+            assert!(key1_targets.contains(&peer2));
 
-            let key2_hints = fetcher.hints.get(&MockKey(2)).unwrap();
-            assert_eq!(key2_hints.len(), 1);
-            assert!(!key2_hints.contains(&peer1));
-            assert!(key2_hints.contains(&peer3));
+            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
+            assert_eq!(key2_targets.len(), 1);
+            assert!(!key2_targets.contains(&peer1));
+            assert!(key2_targets.contains(&peer3));
 
-            // MockKey(3) shouldn't be affected (peer1 wasn't a hint)
-            let key3_hints = fetcher.hints.get(&MockKey(3)).unwrap();
-            assert_eq!(key3_hints.len(), 1);
-            assert!(key3_hints.contains(&peer2));
+            // MockKey(3) shouldn't be affected (peer1 wasn't a target)
+            let key3_targets = fetcher.targets.get(&MockKey(3)).unwrap();
+            assert_eq!(key3_targets.len(), 1);
+            assert!(key3_targets.contains(&peer2));
 
             // Block peer2 - should remove from MockKey(1) and MockKey(3)
             fetcher.block(peer2);
 
-            // MockKey(1) now has no hints
-            assert!(!fetcher.hints.contains_key(&MockKey(1)));
+            // MockKey(1) now has empty targets (entry kept to prevent fallback)
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
 
             // MockKey(2) still has peer3
-            let key2_hints = fetcher.hints.get(&MockKey(2)).unwrap();
-            assert_eq!(key2_hints.len(), 1);
-            assert!(key2_hints.contains(&peer3));
+            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
+            assert_eq!(key2_targets.len(), 1);
+            assert!(key2_targets.contains(&peer3));
 
-            // MockKey(3) now has no hints
-            assert!(!fetcher.hints.contains_key(&MockKey(3)));
+            // MockKey(3) now has empty targets (entry kept to prevent fallback)
+            assert!(fetcher.targets.contains_key(&MockKey(3)));
+            assert!(fetcher.targets.get(&MockKey(3)).unwrap().is_empty());
         });
     }
 
     #[test]
-    fn test_hint_behavior_on_send_failure() {
+    fn test_target_behavior_on_send_failure() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context.clone());
@@ -1238,29 +1222,30 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
             let mut sender = WrappedSender::new(FailMockSender {});
 
-            // Hints filter peer selection
-            fetcher.hint(MockKey(1), [peer3.clone()]);
-            assert!(fetcher.hints.get(&MockKey(1)).unwrap().contains(&peer3));
+            // Targets filter peer selection - send failure does NOT remove target
+            fetcher.target(MockKey(1), [peer3.clone()]);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer3));
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender).await;
-            // The hint should be removed as the send failed
-            assert!(!fetcher.hints.contains_key(&MockKey(1)));
+            // Target should still be present (not removed on send failure)
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer3));
             assert!(fetcher.pending.contains(&MockKey(1)));
             fetcher.cancel(&MockKey(1));
 
-            // Send failure removes only the tried peer from hints
-            fetcher.hint(MockKey(2), [peer1.clone()]);
-            fetcher.hint(MockKey(2), [peer2.clone()]);
+            // Send failure does NOT remove targets - all targets preserved
+            fetcher.target(MockKey(2), [peer1.clone()]);
+            fetcher.target(MockKey(2), [peer2.clone()]);
             fetcher.add_ready(MockKey(2));
-            assert_eq!(fetcher.hints.get(&MockKey(2)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
-            assert_eq!(fetcher.hints.get(&MockKey(2)).unwrap().len(), 1);
+            // Both targets should still be present
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             assert!(fetcher.pending.contains(&MockKey(2)));
         });
     }
 
     #[test]
-    fn test_hint_removal_on_pop() {
+    fn test_target_retention_on_pop() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
@@ -1271,20 +1256,20 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let mut sender = WrappedSender::new(SuccessMockSender {});
 
-            // Timeout removes hint
-            fetcher.hint(MockKey(1), [peer1.clone()]);
-            fetcher.hint(MockKey(1), [peer2.clone()]);
+            // Timeout does NOT remove target (peer might be slow)
+            fetcher.target(MockKey(1), [peer1.clone()]);
+            fetcher.target(MockKey(1), [peer2.clone()]);
             fetcher.add_ready(MockKey(1));
-            assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
-            // Timeout should remove the timed-out peer from hints
-            assert_eq!(fetcher.hints.get(&MockKey(1)).unwrap().len(), 1);
-            fetcher.hints.clear();
+            // Both targets should still be present after timeout
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            fetcher.targets.clear();
 
-            // Error response removes hint
-            fetcher.hint(MockKey(2), [peer1.clone()]);
+            // Error response ("no data") does NOT remove target (peer might get data later)
+            fetcher.target(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
@@ -1292,11 +1277,13 @@ mod tests {
                 fetcher.pop_by_id(id, &peer1, false),
                 Some((MockKey(2), true))
             );
-            assert!(!fetcher.hints.contains_key(&MockKey(2)));
+            // Target should still be present after "no data" response
+            assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
+            fetcher.targets.clear();
 
-            // Data response preserves hints
-            // (caller must clear hints after data validation)
-            fetcher.hint(MockKey(3), [peer1.clone()]);
+            // Data response also preserves targets
+            // (caller must clear targets after data validation)
+            fetcher.target(MockKey(3), [peer1.clone()]);
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
@@ -1304,12 +1291,12 @@ mod tests {
                 fetcher.pop_by_id(id, &peer1, true),
                 Some((MockKey(3), true))
             );
-            assert!(fetcher.hints.contains_key(&MockKey(3)));
+            assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
         });
     }
 
     #[test]
-    fn test_hints_cleared_when_no_hinted_peers_available() {
+    fn test_no_fallback_when_targets_unavailable() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
@@ -1322,22 +1309,90 @@ mod tests {
             // Add only peer1 and peer2 to the peer set (peer3 is NOT in the peer set)
             fetcher.reconcile(&[public_key, peer1, peer2]);
 
-            // Hint peer3, which is NOT in the peer set (disconnected)
-            fetcher.hint(MockKey(1), [peer3]);
-            assert!(fetcher.hints.contains_key(&MockKey(1)));
+            // Target peer3, which is NOT in the peer set (disconnected)
+            fetcher.target(MockKey(1), [peer3]);
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
 
             // Add key to pending
             fetcher.add_ready(MockKey(1));
 
-            // Fetch should clear hints (peer3 not available) and fall back to any peer
+            // Fetch should NOT fallback to any peer - it should wait
             let mut sender = WrappedSender::new(SuccessMockSender {});
             fetcher.fetch(&mut sender).await;
 
-            // Hints should be cleared since the hinted peer wasn't available
-            assert!(!fetcher.hints.contains_key(&MockKey(1)));
+            // Targets should still exist (no fallback cleared them)
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
 
-            // Key should be in active state (fallback to available peer succeeded)
-            assert_eq!(fetcher.len_active(), 1);
+            // Key should still be in pending state (no fallback to available peers)
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Waiter should be set to far future (waiting for target peer)
+            assert!(fetcher.waiter.is_some());
+        });
+    }
+
+    #[test]
+    fn test_retarget() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+
+            // Initially no targets
+            assert!(fetcher.targets.is_empty());
+
+            // Add targets using target()
+            fetcher.target(MockKey(1), [peer1.clone(), peer2.clone()]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer2));
+
+            // retarget() replaces all targets
+            fetcher.retarget(MockKey(1), [peer3.clone()]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 1);
+            assert!(!fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
+            assert!(!fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer2));
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer3));
+
+            // retarget() with empty vec creates empty target set (fetch waits)
+            fetcher.retarget(MockKey(1), Vec::<Ed25519PublicKey>::new());
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
+
+            // retarget() on non-existent key creates new entry
+            fetcher.retarget(MockKey(2), [peer1.clone()]);
+            assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
+        });
+    }
+
+    #[test]
+    fn test_untarget() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Add targets
+            fetcher.target(MockKey(1), [peer1.clone(), peer2]);
+            fetcher.target(MockKey(2), [peer1]);
+            assert_eq!(fetcher.targets.len(), 2);
+
+            // untarget() removes the targets entry entirely
+            fetcher.untarget(&MockKey(1));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
+
+            // untarget() on non-existent key is a no-op
+            fetcher.untarget(&MockKey(99));
+            assert_eq!(fetcher.targets.len(), 1);
+
+            // untarget() remaining key
+            fetcher.untarget(&MockKey(2));
+            assert!(fetcher.targets.is_empty());
         });
     }
 }

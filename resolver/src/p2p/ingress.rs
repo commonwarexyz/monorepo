@@ -5,12 +5,12 @@ use futures::{channel::mpsc, SinkExt};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
-/// A request to fetch data for a key, optionally with peer hints.
+/// A request to fetch data for a key, optionally with target peers.
 pub struct FetchRequest<K, P> {
     /// The key to fetch.
     pub key: K,
-    /// Peers likely to have the data (tried first).
-    pub hints: Vec<P>,
+    /// Target peers to restrict the fetch to.
+    pub targets: Vec<P>,
 }
 
 /// Messages that can be sent to the peer actor.
@@ -27,8 +27,14 @@ pub enum Message<K, P> {
     /// Cancel all fetch requests that do not satisfy the predicate.
     Retain { predicate: Predicate<K> },
 
-    /// Add a hint peer for a key (only effective if key is being fetched).
-    Hint { key: K, peer: P },
+    /// Add target peers for a key (only effective if key is being fetched).
+    Target { key: K, peers: Vec<P> },
+
+    /// Replace all targets for a key (only effective if key is being fetched).
+    Retarget { key: K, peers: Vec<P> },
+
+    /// Clear targeting for a key (only effective if key is being fetched).
+    Untarget { key: K },
 }
 
 /// A way to send messages to the peer actor.
@@ -55,7 +61,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
         self.sender
             .send(Message::Fetch(vec![FetchRequest {
                 key,
-                hints: Vec::new(),
+                targets: Vec::new(),
             }]))
             .await
             .expect("Failed to send fetch");
@@ -70,7 +76,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
                 keys.into_iter()
                     .map(|key| FetchRequest {
                         key,
-                        hints: Vec::new(),
+                        targets: Vec::new(),
                     })
                     .collect(),
             ))
@@ -112,66 +118,99 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
 }
 
 impl<K: Span, P: PublicKey> Mailbox<K, P> {
-    /// Send a fetch request with initial hints for which peers likely have the data.
+    /// Send a fetch request restricted to specific target peers.
     ///
-    /// Hinted peers are tried first. If a hinted peer fails (timeout, error response,
-    /// or send failure), only that peer is removed from hints. As hints deplete through
-    /// failures, the resolver naturally falls back to trying all peers.
+    /// Only target peers are tried - there is no fallback to other peers. Targets
+    /// persist through transient failures (timeout, "no data" response, send failure)
+    /// since the peer might be slow or might receive the data later.
     ///
-    /// Hints are automatically cleared when:
+    /// To clear targeting and fall back to any peer, use [`untarget`](Self::untarget).
+    /// To replace targets, use [`retarget`](Self::retarget).
+    /// To add more targets, use [`target`](Self::target).
+    ///
+    /// Targets are automatically cleared when:
     /// - The fetch succeeds (data received)
     /// - The fetch is canceled
-    /// - All hinted peers fail (empty hints trigger fallback to all peers)
+    /// - A peer is blocked (sent invalid data)
     ///
     /// Panics if the send fails.
-    pub async fn fetch_hinted(&mut self, key: K, hints: Vec<P>) {
+    pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest { key, hints }]))
+            .send(Message::Fetch(vec![FetchRequest { key, targets }]))
             .await
-            .expect("Failed to send fetch_hinted");
+            .expect("Failed to send fetch_targeted");
     }
 
-    /// Send fetch requests for multiple keys, each with their own hints.
+    /// Send fetch requests for multiple keys, each with their own targets.
     ///
-    /// See [`fetch_hinted`](Self::fetch_hinted) for details on hint behavior.
+    /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
     ///
     /// Panics if the send fails.
-    pub async fn fetch_all_hinted(&mut self, requests: Vec<(K, Vec<P>)>) {
+    pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, Vec<P>)>) {
         self.sender
             .send(Message::Fetch(
                 requests
                     .into_iter()
-                    .map(|(key, hints)| FetchRequest { key, hints })
+                    .map(|(key, targets)| FetchRequest { key, targets })
                     .collect(),
             ))
             .await
-            .expect("Failed to send fetch_all_hinted");
+            .expect("Failed to send fetch_all_targeted");
     }
 
-    /// Add a hint peer for an **ongoing** fetch.
+    /// Add target peers for an **ongoing** fetch.
     ///
     /// This only has an effect if a fetch is already in progress for this key.
-    /// To provide hints when starting a fetch, use [`fetch_hinted`](Self::fetch_hinted)
-    /// or [`fetch_all_hinted`](Self::fetch_all_hinted) instead.
+    /// To provide targets when starting a fetch, use [`fetch_targeted`](Self::fetch_targeted)
+    /// or [`fetch_all_targeted`](Self::fetch_all_targeted) instead.
     ///
-    /// When fetching this key, hinted peers are tried first. If a hinted peer
-    /// fails (timeout, error response, or send failure), only that peer is
-    /// removed from hints. As hints deplete through failures, the resolver
-    /// naturally falls back to trying all peers.
+    /// Only target peers are tried - there is no fallback to other peers. Targets
+    /// persist through transient failures (timeout, "no data" response, send failure).
     ///
-    /// Multiple hints can be registered for the same key. New hints will be
-    /// used on retry.
+    /// Multiple calls add to the existing target set. Use [`retarget`](Self::retarget)
+    /// to replace targets, or [`untarget`](Self::untarget) to clear targeting.
     ///
-    /// Hints are automatically cleared when:
+    /// Targets are automatically cleared when:
     /// - The fetch succeeds (data received)
     /// - The fetch is canceled
-    /// - All hinted peers fail (empty hints trigger fallback to all peers)
+    /// - A peer is blocked (sent invalid data)
     ///
     /// Panics if the send fails.
-    pub async fn hint(&mut self, key: K, peer: P) {
+    pub async fn target(&mut self, key: K, peers: Vec<P>) {
         self.sender
-            .send(Message::Hint { key, peer })
+            .send(Message::Target { key, peers })
             .await
-            .expect("Failed to send hint");
+            .expect("Failed to send target");
+    }
+
+    /// Replace all targets for an **ongoing** fetch.
+    ///
+    /// Atomically replaces the target set. Use this when you want to change
+    /// which peers are tried without adding to the existing set.
+    ///
+    /// If `peers` is empty, the fetch will wait until targets are added via
+    /// [`target`](Self::target). To clear targeting and try any peer, use
+    /// [`untarget`](Self::untarget) instead.
+    ///
+    /// Panics if the send fails.
+    pub async fn retarget(&mut self, key: K, peers: Vec<P>) {
+        self.sender
+            .send(Message::Retarget { key, peers })
+            .await
+            .expect("Failed to send retarget");
+    }
+
+    /// Clear targeting for an **ongoing** fetch.
+    ///
+    /// After this call, the fetch will try any available peer instead of
+    /// being restricted to targets. Use this to fall back to any peer after
+    /// targets have been exhausted or timed out.
+    ///
+    /// Panics if the send fails.
+    pub async fn untarget(&mut self, key: K) {
+        self.sender
+            .send(Message::Untarget { key })
+            .await
+            .expect("Failed to send untarget");
     }
 }
