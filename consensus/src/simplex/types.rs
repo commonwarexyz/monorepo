@@ -528,6 +528,11 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
                 5u8.write(writer);
                 v.write(writer);
             }
+            Voter::Certification(r, b) => {
+                6u8.write(writer);
+                r.write(writer);
+                b.write(writer);
+            }
         }
     }
 }
@@ -1585,6 +1590,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     ConflictingFinalize(ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
+    /// A notarization was locally certified.
+    Certification(Notarization<S, D>),
 }
 
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
@@ -1643,6 +1650,10 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
             }
             Self::NullifyFinalize(v) => {
                 8u8.hash(state);
+                v.hash(state);
+            }
+            Activity::Certification(v) => {
+                9u8.hash(state);
                 v.hash(state);
             }
         }
@@ -1724,6 +1735,10 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 8u8.write(writer);
                 v.write(writer);
             }
+            Activity::Certification(v) => {
+                9u8.write(writer);
+                v.write(writer);
+            }
         }
     }
 }
@@ -1785,6 +1800,10 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
             8 => {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Self::NullifyFinalize(v))
+            }
+            9 => {
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
+                Ok(Activity::Certification(v))
             }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",

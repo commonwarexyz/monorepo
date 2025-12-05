@@ -5,12 +5,12 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Relay as Re,
+    Automaton as Au, Relay as Re, Viewable,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::select;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -19,7 +19,7 @@ use futures::{
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -35,6 +35,11 @@ pub enum Message<D: Digest, P: PublicKey> {
         response: oneshot::Sender<D>,
     },
     Verify {
+        context: Context<D, P>,
+        payload: D,
+        response: oneshot::Sender<bool>,
+    },
+    Certify {
         context: Context<D, P>,
         payload: D,
         response: oneshot::Sender<bool>,
@@ -93,6 +98,23 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
             .expect("Failed to send verify");
         receiver
     }
+
+    async fn certify(
+        &mut self,
+        context: Self::Context,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(Message::Certify {
+                context,
+                payload,
+                response: tx,
+            })
+            .await
+            .expect("Failed to send certify");
+        rx
+    }
 }
 
 impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
@@ -110,6 +132,23 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+enum Waiter<D: Digest, P: PublicKey> {
+    Verify(Context<D, P>, oneshot::Sender<bool>),
+    Certify(Context<D, P>, oneshot::Sender<bool>),
+}
+
+/// Predicate to determine whether a payload should be certified.
+/// Returning true means certify, false means reject.
+pub enum CertifyFn<H: Hasher, P: PublicKey> {
+    /// Always certify.
+    Always,
+    /// Certify sometimes, but not always.
+    /// The behavior is to certify 9 views in a row, then reject for 2 views in a row.
+    Sometimes,
+    /// A custom predicate function.
+    Custom(Box<dyn Fn(Context<H::Digest, P>) -> bool + Send + 'static>),
+}
+
 pub struct Config<H: Hasher, P: PublicKey> {
     pub hasher: H,
 
@@ -123,6 +162,11 @@ pub struct Config<H: Hasher, P: PublicKey> {
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
+    pub certify_latency: Latency,
+
+    /// Predicate to determine whether a payload should be certified.
+    /// Returning true means certify, false means reject.
+    pub should_certify: CertifyFn<H, P>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -137,6 +181,9 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    certify_latency: Normal<f64>,
+
+    should_certify: CertifyFn<H, P>,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -151,6 +198,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
+        let certify_latency = Normal::new(cfg.certify_latency.0, cfg.certify_latency.1).unwrap();
 
         // Return constructed application
         let (sender, receiver) = mpsc::channel(1024);
@@ -167,10 +215,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 propose_latency,
                 verify_latency,
+                certify_latency,
 
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
+
+                should_certify: cfg.should_certify,
             },
             Mailbox::new(sender),
         )
@@ -243,6 +294,26 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
+    async fn certify(
+        &mut self,
+        context: Context<H::Digest, P>,
+        _payload: H::Digest,
+        _contents: Bytes,
+    ) -> bool {
+        // Simulate the certify latency
+        let duration = self.certify_latency.sample(&mut self.context);
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Use configured predicate to determine certification
+        match &self.should_certify {
+            CertifyFn::Always => true,
+            CertifyFn::Sometimes => (context.view().get() % 11) < 9,
+            CertifyFn::Custom(func) => func(context),
+        }
+    }
+
     async fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
         self.relay.broadcast(&self.me, (payload, contents)).await;
@@ -255,59 +326,73 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
-        let mut waiters: HashMap<
-            H::Digest,
-            Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
-        > = HashMap::new();
+        let mut waiters: BTreeMap<H::Digest, Vec<Waiter<H::Digest, P>>> = BTreeMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
-        select_loop! {
-            self.context,
-            on_stopped => {
-                debug!("context shutdown, stopping application");
-            },
-            message = self.mailbox.next() => {
-                let message =match message {
-                    Some(message) => message,
-                    None => break,
-                };
-                match message {
-                    Message::Genesis { epoch, response } => {
-                        let digest = self.genesis(epoch);
-                        let _ = response.send(digest);
-                    }
-                    Message::Propose { context, response } => {
-                        let digest = self.propose(context).await;
-                        let _ = response.send(digest);
-                    }
-                    Message::Verify { context, payload, response } => {
-                        if let Some(contents) = seen.get(&payload) {
-                            let verified = self.verify(context, payload, contents.clone()).await;
-                            let _ = response.send(verified);
-                        } else {
-                            waiters
-                                .entry(payload)
-                                .or_default()
-                                .push((context, response));
-                            continue;
+        loop {
+            // Request any missing payloads
+            for payload in waiters.keys() {
+                self.relay.request(*payload, self.me.clone()).await;
+            }
+
+            // Wait for a message or a broadcast
+            select! {
+                message = self.mailbox.next() => {
+                    let message = match message {
+                        Some(message) => message,
+                        None => break,
+                    };
+                    match message {
+                        Message::Genesis { epoch, response } => {
+                            let digest = self.genesis(epoch);
+                            let _ = response.send(digest);
+                        }
+                        Message::Propose { context, response } => {
+                            let digest = self.propose(context).await;
+                            let _ = response.send(digest);
+                        }
+                        Message::Verify { context, payload, response } => {
+                            if let Some(contents) = seen.get(&payload) {
+                                let verified = self.verify(context, payload, contents.clone()).await;
+                                let _ = response.send(verified);
+                            } else {
+                                waiters
+                                    .entry(payload)
+                                    .or_default()
+                                    .push(Waiter::Verify(context, response));
+                            }
+                        }
+                        Message::Certify { context, payload, response } => {
+                            if let Some(contents) = seen.get(&payload) {
+                                let certified = self.certify(context, payload, contents.clone()).await;
+                                let _ = response.send(certified);
+                            } else {
+                                waiters
+                                    .entry(payload)
+                                    .or_default()
+                                    .push(Waiter::Certify(context, response));
+                            }
+                        }
+                        Message::Broadcast { payload } => {
+                            self.broadcast(payload).await;
                         }
                     }
-                    Message::Broadcast { payload } => {
-                        self.broadcast(payload).await;
-                    }
-                }
-            },
-            broadcast = self.broadcast.next() => {
-                // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
-                seen.insert(digest, contents.clone());
+                },
+                broadcast = self.broadcast.next() => {
+                    // Record digest for future use
+                    let (digest, contents) = broadcast.expect("broadcast closed");
+                    seen.insert(digest, contents.clone());
 
-                // Check if we have a waiter
-                if let Some(waiters) = waiters.remove(&digest) {
-                    for (context, sender) in waiters {
-                        let verified = self.verify(context, digest, contents.clone()).await;
-                        sender.send(verified).expect("Failed to send verification");
+                    // Check if we have a waiter
+                    if let Some(waiters) = waiters.remove(&digest) {
+                        for waiter in waiters {
+                            let (success, sender) = match waiter {
+                                Waiter::Verify(context, sender) => (self.verify(context, digest, contents.clone()).await, sender),
+                                Waiter::Certify(context, sender) => (self.certify(context, digest, contents.clone()).await, sender),
+                            };
+                            let _ = sender.send(success);
+                        }
                     }
                 }
             }
