@@ -180,10 +180,12 @@ where
                 }
             }
         }
+        // We need to keep this around until after finalize
+        let epoch = self.epoch;
         if let Some((logs, cb_in)) = finalize {
             self.finalize(logs, cb_in);
         }
-        debug!("player shutting down");
+        debug!(?epoch, "player shutting down");
     }
 
     async fn dealer_message(

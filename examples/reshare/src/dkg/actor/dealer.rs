@@ -166,10 +166,12 @@ where
                 }
             }
         }
+        // We need this after we consume self in finalize.
+        let epoch = self.epoch;
         if let Some(cb_in) = finalize {
             self.finalize(cb_in);
         }
-        debug!("dealer shutting down");
+        debug!(?epoch, "dealer shutting down");
     }
 
     async fn ack(&mut self, replay: bool, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) {
@@ -177,7 +179,7 @@ where
             return;
         }
         if let Err(e) = self.dealer.receive_player_ack(player.clone(), ack.clone()) {
-            warn!(?player, ?e, "bad player ack");
+            warn!(epoch = ?self.epoch, ?player, ?e, "bad player ack");
             return;
         }
         self.unsent_priv_msgs.remove(&player);
