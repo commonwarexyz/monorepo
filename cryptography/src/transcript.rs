@@ -7,6 +7,7 @@ use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
 use rand_core::{
@@ -342,8 +343,10 @@ impl Display for Summary {
 impl Span for Summary {}
 impl Array for Summary {}
 
-impl crate::Digest for Summary {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Summary {}
+
+impl Random for Summary {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut bytes = [0u8; blake3::OUT_LEN];
         rng.fill_bytes(&mut bytes[..]);
         Self {

@@ -84,8 +84,9 @@ pub(super) mod test {
         qmdb::store::{batch_tests, CleanStore as _},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
     use rand::RngCore;

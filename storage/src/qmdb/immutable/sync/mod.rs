@@ -164,8 +164,9 @@ mod tests {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256, Digest, Sha256};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};

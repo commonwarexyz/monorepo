@@ -5,7 +5,8 @@ use crate::simplex::{
     types::{Finalize, Notarize, Proposal, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
+use commonware_math::algebra::Random;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};

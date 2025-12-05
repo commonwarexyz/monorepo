@@ -288,10 +288,13 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    Digest, PublicKey, Signer,
+    PublicKey, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
-use commonware_math::{algebra::Additive, poly::Interpolator};
+use commonware_math::{
+    algebra::{Additive, Random},
+    poly::Interpolator,
+};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     quorum, TryCollect, NZU32,

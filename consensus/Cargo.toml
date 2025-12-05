@@ -49,7 +49,7 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-fuzz = []
+fuzz = [ "dep:commonware-math" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
