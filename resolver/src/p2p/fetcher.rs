@@ -159,7 +159,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                     }
                     // If a request with targets fails to find a peer, other keys may still be fetchable
                 }
-                Err(Error::NoEligibleParticipants) => {}
+                Err(Error::NoEligibleParticipants) => {
+                    // If a request with no valid targets exists (blocked or targets no longer allowed), we
+                    // should skip it (may eventually become fetchable).
+                }
             }
         }
 
