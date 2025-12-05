@@ -366,12 +366,14 @@ mod test {
         }
     }
 
+    #[derive(Clone)]
     struct Crash {
         frequency: Duration,
         downtime: Duration,
         count: usize,
     }
 
+    #[derive(Clone)]
     struct Plan {
         seed: u64,
         total: u32,
@@ -382,7 +384,7 @@ mod test {
     }
 
     impl Plan {
-        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<()>
+        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<String>
         where
             S: Scheme<PublicKey = PublicKey>,
             SchemeProvider<S, PrivateKey>:
@@ -494,7 +496,7 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= self.target {
-                                return Ok(());
+                                return Ok(ctx.auditor().state());
                             } else {
                                 current_epoch = current_epoch.next();
                             }
@@ -542,13 +544,45 @@ mod test {
             }
         }
 
-        fn run<S>(self) -> anyhow::Result<()>
+        fn run<S>(self) -> anyhow::Result<String>
         where
             S: Scheme<PublicKey = PublicKey>,
             SchemeProvider<S, PrivateKey>:
                 EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn plan_deterministic() {
+        let plan = Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 1,
+            crash: None,
+        };
+        for seed in 0..3 {
+            let res0 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run::<EdScheme>()
+            .unwrap_or_else(|e| panic!("failure: {e}"));
+            let res1 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run::<EdScheme>()
+            .unwrap_or_else(|e| panic!("failure: {e}"));
+            assert_eq!(res0, res1);
         }
     }
 
