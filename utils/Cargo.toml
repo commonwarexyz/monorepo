@@ -17,8 +17,8 @@ workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
-hashbrown.workspace = true
 futures = { workspace = true, optional = true }
+hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }
