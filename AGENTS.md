@@ -469,9 +469,6 @@ fn test_storage_conformance() {
 - **Cleanup After Tests**: Use `destroy()` to remove test data
 - **Test Pruning**: Verify old data can be safely removed
 - **Test Concurrent Access**: Multiple readers/writers on same storage
-
-### Handling Storage Failures
-
 - **Failures Are Fatal**: Errors returned by mutable methods (e.g. `put`,
 `delete`, `sync`) are treated as unrecoverable. The database may be in an inconsistent state after
 such an error. Callers must not use a database after a mutable method returns an error. Reviews
