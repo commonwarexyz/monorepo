@@ -116,25 +116,12 @@ impl<T: Read + Ord> Read for Set<T> {
     }
 }
 
-impl<T: Ord> Set<T> {
-    /// Attempts to create a [`Set`] from a vector.
-    ///
-    /// Returns an error if there are duplicate items.
-    pub fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Error> {
-        let mut items: Vec<T> = iter.into_iter().collect();
-        items.sort();
-        let len = items.len();
-        items.dedup();
-        if items.len() != len {
-            return Err(Error::DuplicateKey);
-        }
-        Ok(Self(items))
-    }
-}
-
 impl<T: Ord> TryFromIterator<T> for Set<T> {
     type Error = Error;
 
+    /// Attempts to create a [`Set`] from an iterator.
+    ///
+    /// Returns an error if there are duplicate items.
     fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error> {
         let mut items: Vec<T> = iter.into_iter().collect();
         items.sort();
@@ -438,36 +425,12 @@ impl<K, V> Deref for Map<K, V> {
     }
 }
 
-impl<K: Ord, V> Map<K, V> {
-    /// Attempts to create a [`Map`] from an iterator.
-    ///
-    /// Returns an error if there are duplicate keys.
-    pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error> {
-        let mut items: Vec<(K, V)> = iter.into_iter().collect();
-        items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
-        let len = items.len();
-        items.dedup_by(|l, r| l.0 == r.0);
-        if items.len() != len {
-            return Err(Error::DuplicateKey);
-        }
-
-        let mut keys = Vec::with_capacity(items.len());
-        let mut values = Vec::with_capacity(items.len());
-        for (key, value) in items {
-            keys.push(key);
-            values.push(value);
-        }
-
-        Ok(Self {
-            keys: Set(keys),
-            values,
-        })
-    }
-}
-
 impl<K: Ord, V> TryFromIterator<(K, V)> for Map<K, V> {
     type Error = Error;
 
+    /// Attempts to create a [`Map`] from an iterator.
+    ///
+    /// Returns an error if there are duplicate keys.
     fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Self::Error> {
         let mut items: Vec<(K, V)> = iter.into_iter().collect();
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
