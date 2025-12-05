@@ -654,10 +654,12 @@ impl<K, V: Eq + Hash> TryFrom<Map<K, V>> for BiMap<K, V> {
     type Error = Error;
 
     fn try_from(map: Map<K, V>) -> Result<Self, Self::Error> {
-        let mut seen = HashSet::with_capacity(map.values.len());
-        for value in map.values.iter() {
-            if !seen.insert(value) {
-                return Err(Error::DuplicateValue);
+        {
+            let mut seen = HashSet::with_capacity(map.values.len());
+            for value in map.values.iter() {
+                if !seen.insert(value) {
+                    return Err(Error::DuplicateValue);
+                }
             }
         }
         Ok(Self { inner: map })
