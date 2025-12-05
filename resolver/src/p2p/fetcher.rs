@@ -129,16 +129,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Reset waiter
         self.waiter = None;
 
-        // Collect pending keys (needed to avoid borrow conflicts with request calls)
-        let candidates: Vec<_> = self
-            .pending
-            .iter()
-            .map(|(key, (_, retry))| (key.clone(), *retry))
-            .collect();
-
-        // Try each candidate until one succeeds or all participants are rate-limited
+        // Try pending keys until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
-        for (key, retry) in candidates {
+        let mut idx = 0;
+        loop {
+            // Get next candidate
+            let Some((key, retry)) = self.pending.nth(idx).map(|(k, (_, r))| (k.clone(), *r)) else {
+                break;
+            };
+            idx += 1;
+
             let (result, is_targeted) = match self.targets.get(&key) {
                 Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
                 Some(targets) => (
