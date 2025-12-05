@@ -184,7 +184,7 @@
 //!     primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-//! use commonware_utils::ordered::Set;
+//! use commonware_utils::{ordered::Set, TryCollect};
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
 //! use rand_chacha::ChaCha8Rng;
@@ -202,7 +202,7 @@
 //! // All 4 participants are both dealers and players in initial DKG
 //! let dealer_set: Set<ed25519::PublicKey> = private_keys.iter()
 //!     .map(|k| k.public_key())
-//!     .collect();
+//!     .try_collect()?;
 //! let player_set = dealer_set.clone();
 //!
 //! // Step 1: Create round info for initial DKG
