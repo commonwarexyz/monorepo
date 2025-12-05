@@ -37,7 +37,6 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 - **collector**: Collect responses to committable requests.
 - **consensus**: Order opaque messages in a Byzantine environment.
 - **cryptography**: Generate keys, sign arbitrary messages, and deterministically verify signatures.
-- **deployer**: Deploy infrastructure across cloud providers.
 - **p2p**: Communicate with authenticated peers over encrypted connections.
 - **resolver**: Resolve data identified by a fixed-length key.
 - **runtime**: Execute asynchronous tasks with a configurable scheduler.
@@ -77,7 +76,6 @@ Extensive technical writing in `docs/blogs/` provides deep insights into design 
 - **commonware-runtime.html**: Abstract runtime design and implementation
 - **commonware-cryptography.html**: Cryptographic primitives and safety guarantees
 - **commonware-broadcast.html**: Reliable broadcast protocol implementation
-- **commonware-deployer.html**: Infrastructure deployment automation
 
 ### Algorithms & Data Structures
 - **adb-current.html** / **adb-any.html**: Authenticated data broadcast protocols

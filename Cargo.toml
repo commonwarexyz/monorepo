@@ -6,7 +6,6 @@ members = [
     "collector",
     "consensus",
     "cryptography",
-    "deployer",
     "macros",
     "p2p",
     "resolver",
@@ -60,8 +59,6 @@ undocumented_unsafe_blocks = "deny"
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
 async-lock = "3.4.0"
-aws-config = "1.8.10"
-aws-sdk-ec2 = "1.187.0"
 axum = "0.8.1"
 bimap = "0.6.3"
 blake3 = { version = "1.8.2", default-features = false }
@@ -78,7 +75,7 @@ commonware-coding = { version = "0.0.63", path = "coding" }
 commonware-collector = { version = "0.0.63", path = "collector" }
 commonware-consensus = { version = "0.0.63", path = "consensus" }
 commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
-commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }
+commonware-deployer = { version = "0.0.63", default-features = false }
 commonware-macros = { version = "0.0.63", path = "macros" }
 commonware-p2p = { version = "0.0.63", path = "p2p" }
 commonware-resolver = { version = "0.0.63", path = "resolver" }

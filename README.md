@@ -18,7 +18,6 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [collector](./collector/README.md): Collect responses to committable requests.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
-* [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
