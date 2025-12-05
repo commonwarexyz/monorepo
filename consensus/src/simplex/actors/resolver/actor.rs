@@ -21,7 +21,7 @@ use commonware_p2p::{
 };
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{sequence::U64, set::OrderedQuorum};
+use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};

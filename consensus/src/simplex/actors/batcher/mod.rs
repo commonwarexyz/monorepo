@@ -139,7 +139,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -298,7 +298,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -441,7 +441,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -629,7 +629,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -828,7 +828,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -952,7 +952,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -1078,7 +1078,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =

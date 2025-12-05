@@ -14,7 +14,7 @@ use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     context: E,
     validator: PublicKey,
     scheme: S,
-    participants: Ordered<PublicKey>,
+    participants: Set<PublicKey>,
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     view: u64,
@@ -51,7 +51,7 @@ where
         context: E,
         validator: PublicKey,
         scheme: S,
-        participants: Ordered<PublicKey>,
+        participants: Set<PublicKey>,
         namespace: Vec<u8>,
         fuzz_input: FuzzInput,
     ) -> Self {

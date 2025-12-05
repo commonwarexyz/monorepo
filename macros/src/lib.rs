@@ -415,7 +415,7 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Input for [select_loop].
+/// Input for [select_loop!].
 ///
 /// Parses: `context, on_stopped => { block }, { branches... }`
 struct SelectLoopInput {
