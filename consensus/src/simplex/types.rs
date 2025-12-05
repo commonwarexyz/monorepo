@@ -2118,8 +2118,9 @@ mod tests {
         },
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         sha256::Digest as Sha256,
-        PrivateKeyExt, Signer,
+        Signer,
     };
+    use commonware_math::algebra::Random;
     use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
     use rand::{
         rngs::{OsRng, StdRng},
@@ -2142,7 +2143,7 @@ mod tests {
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
-            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .map(|_| EdPrivateKey::random(&mut rng).public_key())
             .collect();
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
 
@@ -2163,7 +2164,7 @@ mod tests {
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
-            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .map(|_| EdPrivateKey::random(&mut rng).public_key())
             .collect();
 
         let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
@@ -2172,7 +2173,7 @@ mod tests {
 
     fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
+        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::random(&mut rng)).collect();
 
         let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
 

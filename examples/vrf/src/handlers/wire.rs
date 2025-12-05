@@ -257,9 +257,9 @@ mod tests {
             variant::Variant,
         },
         ed25519::{PrivateKey, Signature},
-        PrivateKeyExt, Signer,
+        Signer,
     };
-    use commonware_math::algebra::CryptoGroup;
+    use commonware_math::algebra::{CryptoGroup, Random};
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -321,7 +321,7 @@ mod tests {
     fn test_dkg_ack_codec() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xdead);
         let poly = new_poly();
-        let signer = PrivateKey::from_rng(&mut rng);
+        let signer = PrivateKey::random(&mut rng);
 
         let original: Dkg<Signature> = Dkg {
             round: 1,

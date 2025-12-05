@@ -320,7 +320,7 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
 
     const NAMESPACE: &[u8] = b"fuzz_transport";

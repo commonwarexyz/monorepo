@@ -2,7 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::{dkg::ops, primitives::variant::MinSig},
-    ed25519, PrivateKeyExt as _, Signer as _,
+    ed25519, Signer as _,
 };
 use commonware_utils::{hex, quorum};
 use rand::{rngs::StdRng, SeedableRng};

@@ -272,7 +272,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
+    use commonware_cryptography::ed25519::PrivateKey;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
     use commonware_utils::NZU32;

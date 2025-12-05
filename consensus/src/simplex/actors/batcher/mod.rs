@@ -50,7 +50,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher as _, PrivateKeyExt, Sha256, Signer,
+        Hasher as _, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{

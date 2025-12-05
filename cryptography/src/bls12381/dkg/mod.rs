@@ -225,7 +225,7 @@ mod tests {
             variant::{MinPk, MinSig, Variant},
         },
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_math::algebra::Additive as _;
     use commonware_utils::{

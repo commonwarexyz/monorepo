@@ -7,8 +7,9 @@ use commonware_cryptography::{
         primitives::{group::Share, poly::Public, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt, Signer,
+    Signer,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{from_hex, hex, quorum, NZU32};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
@@ -154,7 +155,7 @@ fn generate_identities(
 
     // Generate p2p private keys
     let mut peer_signers = (0..num_peers)
-        .map(|_| PrivateKey::from_rng(&mut OsRng))
+        .map(|_| PrivateKey::random(&mut OsRng))
         .collect::<Vec<_>>();
     peer_signers.sort_by_key(|signer| signer.public_key());
 

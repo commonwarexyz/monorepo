@@ -163,7 +163,7 @@ mod test {
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt, Signer,
+        Signer,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};

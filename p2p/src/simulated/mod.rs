@@ -60,7 +60,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
-//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
+//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use std::time::Duration;
 //!
@@ -186,7 +186,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};

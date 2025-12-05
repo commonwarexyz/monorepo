@@ -62,6 +62,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::{Digest, Sha256},
     };
+    use commonware_math::algebra::Random;
     use rand::SeedableRng;
 
     /// Helper functions for TipManager tests.
@@ -69,7 +70,7 @@ mod tests {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
-        use commonware_cryptography::{Hasher as _, PrivateKeyExt as _, Signer as _};
+        use commonware_cryptography::{Hasher as _, Signer as _};
 
         /// Creates a dummy link for testing.
         pub fn create_dummy_node<V: Variant>(
@@ -91,7 +92,7 @@ mod tests {
         /// Generates a deterministic public key for testing using the provided seed.
         pub fn deterministic_public_key(seed: u64) -> PublicKey {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            PrivateKey::from_rng(&mut rng).public_key()
+            PrivateKey::random(&mut rng).public_key()
         }
 
         /// Inserts a tip into the given TipManager and returns the inserted node.
