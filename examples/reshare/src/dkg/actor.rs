@@ -229,16 +229,13 @@ where
         // Any given peer set includes:
         // - Dealers and players for the active epoch
         // - Players for the next epoch
-        let peers = dealers
-            .clone()
-            .into_iter()
-            .chain(players.clone())
-            .chain(Self::choose_from_all(
+        let peers = Set::from_iter_dedup(dealers.clone().into_iter().chain(players.clone()).chain(
+            Self::choose_from_all(
                 &all_participants,
                 self.num_participants_per_epoch,
                 current_epoch.next(),
-            ))
-            .collect();
+            ),
+        ));
         self.manager.update(current_epoch.get(), peers).await;
 
         // Initialize the DKG manager for the first round.
@@ -427,16 +424,17 @@ where
                         // Any given peer set includes:
                         // - Dealers and players for the active epoch
                         // - Players for the next epoch
-                        let next_peers = next_dealers
-                            .clone()
-                            .into_iter()
-                            .chain(next_players.clone())
-                            .chain(Self::choose_from_all(
-                                &all_participants,
-                                self.num_participants_per_epoch,
-                                next_epoch.next(),
-                            ))
-                            .collect();
+                        let next_peers = Set::from_iter_dedup(
+                            next_dealers
+                                .clone()
+                                .into_iter()
+                                .chain(next_players.clone())
+                                .chain(Self::choose_from_all(
+                                    &all_participants,
+                                    self.num_participants_per_epoch,
+                                    next_epoch.next(),
+                                )),
+                        );
                         self.manager.update(next_epoch.get(), next_peers).await;
 
                         // Inform the orchestrator of the epoch transition
@@ -573,11 +571,12 @@ where
         active_participants: &[C::PublicKey],
         inactive_participants: &[C::PublicKey],
     ) -> Set<C::PublicKey> {
-        active_participants
-            .iter()
-            .chain(inactive_participants.iter())
-            .cloned()
-            .collect::<Set<_>>()
+        Set::from_iter_dedup(
+            active_participants
+                .iter()
+                .chain(inactive_participants.iter())
+                .cloned(),
+        )
     }
 }
 
