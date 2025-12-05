@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{CleanAny, DirtyAny},
-        build_snapshot_from_log,
+        build_snapshot_from_log, delete_known_loc,
         operation::{Committable, KeyData, Keyed, Ordered},
         store::{Batchable, LogStore},
         update_known_loc, Error, FloorHelper,
@@ -20,6 +20,11 @@ use crate::{
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::try_join_all;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 use tracing::debug;
 
 pub mod fixed;
@@ -30,7 +35,7 @@ type Value<T> = <T as Keyed>::Value;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for a location and its associated key data.
-type LocatedKey<K, V> = (Location, KeyData<K, V>);
+type LocatedKey<K, V> = Option<(Location, KeyData<K, V>)>;
 
 /// A trait implemented by the ordered Any db operation type.
 pub trait Operation: Committable + Keyed + Ordered {
@@ -154,9 +159,8 @@ impl<
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
-        #[allow(clippy::type_complexity)]
-        let mut last_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
+        let mut last_key: LocatedKey<Key<C::Item>, Value<C::Item>> = None;
         for &loc in iter {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
@@ -203,7 +207,7 @@ impl<
         &self,
         iter: impl Iterator<Item = &Location>,
         key: &Key<C::Item>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
@@ -220,7 +224,7 @@ impl<
     pub async fn get_span(
         &self,
         key: &Key<C::Item>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -355,8 +359,7 @@ impl<
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
-        #[allow(clippy::type_complexity)]
-        let mut best_prev_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
+        let mut best_prev_key: LocatedKey<Key<C::Item>, Value<C::Item>> = None;
         {
             // If the translated key is not in the snapshot, insert the new location and return the
             // previous key info.
@@ -1062,6 +1065,44 @@ impl<
     }
 }
 
+/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
+/// first key if `key` is the last key.
+///
+/// # Panics
+///
+/// Panics if `possible_next` is empty.
+fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
+    let next = possible_next
+        .range((Bound::Excluded(key), Bound::Unbounded))
+        .next();
+    if let Some(next) = next {
+        return next.clone();
+    }
+    possible_next
+        .first()
+        .expect("possible_next should not be empty")
+        .clone()
+}
+
+/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
+/// to the last key if `key` is the first key.
+///
+/// # Panics
+///
+/// Panics if `possible_previous` is empty.
+fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) -> (&'a K, &'a V) {
+    let prev = possible_previous
+        .range((Bound::Unbounded, Bound::Excluded(key)))
+        .next_back();
+    if let Some(prev) = prev {
+        return prev;
+    }
+    possible_previous
+        .iter()
+        .next_back()
+        .expect("possible_previous should not be empty")
+}
+
 impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
 where
     E: Storage + Clock + Metrics,
@@ -1069,6 +1110,186 @@ where
     I: Index<Value = Location>,
     H: Hasher,
 {
+    async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
+    ) -> Result<(), Error> {
+        // Collect all the possible matching `locations` for any referenced key, while retaining
+        // each item in the batch in a `mutations` map.
+        let mut mutations = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            mutations.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // A set of possible "next_key" values for any keys whose next_key value will need to be
+        // updated.
+        let mut possible_next = BTreeSet::new();
+        // A set of possible previous keys to any new or deleted keys.
+        let mut possible_previous = BTreeMap::new();
+
+        // We divide keys in the batch into three disjoint sets:
+        // - `deleted`
+        // - `created`
+        // - `updated`
+        // For deleted keys only, we immediately update the log and snapshot during this process.
+        let mut deleted = Vec::new();
+        let mut updated = BTreeMap::new();
+        let mut created = BTreeMap::new();
+
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key").clone();
+            let key_data = op.into_key_data().expect("updates should have key data");
+
+            let Some(update) = mutations.remove(&key) else {
+                // Due to translated key collisions, we may look up keys that aren't in the
+                // mutations set. Any colliding key could potentially be a previous key of some new
+                // or deleted key.
+                possible_previous.insert(key, (key_data.value, old_loc));
+                continue;
+            };
+
+            if let Some(value) = update {
+                // This is an update of an existing key.
+                updated.insert(key.clone(), (value, old_loc));
+                possible_next.insert(key_data.next_key.clone());
+            } else {
+                // This is a delete of an existing key.
+                deleted.push(key.clone());
+
+                // The next_key of a deleted key will need to be the next_key of some other remaining key, unless it too
+                // ends up deleted.
+                possible_next.insert(key_data.next_key.clone());
+
+                // Update the log and snapshot.
+                delete_known_loc(&mut self.snapshot, &key, old_loc);
+                self.log.append(C::Item::new_delete(key.clone())).await?;
+
+                // Each delete reduces the active key count by one and inactivates that key.
+                self.active_keys -= 1;
+                self.steps += 1;
+            }
+
+            // Any key could collide with some other key, so we must record each as a "possible previous".
+            possible_previous.insert(key, (key_data.value, old_loc));
+        }
+
+        // Any key remaining in `mutations` must be a new key so move it to the created map.
+        for (key, value) in mutations {
+            let Some(value) = value else {
+                continue; // can happen from attempt to delete a non-existent key
+            };
+
+            created.insert(key.clone(), value);
+
+            // Any newly created key must be a next_key for some remaining key.
+            possible_next.insert(key);
+        }
+
+        // Complete the `possible_previous` and `possible_next` sets by including entries from the
+        // previous _translated_ key for any created or deleted key.
+        let mut locations = Vec::new();
+        for key in deleted.iter().chain(created.keys()) {
+            let iter = self.snapshot.prev_translated_key(key);
+            locations.extend(iter.copied());
+        }
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key").clone();
+            let key_data = op.into_key_data().expect("updates should have key data");
+            possible_next.insert(key_data.next_key);
+            possible_previous.insert(key, (key_data.value, old_loc));
+        }
+
+        // Remove deleted keys from the possible_* sets.
+        for key in deleted.iter() {
+            possible_previous.remove(key);
+            possible_next.remove(key);
+        }
+
+        // Apply the updates of existing keys.
+        let mut already_updated = BTreeSet::new();
+        for (key, (value, loc)) in updated {
+            let new_loc = self.op_count();
+            let next_key = find_next_key(&key, &possible_next);
+            update_known_loc(&mut self.snapshot, &key, loc, new_loc);
+
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key.clone());
+            self.log.append(op).await?;
+
+            // Each update of an existing key inactivates its previous location.
+            self.steps += 1;
+            already_updated.insert(key);
+        }
+
+        // Create each new key, and update its previous key if it hasn't already been updated.
+        for (key, value) in created {
+            let new_loc = self.op_count();
+            let next_key = find_next_key(&key, &possible_next);
+            self.snapshot.insert(&key, new_loc);
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key.clone());
+
+            // Each newly created key increases the active key count.
+            self.log.append(op).await?;
+            self.active_keys += 1;
+
+            // Update the next_key value of its previous key (unless there are no existing keys).
+            if possible_previous.is_empty() {
+                continue;
+            }
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(&key, &possible_previous);
+            let next_key = find_next_key(prev_key, &possible_next);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
+
+            self.log.append(op).await?;
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        if possible_next.is_empty() || possible_previous.is_empty() {
+            return Ok(());
+        }
+
+        // Update the previous key of each deleted key if it hasn't already been updated.
+        for key in deleted.iter() {
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &possible_previous);
+            let next_key = find_next_key(prev_key, &possible_next);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
+            self.log.append(op).await?;
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
