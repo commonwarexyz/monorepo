@@ -40,7 +40,7 @@ pub enum Error {
 pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
@@ -57,7 +57,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -73,6 +73,24 @@ where
             .map(Location::new_unchecked)
     }
 
+    /// Returns the pruning boundary for the journal.
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary().into()
+    }
+
+    /// Read an operation from the journal at the given location.
+    pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
+        self.journal.read(*loc).await.map_err(Error::Journal)
+    }
+}
+
+impl<E, C, H, S> Journal<E, C, H, S>
+where
+    E: Storage + Clock + Metrics,
+    C: MutableContiguous<Item: Encode>,
+    H: Hasher,
+    S: State<DigestOf<H>>,
+{
     pub async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
@@ -85,16 +103,6 @@ where
         )?;
 
         Ok(Location::new_unchecked(loc))
-    }
-
-    /// Returns the pruning boundary for the journal.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary().into()
-    }
-
-    /// Read an operation from the journal at the given location.
-    pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
-        self.journal.read(*loc).await.map_err(Error::Journal)
     }
 }
 
@@ -218,7 +226,14 @@ where
 
         Ok(pruning_boundary)
     }
+}
 
+impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item: Encode>,
+    H: Hasher,
+{
     /// Generate a proof of inclusion for operations starting at `start_loc`.
     ///
     /// Returns a proof and the operations corresponding to the leaves in the range
@@ -342,6 +357,27 @@ where
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
+    C: Contiguous<Item: Encode>,
+    H: Hasher,
+{
+    /// Merkleize the journal and compute the root digest.
+    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
+        let Self {
+            mmr,
+            journal,
+            mut hasher,
+        } = self;
+        Journal {
+            mmr: mmr.merkleize(&mut hasher),
+            journal,
+            hasher,
+        }
+    }
+}
+
+impl<E, C, H> Journal<E, C, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
@@ -360,20 +396,6 @@ where
         )
         .await?;
         Ok(clean.into_dirty())
-    }
-
-    /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
-        let Self {
-            mmr,
-            journal,
-            mut hasher,
-        } = self;
-        Journal {
-            mmr: mmr.merkleize(&mut hasher),
-            journal,
-            hasher,
-        }
     }
 }
 
