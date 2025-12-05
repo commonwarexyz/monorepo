@@ -155,9 +155,9 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
                     "Invariant violation: finalized view {v} with {:?} but notarized {:?}",
                     fin.payload, notar.payload
                 ),
-                None => panic!(
-                    "Invariant violation: finalized view {v} without local notarization"
-                ),
+                None => {
+                    panic!("Invariant violation: finalized view {v} without local notarization")
+                }
             }
         }
 
