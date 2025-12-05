@@ -18,6 +18,10 @@ type VecIntoIter<T> = std::vec::IntoIter<T>;
 /// Errors that can occur when interacting with sets.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// A key was duplicated.
+    #[error("duplicate key")]
+    DuplicateKey,
+
     /// A value was duplicated across different keys.
     #[error("duplicate value")]
     DuplicateValue,
@@ -33,6 +37,18 @@ pub struct Ordered<T>(Vec<T>);
 impl<T: fmt::Debug> fmt::Debug for Ordered<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Ordered").field(&self.0).finish()
+    }
+}
+
+impl<T: Ord> Ordered<T> {
+    /// Creates a new [`Ordered`] from an iterator, ignoring duplicates.
+    ///
+    /// Items are sorted and deduplicated, keeping the first occurrence of each item.
+    pub fn new_lossy<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut items: Vec<T> = iter.into_iter().collect();
+        items.sort();
+        items.dedup();
+        Self(items)
     }
 }
 
@@ -78,44 +94,34 @@ impl<T: EncodeSize> EncodeSize for Ordered<T> {
     }
 }
 
-impl<T: Read> Read for Ordered<T> {
+impl<T: Read + Ord> Read for Ordered<T> {
     type Cfg = (RangeCfg<usize>, T::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self(Vec::<T>::read_cfg(buf, cfg)?))
+        let items = Vec::<T>::read_cfg(buf, cfg)?;
+        for i in 1..items.len() {
+            if items[i - 1] >= items[i] {
+                return Err(commonware_codec::Error::Invalid(
+                    "Ordered",
+                    "items must be sorted and unique",
+                ));
+            }
+        }
+        Ok(Self(items))
     }
 }
 
-impl<T: Ord> FromIterator<T> for Ordered<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let items: Vec<_> = iter.into_iter().collect();
-        items.into()
-    }
-}
+impl<T: Ord> TryFrom<Vec<T>> for Ordered<T> {
+    type Error = Error;
 
-impl<T: Ord> From<Vec<T>> for Ordered<T> {
-    fn from(mut items: Vec<T>) -> Self {
+    fn try_from(mut items: Vec<T>) -> Result<Self, Self::Error> {
         items.sort();
+        let len = items.len();
         items.dedup();
-        Self(items)
-    }
-}
-
-impl<T: Ord + Clone> From<&[T]> for Ordered<T> {
-    fn from(items: &[T]) -> Self {
-        items.iter().cloned().collect()
-    }
-}
-
-impl<T: Ord, const N: usize> From<[T; N]> for Ordered<T> {
-    fn from(items: [T; N]) -> Self {
-        items.into_iter().collect()
-    }
-}
-
-impl<T: Ord + Clone, const N: usize> From<&[T; N]> for Ordered<T> {
-    fn from(items: &[T; N]) -> Self {
-        items.as_slice().into()
+        if items.len() != len {
+            return Err(Error::DuplicateKey);
+        }
+        Ok(Self(items))
     }
 }
 
@@ -242,6 +248,29 @@ pub struct OrderedAssociated<K, V> {
     values: Vec<V>,
 }
 
+impl<K: Ord, V> OrderedAssociated<K, V> {
+    /// Creates a new [`OrderedAssociated`] from an iterator, ignoring duplicates.
+    ///
+    /// Items are sorted by key and deduplicated, keeping the first occurrence of each key.
+    pub fn new_lossy<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut items: Vec<(K, V)> = iter.into_iter().collect();
+        items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        items.dedup_by(|l, r| l.0 == r.0);
+
+        let mut keys = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            keys.push(key);
+            values.push(value);
+        }
+
+        Self {
+            keys: Ordered(keys),
+            values,
+        }
+    }
+}
+
 impl<K, V> OrderedAssociated<K, V> {
     /// Returns the number of entries in the map.
     pub const fn len(&self) -> usize {
@@ -360,11 +389,16 @@ impl<K, V> Deref for OrderedAssociated<K, V> {
     }
 }
 
-impl<K: Ord, V> FromIterator<(K, V)> for OrderedAssociated<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut items: Vec<(K, V)> = iter.into_iter().collect();
+impl<K: Ord, V> TryFrom<Vec<(K, V)>> for OrderedAssociated<K, V> {
+    type Error = Error;
+
+    fn try_from(mut items: Vec<(K, V)>) -> Result<Self, Self::Error> {
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        let len = items.len();
         items.dedup_by(|l, r| l.0 == r.0);
+        if items.len() != len {
+            return Err(Error::DuplicateKey);
+        }
 
         let mut keys = Vec::with_capacity(items.len());
         let mut values = Vec::with_capacity(items.len());
@@ -373,34 +407,10 @@ impl<K: Ord, V> FromIterator<(K, V)> for OrderedAssociated<K, V> {
             values.push(value);
         }
 
-        Self {
+        Ok(Self {
             keys: Ordered(keys),
             values,
-        }
-    }
-}
-
-impl<K: Ord + Clone, V: Clone> From<&[(K, V)]> for OrderedAssociated<K, V> {
-    fn from(items: &[(K, V)]) -> Self {
-        items.iter().cloned().collect()
-    }
-}
-
-impl<K: Ord, V> From<Vec<(K, V)>> for OrderedAssociated<K, V> {
-    fn from(items: Vec<(K, V)>) -> Self {
-        items.into_iter().collect()
-    }
-}
-
-impl<K: Ord, V, const N: usize> From<[(K, V); N]> for OrderedAssociated<K, V> {
-    fn from(items: [(K, V); N]) -> Self {
-        items.into_iter().collect()
-    }
-}
-
-impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for OrderedAssociated<K, V> {
-    fn from(items: &[(K, V); N]) -> Self {
-        items.as_slice().into()
+        })
     }
 }
 
@@ -423,7 +433,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedAssociated<K, V> {
     }
 }
 
-impl<K: Read, V: Read> Read for OrderedAssociated<K, V> {
+impl<K: Read + Ord, V: Read> Read for OrderedAssociated<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -562,13 +572,13 @@ impl<K, V> OrderedInjection<K, V> {
 
     /// Attempts to create an [`OrderedInjection`] from an iterator of key-value pairs.
     ///
-    /// Returns an error if any value is duplicated across different keys.
+    /// Returns an error if any key or value is duplicated.
     pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
     where
         K: Ord,
         V: Eq,
     {
-        let map: OrderedAssociated<K, V> = iter.into_iter().collect();
+        let map = OrderedAssociated::try_from(iter.into_iter().collect::<Vec<_>>())?;
         Self::try_from(map)
     }
 }
@@ -676,7 +686,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedInjection<K, V> {
     }
 }
 
-impl<K: Read, V: Eq + Read> Read for OrderedInjection<K, V> {
+impl<K: Read + Ord, V: Eq + Read> Read for OrderedInjection<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -717,7 +727,7 @@ mod test {
         const CASE: [u8; 12] = [1, 3, 2, 5, 4, 3, 1, 7, 9, 6, 8, 4];
         const EXPECTED: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-        let sorted: Ordered<_> = CASE.into_iter().collect();
+        let sorted = Ordered::new_lossy(CASE);
         assert_eq!(sorted.iter().copied().collect::<Vec<_>>(), EXPECTED);
 
         let unsealed: Vec<_> = sorted.into();
@@ -727,7 +737,7 @@ mod test {
     #[test]
     fn test_sorted_unique_codec_roundtrip() {
         const CASE: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let sorted: Ordered<_> = CASE.into_iter().collect();
+        let sorted = Ordered::try_from(CASE.to_vec()).unwrap();
 
         let mut buf = Vec::with_capacity(sorted.encode_size());
         sorted.write(&mut buf);
@@ -748,9 +758,9 @@ mod test {
                 write!(f, "ex({})", self.0)
             }
         }
-        let examples = CASE.into_iter().map(Example).collect::<Vec<_>>();
+        let examples: Vec<_> = CASE.into_iter().map(Example).collect();
 
-        let sorted: Ordered<_> = examples.into_iter().collect();
+        let sorted = Ordered::try_from(examples).unwrap();
         assert_eq!(
             sorted.to_string(),
             "[ex(1), ex(2), ex(3), ex(4), ex(5), ex(6), ex(7), ex(8), ex(9)]"
@@ -758,24 +768,30 @@ mod test {
     }
 
     #[test]
-    fn test_ordered_from_slice() {
+    fn test_ordered_new_lossy() {
         let items = [3u8, 1u8, 2u8, 2u8];
-        let ordered = Ordered::from(&items[..]);
+        let ordered = Ordered::new_lossy(items);
         assert_eq!(ordered.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]
-    fn test_ordered_from_iterator() {
-        let items = [3u8, 1u8, 2u8, 2u8];
-        let ordered = items.iter().copied().collect::<Ordered<_>>();
+    fn test_ordered_try_from_success() {
+        let items = vec![3u8, 1u8, 2u8];
+        let ordered = Ordered::try_from(items).unwrap();
         assert_eq!(ordered.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]
-    fn test_ordered_map_dedup_and_access() {
+    fn test_ordered_try_from_vec_duplicate() {
+        let items = vec![3u8, 1u8, 2u8, 2u8];
+        let result = Ordered::try_from(items);
+        assert_eq!(result, Err(Error::DuplicateKey));
+    }
+
+    #[test]
+    fn test_ordered_associated_new_lossy() {
         let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
-
-        let map: OrderedAssociated<_, _> = items.into_iter().collect();
+        let map = OrderedAssociated::new_lossy(items);
 
         assert_eq!(map.len(), 3);
         assert_eq!(map.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
@@ -785,24 +801,19 @@ mod test {
     }
 
     #[test]
-    fn test_ordered_wrapped_from_slice() {
-        let pairs = [(3u8, "c"), (1u8, "a"), (2u8, "b")];
-        let wrapped = OrderedAssociated::from(&pairs[..]);
+    fn test_ordered_associated_try_from_success() {
+        let pairs = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")];
+        let wrapped = OrderedAssociated::try_from(pairs).unwrap();
 
         assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(wrapped.get_value(&2), Some(&"b"));
     }
 
     #[test]
-    fn test_ordered_wrapped_from_iterator() {
-        let pairs = [(3u8, "c"), (1u8, "a"), (2u8, "b")];
-        let wrapped = pairs
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect::<OrderedAssociated<_, _>>();
-
-        assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
-        assert_eq!(wrapped.get_value(&1), Some(&"a"));
+    fn test_ordered_associated_try_from_vec_duplicate() {
+        let pairs = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
+        let result = OrderedAssociated::try_from(pairs);
+        assert_eq!(result, Err(Error::DuplicateKey));
     }
 
     #[test]
@@ -811,16 +822,15 @@ mod test {
             set.iter().map(|v| *v as u32).sum()
         }
 
-        let map: OrderedAssociated<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
+        let map = OrderedAssociated::try_from(vec![(2u8, "b"), (1u8, "a")]).unwrap();
         assert_eq!(sum(&map), 3);
     }
 
     #[test]
     fn test_ordered_map_from_ordered() {
-        let ordered: Ordered<_> = vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')]
-            .into_iter()
-            .collect();
-        let wrapped: OrderedAssociated<_, _> = ordered.clone().into_iter().collect();
+        let ordered = Ordered::try_from(vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')]).unwrap();
+        let wrapped = OrderedAssociated::try_from(ordered.clone().into_iter().collect::<Vec<_>>())
+            .unwrap();
 
         assert_eq!(
             ordered.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
@@ -830,16 +840,14 @@ mod test {
 
     #[test]
     fn test_ordered_map_into_keys() {
-        let map: OrderedAssociated<_, _> = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")]
-            .into_iter()
-            .collect();
+        let map = OrderedAssociated::try_from(vec![(3u8, "c"), (1u8, "a"), (2u8, "b")]).unwrap();
         let keys = map.into_keys();
         assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]
     fn test_values_mut() {
-        let mut map: OrderedAssociated<u8, u8> = [(1, 10), (2, 20)].into_iter().collect();
+        let mut map = OrderedAssociated::try_from(vec![(1u8, 10u8), (2, 20)]).unwrap();
         for value in map.values_mut() {
             *value += 1;
         }
@@ -849,7 +857,7 @@ mod test {
     #[test]
     fn test_ordered_map_allows_duplicate_values() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let map: OrderedAssociated<_, _> = items.into_iter().collect();
+        let map = OrderedAssociated::try_from(items).unwrap();
         assert_eq!(map.len(), 3);
         assert_eq!(map.get_value(&1), Some(&"a"));
         assert_eq!(map.get_value(&3), Some(&"a"));
@@ -884,7 +892,7 @@ mod test {
     #[test]
     fn test_ordered_injection_try_from_associated() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
-        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+        let associated = OrderedAssociated::try_from(items).unwrap();
         let injection = OrderedInjection::try_from(associated).unwrap();
         assert_eq!(injection.len(), 3);
         assert_eq!(injection.get_value(&1), Some(&"a"));
@@ -893,15 +901,15 @@ mod test {
     #[test]
     fn test_ordered_injection_try_from_associated_duplicate() {
         let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
-        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+        let associated = OrderedAssociated::try_from(items).unwrap();
         let result = OrderedInjection::try_from(associated);
         assert_eq!(result, Err(Error::DuplicateValue));
     }
 
     #[test]
     fn test_ordered_injection_decode_rejects_duplicate_values() {
-        let items: [(u8, u8); 3] = [(1, 10), (2, 20), (3, 10)];
-        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+        let items = vec![(1u8, 10u8), (2, 20), (3, 10)];
+        let associated = OrderedAssociated::try_from(items).unwrap();
 
         let mut buf = Vec::with_capacity(associated.encode_size());
         associated.write(&mut buf);
@@ -909,5 +917,81 @@ mod test {
         let cfg = (RangeCfg::from(0..=10), (), ());
         let result = OrderedInjection::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ordered_decode_rejects_duplicates() {
+        let items: Vec<u8> = vec![1, 2, 2, 3];
+        let mut buf = Vec::new();
+        items.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), ());
+        let result = Ordered::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ordered_decode_rejects_unsorted() {
+        let items: Vec<u8> = vec![1, 3, 2, 4];
+        let mut buf = Vec::new();
+        items.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), ());
+        let result = Ordered::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ordered_decode_accepts_valid() {
+        let items: Vec<u8> = vec![1, 2, 3, 4];
+        let mut buf = Vec::new();
+        items.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), ());
+        let result = Ordered::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().iter().copied().collect::<Vec<_>>(), items);
+    }
+
+    #[test]
+    fn test_ordered_associated_decode_rejects_duplicate_keys() {
+        let keys: Vec<u8> = vec![1, 2, 2, 3];
+        let values: Vec<u8> = vec![10, 20, 30, 40];
+        let mut buf = Vec::new();
+        keys.write(&mut buf);
+        values.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), (), ());
+        let result = OrderedAssociated::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ordered_associated_decode_rejects_unsorted_keys() {
+        let keys: Vec<u8> = vec![1, 3, 2, 4];
+        let values: Vec<u8> = vec![10, 20, 30, 40];
+        let mut buf = Vec::new();
+        keys.write(&mut buf);
+        values.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), (), ());
+        let result = OrderedAssociated::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ordered_associated_decode_accepts_valid() {
+        let keys: Vec<u8> = vec![1, 2, 3, 4];
+        let values: Vec<u8> = vec![10, 20, 30, 40];
+        let mut buf = Vec::new();
+        keys.write(&mut buf);
+        values.write(&mut buf);
+
+        let cfg = (RangeCfg::from(0..=10), (), ());
+        let result = OrderedAssociated::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        assert!(result.is_ok());
+        let map = result.unwrap();
+        assert_eq!(map.keys().iter().copied().collect::<Vec<_>>(), keys);
+        assert_eq!(map.values(), values.as_slice());
     }
 }
