@@ -1371,54 +1371,6 @@ mod tests {
     }
 
     #[test]
-    fn test_head_of_line_blocking_avoidance() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            // Create fetcher with rate limit of 1 per second
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let requester_config = RequesterConfig {
-                me: Some(public_key.clone()),
-                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
-                initial: Duration::from_millis(100),
-                timeout: Duration::from_secs(5),
-            };
-            let retry_timeout = Duration::from_millis(100);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let mut sender = WrappedSender::new(SuccessMockSender {});
-
-            // Add three keys:
-            // - MockKey(1) targeted to peer1
-            // - MockKey(2) targeted to peer1
-            // - MockKey(3) untargeted
-            fetcher.add_targets(MockKey(1), [peer1.clone()]);
-            fetcher.add_targets(MockKey(2), [peer1.clone()]);
-            fetcher.add_ready(MockKey(1));
-            fetcher.add_ready(MockKey(2));
-            fetcher.add_ready(MockKey(3));
-            assert_eq!(fetcher.len_pending(), 3);
-
-            // First fetch picks MockKey(1), rate-limiting peer1
-            fetcher.fetch(&mut sender).await;
-            assert_eq!(fetcher.len_active(), 1);
-            assert_eq!(fetcher.len_pending(), 2);
-            assert!(!fetcher.pending.contains(&MockKey(1)));
-            assert!(fetcher.pending.contains(&MockKey(2)));
-            assert!(fetcher.pending.contains(&MockKey(3)));
-
-            // Second fetch should skip MockKey(2) (peer1 rate-limited) and pick MockKey(3)
-            fetcher.fetch(&mut sender).await;
-            assert_eq!(fetcher.len_active(), 2);
-            assert_eq!(fetcher.len_pending(), 1);
-            assert!(fetcher.pending.contains(&MockKey(2))); // Skipped (peer1 rate-limited)
-            assert!(!fetcher.pending.contains(&MockKey(3))); // Fetched via peer2
-        });
-    }
-
-    #[test]
     fn test_skips_keys_with_rate_limited_targets() {
         let runner = Runner::default();
         runner.start(|context| async move {
@@ -1446,7 +1398,9 @@ mod tests {
             fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_targets(MockKey(3), [peer2.clone()]);
             fetcher.add_ready(MockKey(1));
+            context.sleep(Duration::from_millis(1)).await;
             fetcher.add_ready(MockKey(2));
+            context.sleep(Duration::from_millis(1)).await;
             fetcher.add_ready(MockKey(3));
 
             // First fetch: should pick MockKey(1) targeting peer1
