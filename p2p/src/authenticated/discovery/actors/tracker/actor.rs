@@ -71,7 +71,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::Info::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = types::Info::sign(&cfg.crypto, &ip_namespace, socket.into(), timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -285,6 +285,7 @@ mod tests {
             },
             Mailbox,
         },
+        Address,
         Blocker,
         Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
@@ -342,7 +343,8 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let mut signature = signer.sign(ip_namespace, &(socket, timestamp).encode());
+        let address: Address = socket.into();
+        let mut signature = signer.sign(ip_namespace, &(address.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
             let mut sig_bytes = signature.encode();
@@ -351,7 +353,7 @@ mod tests {
         }
 
         Info {
-            socket,
+            address,
             timestamp,
             public_key: peer_info_pk,
             signature,
@@ -495,7 +497,7 @@ mod tests {
                     assert_eq!(infos.len(), 1);
                     let tracker_info = &infos[0];
                     assert_eq!(tracker_info.public_key, tracker_pk);
-                    assert_eq!(tracker_info.socket, cfg.address);
+                    assert_eq!(tracker_info.egress(), cfg.address);
                     assert!(tracker_info.verify(&ip_namespace));
                 }
                 _ => panic!("Expected Peers message with tracker info"),
@@ -509,8 +511,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9999);
-            let cfg_with_boot =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_with_boot = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
@@ -715,7 +719,7 @@ mod tests {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
                     assert_eq!(received_pk2_info.public_key, pk2);
-                    assert_eq!(received_pk2_info.socket, pk2_addr);
+                    assert_eq!(received_pk2_info.egress(), pk2_addr);
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
                 _ => panic!("pk1 did not receive expected Info for pk2",),
@@ -879,8 +883,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
@@ -895,8 +901,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
@@ -1042,7 +1050,7 @@ mod tests {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
-                    assert_eq!(infos[0].socket, peer1_addr);
+                    assert_eq!(infos[0].egress(), peer1_addr);
                 }
                 _ => panic!("Expected Peers message from tracker"),
             }

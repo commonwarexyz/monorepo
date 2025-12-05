@@ -1,10 +1,15 @@
+use crate::Address;
 use commonware_cryptography::Signer;
 use commonware_utils::NZU32;
 use governor::Quota;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper<P> = (P, SocketAddr);
+///
+/// The address can be either a single socket address (same for ingress/egress)
+/// or separate addresses for each direction. When using separate addresses,
+/// the ingress address can be a DNS entry that will be resolved at connection time.
+pub type Bootstrapper<P> = (P, Address);
 
 /// Configuration for the peer-to-peer instance.
 ///

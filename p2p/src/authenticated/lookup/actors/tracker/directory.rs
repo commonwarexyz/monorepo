@@ -1,5 +1,5 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
+use crate::{authenticated::lookup::{actors::tracker::ingress::Releaser, metrics}, Address};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
@@ -12,7 +12,7 @@ use governor::{
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
 };
 use tracing::{debug, warn};
 
@@ -106,10 +106,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
+    ///
+    /// For each peer, the egress address is extracted from the [Address] and used
+    /// for dialing. The egress IP is also used for filtering incoming connections.
     pub fn add_set(
         &mut self,
         index: u64,
-        peers: OrderedAssociated<C, SocketAddr>,
+        peers: OrderedAssociated<C, Address>,
     ) -> Option<Vec<C>> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
@@ -126,16 +129,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Create and store new peer set
+        // Extract egress address from Address for dialing
         for (peer, addr) in &peers {
+            let egress = addr.egress();
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(*addr);
+                    entry.update(egress);
                     entry
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    entry.insert(Record::known(*addr))
+                    entry.insert(Record::known(egress))
                 }
             };
             record.increment();
@@ -296,8 +301,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::{
-        lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
+    use crate::{
+        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
+        Address,
     };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
@@ -317,11 +323,11 @@ mod tests {
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let addr_1: Address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235).into();
         let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
-        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+        let addr_2: Address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236).into();
         let pk_3 = ed25519::PrivateKey::from_seed(3).public_key();
-        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
+        let addr_3: Address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237).into();
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
@@ -329,7 +335,10 @@ mod tests {
             let deleted = directory
                 .add_set(
                     0,
-                    OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                    OrderedAssociated::from([
+                        (pk_1.clone(), addr_1.clone()),
+                        (pk_2.clone(), addr_2.clone()),
+                    ]),
                 )
                 .unwrap();
             assert!(
@@ -340,14 +349,17 @@ mod tests {
             let deleted = directory
                 .add_set(
                     1,
-                    OrderedAssociated::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
+                    OrderedAssociated::from([
+                        (pk_2.clone(), addr_2.clone()),
+                        (pk_3.clone(), addr_3.clone()),
+                    ]),
                 )
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
             let deleted = directory
-                .add_set(2, vec![(pk_3.clone(), addr_3)].into())
+                .add_set(2, vec![(pk_3.clone(), addr_3.clone())].into())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
@@ -385,7 +397,10 @@ mod tests {
 
             directory.add_set(
                 0,
-                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                OrderedAssociated::from([
+                    (pk_1.clone(), addr_1.into()),
+                    (pk_2.clone(), addr_2.into()),
+                ]),
             );
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
@@ -393,14 +408,14 @@ mod tests {
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Update address
-            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4)]));
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4.into())]));
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ignore update to me
-            directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
+            directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3.into())]));
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
@@ -408,14 +423,14 @@ mod tests {
 
             // Ensure tracking works for static peers
             let deleted = directory
-                .add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr)]))
+                .add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr.into())]))
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
             // Ensure tracking works for dynamic peers
             let deleted = directory
-                .add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3)]))
+                .add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3.into())]))
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
@@ -423,7 +438,10 @@ mod tests {
             // Attempt to add an old peer set
             let deleted = directory.add_set(
                 0,
-                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                OrderedAssociated::from([
+                    (pk_1.clone(), addr_1.into()),
+                    (pk_2.clone(), addr_2.into()),
+                ]),
             );
             assert!(deleted.is_none());
         });
@@ -448,7 +466,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1.into())]));
             directory.block(&pk_1);
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
@@ -461,7 +479,7 @@ mod tests {
                 "Blocked peer should not have a socket"
             );
 
-            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2.into())]));
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
                 record.blocked(),

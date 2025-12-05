@@ -1,13 +1,15 @@
 use super::Reservation;
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::Metadata},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+use crate::{
+    authenticated::{
+        lookup::actors::{peer, tracker::Metadata},
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    },
+    Address,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::{Ordered, OrderedAssociated};
 use futures::channel::{mpsc, oneshot};
-use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -16,7 +18,7 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register {
         index: u64,
-        peers: OrderedAssociated<C, SocketAddr>,
+        peers: OrderedAssociated<C, Address>,
     },
 
     // ---------- Used by peer set provider ----------
@@ -182,7 +184,7 @@ impl<C: PublicKey> Oracle<C> {
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
-    type Peers = OrderedAssociated<C, SocketAddr>;
+    type Peers = OrderedAssociated<C, Address>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -191,8 +193,9 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index`.
-    ///   Each element is a tuple containing the public key and the socket address of the peer.
-    ///   The peer must be dialable at and dial from the given socket address.
+    ///   Each element is a tuple containing the public key and the [Address] of the peer.
+    ///   For split addresses, the egress address is used for dialing and the ingress IP
+    ///   is used for filtering incoming connections.
     async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }

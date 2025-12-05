@@ -64,7 +64,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::lookup::{self, Network}, Manager, Sender, Recipients};
+//! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::{NZU32, set::OrderedAssociated};
@@ -119,7 +119,12 @@
 //!     // the composition of a validator set changes).
 //!     oracle.update(
 //!         0,
-//!         OrderedAssociated::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
+//!         OrderedAssociated::from([
+//!             (my_sk.public_key(), Address::from(my_addr)),
+//!             (peer1, Address::from(peer1_addr)),
+//!             (peer2, Address::from(peer2_addr)),
+//!             (peer3, Address::from(peer3_addr)),
+//!         ])
 //!     ).await;
 //!
 //!     // Register some channel
@@ -167,7 +172,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -232,7 +237,7 @@ mod tests {
         }
         let peers = peers_and_sks
             .iter()
-            .map(|(_, pub_key, addr)| (pub_key.clone(), *addr))
+            .map(|(_, pub_key, addr)| (pub_key.clone(), Address::from(*addr)))
             .collect::<Vec<_>>();
 
         // Create networks
@@ -499,10 +504,10 @@ mod tests {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((sk, pk, addr));
             }
-            let peers = peers_and_sks
+            let peers: Vec<_> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect::<Vec<_>>();
+                .map(|(_, pk, addr)| (pk.clone(), Address::from(*addr)))
+                .collect();
 
             // Create networks
             let mut waiters = Vec::new();
@@ -601,7 +606,7 @@ mod tests {
             }
             let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
 
             // Create network
@@ -654,7 +659,7 @@ mod tests {
             }
             let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
@@ -731,7 +736,7 @@ mod tests {
             let set10: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .take(2)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
             oracle.update(10, set10.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
@@ -743,7 +748,7 @@ mod tests {
             let set9: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .skip(2)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
             oracle.update(9, set9.clone()).await;
 
@@ -751,7 +756,7 @@ mod tests {
             let set11: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .skip(4)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
             oracle.update(11, set11.clone()).await;
             let (id, new, all) = subscription.next().await.unwrap();
@@ -783,7 +788,7 @@ mod tests {
             }
             let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect();
 
             // Create networks for all peers

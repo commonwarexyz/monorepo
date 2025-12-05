@@ -1,8 +1,11 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::discovery::{
-    actors::tracker::ingress::Releaser,
-    metrics,
-    types::{self, Info},
+use crate::{
+    authenticated::discovery::{
+        actors::tracker::ingress::Releaser,
+        metrics,
+        types::{self, Info},
+    },
+    Address,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -16,7 +19,6 @@ use governor::{
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
     ops::Deref,
 };
 use tracing::{debug, warn};
@@ -70,15 +72,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
-        bootstrappers: Vec<(C, SocketAddr)>,
+        bootstrappers: Vec<(C, Address)>,
         myself: Info<C>,
         cfg: Config,
         releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
+        // We use the egress address (the address we dial to connect to them).
         let mut peers = HashMap::new();
-        for (peer, socket) in bootstrappers {
-            peers.insert(peer, Record::bootstrapper(socket));
+        for (peer, address) in bootstrappers {
+            peers.insert(peer, Record::bootstrapper(address.egress()));
         }
 
         // Add myself to the list of peers.
