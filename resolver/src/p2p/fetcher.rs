@@ -136,15 +136,17 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             .map(|(key, (_, retry))| (key.clone(), *retry))
             .collect();
 
-        // Try each candidate until one succeeds
+        // Try each candidate until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
         for (key, retry) in candidates {
-            let result = match self.targets.get(&key) {
-                Some(targets) if targets.is_empty() => Err(Error::NoEligibleParticipants),
-                Some(targets) => self
-                    .requester
-                    .request_filtered(retry, |p| targets.contains(p)),
-                None => self.requester.request(retry),
+            let (result, is_targeted) = match self.targets.get(&key) {
+                Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
+                Some(targets) => (
+                    self.requester
+                        .request_filtered(retry, |p| targets.contains(p)),
+                    true,
+                ),
+                None => (self.requester.request(retry), false),
             };
 
             match result {
@@ -154,6 +156,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 }
                 Err(Error::RateLimited(wait)) => {
                     min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
+                    if !is_targeted {
+                        // Untargeted request rate-limited means all participants are busy
+                        break;
+                    }
+                    // Targeted request rate-limited - other keys may have different targets
                 }
                 Err(Error::NoEligibleParticipants) => {}
             }
