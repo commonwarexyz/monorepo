@@ -7,11 +7,12 @@
 //! are performed over the correct field and that all elements are valid.
 
 use super::variant::Variant;
-use crate::bls12381::primitives::group::{self, Element};
+use crate::bls12381::primitives::group;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 pub use commonware_math::poly::Poly;
-use core::hash::Hash;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -28,19 +29,19 @@ pub type PartialSignature<V> = Eval<<V as Variant>::Signature>;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Eval<C: Element> {
+pub struct Eval<C> {
     pub index: u32,
     pub value: C,
 }
 
-impl<C: Element> Write for Eval<C> {
+impl<C: Write> Write for Eval<C> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
-impl<C: Element> Read for Eval<C> {
+impl<C: Read<Cfg = ()>> Read for Eval<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -50,7 +51,7 @@ impl<C: Element> Read for Eval<C> {
     }
 }
 
-impl<C: Element> EncodeSize for Eval<C> {
+impl<C: FixedSize> EncodeSize for Eval<C> {
     fn encode_size(&self) -> usize {
         UInt(self.index).encode_size() + C::SIZE
     }

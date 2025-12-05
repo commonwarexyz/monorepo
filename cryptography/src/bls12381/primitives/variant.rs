@@ -2,20 +2,19 @@
 
 use super::{
     group::{
-        Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
-        GT,
+        Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
+        G2_PROOF_OF_POSSESSION, GT,
     },
     Error,
 };
-use crate::bls12381::primitives::group::{Element, Scalar};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{
     blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
     BLS12_381_NEG_G2,
 };
-use commonware_codec::FixedSize;
-use commonware_math::algebra::HashToGroup;
+use commonware_codec::{FixedSize, Read, Write};
+use commonware_math::algebra::{Additive, HashToGroup, Space};
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -25,10 +24,22 @@ use rand_core::CryptoRngCore;
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
-    type Public: Point + HashToGroup<Scalar = Scalar> + FixedSize + Debug + Hash + Copy;
+    type Public: HashToGroup<Scalar = Scalar>
+        + FixedSize
+        + Write
+        + Read<Cfg = ()>
+        + Debug
+        + Hash
+        + Copy;
 
     /// The signature type.
-    type Signature: Point + HashToGroup<Scalar = Scalar> + FixedSize + Debug + Hash + Copy;
+    type Signature: HashToGroup<Scalar = Scalar>
+        + FixedSize
+        + Write
+        + Read<Cfg = ()>
+        + Debug
+        + Hash
+        + Copy;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
@@ -154,7 +165,7 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars);
+        let s_agg = G2::msm(signatures, &scalars, 1);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -169,7 +180,7 @@ impl Variant for MinPk {
         // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&scalars[i]);
+            scaled_pk *= &scalars[i];
             let pk_affine = scaled_pk.as_blst_p1_affine();
             let hm_affine = hms[i].as_blst_p2_affine();
             pairing.raw_aggregate(&hm_affine, &pk_affine);
@@ -305,7 +316,7 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars);
+        let s_agg = G1::msm(signatures, &scalars, 1);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -320,7 +331,7 @@ impl Variant for MinSig {
         // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&scalars[i]);
+            scaled_pk *= &scalars[i];
             let pk_affine = scaled_pk.as_blst_p2_affine();
             let hm_affine = hms[i].as_blst_p1_affine();
             pairing.raw_aggregate(&pk_affine, &hm_affine);

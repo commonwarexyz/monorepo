@@ -8,7 +8,7 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, Element, Point, Scalar, Share, DST},
+    group::{self, Scalar, Share, DST},
     poly::{self, Eval, PartialSignature},
     variant::Variant,
     Error,
@@ -16,7 +16,10 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_math::poly::Interpolator;
+use commonware_math::{
+    algebra::{Additive, CryptoGroup, HashToGroup},
+    poly::Interpolator,
+};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -39,9 +42,7 @@ fn prepare_evaluations<'a, V: Variant>(
 
 /// Computes the public key from the private key.
 pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
-    let mut public = V::Public::one();
-    public.mul(private);
-    public
+    V::Public::generator() * private
 }
 
 /// Returns a new keypair derived from the provided randomness.
@@ -54,9 +55,7 @@ pub fn keypair<R: CryptoRngCore, V: Variant>(rng: &mut R) -> (group::Private, V:
 /// Hashes the provided message with the domain separation tag (DST) to
 /// the curve.
 pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
-    let mut hm = V::Signature::zero();
-    hm.map(dst, message);
-    hm
+    V::Signature::hash_to_group(dst, message)
 }
 
 /// Hashes the provided message with the domain separation tag (DST) and namespace to
@@ -66,16 +65,12 @@ pub fn hash_message_namespace<V: Variant>(
     namespace: &[u8],
     message: &[u8],
 ) -> V::Signature {
-    let mut hm = V::Signature::zero();
-    hm.map(dst, &union_unique(namespace, message));
-    hm
+    V::Signature::hash_to_group(dst, &union_unique(namespace, message))
 }
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
-    let mut hm = hash_message::<V>(dst, message);
-    hm.mul(private);
-    hm
+    hash_message::<V>(dst, message) * private
 }
 
 /// Generates a proof of possession for the private key.
@@ -231,7 +226,7 @@ where
         if partial.index != index {
             return None;
         }
-        s.add(&partial.value);
+        s += &partial.value;
     }
     Some((index, s))
 }
@@ -269,7 +264,7 @@ where
             || hash_message::<V>(V::MESSAGE, msg),
             |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
         );
-        hm_sum.add(&hm);
+        hm_sum += &hm;
     }
 
     // Verify the signature
@@ -302,8 +297,8 @@ where
         let mut agg_pk = V::Public::zero();
         let mut agg_sig = V::Signature::zero();
         for (pk, partial) in slice {
-            agg_pk.add(pk);
-            agg_sig.add(&partial.value);
+            agg_pk += pk.as_ref();
+            agg_sig += &partial.value;
         }
 
         // If aggregate signature is invalid, bisect. Otherwise, continue.
@@ -522,7 +517,7 @@ where
 {
     let mut p = V::Public::zero();
     for pk in public_keys {
-        p.add(pk);
+        p += pk;
     }
     p
 }
@@ -542,7 +537,7 @@ where
 {
     let mut s = V::Signature::zero();
     for sig in signatures {
-        s.add(sig);
+        s += sig;
     }
     s
 }
@@ -623,7 +618,7 @@ where
                     )
                 })
                 .reduce(V::Signature::zero, |mut sum, hm| {
-                    sum.add(&hm);
+                    sum += &hm;
                     sum
                 })
         })
@@ -644,7 +639,7 @@ where
             || hash_message::<V>(V::MESSAGE, msg),
             |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
         );
-        hm_sum.add(&hm);
+        hm_sum += &hm;
     }
     hm_sum
 }
@@ -658,7 +653,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
-    use commonware_math::algebra::Space;
+    use commonware_math::algebra::{Ring, Space};
     use commonware_utils::{from_hex_formatted, quorum};
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
@@ -1933,7 +1928,7 @@ mod tests {
             signatures.push(signature);
 
             // Fail verification with a manipulated signature
-            signature.add(&<MinSig as Variant>::Signature::one());
+            signature += &<MinSig as Variant>::Signature::generator();
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
 
@@ -1941,7 +1936,7 @@ mod tests {
         assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
 
         // Fail batch verification with a manipulated signature
-        signatures[0].add(&<MinSig as Variant>::Signature::one());
+        signatures[0] += &<MinSig as Variant>::Signature::generator();
         assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 
@@ -2246,7 +2241,7 @@ mod tests {
             signatures.push(signature);
 
             // Fail verification with a manipulated signature
-            signature.add(&<MinPk as Variant>::Signature::one());
+            signature += &<MinPk as Variant>::Signature::generator();
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
 
@@ -2254,7 +2249,7 @@ mod tests {
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
 
         // Fail batch verification with a manipulated signature
-        signatures[0].add(&<MinPk as Variant>::Signature::one());
+        signatures[0] += &<MinPk as Variant>::Signature::generator();
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 
@@ -2281,17 +2276,17 @@ mod tests {
 
                 // Numerator: product over j!=i of (eval_x - x_j)
                 let mut term = eval_x.clone();
-                term.sub(&xj);
-                num.mul(&term);
+                term -= &xj;
+                num *= &term;
 
                 // Denominator: product over j!=i of (x_i - x_j)
                 let mut diff = xi.clone();
-                diff.sub(&xj);
-                den.mul(&diff);
+                diff -= &xj;
+                den *= &diff;
             }
 
             // The result is num / den
-            num.mul(&den.inverse().expect("should not have duplicate indices"));
+            num *= &den.inverse().expect("should not have duplicate indices");
             num
         }
 

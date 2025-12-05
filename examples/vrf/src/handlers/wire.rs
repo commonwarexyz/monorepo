@@ -252,13 +252,14 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self, Element},
+            group::{self},
             poly,
             variant::Variant,
         },
         ed25519::{PrivateKey, Signature},
         PrivateKeyExt, Signer,
     };
+    use commonware_math::algebra::CryptoGroup;
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -277,9 +278,9 @@ mod tests {
     }
 
     fn new_eval(v: u32) -> Eval<<MinSig as Variant>::Signature> {
-        let mut signature = <MinSig as Variant>::Signature::one();
+        let mut signature = <MinSig as Variant>::Signature::generator();
         let scalar = group::Scalar::from_rand(&mut thread_rng());
-        signature.mul(&scalar);
+        signature *= &scalar;
         Eval {
             index: v,
             value: signature,
