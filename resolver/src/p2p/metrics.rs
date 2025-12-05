@@ -2,7 +2,7 @@ use commonware_runtime::{
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
 };
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
+use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
 /// Metrics for the peer actor.
@@ -25,12 +25,6 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub serve_duration: histogram::Timed<E>,
     /// Histogram of successful fetches
     pub fetch_duration: histogram::Timed<E>,
-    /// Number of fetches where a target peer returned valid data
-    pub target_hit: Counter,
-    /// Number of fetches where a target peer returned no data
-    pub target_miss: Counter,
-    /// Current total number of targets (across all keys)
-    pub targets_active: Gauge,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
@@ -82,24 +76,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of successful fetches",
             fetch_duration.clone(),
         );
-        let target_hit = Counter::default();
-        context.register(
-            "target_hit",
-            "Number of fetches where a target peer returned valid data",
-            target_hit.clone(),
-        );
-        let target_miss = Counter::default();
-        context.register(
-            "target_miss",
-            "Number of fetches where a target peer returned no data",
-            target_miss.clone(),
-        );
-        let targets_active = Gauge::default();
-        context.register(
-            "targets_active",
-            "Current total number of targets",
-            targets_active.clone(),
-        );
         let clock = Arc::new(context);
 
         Self {
@@ -112,9 +88,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             serve,
             fetch_duration: histogram::Timed::new(fetch_duration, clock.clone()),
             serve_duration: histogram::Timed::new(serve_duration, clock),
-            target_hit,
-            target_miss,
-            targets_active,
         }
     }
 }

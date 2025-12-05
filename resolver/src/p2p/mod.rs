@@ -23,12 +23,12 @@
 //!
 //! # Targeting
 //!
-//! Callers can restrict fetches to specific target peers. Only target peers are tried, there is no
-//! automatic fallback to other peers. Targets persist through transient failures (timeout, "no
-//! data" response, send failure) since the peer might be slow or receive the data later. To fall
-//! back to any peer, callers must explicitly call `untarget`. Targets are cleared when the fetch
-//! succeeds, is canceled, or when a peer is blocked for sending invalid data (only that peer is
-//! removed from targets).
+//! Callers can restrict fetches to specific target peers using `fetch_targeted`. Only target peers
+//! are tried, there is no automatic fallback to other peers. Targets persist through transient
+//! failures (timeout, "no data" response, send failure) since the peer might be slow or receive
+//! the data later. To fall back to any peer, call `fetch` which clears any existing targets.
+//! Calling `fetch_targeted` again adds to the current targets. Targets are also cleared when
+//! the fetch succeeds, is canceled, or when a peer is blocked for sending invalid data.
 //!
 //! # Performance Considerations
 //!
@@ -913,11 +913,6 @@ mod tests {
                 .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
                 .await;
 
-            // Verify targets are registered
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 2"));
-
             // Should eventually succeed from peer 3
             let event = cons_out1.next().await.unwrap();
             match event {
@@ -928,17 +923,15 @@ mod tests {
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
-            // Verify peer 2 was blocked
+            // Verify peer 2 was blocked (sent invalid data)
             let blocked = oracle.blocked().await.unwrap();
             assert_eq!(blocked.len(), 1);
             assert_eq!(blocked[0].0, peers[0]);
             assert_eq!(blocked[0].1, peers[1]);
 
-            // Verify target metrics: only peer 3 was a target hit (valid data), peer 2 was not
-            // (peer 2 returned data but consumer rejected it, so not a target hit)
+            // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
             let metrics = context.encode();
-            assert!(metrics.contains("_target_hit_total 1"));
-            assert!(metrics.contains("_targets_active 0"));
+            assert!(metrics.contains("_fetch_total{status=\"Success\"} 1"));
         });
     }
 
@@ -1018,23 +1011,17 @@ mod tests {
                 .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
                 .await;
 
-            // Verify targets are registered
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 2"));
-
-            // Wait enough time for targets to fail and retry
+            // Wait enough time for targets to fail and retry multiple times
             context.sleep(Duration::from_secs(3)).await;
-            let metrics = context.encode();
 
-            // Targets never returned valid data
-            assert!(metrics.contains("_target_hit_total 0"));
-            // Targets should still be active (not cleared on failure)
-            assert!(metrics.contains("_targets_active 2"));
-            // There should be some target misses (targets returned "no data")
-            assert!(metrics
+            // The fetch should not succeed because peer 4 (which has data) is not targeted
+            // Verify peer 4 never received a request by checking it has no serve successes
+            let metrics = context.encode();
+            let peer4_serve_success = metrics
                 .lines()
-                .any(|l| l.contains("_target_miss_total") && !l.trim_end().ends_with(" 0")));
+                .filter(|l| l.contains("actor=\"4\"") && l.contains("_serve_success_total"))
+                .any(|l| !l.trim_end().ends_with(" 0"));
+            assert!(!peer4_serve_success);
         });
     }
 
@@ -1134,11 +1121,6 @@ mod tests {
                 .await;
             mailbox1.fetch(key3.clone()).await; // no targeting for key3
 
-            // Verify targets are registered (only 2: key1->peer2, key2->peer4)
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 2"));
-
             // Collect all three events
             let mut results = HashMap::new();
             for _ in 0..3 {
@@ -1157,338 +1139,9 @@ mod tests {
             assert_eq!(results.get(&key2).unwrap(), &Bytes::from("data for key 2"));
             assert_eq!(results.get(&key3).unwrap(), &Bytes::from("data for key 3"));
 
-            // Verify target metrics:
-            // - key1: target hit (peer 2 had valid data)
-            // - key2: target hit (peer 4 had valid data)
-            // - key3: no targets, so no target hit/miss
+            // Verify metrics: 3 successful fetches
             let metrics = context.encode();
-            assert!(metrics.contains("_target_hit_total 2"));
-            assert!(metrics.contains("_target_miss_total 0"));
-            assert!(metrics.contains("_targets_active 0"));
-        });
-    }
-
-    #[test_traced]
-    fn test_target_requires_active_fetch() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2, 3]).await;
-
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-
-            let key = Key(1);
-
-            // Only peer 3 has the data
-            let mut prod3 = Producer::default();
-            prod3.insert(key.clone(), Bytes::from("data from peer 3"));
-
-            let (cons1, mut cons_out1) = Consumer::new();
-
-            let scheme = schemes.remove(0);
-            let mut mailbox1 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                cons1,
-                Producer::default(),
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                Producer::default(), // no data
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox3 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                prod3,
-            )
-            .await;
-
-            // Wait for peer set to be established
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Target before fetch should be ignored
-            mailbox1.target(key.clone(), vec![peers[1].clone()]).await;
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 0")); // Target was ignored
-
-            // Start fetch without targets
-            mailbox1.fetch(key.clone()).await;
-
-            // Now target should work (fetch is active)
-            mailbox1.target(key.clone(), vec![peers[2].clone()]).await;
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 1")); // Target was registered
-
-            // Should succeed from peer 3 (the targeted peer)
-            let event = cons_out1.next().await.unwrap();
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data from peer 3"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
-
-            // Verify the target was used (target hit)
-            let metrics = context.encode();
-            assert!(metrics.contains("_target_hit_total 1"));
-            assert!(metrics.contains("_targets_active 0"));
-        });
-    }
-
-    #[test_traced]
-    fn test_retarget_and_untarget() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2, 3, 4, 5]).await;
-
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 4).await;
-
-            let key = Key(1);
-
-            // Only peer 5 has the data, peers 2, 3, 4 don't
-            let mut prod5 = Producer::default();
-            prod5.insert(key.clone(), Bytes::from("data from peer 5"));
-
-            let (cons1, mut cons_out1) = Consumer::new();
-
-            let scheme = schemes.remove(0);
-            let mut mailbox1 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                cons1,
-                Producer::default(),
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                Producer::default(), // no data
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox3 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                Producer::default(), // no data
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox4 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                Producer::default(), // no data
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox5 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                prod5,
-            )
-            .await;
-
-            // Wait for peer set to be established
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Start fetch with targets for peers 2 and 3 (both don't have data)
-            mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
-                .await;
-
-            // Verify initial targets
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(
-                metrics.contains("_targets_active 2"),
-                "should have 2 initial targets"
-            );
-
-            // Wait for targets to fail (at least one retry)
-            context.sleep(Duration::from_millis(500)).await;
-
-            // Replace targets with peer 4
-            mailbox1.retarget(key.clone(), vec![peers[3].clone()]).await;
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(
-                metrics.contains("_targets_active 1"),
-                "retarget should replace with single target"
-            );
-
-            // Wait for peer 4 to fail (no data)
-            context.sleep(Duration::from_millis(500)).await;
-
-            // Clear targeting, fall back to any peer
-            mailbox1.untarget(key.clone()).await;
-
-            // Verify targets are cleared
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(
-                metrics.contains("_targets_active 0"),
-                "targets should be cleared after untarget"
-            );
-
-            // Wait for the fetch to retry and succeed from peer 5
-            let event = select! {
-                event = cons_out1.next() => { event.unwrap() },
-                _ = context.sleep(Duration::from_secs(5)) => { panic!("fetch should succeed after untarget"); },
-            };
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data from peer 5"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_empty_targets_then_add() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2, 3]).await;
-
-            // Link peer 1 to peers 2 and 3
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-
-            let key = Key(1);
-
-            // Only peer 3 has the data
-            let mut prod3 = Producer::default();
-            prod3.insert(key.clone(), Bytes::from("data from peer 3"));
-
-            let (cons1, mut cons_out1) = Consumer::new();
-
-            let scheme = schemes.remove(0);
-            let mut mailbox1 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                cons1,
-                Producer::default(),
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                Producer::default(), // peer 2 has no data
-            )
-            .await;
-
-            let scheme = schemes.remove(0);
-            let _mailbox3 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                Consumer::dummy(),
-                prod3, // peer 3 has data
-            )
-            .await;
-
-            // Wait for peer set to be established
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Start fetch with EMPTY targets
-            mailbox1.fetch_targeted(key.clone(), vec![]).await;
-
-            // Verify targets are empty
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(
-                metrics.contains("_targets_active 0"),
-                "should have 0 targets (empty set)"
-            );
-
-            // The fetch should be stuck because waiter is far future.
-            // Now add a target, this should clear the waiter and allow retry.
-            mailbox1.target(key.clone(), vec![peers[2].clone()]).await;
-
-            // Verify target was added
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(
-                metrics.contains("_targets_active 1"),
-                "should have 1 target after adding"
-            );
-
-            // Wait for the fetch to succeed from peer 3
-            let event = select! {
-                event = cons_out1.next() => { event.unwrap() },
-                _ = context.sleep(Duration::from_secs(3)) => {
-                    panic!("fetch should succeed after adding target - waiter should have been cleared");
-                },
-            };
-            match event {
-                Event::Success(key_actual, value) => {
-                    assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data from peer 3"));
-                }
-                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
-            }
+            assert!(metrics.contains("_fetch_total{status=\"Success\"} 3"));
         });
     }
 }

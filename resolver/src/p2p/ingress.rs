@@ -11,8 +11,8 @@ pub struct FetchRequest<K, P> {
     pub key: K,
     /// Target peers to restrict the fetch to.
     ///
-    /// - `None`: No targeting, try any available peer
-    /// - `Some(peers)`: Only try the specified peers (even if empty)
+    /// - `None`: No targeting (or clear existing targeting), try any available peer
+    /// - `Some(peers)`: Only try the specified peers (must be non-empty)
     pub targets: Option<Vec<P>>,
 }
 
@@ -29,16 +29,6 @@ pub enum Message<K, P> {
 
     /// Cancel all fetch requests that do not satisfy the predicate.
     Retain { predicate: Predicate<K> },
-
-    /// Modify targets for a key (only effective if key is being fetched).
-    ///
-    /// - `None`: Clear targeting (untarget)
-    /// - `Some((targets, true))`: Replace all targets (retarget)
-    /// - `Some((targets, false))`: Add to existing targets (target)
-    Target {
-        key: K,
-        targets: Option<(Vec<P>, bool)>,
-    },
 }
 
 /// A way to send messages to the peer actor.
@@ -60,6 +50,9 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
 
     /// Send a fetch request to the peer actor.
     ///
+    /// If a fetch is already in progress for this key, this clears any existing
+    /// targets for that key (the fetch will try any available peer).
+    ///
     /// Panics if the send fails.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
@@ -69,6 +62,9 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
+    ///
+    /// If a fetch is already in progress for any key, this clears any existing
+    /// targets for that key (the fetch will try any available peer).
     ///
     /// Panics if the send fails.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
@@ -122,16 +118,22 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// persist through transient failures (timeout, "no data" response, send failure)
     /// since the peer might be slow or might receive the data later.
     ///
-    /// To clear targeting and fall back to any peer, use [`untarget`](Self::untarget).
-    /// To replace targets, use [`retarget`](Self::retarget).
-    /// To add more targets, use [`target`](Self::target).
+    /// If a fetch is already in progress for this key, the new targets are added
+    /// to the existing target set. To clear targeting and fall back to any peer,
+    /// call [`fetch`](Self::fetch) instead.
     ///
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// When a peer is blocked (sent invalid data), only that peer is removed
     /// from the target set.
     ///
-    /// Panics if the send fails.
+    /// # Panics
+    ///
+    /// Panics if `targets` is empty or if the send fails.
     pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
+        assert!(
+            !targets.is_empty(),
+            "targets must not be empty; use fetch() for untargeted requests"
+        );
         self.sender
             .send(Message::Fetch(vec![FetchRequest {
                 key,
@@ -145,8 +147,16 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     ///
     /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
     ///
-    /// Panics if the send fails.
+    /// # Panics
+    ///
+    /// Panics if any `targets` is empty or if the send fails.
     pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, Vec<P>)>) {
+        for (_, targets) in &requests {
+            assert!(
+                !targets.is_empty(),
+                "targets must not be empty; use fetch() for untargeted requests"
+            );
+        }
         self.sender
             .send(Message::Fetch(
                 requests
@@ -159,66 +169,5 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
             ))
             .await
             .expect("Failed to send fetch_all_targeted");
-    }
-
-    /// Add target peers for an **ongoing** fetch.
-    ///
-    /// This only has an effect if a fetch is already in progress for this key.
-    /// To provide targets when starting a fetch, use [`fetch_targeted`](Self::fetch_targeted)
-    /// or [`fetch_all_targeted`](Self::fetch_all_targeted) instead.
-    ///
-    /// Only target peers are tried, there is no fallback to other peers. Targets persist
-    /// through transient failures (timeout, "no data" response, send failure).
-    ///
-    /// Multiple calls add to the existing target set. Use [`retarget`](Self::retarget)
-    /// to replace targets, or [`untarget`](Self::untarget) to clear targeting.
-    ///
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// When a peer is blocked (sent invalid data), only that peer is removed
-    /// from the target set.
-    ///
-    /// Panics if the send fails.
-    pub async fn target(&mut self, key: K, targets: Vec<P>) {
-        self.sender
-            .send(Message::Target {
-                key,
-                targets: Some((targets, false)),
-            })
-            .await
-            .expect("Failed to send target");
-    }
-
-    /// Replace all targets for an **ongoing** fetch.
-    ///
-    /// Atomically replaces the target set. Use this when you want to change
-    /// which peers are tried without adding to the existing set.
-    ///
-    /// If `targets` is empty, the fetch will wait until targets are added via
-    /// [`target`](Self::target). To clear targeting and try any peer, use
-    /// [`untarget`](Self::untarget) instead.
-    ///
-    /// Panics if the send fails.
-    pub async fn retarget(&mut self, key: K, targets: Vec<P>) {
-        self.sender
-            .send(Message::Target {
-                key,
-                targets: Some((targets, true)),
-            })
-            .await
-            .expect("Failed to send retarget");
-    }
-
-    /// Clear targeting for an **ongoing** fetch.
-    ///
-    /// After this call, the fetch will try any available peer instead of
-    /// being restricted to targets. Use this to fall back to any peer after
-    /// targets have been exhausted or timed out.
-    ///
-    /// Panics if the send fails.
-    pub async fn untarget(&mut self, key: K) {
-        self.sender
-            .send(Message::Target { key, targets: None })
-            .await
-            .expect("Failed to send untarget");
     }
 }

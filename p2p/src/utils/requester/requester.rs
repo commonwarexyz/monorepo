@@ -170,7 +170,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         };
 
         // Look for a participant that can handle request
-        let mut next = Duration::MAX; // if all participants are ourselves or excluded, we should wait until reset
+        let mut next = None;
         for (participant, _) in participant_iter {
             // Check if me
             if Some(participant) == self.me.as_ref() {
@@ -191,7 +191,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 
             // Check if rate limit is exceeded (and update rate limiter if not)
             if let Err(limit) = self.rate_limiter.check_key(participant) {
-                next = limit.wait_time_from(self.context.now());
+                next = Some(limit.wait_time_from(self.context.now()));
                 continue;
             }
 
@@ -213,10 +213,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         // Increment failed metric if no participants are available
         self.metrics.created.inc(Status::Failure);
 
-        if next == Duration::MAX {
-            Err(Error::NoEligibleParticipants)
-        } else {
-            Err(Error::RateLimited(next))
+        match next {
+            None => Err(Error::NoEligibleParticipants),
+            Some(wait) => Err(Error::RateLimited(wait)),
         }
     }
 

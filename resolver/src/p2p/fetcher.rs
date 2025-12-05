@@ -280,15 +280,14 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Processes a response from a peer. Removes and returns the relevant key.
     ///
-    /// Returns `(key, targeted)` if the response was valid, where `targeted` indicates
-    /// if the peer was a target for this key. Returns `None` if the response was invalid
-    /// or unsolicited.
+    /// Returns the key if the response was valid. Returns `None` if the response was
+    /// invalid or unsolicited.
     ///
     /// Targets are not removed here, regardless of response type. Targets persist through
     /// "no data" responses (peer might get data later). On valid data response, caller
     /// should call `clear_targets()`. On invalid data, caller should block the peer which
     /// removes them from all target sets.
-    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<(Key, bool)> {
+    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
 
@@ -300,16 +299,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
-        self.active.remove_by_left(&id).map(|(_, key)| {
-            // Check if peer was a target
-            let targeted = self
-                .targets
-                .get(&key)
-                .map(|t| t.contains(peer))
-                .unwrap_or(false);
-
-            (key, targeted)
-        })
+        self.active.remove_by_left(&id).map(|(_, key)| key)
     }
 
     /// Reconciles the list of peers that can be used to fetch data.
@@ -332,20 +322,13 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.block(peer);
     }
 
-    /// Add or replace target peers for fetching a key.
+    /// Add target peers for fetching a key.
     ///
-    /// If `replace` is true, atomically replaces the target set.
-    /// If `replace` is false, adds to the existing target set.
-    ///
-    /// If the resulting target set is empty, the fetch will wait until targets are added.
+    /// Targets are added to any existing targets for this key.
     ///
     /// Clears the waiter to allow immediate retry if the fetch was blocked waiting for targets.
-    pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>, replace: bool) {
-        if replace {
-            self.targets.insert(key, peers.into_iter().collect());
-        } else {
-            self.targets.entry(key).or_default().extend(peers);
-        }
+    pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
+        self.targets.entry(key).or_default().extend(peers);
 
         // Clear waiter to allow retry with new targets
         self.waiter = None;
@@ -383,11 +366,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
         self.requester.len_blocked()
-    }
-
-    /// Returns the total number of targets (sum of all targets across all keys).
-    pub fn len_targets(&self) -> usize {
-        self.targets.values().map(|v| v.len()).sum()
     }
 
     /// Returns true if the fetch is in progress.
@@ -1079,42 +1057,40 @@ mod tests {
             };
             let retry_timeout = Duration::from_millis(100);
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let blocked_peer =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(99).public_key();
             let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[public_key, peer1.clone()]);
             let mut sender = WrappedSender::new(FailMockSender {});
 
-            // Add a key with empty targets (will cause NoEligibleParticipants)
+            // Block the peer we'll use as target, so fetch has no eligible participants
+            fetcher.block(blocked_peer.clone());
+
+            // Add key with targets pointing only to blocked peer
             fetcher.add_ready(MockKey(1));
-            fetcher.add_targets(
-                MockKey(1),
-                std::iter::empty::<commonware_cryptography::ed25519::PublicKey>(),
-                true,
-            );
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
             fetcher.fetch(&mut sender).await;
 
-            // Waiter should be set to far future
+            // Waiter should be set to far future (no eligible participants)
             assert!(fetcher.waiter.is_some());
             let far_future = fetcher.waiter.unwrap();
             assert!(far_future > context.current() + Duration::from_secs(1000));
 
-            // Pending deadline should be the far future waiter
-            let deadline = fetcher.get_pending_deadline().unwrap();
-            assert!(deadline > context.current() + Duration::from_secs(1000));
-
-            // Add targets, this should clear the waiter
-            fetcher.add_targets(MockKey(1), vec![peer1.clone()], true);
+            // Add targets should clear the waiter
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
             assert!(fetcher.waiter.is_none());
 
             // Pending deadline should now be reasonable
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert!(deadline <= context.current() + retry_timeout);
 
-            // Clearing targets also clears waiter
-            fetcher.add_targets(MockKey(1), [], true);
+            // Set waiter again by targeting blocked peer
+            fetcher.clear_targets(&MockKey(1));
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
             fetcher.fetch(&mut sender).await;
             assert!(fetcher.waiter.is_some());
 
+            // clear_targets should clear the waiter
             fetcher.clear_targets(&MockKey(1));
             assert!(fetcher.waiter.is_none());
         });
@@ -1132,13 +1108,13 @@ mod tests {
             // Initially no targets
             assert!(fetcher.targets.is_empty());
 
-            // Add target for a key
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
+            // Add targets for a key
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
             assert_eq!(fetcher.targets.len(), 1);
             assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
 
-            // Add another target for the same key (accumulates)
-            fetcher.add_targets(MockKey(1), [peer2.clone()], false);
+            // Add more targets for the same key (accumulates)
+            fetcher.add_targets(MockKey(1), [peer2.clone()]);
             assert_eq!(fetcher.targets.len(), 1);
             let targets = fetcher.targets.get(&MockKey(1)).unwrap();
             assert_eq!(targets.len(), 2);
@@ -1146,28 +1122,25 @@ mod tests {
             assert!(targets.contains(&peer2));
 
             // Add target for a different key
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
             assert_eq!(fetcher.targets.len(), 2);
             assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
 
             // Adding duplicate target is idempotent
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
 
-            // Replace all targets
-            fetcher.add_targets(MockKey(1), [peer3.clone()], true);
-            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 1);
-            assert!(!fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
-            assert!(!fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer2));
+            // Add more to reach three targets
+            fetcher.add_targets(MockKey(1), [peer3.clone()]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 3);
             assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer3));
 
-            // Replace with empty set (fetch waits for targets)
-            fetcher.add_targets(MockKey(1), Vec::<Ed25519PublicKey>::new(), true);
-            assert!(fetcher.targets.contains_key(&MockKey(1)));
-            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
+            // clear_targets() removes all targets for a key
+            fetcher.clear_targets(&MockKey(1));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
 
-            // Replace on non-existent key creates new entry
-            fetcher.add_targets(MockKey(3), [peer1.clone()], true);
+            // Add targets on non-existent key creates new entry
+            fetcher.add_targets(MockKey(3), [peer1.clone()]);
             assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
         });
     }
@@ -1181,8 +1154,8 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
             // cancel() clears targets for key
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_retry(MockKey(1));
             fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.targets.len(), 2);
@@ -1195,20 +1168,19 @@ mod tests {
             assert!(fetcher.targets.is_empty());
 
             // clear() clears all targets
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(1), [peer2.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(3), [peer2], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2]);
             assert_eq!(fetcher.targets.len(), 3);
 
             fetcher.clear();
             assert!(fetcher.targets.is_empty());
 
             // retain() filters targets
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(10), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(20), [peer1], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(10), [peer1.clone()]);
+            fetcher.add_targets(MockKey(20), [peer1]);
             assert_eq!(fetcher.targets.len(), 4);
 
             fetcher.retain(|key| key.0 <= 5);
@@ -1230,11 +1202,9 @@ mod tests {
             let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
 
             // Add targets for multiple keys with various peers
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(1), [peer2.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer3.clone()], false);
-            fetcher.add_targets(MockKey(3), [peer2.clone()], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone(), peer3.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2.clone()]);
 
             // Verify initial state
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
@@ -1292,8 +1262,7 @@ mod tests {
             let mut sender = WrappedSender::new(FailMockSender {});
 
             // Add targets and attempt fetch
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(2), [peer2.clone()], false);
+            fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
@@ -1316,8 +1285,7 @@ mod tests {
             let mut sender = WrappedSender::new(SuccessMockSender {});
 
             // Timeout does not remove target
-            fetcher.add_targets(MockKey(1), [peer1.clone()], false);
-            fetcher.add_targets(MockKey(1), [peer2.clone()], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
             fetcher.add_ready(MockKey(1));
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
             fetcher.fetch(&mut sender).await;
@@ -1328,28 +1296,22 @@ mod tests {
             fetcher.targets.clear();
 
             // Error response ("no data") does not remove target
-            fetcher.add_targets(MockKey(2), [peer1.clone()], false);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(
-                fetcher.pop_by_id(id, &peer1, false),
-                Some((MockKey(2), true))
-            );
+            assert_eq!(fetcher.pop_by_id(id, &peer1, false), Some(MockKey(2)));
             // Target should still be present after "no data" response
             assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
             fetcher.targets.clear();
 
             // Data response also preserves targets
             // (caller must clear targets after data validation)
-            fetcher.add_targets(MockKey(3), [peer1.clone()], false);
+            fetcher.add_targets(MockKey(3), [peer1.clone()]);
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender).await;
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(
-                fetcher.pop_by_id(id, &peer1, true),
-                Some((MockKey(3), true))
-            );
+            assert_eq!(fetcher.pop_by_id(id, &peer1, true), Some(MockKey(3)));
             assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
         });
     }
@@ -1369,7 +1331,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1, peer2]);
 
             // Target peer3, which is not in the peer set (disconnected)
-            fetcher.add_targets(MockKey(1), [peer3], false);
+            fetcher.add_targets(MockKey(1), [peer3]);
             assert!(fetcher.targets.contains_key(&MockKey(1)));
 
             // Add key to pending
@@ -1400,8 +1362,8 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
             // Add targets
-            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2], false);
-            fetcher.add_targets(MockKey(2), [peer1], false);
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2]);
+            fetcher.add_targets(MockKey(2), [peer1]);
             assert_eq!(fetcher.targets.len(), 2);
 
             // clear_targets() removes the targets entry entirely
