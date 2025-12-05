@@ -47,7 +47,7 @@ impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, Journal<E, Operation<K, V>>, T, H, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     Any<E, K, V, H, T>

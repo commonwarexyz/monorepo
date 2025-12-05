@@ -6,7 +6,7 @@ use crate::{
         store::{Batchable, LogStore},
         update_known_loc, Error, FloorHelper,
     },
-    index::{Cursor as _, Ordered as Index},
+    index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
     journal::{
         authenticated,
         contiguous::{MutableContiguous, PersistableContiguous},
@@ -15,6 +15,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
+    translator::Translator,
     AuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -58,7 +59,7 @@ enum UpdateLocResult<O: Keyed> {
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: Operation>,
-    I: Index,
+    T: Translator,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
@@ -83,7 +84,7 @@ pub struct IndexedLog<
     /// # Invariant
     ///
     /// - Only references update variants of [Keyed] operations.
-    pub(crate) snapshot: I,
+    pub(crate) snapshot: Index<T, Location>,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
@@ -96,10 +97,10 @@ pub struct IndexedLog<
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, S>
+    > IndexedLog<E, C, T, H, S>
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -631,9 +632,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+    > IndexedLog<E, C, T, H>
 {
     /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -642,7 +643,7 @@ impl<
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub async fn init_from_log<F>(
-        mut index: I,
+        mut index: Index<T, Location>,
         log: AuthenticatedLog<E, C, H>,
         known_inactivity_floor: Option<Location>,
         mut callback: F,
@@ -721,7 +722,7 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    ) -> FloorHelper<'_, Index<T, Location>, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -732,9 +733,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+    > IndexedLog<E, C, T, H>
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -818,7 +819,7 @@ impl<
     }
 
     /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
+    pub fn into_dirty(self) -> IndexedLog<E, C, T, H, Dirty> {
         IndexedLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -833,12 +834,12 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > IndexedLog<E, C, I, H, Dirty>
+    > IndexedLog<E, C, T, H, Dirty>
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, C, I, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> IndexedLog<E, C, T, H, Clean<H::Digest>> {
         IndexedLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -853,9 +854,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, C, I, H>
+    > crate::store::StorePersistable for IndexedLog<E, C, T, H>
 {
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
@@ -869,9 +870,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::adb::store::LogStorePrunable for IndexedLog<E, C, I, H>
+    > crate::adb::store::LogStorePrunable for IndexedLog<E, C, T, H>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
@@ -881,13 +882,13 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
+    > crate::adb::store::CleanStore for IndexedLog<E, C, T, H>
 {
     type Digest = H::Digest;
     type Operation = C::Item;
-    type Dirty = IndexedLog<E, C, I, H, Dirty>;
+    type Dirty = IndexedLog<E, C, T, H, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
@@ -922,10 +923,10 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > LogStore for IndexedLog<E, C, I, H, S>
+    > LogStore for IndexedLog<E, C, T, H, S>
 {
     type Value = Value<C::Item>;
 
@@ -949,9 +950,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, C, I, H>
+    > crate::store::Store for IndexedLog<E, C, T, H>
 {
     type Key = Key<C::Item>;
     type Value = Value<C::Item>;
@@ -965,9 +966,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, C, I, H>
+    > crate::store::StoreMut for IndexedLog<E, C, T, H>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -977,9 +978,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
+    > crate::store::StoreDeletable for IndexedLog<E, C, T, H>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -989,13 +990,13 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > crate::adb::store::DirtyStore for IndexedLog<E, C, I, H, Dirty>
+    > crate::adb::store::DirtyStore for IndexedLog<E, C, T, H, Dirty>
 {
     type Digest = H::Digest;
     type Operation = C::Item;
-    type Clean = IndexedLog<E, C, I, H>;
+    type Clean = IndexedLog<E, C, T, H>;
 
     fn merkleize(self) -> Self::Clean {
         self.merkleize()
@@ -1005,9 +1006,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > CleanAny for IndexedLog<E, C, I, H>
+    > CleanAny for IndexedLog<E, C, T, H>
 {
     type Key = Key<C::Item>;
 
@@ -1039,9 +1040,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
+        T: Translator,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, C, I, H, Dirty>
+    > DirtyAny for IndexedLog<E, C, T, H, Dirty>
 {
     type Key = Key<C::Item>;
 
@@ -1062,11 +1063,11 @@ impl<
     }
 }
 
-impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
+impl<E, C, T, H> Batchable for IndexedLog<E, C, T, H>
 where
     E: Storage + Clock + Metrics,
     C: PersistableContiguous<Item: Operation>,
-    I: Index<Value = Location>,
+    T: Translator,
     H: Hasher,
 {
 }
