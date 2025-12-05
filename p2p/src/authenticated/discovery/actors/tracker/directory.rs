@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, set::PeerSet, Metadata, Reservation};
+use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::authenticated::discovery::{
     actors::tracker::ingress::Releaser,
     metrics,
@@ -8,7 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set, SystemTimeExt};
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -51,7 +51,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     peers: HashMap<C, Record<C>>,
 
     /// The peer sets
-    sets: BTreeMap<u64, PeerSet<C>>,
+    sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
@@ -176,7 +176,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Set<C>) -> bool {
+    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -192,7 +192,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Create and store new peer set
-        let mut set = PeerSet::new(peers.clone());
+        let mut set = Set::new(peers.clone());
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
@@ -221,7 +221,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
+    pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.sets.get(index).map(Deref::deref)
     }
 
@@ -264,7 +264,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns all tracked peers.
-    pub fn tracked(&self) -> Set<C> {
+    pub fn tracked(&self) -> OrderedSet<C> {
         self.peers.keys().cloned().collect()
     }
 
