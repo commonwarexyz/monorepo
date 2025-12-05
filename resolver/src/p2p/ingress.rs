@@ -151,19 +151,20 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     ///
     /// Panics if any `targets` is empty or if the send fails.
     pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, Vec<P>)>) {
-        for (_, targets) in &requests {
-            assert!(
-                !targets.is_empty(),
-                "targets must not be empty; use fetch() for untargeted requests"
-            );
-        }
         self.sender
             .send(Message::Fetch(
                 requests
                     .into_iter()
-                    .map(|(key, targets)| FetchRequest {
-                        key,
-                        targets: Some(targets),
+                    .map(|(key, targets)| {
+                        assert!(
+                            !targets.is_empty(),
+                            "targets must not be empty; use fetch() for untargeted requests"
+                        );
+
+                        FetchRequest {
+                            key,
+                            targets: Some(targets),
+                        }
                     })
                     .collect(),
             ))
