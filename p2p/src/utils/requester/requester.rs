@@ -155,28 +155,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         self.request_inner(shuffle, Some(filter))
     }
 
-    /// Check if any participant passes the filter (ignoring rate limits).
-    ///
-    /// Returns `true` if at least one participant passes the filter and is not
-    /// blocked or self. This is useful for quickly determining if a request
-    /// has any potential targets before checking rate limits.
-    pub fn has_eligible(&self, filter: impl Fn(&P) -> bool) -> bool {
-        self.participants.iter().any(|(participant, _)| {
-            // Check if me
-            if Some(participant) == self.me.as_ref() {
-                return false;
-            }
-
-            // Check if excluded
-            if self.excluded.contains(participant) {
-                return false;
-            }
-
-            // Check if passes filter
-            filter(participant)
-        })
-    }
-
     fn request_inner(
         &mut self,
         shuffle: bool,
@@ -653,65 +631,6 @@ mod tests {
                 seen.insert(participant);
             }
             assert_eq!(seen.len(), 2);
-        });
-    }
-
-    #[test]
-    fn test_has_eligible() {
-        let executor = deterministic::Runner::seeded(0);
-        executor.start(|context| async move {
-            // Create requester
-            let scheme = PrivateKey::from_seed(0);
-            let me = scheme.public_key();
-            let config = Config {
-                me: Some(me.clone()),
-                rate_limit: Quota::per_second(NZU32!(10)),
-                initial: Duration::from_millis(100),
-                timeout: Duration::from_secs(5),
-            };
-            let mut requester = Requester::new(context.clone(), config);
-
-            // No participants - should return false
-            assert!(!requester.has_eligible(|_| true));
-
-            // Add participants
-            let other1 = PrivateKey::from_seed(1).public_key();
-            let other2 = PrivateKey::from_seed(2).public_key();
-            let other3 = PrivateKey::from_seed(3).public_key();
-            requester.reconcile(&[me.clone(), other1.clone(), other2.clone(), other3]);
-
-            // Filter that matches all returns true
-            assert!(requester.has_eligible(|_| true));
-
-            // Filter that matches specific participant returns true
-            assert!(requester.has_eligible(|p| *p == other2));
-
-            // Filter that matches none returns false
-            assert!(!requester.has_eligible(|_| false));
-
-            // Filter for unknown participant returns false
-            let unknown = PrivateKey::from_seed(99).public_key();
-            assert!(!requester.has_eligible(|p| *p == unknown));
-
-            // Filter for self returns false (self is skipped)
-            assert!(!requester.has_eligible(|p| *p == me));
-
-            // Block a participant
-            requester.block(other1.clone());
-
-            // Filter for blocked participant returns false
-            assert!(!requester.has_eligible(|p| *p == other1));
-
-            // Filter that includes blocked and non-blocked returns true
-            assert!(requester.has_eligible(|p| *p == other1 || *p == other2));
-
-            // has_eligible ignores rate limits (unlike request_filtered)
-            // Exhaust rate limit for other2
-            for _ in 0..10 {
-                requester.request_filtered(false, |p| *p == other2).unwrap();
-            }
-            // other2 is now rate-limited, but has_eligible still returns true
-            assert!(requester.has_eligible(|p| *p == other2));
         });
     }
 }

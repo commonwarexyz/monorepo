@@ -129,25 +129,14 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Reset waiter
         self.waiter = None;
 
-        // Collect candidate keys with eligible participants (to avoid borrow issues)
-        let candidates: Vec<(Key, bool)> = self
+        // Collect pending keys (needed to avoid borrow conflicts with request calls)
+        let candidates: Vec<_> = self
             .pending
             .iter()
-            .filter_map(|(key, (_, retry))| {
-                let has_eligible = match self.targets.get(key) {
-                    Some(targets) if targets.is_empty() => false,
-                    Some(targets) => self.requester.has_eligible(|p| targets.contains(p)),
-                    None => self.requester.has_eligible(|_| true),
-                };
-                if has_eligible {
-                    Some((key.clone(), *retry))
-                } else {
-                    None
-                }
-            })
+            .map(|(key, (_, retry))| (key.clone(), *retry))
             .collect();
 
-        // Try each candidate in order until one succeeds
+        // Try each candidate until one succeeds
         let mut min_wait: Option<Duration> = None;
         for (key, retry) in candidates {
             let result = match self.targets.get(&key) {
@@ -160,17 +149,13 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
             match result {
                 Ok((peer, id)) => {
-                    // Found a key we can fetch - remove it and proceed
                     self.pending.remove(&key);
                     return self.send_request(sender, key, peer, id).await;
                 }
                 Err(Error::RateLimited(wait)) => {
-                    // Track minimum wait time across all rate-limited keys
                     min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
                 }
-                Err(Error::NoEligibleParticipants) => {
-                    // Should not happen since we checked has_eligible, but handle it
-                }
+                Err(Error::NoEligibleParticipants) => {}
             }
         }
 
