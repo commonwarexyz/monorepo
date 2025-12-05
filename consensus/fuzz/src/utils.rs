@@ -10,12 +10,18 @@ pub enum Action {
     Unlink,
 }
 
+/// Network partition strategies for fuzz testing.
 #[derive(Debug, Clone, Arbitrary, PartialEq)]
 pub enum Partition {
+    /// All validators connected to each other.
     Connected,
+    /// Two partitions where only the Byzantine node (index 0) bridges them.
     TwoPartitionsWithByzantine,
+    /// Each honest node isolated, only connected to the Byzantine node (index 0).
     ManyPartitionsWithByzantine,
+    /// No connections between any validators.
     Isolated,
+    /// Chain topology: each node only connected to its neighbors.
     Linear,
 }
 
@@ -31,6 +37,7 @@ impl Partition {
     }
 }
 
+// Byzantine node (index 0) connects both partitions, honest nodes split in half.
 fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
     if i == 0 || j == 0 {
         return true;
@@ -41,10 +48,12 @@ fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
     i_partition == j_partition
 }
 
+// Only Byzantine node (index 0) has connections, creating a star topology.
 fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
     i == 0 || j == 0
 }
 
+// Ring topology where each node connects to its successor.
 fn linear(n: usize, i: usize, j: usize) -> bool {
     (i + 1) % n == j % n || i == j
 }

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Which fields to mutate when creating a malformed proposal.
 #[derive(Debug, Clone, Arbitrary)]
 pub enum Mutation {
     Payload,
@@ -29,6 +30,7 @@ pub enum Mutation {
     All,
 }
 
+/// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
 pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
     context: E,
     validator: PublicKey,
