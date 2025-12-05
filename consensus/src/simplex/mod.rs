@@ -5111,7 +5111,7 @@ mod tests {
 
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: Vec::from(participants.as_ref()).try_into().unwrap(),
+                        participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
@@ -5168,7 +5168,7 @@ mod tests {
 
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: Vec::from(participants.as_ref()).try_into().unwrap(),
+                    participants: participants.as_ref().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
