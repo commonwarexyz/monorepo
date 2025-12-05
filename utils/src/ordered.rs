@@ -44,6 +44,9 @@ impl<T: fmt::Debug> fmt::Debug for Set<T> {
 
 impl<T: Ord> Set<T> {
     /// Creates a new [`Set`] from an iterator, removing duplicates.
+    ///
+    /// Unlike [`FromIterator`] and [`From`], this method tolerates duplicate
+    /// items by silently discarding them.
     pub fn from_iter_dedup<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut items: Vec<T> = iter.into_iter().collect();
         items.sort();
@@ -275,7 +278,10 @@ pub struct Map<K, V> {
 }
 
 impl<K: Ord, V> Map<K, V> {
-    /// Creates a new [`Map`] from an iterator, removing duplicates.
+    /// Creates a new [`Map`] from an iterator, removing duplicate keys.
+    ///
+    /// Unlike [`FromIterator`] and [`From`], this method tolerates duplicate
+    /// keys by silently discarding them (keeping the first occurrence).
     pub fn from_iter_dedup<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut items: Vec<(K, V)> = iter.into_iter().collect();
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
