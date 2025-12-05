@@ -1135,19 +1135,19 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Fetch all keys with targets:
-            // - key1 targeted to peer 2 (has data) -> should succeed
-            // - key2 targeted to peer 4 (has data) -> should succeed
-            // - key3 has no targets -> fetched from any peer (peer 3 has it)
+            // Fetch keys with mixed targeting:
+            // - key1 targeted to peer 2 (has data) -> should succeed from target
+            // - key2 targeted to peer 4 (has data) -> should succeed from target
+            // - key3 no targeting -> fetched from any peer (peer 3 has it)
             mailbox1
                 .fetch_all_targeted(vec![
                     (key1.clone(), vec![peers[1].clone()]), // peer 2 has key1
                     (key2.clone(), vec![peers[3].clone()]), // peer 4 has key2
-                    (key3.clone(), vec![]),                 // no targets for key3
                 ])
                 .await;
+            mailbox1.fetch(key3.clone()).await; // no targeting for key3
 
-            // Verify targets are registered (only 2: key1->peer2, key2->peer4; key3 has no targets)
+            // Verify targets are registered (only 2: key1->peer2, key2->peer4)
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
             assert!(metrics.contains("_targets_active 2"));

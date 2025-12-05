@@ -10,7 +10,10 @@ pub struct FetchRequest<K, P> {
     /// The key to fetch.
     pub key: K,
     /// Target peers to restrict the fetch to.
-    pub targets: Vec<P>,
+    ///
+    /// - `None`: No targeting, try any available peer
+    /// - `Some(peers)`: Only try the specified peers (even if empty)
+    pub targets: Option<Vec<P>>,
 }
 
 /// Messages that can be sent to the peer actor.
@@ -27,14 +30,15 @@ pub enum Message<K, P> {
     /// Cancel all fetch requests that do not satisfy the predicate.
     Retain { predicate: Predicate<K> },
 
-    /// Add target peers for a key (only effective if key is being fetched).
-    Target { key: K, peers: Vec<P> },
-
-    /// Replace all targets for a key (only effective if key is being fetched).
-    Retarget { key: K, peers: Vec<P> },
-
-    /// Clear targeting for a key (only effective if key is being fetched).
-    Untarget { key: K },
+    /// Modify targets for a key (only effective if key is being fetched).
+    ///
+    /// - `None`: Clear targeting (untarget)
+    /// - `Some((targets, true))`: Replace all targets (retarget)
+    /// - `Some((targets, false))`: Add to existing targets (target)
+    Target {
+        key: K,
+        targets: Option<(Vec<P>, bool)>,
+    },
 }
 
 /// A way to send messages to the peer actor.
@@ -59,10 +63,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Panics if the send fails.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest {
-                key,
-                targets: Vec::new(),
-            }]))
+            .send(Message::Fetch(vec![FetchRequest { key, targets: None }]))
             .await
             .expect("Failed to send fetch");
     }
@@ -74,10 +75,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
         self.sender
             .send(Message::Fetch(
                 keys.into_iter()
-                    .map(|key| FetchRequest {
-                        key,
-                        targets: Vec::new(),
-                    })
+                    .map(|key| FetchRequest { key, targets: None })
                     .collect(),
             ))
             .await
@@ -136,7 +134,10 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Panics if the send fails.
     pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest { key, targets }]))
+            .send(Message::Fetch(vec![FetchRequest {
+                key,
+                targets: Some(targets),
+            }]))
             .await
             .expect("Failed to send fetch_targeted");
     }
@@ -151,7 +152,10 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
             .send(Message::Fetch(
                 requests
                     .into_iter()
-                    .map(|(key, targets)| FetchRequest { key, targets })
+                    .map(|(key, targets)| FetchRequest {
+                        key,
+                        targets: Some(targets),
+                    })
                     .collect(),
             ))
             .await
@@ -176,9 +180,12 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// - A peer is blocked (sent invalid data)
     ///
     /// Panics if the send fails.
-    pub async fn target(&mut self, key: K, peers: Vec<P>) {
+    pub async fn target(&mut self, key: K, targets: Vec<P>) {
         self.sender
-            .send(Message::Target { key, peers })
+            .send(Message::Target {
+                key,
+                targets: Some((targets, false)),
+            })
             .await
             .expect("Failed to send target");
     }
@@ -193,9 +200,12 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// [`untarget`](Self::untarget) instead.
     ///
     /// Panics if the send fails.
-    pub async fn retarget(&mut self, key: K, peers: Vec<P>) {
+    pub async fn retarget(&mut self, key: K, targets: Vec<P>) {
         self.sender
-            .send(Message::Retarget { key, peers })
+            .send(Message::Target {
+                key,
+                targets: Some((targets, true)),
+            })
             .await
             .expect("Failed to send retarget");
     }
@@ -209,7 +219,7 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Panics if the send fails.
     pub async fn untarget(&mut self, key: K) {
         self.sender
-            .send(Message::Untarget { key })
+            .send(Message::Target { key, targets: None })
             .await
             .expect("Failed to send untarget");
     }

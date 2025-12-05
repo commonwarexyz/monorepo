@@ -243,9 +243,11 @@ impl<
                                     continue;
                                 }
 
-                                // Add targets if provided
-                                if !targets.is_empty() {
-                                    self.fetcher.target(key.clone(), targets);
+                                // Set targets if targeting is enabled
+                                // None = no targeting (try any peer)
+                                // Some(peers) = only try these peers (even if empty)
+                                if let Some(peers) = targets {
+                                    self.fetcher.retarget(key.clone(), peers);
                                 }
 
                                 // Record fetch start time
@@ -284,31 +286,25 @@ impl<
                                 self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
                             }
                         }
-                        Message::Target { key, peers } => {
-                            // Only add targets if key is being fetched
-                            if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, ?peers, "mailbox: target");
-                                self.fetcher.target(key, peers);
-                            } else {
-                                trace!(?key, ?peers, "mailbox: target ignored (no active fetch)");
+                        Message::Target { key, targets } => {
+                            // Only modify targets if key is being fetched
+                            if !self.fetch_timers.contains_key(&key) {
+                                trace!(?key, ?targets, "mailbox: target ignored (no active fetch)");
+                                continue;
                             }
-                        }
-                        Message::Retarget { key, peers } => {
-                            // Only retarget if key is being fetched
-                            if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, ?peers, "mailbox: retarget");
-                                self.fetcher.retarget(key, peers);
-                            } else {
-                                trace!(?key, ?peers, "mailbox: retarget ignored (no active fetch)");
-                            }
-                        }
-                        Message::Untarget { key } => {
-                            // Only untarget if key is being fetched
-                            if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, "mailbox: untarget");
-                                self.fetcher.untarget(&key);
-                            } else {
-                                trace!(?key, "mailbox: untarget ignored (no active fetch)");
+                            match targets {
+                                None => {
+                                    trace!(?key, "mailbox: untarget");
+                                    self.fetcher.untarget(&key);
+                                }
+                                Some((targets, true)) => {
+                                    trace!(?key, ?targets, "mailbox: retarget");
+                                    self.fetcher.retarget(key, targets);
+                                }
+                                Some((targets, false)) => {
+                                    trace!(?key, ?targets, "mailbox: target");
+                                    self.fetcher.target(key, targets);
+                                }
                             }
                         }
                     }
