@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{Dealer, Player},
+        dkg::{player::FinalizeInput, Dealer, Player},
         primitives::variant::MinSig,
     },
     ed25519, PrivateKeyExt as _, Signer as _,
@@ -54,7 +54,11 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     (player, commitments)
                 },
                 |(player, commitments)| {
-                    black_box(player.finalize(commitments, BTreeMap::new()).unwrap());
+                    black_box(
+                        player
+                            .finalize(FinalizeInput::new(commitments, BTreeMap::new()))
+                            .unwrap(),
+                    );
                 },
                 BatchSize::SmallInput,
             );

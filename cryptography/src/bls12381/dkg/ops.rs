@@ -5,7 +5,7 @@ use crate::bls12381::{
     primitives::{
         group::Share,
         ops::msm_interpolate,
-        poly::{self, compute_weights},
+        poly::{self, compute_weights, Public, Weight},
         variant::Variant,
     },
 };
@@ -97,7 +97,7 @@ pub fn verify_share<V: Variant>(
 pub fn construct_public<'a, V: Variant>(
     commitments: impl IntoIterator<Item = &'a poly::Public<V>>,
     required: u32,
-) -> Result<poly::Public<V>, Error> {
+) -> Result<Public<V>, Error> {
     // Compute new public polynomial by summing all commitments
     let mut count = 0;
     let mut public = poly::Public::<V>::zero();
@@ -175,7 +175,7 @@ pub fn recover_public<V: Variant>(
     commitments: &BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
     concurrency: usize,
-) -> Result<poly::Public<V>, Error> {
+) -> Result<(Public<V>, BTreeMap<u32, Weight>), Error> {
     // Ensure we have enough commitments to interpolate
     let required = previous.required();
     if commitments.len() < required as usize {
@@ -187,5 +187,8 @@ pub fn recover_public<V: Variant>(
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Perform interpolation over each coefficient using the precomputed weights
-    recover_public_with_weights::<V>(previous, commitments, &weights, threshold, concurrency)
+
+    let public =
+        recover_public_with_weights::<V>(previous, commitments, &weights, threshold, concurrency)?;
+    Ok((public, weights))
 }
