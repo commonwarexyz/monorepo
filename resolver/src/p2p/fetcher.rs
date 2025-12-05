@@ -129,7 +129,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Try pending keys until one succeeds or all participants are rate-limited
         let mut min_wait: Option<Duration> = None;
-        let mut selected: Option<(Key, P, ID)> = None;
+        let mut selected = None;
         for (key, (_, retry)) in self.pending.iter() {
             // Try to find a peer for the key
             let (result, is_targeted) = match self.targets.get(key) {
