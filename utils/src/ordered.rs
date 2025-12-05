@@ -27,10 +27,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-/// An ordered, deduplicated slice of items.
-///
-/// After construction, the contained [`Vec<T>`] is sealed and cannot be modified. To unseal the
-/// inner [`Vec<T>`], use the [`Into<Vec<T>>`] impl.
+/// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Set<T>(Vec<T>);
 
@@ -267,13 +264,7 @@ impl<T: Ord> Quorum for Set<T> {
     }
 }
 
-/// An ordered, deduplicated slice of items each paired with some associated value.
-///
-/// Like [`Set`], the contained [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the
-/// inner [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
-///
-/// Consumers that only need the ordered keys can treat a [`Map`] as a
-/// [`Set`] through deref coercions.
+/// An ordered, deduplicated collection of key-value pairs.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Map<K, V> {
     keys: Set<K>,
@@ -529,7 +520,7 @@ impl<'a, K, V> IntoIterator for &'a Map<K, V> {
     }
 }
 
-/// Owned iterator over [`Map`].
+/// An iterator over owned key-value pairs.
 pub struct MapIntoIter<K, V> {
     keys: VecIntoIter<K>,
     values: VecIntoIter<V>,
@@ -559,14 +550,7 @@ impl<K, V> DoubleEndedIterator for MapIntoIter<K, V> {
     }
 }
 
-/// An ordered, deduplicated slice of items each paired with some associated value, where values must be unique.
-///
-/// Like [`Map`], but enforces that values are unique across all keys. The contained
-/// [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the inner
-/// [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
-///
-/// Consumers that only need the ordered keys can treat a [`BiMap`] as a
-/// [`Set`] through deref coercions.
+/// An ordered, deduplicated collection of key-value pairs with unique values.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BiMap<K, V> {
     inner: Map<K, V>,
