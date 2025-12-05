@@ -424,7 +424,7 @@ where
                 //
                 // The initial DKG process will never be exited automatically, assuming coordination
                 // between participants is manual.
-                info!("DKG told to stop post update, now waiting...");
+                info!("DKG complete; waiting for shutdown.");
                 futures::future::pending::<()>().await;
                 break 'actor;
             }

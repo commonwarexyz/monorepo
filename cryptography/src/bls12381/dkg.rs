@@ -1572,7 +1572,7 @@ mod test_plan {
                 // Every dealer must have been a player in the previous round
                 for &d in &self.dealers {
                     if !prev_players.contains(&d) {
-                        return Err(anyhow!("dealer {} was not a player in previous round", d));
+                        return Err(anyhow!("dealer {d} was not a player in previous round"));
                     }
                 }
                 // Must have >= quorum(prev_players) dealers
@@ -1949,7 +1949,7 @@ mod test_plan {
                 }
 
                 // Generate and verify threshold signature
-                let test_message = format!("test message round {}", i_round).into_bytes();
+                let test_message = format!("test message round {i_round}").into_bytes();
                 let namespace = Some(&b"test"[..]);
 
                 let mut partial_sigs = Vec::new();

@@ -30,7 +30,7 @@ use std::{
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
-const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
+const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
 /// Epoch-level DKG state persisted across restarts.
 pub struct DkgState<V: Variant, P: PublicKey> {
@@ -167,7 +167,7 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> Inner<E, V, P> {
                     partition: format!("{partition_prefix}_dkg_msgs"),
                     compression: None,
                     codec_config: max_read_size,
-                    buffer_pool: buffer_pool.clone(),
+                    buffer_pool,
                     write_buffer: WRITE_BUFFER,
                 },
             )
