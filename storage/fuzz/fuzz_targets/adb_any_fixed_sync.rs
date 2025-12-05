@@ -5,9 +5,9 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
-        any::{unordered::fixed::Any, AnyDb as _, FixedConfig as Config},
+        any::{unordered::fixed::Any, FixedConfig as Config},
         operation::fixed::unordered::Operation as Fixed,
-        store::Db as _,
+        store::CleanStore as _,
         sync,
     },
     translator::TwoCap,

@@ -22,7 +22,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
+use commonware_utils::{ordered::Set, quorum, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -48,7 +48,7 @@ const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 pub struct Config<C, P, B, V>
 where
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -74,7 +74,7 @@ pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -114,7 +114,7 @@ impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,

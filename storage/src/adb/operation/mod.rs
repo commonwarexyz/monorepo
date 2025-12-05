@@ -44,7 +44,7 @@ pub trait Keyed: Codec {
     type Key: Array;
 
     /// The value type for this operation.
-    type Value: Codec;
+    type Value: Codec + Clone;
 
     /// Returns the key if this operation involves a key, None otherwise.
     fn key(&self) -> Option<&Self::Key>;

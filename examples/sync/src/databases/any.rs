@@ -6,9 +6,9 @@ use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{
         self,
-        any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
+        any::{unordered::fixed::Any, FixedConfig as Config},
         operation,
-        store::Db,
+        store::CleanStore,
     },
     mmr::{Location, Proof},
 };
@@ -84,7 +84,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    Db::commit(database, metadata).await?;
+                    database.commit(metadata).await?;
                 }
             }
         }
@@ -92,20 +92,20 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self, None).await?;
+        self.commit(None).await?;
         Ok(())
     }
 
     fn root(&self) -> Key {
-        AnyDb::root(self)
+        CleanStore::root(self)
     }
 
     fn op_count(&self) -> Location {
-        Db::op_count(self)
+        self.op_count()
     }
 
     fn lower_bound(&self) -> Location {
-        Db::inactivity_floor_loc(self)
+        self.inactivity_floor_loc()
     }
 
     fn historical_proof(
@@ -114,7 +114,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        AnyDb::historical_proof(self, op_count, start_loc, max_ops)
+        CleanStore::historical_proof(self, op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {

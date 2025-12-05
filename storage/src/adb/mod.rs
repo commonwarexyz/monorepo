@@ -15,7 +15,7 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::Location,
-    AuthenticatedBitMap as BitMap,
+    DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;
@@ -71,9 +71,6 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
-
-    #[error("uncommitted operations present")]
-    UncommittedOperations,
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
@@ -223,6 +220,10 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
 async fn find_update_op<C>(
     log: &C,
     cursor: &mut impl Cursor<Value = Location>,
@@ -240,6 +241,41 @@ where
     }
 
     Ok(None)
+}
+
+/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// its location to `new_loc`.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+fn update_known_loc<I: Index<Value = Location>>(
+    snapshot: &mut I,
+    key: &[u8],
+    old_loc: Location,
+    new_loc: Location,
+) {
+    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    assert!(
+        cursor.find(|&loc| *loc == old_loc),
+        "prev_key with given old_loc should have been found"
+    );
+    cursor.update(new_loc);
+}
+
+/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
+/// it from the snapshot.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], old_loc: Location) {
+    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    assert!(
+        cursor.find(|&loc| *loc == old_loc),
+        "prev_key with given old_loc should have been found"
+    );
+    cursor.delete();
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
@@ -318,7 +354,7 @@ where
     /// Panics if there is not at least one active operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut BitMap<D, N>,
+        status: &mut DirtyAuthenticatedBitMap<D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

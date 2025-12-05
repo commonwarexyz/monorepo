@@ -9,9 +9,12 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::adb::{
-    store::{Batchable, Db},
-    Error,
+use commonware_storage::{
+    adb::{
+        store::{Batchable, LogStorePrunable},
+        Error,
+    },
+    store::{StoreDeletable, StorePersistable},
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -82,15 +85,19 @@ fn bench_variable_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<
-    A: Db<<Sha256 as Hasher>::Digest, Vec<u8>> + Batchable<<Sha256 as Hasher>::Digest, Vec<u8>>,
->(
+async fn test_db<A>(
     db: A,
     use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, Error> {
+) -> Result<Duration, Error>
+where
+    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Batchable
+        + StoreDeletable
+        + LogStorePrunable,
+{
     let start = Instant::now();
     let db = if use_batch {
         gen_random_kv_batched(db, elements, operations, commit_frequency).await

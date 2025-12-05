@@ -17,7 +17,7 @@ pub struct Relay<D: Digest, P: PublicKey> {
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
         }
