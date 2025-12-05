@@ -29,7 +29,6 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest,
     Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
@@ -248,19 +247,13 @@ fn run<P: Simplex>(input: FuzzInput) {
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
-            let reporter_cfg = reporter::Config {
-                namespace: namespace.clone(),
-                participants: participants.clone().into(),
-                scheme: scheme.clone(),
-            };
-            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
 
             let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
-            let disrupter = Disrupter::<_, _, Sha256Digest>::new(
+            let disrupter = Disrupter::<_, _>::new(
                 context.with_label("disrupter"),
                 validator.clone(),
                 scheme,
-                reporter,
+                participants.clone().into(),
                 namespace.clone(),
                 input.clone(),
             );
@@ -399,6 +392,32 @@ mod tests {
             raw_bytes: vec![2u8; 256],
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed([2u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_many_partitions() {
+        let input = FuzzInput {
+            seed: 789,
+            partition: Partition::ManyPartitionsWithByzantine,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![3u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([3u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_linear() {
+        let input = FuzzInput {
+            seed: 999,
+            partition: Partition::Linear,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![4u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([4u8; 32])),
         };
         fuzz::<SimplexEd25519>(input);
     }

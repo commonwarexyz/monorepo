@@ -4,18 +4,17 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
-        mocks::reporter::Reporter,
         signing_scheme::Scheme,
         types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
-use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest, Digest};
+use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::set::OrderedQuorum;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 
@@ -31,11 +30,11 @@ pub enum Mutation {
 }
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
+pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     context: E,
     validator: PublicKey,
     scheme: S,
-    reporter: Reporter<E, PublicKey, S, D>,
+    participants: Ordered<PublicKey>,
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     view: u64,
@@ -44,7 +43,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest>
     last_notarized: u64,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> Disrupter<E, S, D>
+impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
@@ -52,7 +51,7 @@ where
         context: E,
         validator: PublicKey,
         scheme: S,
-        reporter: Reporter<E, PublicKey, S, D>,
+        participants: Ordered<PublicKey>,
         namespace: Vec<u8>,
         fuzz_input: FuzzInput,
     ) -> Self {
@@ -64,7 +63,7 @@ where
             context,
             validator,
             scheme,
-            reporter,
+            participants,
             namespace,
             fuzz_input,
         }
@@ -190,11 +189,8 @@ where
                     }
                 },
                 result = cert_receiver.recv().fuse() => {
-                    match result {
-                        Ok((_, msg)) => {
-                            self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
-                        }
-                        Err(_) => {}
+                    if let Ok((_, msg)) = result {
+                        self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
                     }
                 },
                 _ = self.context.sleep(TIMEOUT) => {
@@ -340,7 +336,7 @@ where
             self.payload(),
         );
 
-        if self.reporter.participants.index(&self.validator).is_none() {
+        if self.participants.index(&self.validator).is_none() {
             let bytes = self.bytes();
             let _ = sender.send(Recipients::All, bytes.into(), true).await;
             return;
