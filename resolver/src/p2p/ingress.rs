@@ -126,10 +126,9 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// To replace targets, use [`retarget`](Self::retarget).
     /// To add more targets, use [`target`](Self::target).
     ///
-    /// Targets are automatically cleared when:
-    /// - The fetch succeeds (data received)
-    /// - The fetch is canceled
-    /// - A peer is blocked (sent invalid data)
+    /// Targets are automatically cleared when the fetch succeeds or is canceled.
+    /// When a peer is blocked (sent invalid data), only that peer is removed
+    /// from the target set.
     ///
     /// Panics if the send fails.
     pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
@@ -174,10 +173,9 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Multiple calls add to the existing target set. Use [`retarget`](Self::retarget)
     /// to replace targets, or [`untarget`](Self::untarget) to clear targeting.
     ///
-    /// Targets are automatically cleared when:
-    /// - The fetch succeeds (data received)
-    /// - The fetch is canceled
-    /// - A peer is blocked (sent invalid data)
+    /// Targets are automatically cleared when the fetch succeeds or is canceled.
+    /// When a peer is blocked (sent invalid data), only that peer is removed
+    /// from the target set.
     ///
     /// Panics if the send fails.
     pub async fn target(&mut self, key: K, targets: Vec<P>) {
