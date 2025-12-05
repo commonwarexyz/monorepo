@@ -381,7 +381,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             }
             journal.rewind(*last_valid_size).await?;
             journal.sync().await?;
-            journal_size = last_valid_size
+            journal_size = last_valid_size;
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
@@ -1959,7 +1959,7 @@ mod tests {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
-                    expected_nodes.get(&pos).cloned()
+                    expected_nodes.get(&pos).copied()
                 );
             }
 
@@ -2021,7 +2021,7 @@ mod tests {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
-                    expected_nodes.get(&pos).cloned()
+                    expected_nodes.get(&pos).copied()
                 );
             }
 

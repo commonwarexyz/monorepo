@@ -221,8 +221,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
-        self.sets.get(index).map(Deref::deref)
+    pub fn get_set(&self, index: u64) -> Option<&Ordered<C>> {
+        self.sets.get(&index).map(Deref::deref)
     }
 
     /// Returns the latest peer set index.

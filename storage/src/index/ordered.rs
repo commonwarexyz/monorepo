@@ -61,7 +61,7 @@ impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn update(&mut self, v: V) {
-        self.inner.update(v)
+        self.inner.update(v);
     }
 
     fn next(&mut self) -> Option<&V> {
@@ -69,15 +69,15 @@ impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
     }
 
     fn insert(&mut self, v: V) {
-        self.inner.insert(v)
+        self.inner.insert(v);
     }
 
     fn delete(&mut self) {
-        self.inner.delete()
+        self.inner.delete();
     }
 
     fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
+        self.inner.prune(predicate);
     }
 }
 

@@ -114,8 +114,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     fn floor_view(&self) -> View {
         self.floor
             .as_ref()
-            .map(|floor| floor.view())
-            .unwrap_or(View::zero())
+            .map_or(View::zero(), |floor| floor.view())
     }
 
     /// Inform the [Resolver] of any missing nullifications.

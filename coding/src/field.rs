@@ -18,7 +18,7 @@ impl FixedSize for F {
 
 impl Write for F {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
+        self.0.write(buf);
     }
 }
 
@@ -463,7 +463,7 @@ mod test {
 
         #[test]
         fn test_div2(x in any_f()) {
-            assert_eq!((x + x).div_2(), x)
+            assert_eq!((x + x).div_2(), x);
         }
 
         #[test]

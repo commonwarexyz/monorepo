@@ -22,8 +22,7 @@ impl<P: PublicKey> Metadata<P> {
     /// Get the public key of the peer associated with this metadata.
     pub const fn public_key(&self) -> &P {
         match self {
-            Self::Dialer(public_key, _) => public_key,
-            Self::Listener(public_key) => public_key,
+            Self::Dialer(public_key, _) | Self::Listener(public_key) => public_key,
         }
     }
 }

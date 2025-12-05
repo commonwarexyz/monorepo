@@ -208,9 +208,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.next_addr.set_port(port);
             }
             None => {
-                let ip = match self.next_addr.ip() {
-                    IpAddr::V4(ipv4) => ipv4,
-                    _ => unreachable!(),
+                let IpAddr::V4(ip) = self.next_addr.ip() else {
+                    unreachable!()
                 };
                 let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
                 self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
@@ -321,7 +320,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                send_result(result, Ok((sender, receiver)))
+                send_result(result, Ok((sender, receiver)));
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
@@ -388,7 +387,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.received_messages.clone(),
                 );
                 self.links.insert(key, link);
-                send_result(result, Ok(()))
+                send_result(result, Ok(()));
             }
             ingress::Message::RemoveLink {
                 sender,
@@ -399,13 +398,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Some(_) => (),
                     None => return send_result(result, Err(Error::LinkMissing)),
                 }
-                send_result(result, Ok(()))
+                send_result(result, Ok(()));
             }
             ingress::Message::Block { from, to } => {
                 self.blocks.insert((from, to));
             }
             ingress::Message::Blocked { result } => {
-                send_result(result, Ok(self.blocks.iter().cloned().collect()))
+                send_result(result, Ok(self.blocks.iter().cloned().collect()));
             }
         }
     }
@@ -598,17 +597,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
-                    let message = match message {
-                        Some(message) => message,
-                        None => break,
+                    let Some(message) = message else {
+                        break;
                     };
                     self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
-                    let task = match task {
-                        Some(task) => task,
-                        None => break,
+                    let Some(task) = task else {
+                        break;
                     };
                     self.handle_task(task);
                 },
@@ -888,9 +885,8 @@ impl<P: PublicKey> Peer<P> {
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
                 inbox = inbox_receiver.next() => {
                     // If inbox is closed, exit
-                    let (channel, message) = match inbox {
-                        Some(message) => message,
-                        None => break,
+                    let Some((channel, message)) = inbox else {
+                        break;
                     };
 
                     // Send message to mailbox
@@ -929,12 +925,9 @@ impl<P: PublicKey> Peer<P> {
                         let mut inbox_sender = inbox_sender.clone();
                         move |_| async move {
                             // Receive dialer's public key as a handshake
-                            let dialer = match recv_frame(&mut stream, max_size).await {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    error!("failed to receive public key from dialer");
-                                    return;
-                                }
+                            let Ok(dialer) = recv_frame(&mut stream, max_size).await else {
+                                error!("failed to receive public key from dialer");
+                                return;
                             };
                             let Ok(dialer) = P::decode(dialer.as_ref()) else {
                                 error!("received public key is invalid");

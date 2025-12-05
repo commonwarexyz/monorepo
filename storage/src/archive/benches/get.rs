@@ -83,9 +83,7 @@ fn bench_get(c: &mut Criterion) {
                             variant.name(),
                             mode,
                             pattern,
-                            compression
-                                .map(|l| l.to_string())
-                                .unwrap_or_else(|| "off".into()),
+                            compression.map_or_else(|| "off".into(), |l| l.to_string()),
                             reads
                         );
                         c.bench_function(&label, |b| {
@@ -101,14 +99,15 @@ fn bench_get(c: &mut Criterion) {
                                         for _ in 0..iters {
                                             match mode {
                                                 "serial" => {
-                                                    read_serial_keys(&archive, &selected_keys).await
+                                                    read_serial_keys(&archive, &selected_keys)
+                                                        .await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_keys(
                                                         &archive,
                                                         selected_keys.clone(),
                                                     )
-                                                    .await
+                                                    .await;
                                                 }
                                                 _ => unreachable!(),
                                             }
@@ -120,15 +119,18 @@ fn bench_get(c: &mut Criterion) {
                                         for _ in 0..iters {
                                             match mode {
                                                 "serial" => {
-                                                    read_serial_indices(&archive, &selected_indices)
-                                                        .await
+                                                    read_serial_indices(
+                                                        &archive,
+                                                        &selected_indices,
+                                                    )
+                                                    .await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_indices(
                                                         &archive,
                                                         &selected_indices,
                                                     )
-                                                    .await
+                                                    .await;
                                                 }
                                                 _ => unreachable!(),
                                             }

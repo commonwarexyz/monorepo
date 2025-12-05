@@ -68,7 +68,7 @@ impl<D: Digest> ProofStore<D> {
 
 impl<D: Digest> Storage<D> for ProofStore<D> {
     async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
-        Ok(self.digests.get(&pos).cloned())
+        Ok(self.digests.get(&pos).copied())
     }
 
     fn size(&self) -> Position {

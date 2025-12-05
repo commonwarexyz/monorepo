@@ -2459,10 +2459,8 @@ mod tests {
                     for (_, faults) in faulter.iter() {
                         for fault in faults.iter() {
                             match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting += 1;
-                                }
-                                Activity::ConflictingFinalize(_) => {
+                                Activity::ConflictingNotarize(_)
+                                | Activity::ConflictingFinalize(_) => {
                                     count_conflicting += 1;
                                 }
                                 _ => panic!("unexpected fault: {fault:?}"),
@@ -3713,7 +3711,7 @@ mod tests {
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
-        })
+        });
     }
 
     #[test_group("slow")]
@@ -4057,7 +4055,7 @@ mod tests {
 
                 // Check notarizes
                 let notarizes = reporter.notarizes.lock().unwrap();
-                let last_view = notarizes.keys().max().cloned().unwrap_or_default();
+                let last_view = notarizes.keys().max().copied().unwrap_or_default();
                 for (view, payloads) in notarizes.iter() {
                     if *view == last_view {
                         continue; // Skip last view

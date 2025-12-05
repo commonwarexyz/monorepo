@@ -267,10 +267,10 @@ impl<C: Element> Poly<C> {
 
         // if we have a smaller degree we should pad with zeros
         if self.0.len() < other.0.len() {
-            self.0.resize(other.0.len(), C::zero())
+            self.0.resize(other.0.len(), C::zero());
         }
 
-        self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
+        self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b));
     }
 
     /// Evaluates the polynomial at the specified index (provided value offset by 1).
@@ -288,7 +288,7 @@ impl<C: Element> Poly<C> {
             sum.add(coeff);
             sum
         });
-        Eval { value, index }
+        Eval { index, value }
     }
 
     /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
@@ -464,7 +464,7 @@ pub mod tests {
     fn pow(base: Scalar, pow: usize) -> Scalar {
         let mut res = Scalar::one();
         for _ in 0..pow {
-            res.mul(&base)
+            res.mul(&base);
         }
         res
     }

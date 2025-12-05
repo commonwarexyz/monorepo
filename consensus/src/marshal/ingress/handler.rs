@@ -129,9 +129,8 @@ impl<B: Block> Request<B> {
             (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
                 *theirs > *mine
             }
-            (Self::Finalized { .. }, _) => true,
             (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
-            (Self::Notarized { .. }, _) => true,
+            (Self::Finalized { .. }, _) | (Self::Notarized { .. }, _) => true,
         }
     }
 }

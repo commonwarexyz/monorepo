@@ -134,11 +134,11 @@ mod tests {
 
         // Verify they match
         match (&error_code, &decoded) {
-            (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
-            (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
-            (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
-            (ErrorCode::Timeout, ErrorCode::Timeout) => {}
-            (ErrorCode::InternalError, ErrorCode::InternalError) => {}
+            (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest)
+            | (ErrorCode::DatabaseError, ErrorCode::DatabaseError)
+            | (ErrorCode::NetworkError, ErrorCode::NetworkError)
+            | (ErrorCode::Timeout, ErrorCode::Timeout)
+            | (ErrorCode::InternalError, ErrorCode::InternalError) => {}
             _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
         }
     }

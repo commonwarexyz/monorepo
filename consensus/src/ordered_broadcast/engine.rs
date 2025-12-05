@@ -890,8 +890,7 @@ impl<
             let bound_lo = self
                 .tip_manager
                 .get(&ack.chunk.sequencer)
-                .map(|t| t.chunk.height)
-                .unwrap_or(0);
+                .map_or(0, |t| t.chunk.height);
             let bound_hi = bound_lo + self.height_bound;
             if ack.chunk.height < bound_lo || ack.chunk.height > bound_hi {
                 return Err(Error::AckHeightOutsideBounds(

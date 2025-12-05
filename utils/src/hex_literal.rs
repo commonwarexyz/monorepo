@@ -23,13 +23,11 @@ const fn next_hex_char(string: &[u8], mut pos: usize) -> Option<(u8, usize)> {
 }
 
 const fn next_byte(string: &[u8], pos: usize) -> Option<(u8, usize)> {
-    let (half1, pos) = match next_hex_char(string, pos) {
-        Some(v) => v,
-        None => return None,
+    let Some((half1, pos)) = next_hex_char(string, pos) else {
+        return None;
     };
-    let (half2, pos) = match next_hex_char(string, pos) {
-        Some(v) => v,
-        None => panic!("Odd number of hex characters"),
+    let Some((half2, pos)) = next_hex_char(string, pos) else {
+        panic!("Odd number of hex characters")
     };
     Some(((half1 << 4) + half2, pos))
 }

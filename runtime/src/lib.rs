@@ -1099,7 +1099,7 @@ mod tests {
             // Read data past file length (non-empty file)
             let result = blob.read_at(vec![0u8; 20], 0).await;
             assert!(result.is_err());
-        })
+        });
     }
 
     fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
@@ -1433,7 +1433,7 @@ mod tests {
                 parent_initialized_tx.send(()).unwrap();
 
                 // Parent task runs until aborted
-                pending::<()>().await
+                pending::<()>().await;
             });
 
             // Wait for parent task to spawn the children
@@ -1921,7 +1921,7 @@ mod tests {
     {
         runner.start(|context| async move {
             context.with_label(METRICS_PREFIX);
-        })
+        });
     }
 
     #[test]

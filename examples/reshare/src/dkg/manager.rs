@@ -236,13 +236,11 @@ where
 
         let rate_limiter =
             RateLimiter::hashmap_with_clock(send_rate_limit, context.deref().clone());
-        let previous = public
-            .map(|public| {
-                share.map_or(RoundResult::Polynomial(public.clone()), |share| {
-                    RoundResult::Output(Output { public, share })
-                })
+        let previous = public.map_or(RoundResult::None, |public| {
+            share.map_or(RoundResult::Polynomial(public.clone()), |share| {
+                RoundResult::Output(Output { public, share })
             })
-            .unwrap_or(RoundResult::None);
+        });
 
         Self {
             namespace,
@@ -525,7 +523,7 @@ where
         if !outcome.acks.iter().all(|ack| {
             self.players
                 .get(ack.player as usize)
-                .map(|public_key| {
+                .is_some_and(|public_key| {
                     ack.verify::<V, _>(
                         &union(&self.namespace, ACK_NAMESPACE),
                         public_key,
@@ -534,7 +532,6 @@ where
                         &outcome.commitment,
                     )
                 })
-                .unwrap_or(false)
         }) {
             self.arbiter
                 .disqualify(outcome.dealer.clone())

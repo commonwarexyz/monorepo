@@ -158,7 +158,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
                         .digests
                         .get(&sequencer)
                         .and_then(|map| map.get(&height))
-                        .cloned();
+                        .copied();
                     sender.send(digest).unwrap();
                 }
             }

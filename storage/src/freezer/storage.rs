@@ -749,7 +749,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Update the number of items added to the entry.
         //
         // We use `saturating_add` to handle overflow (when the table is at max size) gracefully.
-        let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
+        let mut added = head.map_or(0, |(_, _, added)| added);
         added = added.saturating_add(1);
 
         // If we've reached the threshold for resizing, increment the resizable entries

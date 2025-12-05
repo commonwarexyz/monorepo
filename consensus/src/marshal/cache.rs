@@ -116,7 +116,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
     fn get_metadata(&self) -> (Epoch, Epoch) {
         self.metadata
             .get(&CACHED_EPOCHS_KEY)
-            .cloned()
+            .copied()
             .unwrap_or((Epoch::zero(), Epoch::zero()))
     }
 

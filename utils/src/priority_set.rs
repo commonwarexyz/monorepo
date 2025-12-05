@@ -68,7 +68,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
 
     /// Get the current priority of an item.
     pub fn get(&self, item: &I) -> Option<P> {
-        self.keys.get(item).cloned()
+        self.keys.get(item).copied()
     }
 
     /// Remove an item from the set.

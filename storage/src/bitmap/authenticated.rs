@@ -988,7 +988,7 @@ mod tests {
                     );
                 }
             }
-        })
+        });
     }
 
     #[test_traced]

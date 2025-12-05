@@ -193,8 +193,8 @@ mod tests {
                 (
                     TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
                     TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
-                ) => {}
-                (
+                )
+                | (
                     TestError::Engine(EngineError::SyncTargetRootUnchanged),
                     TestError::Engine(EngineError::SyncTargetRootUnchanged),
                 ) => {}

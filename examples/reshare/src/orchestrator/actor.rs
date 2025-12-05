@@ -330,7 +330,7 @@ where
                         engine.abort();
 
                         // Unregister the signing scheme for the epoch.
-                        assert!(self.scheme_provider.unregister(&epoch));
+                        assert!(self.scheme_provider.unregister(epoch));
 
                         info!(%epoch, "exited epoch");
                     }

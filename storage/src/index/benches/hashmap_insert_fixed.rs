@@ -48,7 +48,7 @@ fn benchmark_hashmap_insert_fixed(c: &mut Criterion) {
                     }
                 },
                 BatchSize::SmallInput,
-            )
+            );
         });
     }
 }

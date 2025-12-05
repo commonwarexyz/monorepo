@@ -242,9 +242,8 @@ pub enum Subject<'a, D: Digest> {
 impl<D: Digest> Viewable for Subject<'_, D> {
     fn view(&self) -> View {
         match self {
-            Subject::Notarize { proposal } => proposal.view(),
+            Subject::Notarize { proposal } | Subject::Finalize { proposal } => proposal.view(),
             Subject::Nullify { round } => round.view(),
-            Subject::Finalize { proposal } => proposal.view(),
         }
     }
 }
@@ -656,7 +655,7 @@ impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.parent.write(writer);
-        self.payload.write(writer)
+        self.payload.write(writer);
     }
 }
 
@@ -1653,15 +1652,13 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub const fn verified(&self) -> bool {
         match self {
-            Self::Notarize(_) => false,
-            Self::Notarization(_) => true,
-            Self::Nullify(_) => false,
-            Self::Nullification(_) => true,
-            Self::Finalize(_) => false,
-            Self::Finalization(_) => true,
-            Self::ConflictingNotarize(_) => false,
-            Self::ConflictingFinalize(_) => false,
-            Self::NullifyFinalize(_) => false,
+            Self::Notarization(_) | Self::Nullification(_) | Self::Finalization(_) => true,
+            Self::Notarize(_)
+            | Self::Nullify(_)
+            | Self::Finalize(_)
+            | Self::ConflictingNotarize(_)
+            | Self::ConflictingFinalize(_)
+            | Self::NullifyFinalize(_) => false,
         }
     }
 

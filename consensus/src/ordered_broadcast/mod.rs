@@ -1017,7 +1017,7 @@ mod tests {
                 (1_000, Epoch::new(111), false),
             )
             .await;
-        })
+        });
     }
 
     #[test_group("slow")]

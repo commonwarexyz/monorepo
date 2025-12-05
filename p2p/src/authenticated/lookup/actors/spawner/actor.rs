@@ -157,7 +157,7 @@ impl<
                                 }
                                 router.release(peer).await;
                                 // Release the reservation
-                                drop(reservation)
+                                drop(reservation);
                             });
                     }
                 }

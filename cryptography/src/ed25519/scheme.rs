@@ -2,7 +2,7 @@ use crate::{Array, PrivateKeyExt};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use crate::BatchVerifier;
-        use std::borrow::{Cow, ToOwned};
+        use std::borrow::Cow;
     } else {
         use alloc::borrow::{Cow, ToOwned};
     }
@@ -45,7 +45,7 @@ impl crate::Signer for PrivateKey {
         let raw = self.key.verification_key().to_bytes();
         Self::PublicKey {
             raw,
-            key: self.key.verification_key().to_owned(),
+            key: self.key.verification_key(),
         }
     }
 }
@@ -53,9 +53,10 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
-        let payload = namespace
-            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
-            .unwrap_or_else(|| Cow::Borrowed(msg));
+        let payload = namespace.map_or_else(
+            || Cow::Borrowed(msg),
+            |namespace| Cow::Owned(union_unique(namespace, msg)),
+        );
         let sig = self.key.sign(&payload);
         Signature::from(sig)
     }
@@ -181,9 +182,10 @@ impl crate::Verifier for PublicKey {
 impl PublicKey {
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
-        let payload = namespace
-            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
-            .unwrap_or_else(|| Cow::Borrowed(msg));
+        let payload = namespace.map_or_else(
+            || Cow::Borrowed(msg),
+            |namespace| Cow::Owned(union_unique(namespace, msg)),
+        );
         self.key.verify(&sig.signature, &payload).is_ok()
     }
 }
@@ -541,7 +543,7 @@ mod tests {
     #[test]
     fn rfc8032_test_vector_1() {
         let (private_key, public_key, message, signature) = vector_1();
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     // sanity check the test infra rejects bad signatures
@@ -566,7 +568,7 @@ mod tests {
     #[test]
     fn rfc8032_test_vector_2() {
         let (private_key, public_key, message, signature) = vector_2();
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -592,7 +594,7 @@ mod tests {
             4a7c15e9716ed28dc027beceea1ec40a
             ",
         );
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -686,7 +688,7 @@ mod tests {
             5e8fcd4f681e30a6ac00a9704a188a03
             ",
         );
-        test_sign_and_verify(private_key, public_key, &message, signature)
+        test_sign_and_verify(private_key, public_key, &message, signature);
     }
 
     #[test]
@@ -728,7 +730,7 @@ mod tests {
             PublicKey::decode(public_key.as_ref()).unwrap(),
             &message,
             Signature::decode(signature.as_ref()).unwrap(),
-        )
+        );
     }
 
     #[test]

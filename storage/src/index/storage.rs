@@ -306,15 +306,16 @@ impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
 
         // If there is a dangling next, we should add it to past.
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial | Phase::Entry => {
+            Phase::Initial
+            | Phase::Entry
+            | Phase::Done
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::Next(next) => {
                 // If there is a next, we should add it to past.
                 self.past_push(next);
-            }
-            Phase::Done => {
-                // No action needed.
             }
             Phase::EntryDeleted => {
                 // If the entry is deleted, we should remove it.
@@ -322,15 +323,9 @@ impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
                 entry.remove();
                 return;
             }
-            Phase::PostDeleteEntry => {
-                // No action needed.
-            }
             Phase::PostDeleteNext(Some(next)) => {
                 // If there is a stale record, we should add it to past.
                 self.past_push(next);
-            }
-            Phase::PostDeleteNext(None) => {
-                // No action needed.
             }
             Phase::PostInsert(next) => {
                 // If there is a current record, we should add it to past.

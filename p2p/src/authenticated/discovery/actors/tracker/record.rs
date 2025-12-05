@@ -99,8 +99,7 @@ impl<C: PublicKey> Record<C> {
     /// Returns true if the update was successful.
     pub fn update(&mut self, info: Info<C>) -> bool {
         match &self.address {
-            Address::Myself(_) => false,
-            Address::Blocked => false,
+            Address::Myself(_) | Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => {
                 self.address = Address::Discovered(info, 0);
                 true
@@ -234,11 +233,9 @@ impl<C: PublicKey> Record<C> {
     /// Return the socket of the peer, if known.
     pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
+            Address::Myself(info) | Address::Discovered(info, _) => Some(info.socket),
             Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info, _) => Some(info.socket),
-            Address::Blocked => None,
+            Address::Unknown | Address::Blocked => None,
         }
     }
 
@@ -246,11 +243,9 @@ impl<C: PublicKey> Record<C> {
     /// known and we are connected to the peer.
     pub fn sharable(&self) -> Option<Info<C>> {
         match &self.address {
-            Address::Unknown => None,
             Address::Myself(info) => Some(info),
-            Address::Bootstrapper(_) => None,
             Address::Discovered(info, _) => (self.status == Status::Active).then_some(info),
-            Address::Blocked => None,
+            Address::Unknown | Address::Bootstrapper(_) | Address::Blocked => None,
         }
         .cloned()
     }

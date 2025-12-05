@@ -403,8 +403,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             debug!(section = i, "destroyed blob");
         }
         match self.context.remove(&self.config.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

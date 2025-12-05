@@ -113,7 +113,7 @@ impl<B: Blob> Append<B> {
         // the append buffer to maintain its page-boundary alignment.
         if remaining != 0 {
             buffer.offset -= remaining as u64;
-            buffer.data.extend_from_slice(&buf[buf.len() - remaining..])
+            buffer.data.extend_from_slice(&buf[buf.len() - remaining..]);
         }
 
         // Calculate where new data starts in the buffer to skip already-written trailing bytes.

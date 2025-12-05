@@ -23,7 +23,7 @@ enum Variant {
 }
 
 impl Variant {
-    pub const fn name(&self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Store => "store",
             Self::Any => "any",

@@ -117,7 +117,7 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args).await
+                validator::run::<ThresholdScheme<MinSig>>(context, args).await;
             }
         }
     });

@@ -181,9 +181,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(offset) => offset,
-            None => return Ok(None),
+        let Some(location) = self.indices.get(&index) else {
+            return Ok(None);
         };
 
         // Fetch item from disk

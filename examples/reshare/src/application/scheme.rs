@@ -50,9 +50,9 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     /// Unregisters the signing scheme for the given epoch.
     ///
     /// Returns `false` if no scheme was registered for the epoch.
-    pub fn unregister(&self, epoch: &Epoch) -> bool {
+    pub fn unregister(&self, epoch: Epoch) -> bool {
         let mut schemes = self.schemes.lock().unwrap();
-        schemes.remove(epoch).is_some()
+        schemes.remove(&epoch).is_some()
     }
 }
 

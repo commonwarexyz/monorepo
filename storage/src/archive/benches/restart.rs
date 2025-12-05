@@ -29,9 +29,7 @@ fn bench_restart(c: &mut Criterion) {
                         module_path!(),
                         variant.name(),
                         items,
-                        compression
-                            .map(|l| l.to_string())
-                            .unwrap_or_else(|| "off".into())
+                        compression.map_or_else(|| "off".into(), |l| l.to_string())
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {

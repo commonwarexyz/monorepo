@@ -150,9 +150,8 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(offset) => offset,
-            None => return Ok(None),
+        let Some(location) = self.indices.get(&index) else {
+            return Ok(None);
         };
 
         // Fetch item from disk

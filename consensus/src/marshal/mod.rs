@@ -762,7 +762,7 @@ mod tests {
                     assert_eq!(block.unwrap().height(), height);
                 }
             }
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -817,7 +817,7 @@ mod tests {
             let received_block = subscription_rx.await.unwrap();
             assert_eq!(received_block.digest(), block.digest());
             assert_eq!(received_block.height(), 1);
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -893,7 +893,7 @@ mod tests {
             assert_eq!(received1_sub1.height(), 1);
             assert_eq!(received2.height(), 2);
             assert_eq!(received1_sub3.height(), 1);
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -961,7 +961,7 @@ mod tests {
             let received2 = sub2_rx.await.unwrap();
             assert_eq!(received2.digest(), block2.digest());
             assert_eq!(received2.height(), 2);
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1072,7 +1072,7 @@ mod tests {
             let received5 = sub5_rx.await.unwrap();
             assert_eq!(received5.digest(), block5.digest());
             assert_eq!(received5.height(), 5);
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1132,7 +1132,7 @@ mod tests {
             // Missing commitment
             let missing = Sha256::hash(b"missing");
             assert!(actor.get_info(&missing).await.is_none());
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1214,7 +1214,7 @@ mod tests {
             actor.report(Activity::Finalization(f3)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((3, d3)));
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1273,7 +1273,7 @@ mod tests {
             // Missing height
             let by_height = actor.get_block(2).await;
             assert!(by_height.is_none());
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1331,7 +1331,7 @@ mod tests {
             let missing = Sha256::hash(b"definitely-missing");
             let missing_block = actor.get_block(&missing).await;
             assert!(missing_block.is_none());
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1385,7 +1385,7 @@ mod tests {
             assert_eq!(finalization.proposal.payload, commitment);
 
             assert!(actor.get_finalization(2).await.is_none());
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1436,7 +1436,7 @@ mod tests {
             (0..5).for_each(|i| {
                 assert_eq!(blocks[i].height(), 5 - i as u64);
             });
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1596,7 +1596,7 @@ mod tests {
                 !verify.await.unwrap(),
                 "Byzantine block with mismatched parent commitment should be rejected"
             );
-        })
+        });
     }
 
     #[test_traced("WARN")]
@@ -1708,7 +1708,7 @@ mod tests {
             // Validator 1 should still have the original finalization (v2)
             let fin0_after = actors[1].get_finalization(1).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
-        })
+        });
     }
 
     #[test_traced("INFO")]

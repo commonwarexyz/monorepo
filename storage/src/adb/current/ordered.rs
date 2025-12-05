@@ -298,8 +298,8 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                next_key,
                 loc,
+                next_key,
                 chunk,
             },
         ))

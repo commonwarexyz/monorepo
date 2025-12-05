@@ -818,13 +818,13 @@ mod tests {
         const PEAK_COUNT: usize = 3;
         proof2
             .digests
-            .extend(proof.digests[0..PEAK_COUNT - 1].iter().cloned());
+            .extend(proof.digests[0..PEAK_COUNT - 1].iter().copied());
         // sneak in an extra hash that won't be used in the computation and make sure it's
         // detected
         proof2.digests.push(test_digest(0));
         proof2
             .digests
-            .extend(proof.digests[PEAK_COUNT - 1..].iter().cloned());
+            .extend(proof.digests[PEAK_COUNT - 1..].iter().copied());
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
             "proof verification should fail with extra hash even if it's unused by the computation"

@@ -183,7 +183,7 @@ pub fn recover_public<V: Variant>(
     }
 
     // Precompute Barycentric Weights for all coefficients
-    let indices: Vec<u32> = commitments.keys().cloned().collect();
+    let indices: Vec<u32> = commitments.keys().copied().collect();
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Perform interpolation over each coefficient using the precomputed weights

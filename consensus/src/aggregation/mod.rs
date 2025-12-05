@@ -493,7 +493,7 @@ mod tests {
                                 Epoch::new(111),
                                 share.clone(),
                                 polynomial.clone(),
-                                pks.to_vec(),
+                                pks.clone(),
                             );
                             s
                         };
@@ -655,7 +655,7 @@ mod tests {
                             Epoch::new(111),
                             share.clone(),
                             polynomial_clone.clone(),
-                            pks.to_vec(),
+                            pks.clone(),
                         );
                         s
                     };
@@ -744,7 +744,7 @@ mod tests {
                             Epoch::new(111),
                             share.clone(),
                             polynomial.clone(),
-                            pks.to_vec(),
+                            pks.clone(),
                         );
                         s
                     };
@@ -1056,7 +1056,7 @@ mod tests {
                         Epoch::new(111),
                         share.clone(),
                         polynomial.clone(),
-                        pks.to_vec(),
+                        pks.clone(),
                     );
                     s
                 };

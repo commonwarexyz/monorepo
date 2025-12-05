@@ -41,7 +41,7 @@ fn bench_prove_range(c: &mut Criterion) {
                             .is_ok());
                     },
                     criterion::BatchSize::SmallInput,
-                )
+                );
             },
         );
     }

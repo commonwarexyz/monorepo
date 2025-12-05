@@ -166,8 +166,8 @@ impl Read for Signature {
         }
         Ok(Self {
             raw,
-            signature,
             recovery_id,
+            signature,
         })
     }
 }
