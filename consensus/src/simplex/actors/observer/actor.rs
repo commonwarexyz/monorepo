@@ -1,5 +1,5 @@
 use super::{Config, Mailbox};
-use crate::simplex::{signing_scheme::Scheme, types::Voter};
+use crate::simplex::signing_scheme::Scheme;
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use rand::{CryptoRng, Rng};
 use tracing::{debug, warn};
+use crate::simplex::types::Certificate;
 
 /// Observer broadcaster actor that accepts TCP connections and broadcasts
 /// certificates to all connected observers.
@@ -20,7 +21,7 @@ pub struct Actor<
     L: Listener,
 > {
     context: ContextCell<E>,
-    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
 
     observers: HashMap<SocketAddr, L::Sink>,
     max_observers: usize,
@@ -59,6 +60,10 @@ impl<
     /// Runs the observer actor event loop.
     pub async fn run(mut self, mut listener: L) {
         select_loop! {
+            self.context,
+            on_stopped => {
+                // TODO: cleanup
+            },
             // Accept new observer connections
             result = listener.accept() => {
                 match result {
@@ -88,7 +93,7 @@ impl<
         }
     }
 
-    async fn broadcast(&mut self, msg: Voter<S, D>) {
+    async fn broadcast(&mut self, msg: Certificate<S, D>) {
         let encoded = msg.encode();
         let mut to_remove = vec![];
 
@@ -105,7 +110,7 @@ impl<
         }
 
         for address in to_remove {
-            self.observers.remove(&address);
+            let conn = self.observers.remove(&address);
         }
     }
 }

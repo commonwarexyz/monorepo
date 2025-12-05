@@ -1,3 +1,4 @@
+use futures::future::Either;
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
@@ -7,10 +8,11 @@ use crate::{simplex::signing_scheme::Scheme, Automaton, Relay, Reporter};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
+use crate::simplex::actors::observer;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -22,6 +24,7 @@ pub struct Engine<
     A: Automaton<Context = Context<D, P>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    L: Listener,
 > {
     context: ContextCell<E>,
 
@@ -33,18 +36,22 @@ pub struct Engine<
 
     resolver: resolver::Actor<E, P, S, B, D>,
     resolver_mailbox: resolver::Mailbox<S, D>,
+
+    observer: Option<observer::Actor<E, S, D, L>>,
+    observer_mailbox: Option<observer::Mailbox<S, D>>,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
-        D: Digest,
-        A: Automaton<Context = Context<D, P>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, P, S, B, D, A, R, F>
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    P: PublicKey,
+    S: Scheme<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+    D: Digest,
+    A: Automaton<Context = Context<D, P>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<S, D>>,
+    L: Listener,
+> Engine<E, P, S, B, D, A, R, F, L>
 {
     /// Create a new `simplex` consensus engine.
     pub fn new(context: E, cfg: Config<P, S, B, D, A, R, F>) -> Self {
@@ -89,6 +96,14 @@ impl<
             },
         );
 
+        let observer_config = cfg.listen_addr.map(|listen_addr| observer::Config {
+            listen_addr,
+            max_observers: cfg.max_observers.unwrap_or(100),
+        });
+        let (observer, observer_mailbox) = observer_config.map(|cfg| {
+            observer::Actor::new(context.with_label("observer"), cfg)
+        }).unzip();
+
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
@@ -116,6 +131,9 @@ impl<
 
             resolver,
             resolver_mailbox,
+
+            observer,
+            observer_mailbox,
         }
     }
 
@@ -161,10 +179,11 @@ impl<
         vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        listener: L,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(vote_network, certificate_network, resolver_network)
+            self.run(vote_network, certificate_network, resolver_network, listener)
                 .await
         )
     }
@@ -174,6 +193,7 @@ impl<
         vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        listener: L,
     ) {
         // Start the batcher (receives votes via vote_network, certificates via certificate_network)
         // Batcher sends proposals/certificates to voter via voter_mailbox
@@ -185,11 +205,20 @@ impl<
             certificate_receiver,
         );
 
+        // Start the observer
+        let mut observer_task = match self.observer {
+            Some(observer) => Either::Left(observer.start(listener)),
+            None => Either::Right(futures::future::pending()),
+        };
+
         // Start the resolver (sends certificates to voter via voter_mailbox)
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
-            self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+        let mut resolver_task = self.resolver.start(
+            self.voter_mailbox,
+            resolver_sender,
+            resolver_receiver,
+            self.observer_mailbox,
+        );
 
         // Start the voter
         let mut voter_task = self.voter.start(
@@ -214,6 +243,9 @@ impl<
             _ = &mut resolver_task => {
                 panic!("resolver should not finish");
             },
+            _ = &mut observer_task => {
+                panic!("observer should not finish");
+            }
         }
     }
 }
