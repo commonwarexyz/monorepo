@@ -509,6 +509,7 @@ mod tests {
                 // Calculate the epoch and round for the block
                 let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
                 let round = Round::new(epoch, View::new(height));
+                let parent_view = View::new(height - 1);
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
@@ -524,10 +525,7 @@ mod tests {
                 let proposal = Proposal {
                     round,
                     leader: 0,
-                    parent: (
-                        View::new(height.checked_sub(1).unwrap()),
-                        Sha256Digest::from([0u8; 32]),
-                    ),
+                    parent: (parent_view, block.parent()),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -657,6 +655,7 @@ mod tests {
                 // Calculate the epoch and round for the block
                 let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
                 let round = Round::new(epoch, View::new(height));
+                let parent_view = View::new(height - 1);
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (applications.len() as u64)) as usize;
@@ -672,10 +671,7 @@ mod tests {
                 let proposal = Proposal {
                     round,
                     leader: 0,
-                    parent: (
-                        View::new(height.checked_sub(1).unwrap()),
-                        Sha256Digest::from([0u8; 32]),
-                    ),
+                    parent: (parent_view, block.parent()),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
