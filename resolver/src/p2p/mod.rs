@@ -23,12 +23,17 @@
 //!
 //! # Targeting
 //!
-//! Callers can restrict fetches to specific target peers using `fetch_targeted`. Only target peers
-//! are tried, there is no automatic fallback to other peers. Targets persist through transient
-//! failures (timeout, "no data" response, send failure) since the peer might be slow or receive
-//! the data later. To fall back to any peer, call `fetch` which clears any existing targets.
-//! Calling `fetch_targeted` again adds to the current targets. Targets are also cleared when
-//! the fetch succeeds, is canceled, or when a peer is blocked for sending invalid data.
+//! Callers can restrict fetches to specific target peers using [`Mailbox::fetch_targeted`]. Only
+//! target peers are tried, there is no automatic fallback to other peers. Targets persist through
+//! transient failures (timeout, "no data" response, send failure) since the peer might be slow or
+//! receive the data later.
+//!
+//! While a fetch is in progress, callers can modify targeting:
+//! - [`Mailbox::fetch_targeted`] adds peers to the existing target set
+//! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
+//!
+//! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
+//! or blocked peer), the targets for that key are cleared automatically.
 //!
 //! # Performance Considerations
 //!
