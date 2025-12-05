@@ -179,13 +179,8 @@ where
 
             select! {
                 result = vote_receiver.recv().fuse() => {
-                    match result {
-                        Ok((_, msg)) => {
-                            self.handle_vote(&mut vote_sender, msg.to_vec()).await;
-                        }
-                        Err(_) => {
-                            self.send_random(&mut vote_sender).await;
-                        }
+                    if let Ok((_, msg)) = result {
+                        self.handle_vote(&mut vote_sender, msg.to_vec()).await;
                     }
                 },
                 result = cert_receiver.recv().fuse() => {
@@ -193,6 +188,7 @@ where
                         self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
                     }
                 },
+                // We ignore resolver messages
                 _ = self.context.sleep(TIMEOUT) => {
                     self.send_random(&mut vote_sender).await;
                 }
@@ -210,9 +206,6 @@ where
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
             return;
         };
-
-        self.view = vote.view().get();
-
         match vote {
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
@@ -259,7 +252,6 @@ where
     }
 
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
-        // Optionally replay the certificate
         if self.fuzz_input.random_bool() {
             let _ = sender
                 .send(Recipients::All, Bytes::from(msg.clone()), true)
@@ -271,22 +263,30 @@ where
             return;
         };
 
-        // Update state based on certificate type
         match cert {
             Certificate::Notarization(n) => {
                 let v = n.view().get();
+                if v > self.view {
+                    self.view = v;
+                }
                 if v > self.last_notarized {
                     self.last_notarized = v;
                 }
             }
             Certificate::Nullification(n) => {
                 let v = n.view().get();
+                if v > self.view {
+                    self.view = v;
+                }
                 if v > self.last_nullified {
                     self.last_nullified = v;
                 }
             }
             Certificate::Finalization(f) => {
                 let v = f.view().get();
+                if v > self.view {
+                    self.view = v;
+                }
                 if v > self.last_finalized {
                     self.last_finalized = v;
                 }
