@@ -4,12 +4,6 @@
     <loc>https://commonware.xyz/benchmarks.html</loc>
   </url>
   <url>
-    <loc>https://commonware.xyz/blogs/qmdb-any.html</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/blogs/qmdb-current.html</loc>
-  </url>
-  <url>
     <loc>https://commonware.xyz/blogs/buffered-signatures.html</loc>
   </url>
   <url>
@@ -38,6 +32,12 @@
   </url>
   <url>
     <loc>https://commonware.xyz/blogs/only-time-will-tell.html</loc>
+  </url>
+  <url>
+    <loc>https://commonware.xyz/blogs/qmdb-any.html</loc>
+  </url>
+  <url>
+    <loc>https://commonware.xyz/blogs/qmdb-current.html</loc>
   </url>
   <url>
     <loc>https://commonware.xyz/blogs/reshare.html</loc>
