@@ -604,6 +604,18 @@ impl<K, V> BiMap<K, V> {
         self.inner.get_value(key)
     }
 
+    /// Returns the associated key for `value`, if it exists.
+    pub fn get_key(&self, value: &V) -> Option<&K>
+    where
+        V: PartialEq,
+    {
+        self.inner
+            .values()
+            .iter()
+            .position(|v| v == value)
+            .map(|idx| &self.inner.keys()[idx])
+    }
+
     /// Returns the associated values.
     pub fn values(&self) -> &[V] {
         self.inner.values()
@@ -952,6 +964,16 @@ mod test {
         let bimap = BiMap::try_from(map).unwrap();
         assert_eq!(bimap.len(), 3);
         assert_eq!(bimap.get_value(&1), Some(&"a"));
+    }
+
+    #[test]
+    fn test_bimap_get_key() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
+        let bimap: BiMap<_, _> = items.into();
+        assert_eq!(bimap.get_key(&"a"), Some(&1));
+        assert_eq!(bimap.get_key(&"b"), Some(&2));
+        assert_eq!(bimap.get_key(&"c"), Some(&3));
+        assert_eq!(bimap.get_key(&"d"), None);
     }
 
     #[test]
