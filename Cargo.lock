@@ -1154,9 +1154,16 @@ name = "commonware-consensus-fuzz"
 version = "0.0.63"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]
