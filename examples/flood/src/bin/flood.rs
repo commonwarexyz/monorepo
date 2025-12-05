@@ -8,7 +8,11 @@ use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
-use commonware_utils::{from_hex_formatted, ordered::Set, union, NZU32};
+use commonware_utils::{
+    from_hex_formatted,
+    ordered::{Set, TryCollect},
+    union, NZU32,
+};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
@@ -96,7 +100,11 @@ fn main() {
         );
 
         // Configure peers and bootstrappers
-        let peer_keys = Set::try_from_iter(peers.keys().cloned()).expect("public keys are unique");
+        let peer_keys: Set<_> = peers
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("public keys are unique");
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");

@@ -55,7 +55,10 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{ordered::Set, union, NZUsize, NZU32};
+use commonware_utils::{
+    ordered::{Set, TryCollect},
+    union, NZUsize, NZU32,
+};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -114,12 +117,15 @@ fn main() {
     if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
-    let validators = Set::try_from_iter(participants.iter().map(|peer| {
-        let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
-        tracing::info!(key = ?verifier, "registered authorized key",);
-        verifier
-    }))
-    .expect("public keys are unique");
+    let validators: Set<_> = participants
+        .iter()
+        .map(|peer| {
+            let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
+            tracing::info!(key = ?verifier, "registered authorized key",);
+            verifier
+        })
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

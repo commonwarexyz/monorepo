@@ -8,7 +8,10 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{ordered::BiMap, quorum};
+use commonware_utils::{
+    ordered::{BiMap, TryCollect},
+    quorum,
+};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -30,12 +33,14 @@ pub fn ed25519_participants<R>(
 where
     R: RngCore + CryptoRng,
 {
-    BiMap::try_from_iter((0..n).map(|_| {
-        let private_key = ed25519::PrivateKey::from_rng(rng);
-        let public_key = private_key.public_key();
-        (public_key, private_key)
-    }))
-    .expect("ed25519 public keys are unique")
+    (0..n)
+        .map(|_| {
+            let private_key = ed25519::PrivateKey::from_rng(rng);
+            let public_key = private_key.public_key();
+            (public_key, private_key)
+        })
+        .try_collect()
+        .expect("ed25519 public keys are unique")
 }
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
@@ -83,7 +88,11 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
-    let signers = BiMap::try_from_iter(participants.clone().into_iter().zip(bls_public))
+    let signers: BiMap<_, _> = participants
+        .clone()
+        .into_iter()
+        .zip(bls_public)
+        .try_collect()
         .expect("ed25519 public keys are unique");
     let schemes: Vec<_> = bls_privates
         .into_iter()

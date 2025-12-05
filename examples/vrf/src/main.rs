@@ -85,7 +85,10 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{ordered::Set, quorum, NZU32};
+use commonware_utils::{
+    ordered::{Set, TryCollect},
+    quorum, NZU32,
+};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -185,12 +188,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let recipients = Set::try_from_iter(participants.into_iter().map(|peer| {
-        let verifier = PrivateKey::from_seed(peer).public_key();
-        tracing::info!(key = ?verifier, "registered authorized key",);
-        verifier
-    }))
-    .expect("public keys are unique");
+    let recipients: Set<_> = participants
+        .into_iter()
+        .map(|peer| {
+            let verifier = PrivateKey::from_seed(peer).public_key();
+            tracing::info!(key = ?verifier, "registered authorized key",);
+            verifier
+        })
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -269,7 +275,10 @@ fn main() {
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
-                Set::try_from_iter(contributors.clone()).expect("public keys are unique"),
+                contributors
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 corrupt,
                 lazy,
                 forger,
@@ -300,7 +309,7 @@ fn main() {
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
-                Set::try_from_iter(contributors).expect("public keys are unique"),
+                contributors.try_into().expect("public keys are unique"),
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

@@ -213,7 +213,7 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let dealers = Set::try_from_iter(dealers).expect("participants are unique");
+        let dealers: Set<_> = dealers.try_into().expect("participants are unique");
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -413,11 +413,13 @@ where
                             next_dealers.clone()
                         } else {
                             // Pseudorandomly select some random players to receive shares for the next epoch.
-                            Set::try_from_iter(Self::choose_from_all(
+                            Self::choose_from_all(
                                 &all_participants,
                                 self.num_participants_per_epoch,
                                 next_epoch,
-                            ))
+                            )
+                            .into_iter()
+                            .try_collect()
                             .expect("participants are unique")
                         };
 

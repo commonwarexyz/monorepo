@@ -20,7 +20,7 @@ use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{
     from_hex,
-    ordered::{Quorum, Set},
+    ordered::{Quorum, Set, TryCollect},
     union, NZUsize, NZU32,
 };
 use governor::Quota;
@@ -86,12 +86,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = Set::try_from_iter(participants.into_iter().map(|peer| {
-        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
-        tracing::info!(key = ?verifier, "registered authorized key");
-        verifier
-    }))
-    .expect("public keys are unique");
+    let validators: Set<_> = participants
+        .into_iter()
+        .map(|peer| {
+            let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
+            tracing::info!(key = ?verifier, "registered authorized key");
+            verifier
+        })
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

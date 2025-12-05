@@ -11,7 +11,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::{
-    ordered::{Map, Set},
+    ordered::{Map, Set, TryCollect},
     NZU32,
 };
 use governor::Quota;
@@ -254,8 +254,11 @@ impl NetworkScheme for Discovery {
         for index in 0..peer.topo.tracked_peer_sets {
             let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
-            let subset =
-                Set::try_from_iter(addrs[..3].iter().cloned()).expect("public keys are unique");
+            let subset: Set<_> = addrs[..3]
+                .iter()
+                .cloned()
+                .try_collect()
+                .expect("public keys are unique");
             oracle.update(index as u64, subset).await;
         }
 
@@ -280,12 +283,11 @@ impl NetworkScheme for Discovery {
         peer_ids: &'a [PeerId],
     ) {
         // Discovery only needs public keys (addresses discovered via protocol)
-        let peer_pks: Set<_> = Set::try_from_iter(
-            peer_ids
-                .iter()
-                .map(|&id| topo.peers[id as usize].public_key.clone()),
-        )
-        .expect("public keys are unique");
+        let peer_pks: Set<_> = peer_ids
+            .iter()
+            .map(|&id| topo.peers[id as usize].public_key.clone())
+            .try_collect()
+            .expect("public keys are unique");
         let _ = oracle.update(index, peer_pks).await;
     }
 }
@@ -331,7 +333,10 @@ impl NetworkScheme for Lookup {
             oracle
                 .update(
                     index as u64,
-                    Map::try_from_iter(peer_list.clone()).expect("public keys are unique"),
+                    peer_list
+                        .clone()
+                        .try_into()
+                        .expect("public keys are unique"),
                 )
                 .await;
         }
@@ -340,8 +345,11 @@ impl NetworkScheme for Lookup {
         for index in peer.topo.tracked_peer_sets..(peer.topo.tracked_peer_sets * 2) {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
-            let subset =
-                Map::try_from_iter(peers[..3].iter().cloned()).expect("public keys are unique");
+            let subset: Map<_, _> = peers[..3]
+                .iter()
+                .cloned()
+                .try_collect()
+                .expect("public keys are unique");
             oracle.update(index as u64, subset).await;
         }
 
@@ -366,11 +374,14 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Map<_, _> = Map::try_from_iter(peer_ids.iter().map(|&id| {
-            let p = &topo.peers[id as usize];
-            (p.public_key.clone(), p.address)
-        }))
-        .expect("public keys are unique");
+        let peer_list: Map<_, _> = peer_ids
+            .iter()
+            .map(|&id| {
+                let p = &topo.peers[id as usize];
+                (p.public_key.clone(), p.address)
+            })
+            .try_collect()
+            .expect("public keys are unique");
         let _ = oracle.update(index, peer_list).await;
     }
 }

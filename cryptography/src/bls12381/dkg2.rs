@@ -291,7 +291,7 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
-    ordered::{Map, Quorum, Set},
+    ordered::{Map, Quorum, Set, TryCollect},
     quorum, NZU32,
 };
 use core::num::NonZeroU32;
@@ -1054,13 +1054,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                 )
             })
             .collect::<Vec<_>>();
-        let results = Map::try_from_iter(
-            priv_msgs
-                .clone()
-                .into_iter()
-                .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg))),
-        )
-        .expect("players are unique");
+        let results: Map<_, _> = priv_msgs
+            .clone()
+            .into_iter()
+            .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg)))
+            .try_collect()
+            .expect("players are unique");
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
@@ -1369,21 +1368,28 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
 ) -> DealResult<V, P> {
-    let players = Set::try_from_iter(players).map_err(|_| Error::DuplicatePlayers)?;
+    let players: Set<_> = players
+        .into_iter()
+        .try_collect()
+        .map_err(|_| Error::DuplicatePlayers)?;
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
     let private = poly::new_from(t - 1, &mut rng);
-    let shares: Map<_, _> = Map::try_from_iter(players.iter().enumerate().map(|(i, p)| {
-        let eval = private.evaluate(i as u32);
-        let share = Share {
-            index: eval.index,
-            private: eval.value,
-        };
-        (p.clone(), share)
-    }))
-    .expect("players are unique");
+    let shares: Map<_, _> = players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let eval = private.evaluate(i as u32);
+            let share = Share {
+                index: eval.index,
+                private: eval.value,
+            };
+            (p.clone(), share)
+        })
+        .try_collect()
+        .expect("players are unique");
     let output = Output {
         summary: Summary::random(&mut rng),
         players,

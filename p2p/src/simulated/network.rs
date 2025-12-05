@@ -15,7 +15,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::ordered::Set;
+use commonware_utils::ordered::{Set, TryCollect};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
@@ -327,7 +327,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if self.peer_sets.is_empty() {
                     // Return all peers if no peer sets are registered.
                     let _ = response.send(Some(
-                        Set::try_from_iter(self.peers.keys().cloned())
+                        self.peers
+                            .keys()
+                            .cloned()
+                            .try_collect()
                             .expect("BTreeMap keys are unique"),
                     ));
                 } else {
@@ -439,7 +442,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Get all tracked peers as an ordered set.
     fn all_tracked_peers(&self) -> Set<P> {
-        Set::try_from_iter(self.peer_refs.keys().cloned()).expect("BTreeMap keys are unique")
+        self.peer_refs
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("BTreeMap keys are unique")
     }
 }
 

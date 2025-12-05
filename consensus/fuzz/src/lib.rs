@@ -22,7 +22,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, ordered::Set, NZUsize, NZU32};
+use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -181,7 +181,10 @@ fn run<P: Simplex>(input: FuzzInput) {
                 context.with_label("disrupter"),
                 validator.clone(),
                 scheme,
-                Set::try_from_iter(participants.clone()).expect("public keys are unique"),
+                participants
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 namespace.clone(),
                 input.clone(),
             );
@@ -193,7 +196,9 @@ fn run<P: Simplex>(input: FuzzInput) {
             let context = context.with_label(&format!("validator-{validator}"));
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
-                participants: Set::try_from_iter(participants.clone())
+                participants: participants
+                    .clone()
+                    .try_into()
                     .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
             };
