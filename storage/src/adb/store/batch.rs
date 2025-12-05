@@ -237,6 +237,7 @@ pub mod tests {
         test_create(new_db).await?;
         test_delete(new_db).await?;
         test_delete_unchecked(new_db).await?;
+        test_write_batch_from_to_empty(new_db).await?;
         test_write_batch(new_db).await?;
         Ok(())
     }
@@ -345,6 +346,72 @@ pub mod tests {
         assert_eq!(batch.get(&key).await?, None);
 
         db.destroy().await?;
+        Ok(())
+    }
+
+    /// Create an empty db, write a batch containing small # of keys, then write another batch deleting those
+    /// keys.
+    async fn test_write_batch_from_to_empty<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
+    {
+        // 2 key test
+        let mut db = new_db().await;
+        let created1 = D::Key::from_seed(1);
+        let created2 = D::Key::from_seed(2);
+        let mut batch = db.start_batch();
+        batch
+            .create(created1.clone(), D::Value::from_seed(1))
+            .await?;
+        batch
+            .create(created2.clone(), D::Value::from_seed(2))
+            .await?;
+        batch
+            .update(created1.clone(), D::Value::from_seed(3))
+            .await?;
+        db.write_batch(batch.into_iter()).await?;
+
+        assert_eq!(
+            Store::get(&db, &created1).await?,
+            Some(D::Value::from_seed(3))
+        );
+        assert_eq!(
+            Store::get(&db, &created2).await?,
+            Some(D::Value::from_seed(2))
+        );
+
+        let mut delete_batch = db.start_batch();
+        delete_batch.delete(created1.clone()).await?;
+        delete_batch.delete(created2.clone()).await?;
+        db.write_batch(delete_batch.into_iter()).await?;
+        assert_eq!(Store::get(&db, &created1).await?, None);
+        assert_eq!(Store::get(&db, &created2).await?, None);
+
+        db.destroy().await?;
+
+        // 1 key test
+        let mut db = new_db().await;
+        let created1 = D::Key::from_seed(1);
+        let mut batch = db.start_batch();
+        batch
+            .create(created1.clone(), D::Value::from_seed(1))
+            .await?;
+        db.write_batch(batch.into_iter()).await?;
+        assert_eq!(
+            Store::get(&db, &created1).await?,
+            Some(D::Value::from_seed(1))
+        );
+        let mut delete_batch = db.start_batch();
+        delete_batch.delete(created1.clone()).await?;
+        db.write_batch(delete_batch.into_iter()).await?;
+        assert_eq!(Store::get(&db, &created1).await?, None);
+
+        db.destroy().await?;
+
         Ok(())
     }
 
