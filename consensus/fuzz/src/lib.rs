@@ -255,7 +255,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
 
-            let (pending, _, _) = registrations.remove(&validator).unwrap();
+            let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _, Sha256Digest>::new(
                 context.with_label("disrupter"),
                 validator.clone(),
@@ -264,7 +264,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 namespace.clone(),
                 input.clone(),
             );
-            disrupter.start(pending);
+            disrupter.start(vote_network, certificate_network);
         }
 
         for i in (f as usize)..(n as usize) {
@@ -357,5 +357,49 @@ pub fn fuzz<P: Simplex>(input: FuzzInput) {
 
     if result.is_err() && !IGNORE_PANIC.load(Ordering::SeqCst) {
         panic!("unexpected panic");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ed25519_connected() {
+        let input = FuzzInput {
+            seed: 42,
+            partition: Partition::Connected,
+            configuration: (3, 2, 1),
+            raw_bytes: vec![0u8; 1024],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([0u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_isolated() {
+        let input = FuzzInput {
+            seed: 123,
+            partition: Partition::Isolated,
+            configuration: (3, 2, 1),
+            raw_bytes: vec![1u8; 512],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([1u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
+    }
+
+    #[test]
+    fn test_ed25519_two_partitions() {
+        let input = FuzzInput {
+            seed: 456,
+            partition: Partition::TwoPartitionsWithByzantine,
+            configuration: (4, 3, 1),
+            raw_bytes: vec![2u8; 256],
+            offset: RefCell::new(0),
+            rng: RefCell::new(StdRng::from_seed([2u8; 32])),
+        };
+        fuzz::<SimplexEd25519>(input);
     }
 }

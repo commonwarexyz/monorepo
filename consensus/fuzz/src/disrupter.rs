@@ -6,7 +6,7 @@ use commonware_consensus::{
     simplex::{
         mocks::reporter::Reporter,
         signing_scheme::Scheme,
-        types::{Finalize, Notarize, Nullify, Proposal, Vote},
+        types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -39,6 +39,9 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest>
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     view: u64,
+    last_finalized: u64,
+    last_nullified: u64,
+    last_notarized: u64,
 }
 
 impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> Disrupter<E, S, D>
@@ -55,6 +58,9 @@ where
     ) -> Self {
         Self {
             view: 0,
+            last_finalized: 0,
+            last_nullified: 0,
+            last_notarized: 0,
             context,
             validator,
             scheme,
@@ -74,11 +80,43 @@ where
         Message::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Message::Random)
     }
 
-    fn random_view(&mut self) -> u64 {
-        match self.fuzz_input.random_byte() % 4 {
-            0 => self.view.saturating_sub(self.fuzz_input.random_byte() as u64 % 10),
-            1 => self.view + 1 + (self.fuzz_input.random_byte() as u64 % 4),
-            2 => self.view.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
+    fn random_view(&mut self, current: u64) -> u64 {
+        let lf = self.last_finalized;
+        let lnz = self.last_notarized;
+        let lnf = self.last_nullified;
+
+        match self.fuzz_input.random_byte() % 7 {
+            // Too old (pre-finalized) - should be filtered
+            0 => {
+                if lf == 0 {
+                    0
+                } else {
+                    self.fuzz_input.random_u64() % lf
+                }
+            }
+            // Active past: [last_finalized, current_view]
+            1 => {
+                if current <= lf {
+                    lf
+                } else {
+                    lf + (self.fuzz_input.random_u64() % (current - lf + 1))
+                }
+            }
+            // Active band: [last_finalized, min(last_notarized, current_view)]
+            2 => {
+                let hi = lnz.min(current).max(lf);
+                lf + (self.fuzz_input.random_u64() % (hi - lf + 1))
+            }
+            // Near future: [current_view+1, current_view+4]
+            3 => current + 1 + (self.fuzz_input.random_byte() as u64 % 4),
+            // Moderate future: [current_view+5, current_view+10]
+            4 => current.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
+            // Nullification-based future: start after max(current_view, last_nullified)
+            5 => {
+                let base = current.max(lnf);
+                base.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 10))
+            }
+            // Pure random
             _ => self.fuzz_input.random_u64(),
         }
     }
@@ -118,38 +156,55 @@ where
         result
     }
 
-    pub fn start(self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+    pub fn start(
+        self,
+        vote_network: (impl Sender, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
         let context = self.context.clone();
-        context.spawn(|_| self.run(vote_network))
+        context.spawn(|_| self.run(vote_network, certificate_network))
     }
 
-    async fn run(mut self, vote_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = vote_network;
+    async fn run(
+        mut self,
+        vote_network: (impl Sender, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
+    ) {
+        let (mut vote_sender, mut vote_receiver) = vote_network;
+        let (mut cert_sender, mut cert_receiver) = certificate_network;
 
         loop {
             if self.fuzz_input.random_byte() % 100 < 10 {
-                self.send_random(&mut sender).await;
+                self.send_random(&mut vote_sender).await;
             }
 
             select! {
-                result = receiver.recv().fuse() => {
+                result = vote_receiver.recv().fuse() => {
                     match result {
                         Ok((_, msg)) => {
-                            self.handle(&mut sender, msg.to_vec()).await;
+                            self.handle_vote(&mut vote_sender, msg.to_vec()).await;
                         }
                         Err(_) => {
-                            self.send_random(&mut sender).await;
+                            self.send_random(&mut vote_sender).await;
                         }
                     }
                 },
+                result = cert_receiver.recv().fuse() => {
+                    match result {
+                        Ok((_, msg)) => {
+                            self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
+                        }
+                        Err(_) => {}
+                    }
+                },
                 _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random(&mut sender).await;
+                    self.send_random(&mut vote_sender).await;
                 }
             }
         }
     }
 
-    async fn handle(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+    async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if self.fuzz_input.random_bool() {
             let _ = sender
                 .send(Recipients::All, Bytes::from(msg.clone()), true)
@@ -194,7 +249,7 @@ where
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
-                    let v = self.random_view();
+                    let v = self.random_view(self.view);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
                     if let Some(v) =
                         Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
@@ -204,6 +259,48 @@ where
                     }
                 }
             }
+        }
+    }
+
+    async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        // Optionally replay the certificate
+        if self.fuzz_input.random_bool() {
+            let _ = sender
+                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .await;
+        }
+
+        let cfg = Default::default();
+        let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &cfg) else {
+            return;
+        };
+
+        // Update state based on certificate type
+        match cert {
+            Certificate::Notarization(n) => {
+                let v = n.view().get();
+                if v > self.last_notarized {
+                    self.last_notarized = v;
+                }
+            }
+            Certificate::Nullification(n) => {
+                let v = n.view().get();
+                if v > self.last_nullified {
+                    self.last_nullified = v;
+                }
+            }
+            Certificate::Finalization(f) => {
+                let v = f.view().get();
+                if v > self.last_finalized {
+                    self.last_finalized = v;
+                }
+            }
+        }
+
+        // Optionally send mutated certificate
+        if self.fuzz_input.random_bool() {
+            let mutated = self.mutate_bytes(&msg);
+            let _ = sender.send(Recipients::All, mutated.into(), true).await;
         }
     }
 
@@ -219,7 +316,7 @@ where
                 self.payload(),
             ),
             Mutation::View => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view())),
+                Round::new(original.epoch(), View::new(self.random_view(self.view))),
                 original.parent,
                 original.payload,
             ),
@@ -229,7 +326,7 @@ where
                 original.payload,
             ),
             Mutation::All => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view())),
+                Round::new(original.epoch(), View::new(self.random_view(self.view))),
                 View::new(self.parent()),
                 self.payload(),
             ),
@@ -238,7 +335,7 @@ where
 
     async fn send_random(&mut self, sender: &mut impl Sender) {
         let proposal = Proposal::new(
-            Round::new(Epoch::new(EPOCH), View::new(self.random_view())),
+            Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view))),
             View::new(self.parent()),
             self.payload(),
         );
