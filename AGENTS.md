@@ -472,7 +472,7 @@ fn test_storage_conformance() {
 
 ### Handling Storage Failures
 
-For databases implemented in commonware-storage, errors returned by mutable methods (e.g. `put`,
+- **Failures Are Fatal**: Errors returned by mutable methods (e.g. `put`,
 `delete`, `sync`) are treated as unrecoverable. The database may be in an inconsistent state after
 such an error. Callers must not use a database after a mutable method returns an error. Reviews
 need not comment the database being in an inconsistent state after such an error.
