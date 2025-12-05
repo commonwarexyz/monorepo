@@ -191,6 +191,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.active.retain(|_, k| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
+
+        // Clear waiter since the key that caused it may have been removed
+        self.waiter = None;
     }
 
     /// Cancels a fetch request.
