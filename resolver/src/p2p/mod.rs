@@ -1024,32 +1024,17 @@ mod tests {
             assert!(metrics.contains("_targets_active 2"));
 
             // Wait enough time for targets to fail and retry
-            // With new semantics, targets persist through "no data" responses
-            // so they will be retried multiple times
             context.sleep(Duration::from_secs(3)).await;
-
             let metrics = context.encode();
 
-            // Key assertions for no-fallback semantics:
-            // 1. target_hit should be 0 - targets never returned valid data
-            assert!(
-                metrics.contains("_target_hit_total 0"),
-                "target_hit should be 0 (no valid data from targets)"
-            );
-
-            // 2. Targets should still be active (not cleared on failure)
-            // They persist through "no data" responses
-            assert!(
-                metrics.contains("_targets_active 2"),
-                "targets should persist through failures"
-            );
-
-            // 3. There should be some target misses (targets returned "no data")
-            // With retry semantics, there could be multiple misses per target
-            assert!(
-                metrics.contains("_target_miss_total"),
-                "should have target misses"
-            );
+            // Targets never returned valid data
+            assert!(metrics.contains("_target_hit_total 0"));
+            // Targets should still be active (not cleared on failure)
+            assert!(metrics.contains("_targets_active 2"));
+            // There should be some target misses (targets returned "no data")
+            assert!(metrics
+                .lines()
+                .any(|l| l.contains("_target_miss_total") && !l.trim_end().ends_with(" 0")));
         });
     }
 
@@ -1273,21 +1258,22 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_untarget_fallback() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+    fn test_retarget_and_untarget() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
+                setup_network_and_peers(&context, &[1, 2, 3, 4, 5]).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 4).await;
 
             let key = Key(1);
 
-            // Only peer 4 has the data, peers 2 and 3 don't
-            let mut prod4 = Producer::default();
-            prod4.insert(key.clone(), Bytes::from("data from peer 4"));
+            // Only peer 5 has the data, peers 2, 3, 4 don't
+            let mut prod5 = Producer::default();
+            prod5.insert(key.clone(), Bytes::from("data from peer 5"));
 
             let (cons1, mut cons_out1) = Consumer::new();
 
@@ -1335,7 +1321,19 @@ mod tests {
                 scheme,
                 connections.remove(0),
                 Consumer::dummy(),
-                prod4,
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox5 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod5,
             )
             .await;
 
@@ -1343,31 +1341,34 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with targets for peers 2 and 3 (both don't have data)
-            // Peer 4 has data but is NOT a target initially
             mailbox1
                 .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
                 .await;
 
-            // Verify targets are registered
+            // Verify initial targets
             context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert!(metrics.contains("_targets_active 2"));
-
-            // Wait for targets to fail a couple times (no data responses)
-            context.sleep(Duration::from_secs(1)).await;
-
-            // Verify fetch hasn't succeeded yet (targets still active, no success)
             let metrics = context.encode();
             assert!(
                 metrics.contains("_targets_active 2"),
-                "targets should persist through failures"
-            );
-            assert!(
-                metrics.contains("_target_miss_total"),
-                "should have target misses"
+                "should have 2 initial targets"
             );
 
-            // Now call untarget to fall back to any peer
+            // Wait for targets to fail (at least one retry)
+            context.sleep(Duration::from_millis(500)).await;
+
+            // Replace targets with peer 4
+            mailbox1.retarget(key.clone(), vec![peers[3].clone()]).await;
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("_targets_active 1"),
+                "retarget should replace with single target"
+            );
+
+            // Wait for peer 4 to fail (no data)
+            context.sleep(Duration::from_millis(500)).await;
+
+            // Clear targeting, fall back to any peer
             mailbox1.untarget(key.clone()).await;
 
             // Verify targets are cleared
@@ -1378,12 +1379,15 @@ mod tests {
                 "targets should be cleared after untarget"
             );
 
-            // The fetch should now succeed from peer 4 (which has the data)
-            let event = cons_out1.next().await.unwrap();
+            // Wait for the fetch to retry and succeed from peer 5
+            let event = select! {
+                event = cons_out1.next() => { event.unwrap() },
+                _ = context.sleep(Duration::from_secs(5)) => { panic!("fetch should succeed after untarget"); },
+            };
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
-                    assert_eq!(value, Bytes::from("data from peer 4"));
+                    assert_eq!(value, Bytes::from("data from peer 5"));
                 }
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }

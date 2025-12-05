@@ -493,10 +493,8 @@ mod tests {
             fetcher.retain(|key| key.0 <= 10);
 
             // Check that only keys with value <= 10 remain
-            // MockKey(1) from pending should remain
-            // MockKey(10) from active should remain
-            // MockKey(2), MockKey(3) from pending should be removed (2 <= 10 and 3 <= 10, wait that's wrong)
-            // Actually all keys <= 10 should remain: 1, 2, 3, 10
+            // Pending: MockKey(1), MockKey(2), MockKey(3) all remain (1, 2, 3 <= 10)
+            // Active: MockKey(10) remains, MockKey(20) and MockKey(30) removed (20, 30 > 10)
             assert_eq!(fetcher.len(), 4); // Key(1), Key(2), Key(3), Key(10)
             assert_eq!(fetcher.len_pending(), 3); // Key(1), Key(2), Key(3)
             assert_eq!(fetcher.len_active(), 1); // Key(10)
