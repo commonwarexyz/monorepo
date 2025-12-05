@@ -2123,7 +2123,7 @@ mod test_plan {
                     rounds.push(round);
                     Ok(ControlFlow::Continue(()))
                 })?;
-                let plan = Plan {
+                let plan = Self {
                     num_participants: NZU32!(num_participants),
                     rounds,
                 };
