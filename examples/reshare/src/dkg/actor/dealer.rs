@@ -9,6 +9,7 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Signer,
 };
+use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use futures::{
@@ -16,7 +17,7 @@ use futures::{
         mpsc,
         oneshot::{self, Canceled},
     },
-    select_biased, FutureExt, SinkExt, StreamExt,
+    SinkExt, StreamExt,
 };
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
@@ -132,38 +133,39 @@ where
     }
 
     async fn run(mut self) {
-        let mut stopped = self.ctx.stopped().fuse();
-        let finalize = loop {
-            select_biased! {
-                // If the context has stopped, terminate.
-                _ = stopped => break None,
-                msg = self.from_players.recv().fuse() => {
-                    let Ok((player, mut msg_bytes)) = msg else {
-                        // The network is dead, so terminate.
-                        break None;
-                    };
-                    let Ok(ack) = PlayerAck::<C::PublicKey>::read(&mut msg_bytes) else {
-                        continue;
-                    };
-                    self.ack(false, player, ack).await;
-                }
-                res = self.inbox.next() => {
-                    let Some(msg) = res else {
-                        break None;
-                    };
-                    match msg {
-                        Message::Transmit => {
-                            if self.transmit().await.is_err() {
-                                break None;
-                            }
-                        },
-                        Message::Finalize { cb_in } => {
-                            break Some(cb_in);
+        let mut finalize = None;
+        select_loop! {
+            self.ctx,
+            on_stopped => {
+                break;
+            },
+            msg = self.from_players.recv() => {
+                let Ok((player, mut msg_bytes)) = msg else {
+                    // The network is dead, so terminate.
+                    break;
+                };
+                let Ok(ack) = PlayerAck::<C::PublicKey>::read(&mut msg_bytes) else {
+                    continue;
+                };
+                self.ack(false, player, ack).await;
+            },
+            res = self.inbox.next() => {
+                let Some(msg) = res else {
+                    break;
+                };
+                match msg {
+                    Message::Transmit => {
+                        if self.transmit().await.is_err() {
+                            break;
                         }
+                    },
+                    Message::Finalize { cb_in } => {
+                        finalize = Some(cb_in);
+                        break;
                     }
                 }
             }
-        };
+        }
         if let Some(cb_in) = finalize {
             self.finalize(cb_in);
         }
