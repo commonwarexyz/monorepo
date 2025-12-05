@@ -338,12 +338,17 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// If `replace` is false, adds to the existing target set.
     ///
     /// If the resulting target set is empty, the fetch will wait until targets are added.
+    ///
+    /// Clears the waiter to allow immediate retry if the fetch was blocked waiting for targets.
     pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>, replace: bool) {
         if replace {
             self.targets.insert(key, peers.into_iter().collect());
         } else {
             self.targets.entry(key).or_default().extend(peers);
         }
+
+        // Clear waiter to allow retry with new targets
+        self.waiter = None;
     }
 
     /// Clear targeting for a key.
@@ -351,8 +356,13 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// If there is an ongoing fetch for this key, it will try any available peer instead
     /// of being restricted to targets. Also used to clean up targets after a successful
     /// or cancelled fetch.
+    ///
+    /// Clears the waiter to allow immediate retry with any available peer.
     pub fn clear_targets(&mut self, key: &Key) {
         self.targets.remove(key);
+
+        // Clear waiter to allow retry without targets
+        self.waiter = None;
     }
 
     /// Returns the number of fetches.
@@ -1051,6 +1061,62 @@ mod tests {
                 next_deadline,
                 context.current() + Duration::from_millis(100)
             );
+        });
+    }
+
+    #[test]
+    fn test_waiter_cleared_on_target_modification() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher with participants
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(10).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(FailMockSender {});
+
+            // Add a key with empty targets (will cause NoEligibleParticipants)
+            fetcher.add_ready(MockKey(1));
+            fetcher.add_targets(
+                MockKey(1),
+                std::iter::empty::<commonware_cryptography::ed25519::PublicKey>(),
+                true,
+            );
+            fetcher.fetch(&mut sender).await;
+
+            // Waiter should be set to far future
+            assert!(fetcher.waiter.is_some());
+            let far_future = fetcher.waiter.unwrap();
+            assert!(far_future > context.current() + Duration::from_secs(1000));
+
+            // Pending deadline should be the far future waiter
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline > context.current() + Duration::from_secs(1000));
+
+            // Add targets, this should clear the waiter
+            fetcher.add_targets(MockKey(1), vec![peer1.clone()], true);
+            assert!(fetcher.waiter.is_none());
+
+            // Pending deadline should now be reasonable
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline <= context.current() + retry_timeout);
+
+            // Clearing targets also clears waiter
+            fetcher.add_targets(MockKey(1), [], true);
+            fetcher.fetch(&mut sender).await;
+            assert!(fetcher.waiter.is_some());
+
+            fetcher.clear_targets(&MockKey(1));
+            assert!(fetcher.waiter.is_none());
         });
     }
 
