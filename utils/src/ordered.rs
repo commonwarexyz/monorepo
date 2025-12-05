@@ -6,8 +6,13 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
+    hash::Hash,
     ops::{Deref, Index, Range},
 };
+#[cfg(not(feature = "std"))]
+use hashbrown::HashSet;
+#[cfg(feature = "std")]
+use std::collections::HashSet;
 use thiserror::Error;
 
 #[cfg(not(feature = "std"))]
@@ -620,19 +625,20 @@ impl<K, V> BiMap<K, V> {
     pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
     where
         K: Ord,
-        V: Eq,
+        V: Eq + Hash,
     {
         let map = Map::try_from_iter(iter)?;
         Self::try_from(map)
     }
 }
 
-impl<K, V: Eq> TryFrom<Map<K, V>> for BiMap<K, V> {
+impl<K, V: Eq + Hash> TryFrom<Map<K, V>> for BiMap<K, V> {
     type Error = Error;
 
     fn try_from(map: Map<K, V>) -> Result<Self, Self::Error> {
-        for (i, value) in map.values.iter().enumerate() {
-            if map.values[i + 1..].contains(value) {
+        let mut seen = HashSet::with_capacity(map.values.len());
+        for value in map.values.iter() {
+            if !seen.insert(value) {
                 return Err(Error::DuplicateValue);
             }
         }
@@ -681,31 +687,31 @@ impl<K, V> Deref for BiMap<K, V> {
     }
 }
 
-impl<K: Ord, V: Eq> FromIterator<(K, V)> for BiMap<K, V> {
+impl<K: Ord, V: Eq + Hash> FromIterator<(K, V)> for BiMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self::try_from_iter(iter).expect("duplicate value detected during BiMap construction")
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Eq> From<&[(K, V)]> for BiMap<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq + Hash> From<&[(K, V)]> for BiMap<K, V> {
     fn from(items: &[(K, V)]) -> Self {
         items.iter().cloned().collect()
     }
 }
 
-impl<K: Ord, V: Eq> From<Vec<(K, V)>> for BiMap<K, V> {
+impl<K: Ord, V: Eq + Hash> From<Vec<(K, V)>> for BiMap<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V: Eq, const N: usize> From<[(K, V); N]> for BiMap<K, V> {
+impl<K: Ord, V: Eq + Hash, const N: usize> From<[(K, V); N]> for BiMap<K, V> {
     fn from(items: [(K, V); N]) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord + Clone, V: Clone + Eq, const N: usize> From<&[(K, V); N]> for BiMap<K, V> {
+impl<K: Ord + Clone, V: Clone + Eq + Hash, const N: usize> From<&[(K, V); N]> for BiMap<K, V> {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
@@ -729,7 +735,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for BiMap<K, V> {
     }
 }
 
-impl<K: Read + Ord, V: Eq + Read> Read for BiMap<K, V> {
+impl<K: Read + Ord, V: Eq + Hash + Read> Read for BiMap<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
