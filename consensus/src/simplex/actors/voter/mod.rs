@@ -18,7 +18,6 @@ pub use ingress::Mailbox;
 pub use ingress::Message;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Configuration for the voter [`Actor`].
 pub struct Config<
     S: Scheme,
     B: Blocker,
@@ -221,7 +220,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -453,7 +452,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -722,7 +721,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -887,7 +886,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1417,7 +1416,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1613,7 +1612,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),

@@ -194,15 +194,16 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return (retry, nullify, None);
         }
 
-        // Try to construct entry certificates for the previous view
-        // Prefer the strongest proof available so lagging replicas can re-enter quickly.
+        // Get the certificate for the previous view. Prefer finalizations since they are the
+        // strongest proof available. Prefer nullifications over notarizations since they do not
+        // require certification to move to the next view.
         #[allow(clippy::option_if_let_else)]
         let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
             Some(Certificate::Finalization(finalization))
-        } else if let Some(notarization) = self.notarization(entry_view).cloned() {
-            Some(Certificate::Notarization(notarization))
         } else if let Some(nullification) = self.nullification(entry_view).cloned() {
             Some(Certificate::Nullification(nullification))
+        } else if let Some(notarization) = self.notarization(entry_view).cloned() {
+            Some(Certificate::Notarization(notarization))
         } else {
             warn!(%entry_view, "entry certificate not found during timeout");
             None
@@ -221,6 +222,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .seed(notarization.round(), &notarization.certificate);
         let added = self.create_round(view).add_notarization(notarization);
         self.set_leader(view.next(), seed);
+        self.certification_candidates.insert(view);
         // Do not advance to the next view until the certification passes
         added
     }
@@ -232,8 +234,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .scheme
             .seed(nullification.round(), &nullification.certificate);
         let added = self.create_round(view).add_nullification(nullification);
-        self.set_leader(view.next(), seed);
         self.enter_view(view.next());
+        self.set_leader(view.next(), seed);
         added
     }
 
@@ -252,8 +254,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .scheme
             .seed(finalization.round(), &finalization.certificate);
         let added = self.create_round(view).add_finalization(finalization);
-        self.set_leader(view.next(), seed);
         self.enter_view(view.next());
+        self.set_leader(view.next(), seed);
         added
     }
 
@@ -566,24 +568,18 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
-    pub fn emit_floor(&mut self, view: View) -> Option<Certificate<S, D>> {
-        // Check if we were the leader in the provided view.
-        let leader = self.leader_index(view)?;
-        if self.scheme.me().is_none_or(|me| me != leader) {
-            return None;
-        }
+    /// Returns the certificate for the parent of the proposal at the given view.
+    pub fn parent_certificate(&mut self, view: View) -> Option<Certificate<S, D>> {
+        let parent = {
+            let view = self.views.get(&view)?.proposal()?.parent;
+            self.views.get(&view)?
+        };
 
-        // Walk backwards through the chain, emitting the best notarization or finalization available.
-        for cursor in View::range(GENESIS_VIEW.next(), self.view.next()).rev() {
-            let Some(round) = self.views.get(&cursor) else {
-                continue;
-            };
-            if let Some(finalization) = round.finalization() {
-                return Some(Certificate::Finalization(finalization.clone()));
-            }
-            if let Some(notarization) = round.notarization() {
-                return Some(Certificate::Notarization(notarization.clone()));
-            }
+        if let Some(f) = parent.finalization().cloned() {
+            return Some(Certificate::Finalization(f));
+        }
+        if let Some(n) = parent.notarization().cloned() {
+            return Some(Certificate::Notarization(n));
         }
         None
     }

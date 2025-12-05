@@ -345,7 +345,7 @@ impl<
                 .await;
         }
 
-        // Broadcast entry certificate to help others enter the view
+        // Broadcast entry to help others enter the view
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
@@ -413,9 +413,11 @@ impl<
         }
         self.append_journal(view, artifact).await;
 
-        // If we were the proposer, we should emit the notarization that we built our proposal on
-        if self.state.is_me(self.state.leader_index(view)?) {
-            return self.state.emit_floor(view);
+        // If we were the leader, we should emit a certifiable chain of ancestor certificates such
+        // that other peers are able to verify my proposal in the future.
+        let leader = self.state.leader_index(view)?;
+        if self.state.is_me(leader) {
+            return self.state.parent_certificate(view);
         }
         None
     }

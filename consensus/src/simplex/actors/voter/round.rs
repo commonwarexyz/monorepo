@@ -265,7 +265,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullify_retry = when;
     }
 
-    /// Marks that we should broadcast a nullify vote if we haven't already finalized.
+    /// Returns a nullify vote if we should timeout/retry.
     ///
     /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
     /// `Some(false)` if this is the first timeout for this round, and `None` if we

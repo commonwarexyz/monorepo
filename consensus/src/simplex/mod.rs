@@ -2293,7 +2293,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_and_lossy_links_bls_threshold_minpk() {
+    fn test_slow_and_lossy_links() {
         slow_and_lossy_links(0, bls12381_threshold::<MinPk, _>);
         slow_and_lossy_links(0, bls12381_threshold::<MinSig, _>);
         slow_and_lossy_links(0, bls12381_multisig::<MinPk, _>);

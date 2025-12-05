@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
-    /// Most recent finalized/certified certificate.
+    /// Most recent finalized certificate.
     floor: Option<Finalization<S, D>>,
     /// Notarizations for any view greater than the floor.
     notarizations: BTreeMap<View, Notarization<S, D>>,
@@ -30,11 +30,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
     pub const fn new(fetch_concurrent: usize) -> Self {
         Self {
-            fetch_concurrent,
             current_view: View::zero(),
             floor: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
+            fetch_concurrent,
         }
     }
 
