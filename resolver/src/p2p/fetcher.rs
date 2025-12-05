@@ -161,7 +161,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 }
                 Err(Error::NoEligibleParticipants) => {
                     // If a request with no valid targets exists (blocked or targets no longer allowed), we
-                    // should skip it (may eventually become fetchable).
+                    // should skip it (may eventually become fetchable if the peer set changes).
                 }
             }
         }
