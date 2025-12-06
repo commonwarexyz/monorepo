@@ -142,9 +142,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // State of the transmitter
     transmitter: transmitter::State<P>,
 
-    // Subscribers to peer set updates
+    // Subscribers to peer set updates (me, sender)
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
+    subscribers: Vec<(P, mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>)>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -293,9 +293,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Notify all subscribers about the new peer set
                 let all = self.all_tracked_peers();
-                let notification = (id, peers, all);
-                self.subscribers
-                    .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
+                self.subscribers.retain(|(me, subscriber)| {
+                    let all_with_self = if all.position(me).is_some() {
+                        all.clone()
+                    } else {
+                        Set::from_iter_dedup(all.iter().cloned().chain(std::iter::once(me.clone())))
+                    };
+                    subscriber
+                        .unbounded_send((id, peers.clone(), all_with_self))
+                        .is_ok()
+                });
             }
             ingress::Message::Register {
                 channel,
@@ -338,14 +345,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let _ = response.send(self.peer_sets.get(&id).cloned());
                 }
             }
-            ingress::Message::Subscribe { sender } => {
+            ingress::Message::Subscribe { me, sender } => {
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
                     let all = self.all_tracked_peers();
-                    let notification = (*index, peers.clone(), all);
+                    let all_with_self = if all.position(&me).is_some() {
+                        all
+                    } else {
+                        Set::from_iter_dedup(all.into_iter().chain(std::iter::once(me.clone())))
+                    };
+                    let notification = (*index, peers.clone(), all_with_self);
                     let _ = sender.unbounded_send(notification);
                 }
-                self.subscribers.push(sender);
+                self.subscribers.push((me, sender));
             }
             ingress::Message::LimitBandwidth {
                 public_key,
@@ -1099,7 +1111,7 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register the peer set
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(pk1.clone());
             manager
                 .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
@@ -1151,7 +1163,7 @@ mod tests {
             let peer_b = ed25519::PrivateKey::from_seed(22).public_key();
 
             // Register all peers
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(twin.clone());
             manager
                 .update(
                     0,
@@ -1277,7 +1289,7 @@ mod tests {
             let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
 
             // Register all peers
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(twin.clone());
             manager
                 .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
                 .await;
@@ -1346,7 +1358,7 @@ mod tests {
             let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
 
             // Register all peers
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(twin.clone());
             manager
                 .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
                 .await;
@@ -1430,7 +1442,7 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Subscribe to peer sets
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(pk1.clone());
             let mut subscription = manager.subscribe().await;
 
             // Register initial peer set
@@ -1507,7 +1519,7 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(sender_pk.clone());
             manager
                 .update(
                     0,
@@ -1585,7 +1597,7 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(sender_pk.clone());
             manager
                 .update(
                     0,

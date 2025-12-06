@@ -89,7 +89,7 @@
 //!     let network_handler = network.start();
 //!
 //!     // Register a peer set
-//!     let mut manager = oracle.manager();
+//!     let mut manager = oracle.manager(peers[0].clone());
 //!     manager.update(0, peers.clone().try_into().unwrap()).await;
 //!
 //!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0).await.unwrap();
@@ -563,7 +563,7 @@ mod tests {
             let pk2 = PrivateKey::from_seed(1).public_key();
 
             // Register peer set
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(pk1.clone());
             manager
                 .update(0, vec![pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
@@ -2254,10 +2254,9 @@ mod tests {
             );
             network.start();
 
-            let mut manager = oracle.manager();
-            assert_eq!(manager.peer_set(0).await, Some([].try_into().unwrap()));
-
             let pk1 = PrivateKey::from_seed(1).public_key();
+            let mut manager = oracle.manager(pk1.clone());
+            assert_eq!(manager.peer_set(0).await, Some([].try_into().unwrap()));
             let pk2 = PrivateKey::from_seed(2).public_key();
             manager
                 .update(0xFF, [pk1.clone(), pk2.clone()].try_into().unwrap())
@@ -2289,7 +2288,7 @@ mod tests {
             let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
             let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
 
-            let mut manager = oracle.socket_manager();
+            let mut manager = oracle.socket_manager(pk1.clone());
             let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
                 .try_into()
                 .unwrap();
@@ -2340,7 +2339,7 @@ mod tests {
             let pk4 = PrivateKey::from_seed(4).public_key();
 
             // Register first peer set with pk1 and pk2
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(pk1.clone());
             manager
                 .update(1, vec![pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
@@ -2452,12 +2451,12 @@ mod tests {
                 },
             );
             network.start();
-            let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await;
 
             // Register a peer set
             let sender_pk = PrivateKey::from_seed(1).public_key();
             let recipient_pk = PrivateKey::from_seed(2).public_key();
+            let mut manager = oracle.manager(sender_pk.clone());
+            let mut subscription = manager.subscribe().await;
             manager
                 .update(
                     1,
@@ -2575,14 +2574,14 @@ mod tests {
             );
             network.start();
 
-            // Subscribe to peer set updates
-            let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await;
-
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
             let pk3 = PrivateKey::from_seed(3).public_key();
+
+            // Subscribe to peer set updates
+            let mut manager = oracle.manager(pk1.clone());
+            let mut subscription = manager.subscribe().await;
 
             // Register first peer set
             manager
@@ -2654,15 +2653,15 @@ mod tests {
             );
             network.start();
 
-            // Create multiple subscriptions
-            let mut manager = oracle.manager();
-            let mut subscription1 = manager.subscribe().await;
-            let mut subscription2 = manager.subscribe().await;
-            let mut subscription3 = manager.subscribe().await;
-
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
+
+            // Create multiple subscriptions
+            let mut manager = oracle.manager(pk1.clone());
+            let mut subscription1 = manager.subscribe().await;
+            let mut subscription2 = manager.subscribe().await;
+            let mut subscription3 = manager.subscribe().await;
 
             // Register a peer set
             manager
@@ -2692,6 +2691,54 @@ mod tests {
 
             assert_eq!(id1, 2);
             assert_eq!(id3, 2);
+        });
+    }
+
+    #[test]
+    fn test_subscription_includes_self() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(2),
+                },
+            );
+            network.start();
+
+            // Create "self" and "other" peers
+            let self_pk = PrivateKey::from_seed(0).public_key();
+            let other_pk = PrivateKey::from_seed(1).public_key();
+
+            // Subscribe to peer set updates
+            let mut manager = oracle.manager(self_pk.clone());
+            let mut subscription = manager.subscribe().await;
+
+            // Register a peer set that does NOT include self
+            manager
+                .update(1, vec![other_pk.clone()].try_into().unwrap())
+                .await;
+
+            // Receive subscription notification
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+
+            // The "new" set should only contain the registered peers (not self)
+            assert!(new.position(&self_pk).is_none());
+            assert!(new.position(&other_pk).is_some());
+
+            // The "all" (tracked) set should include self even though self
+            // was not in the registered peer set
+            assert!(
+                all.position(&self_pk).is_some(),
+                "tracked peers should include self"
+            );
+            assert!(
+                all.position(&other_pk).is_some(),
+                "tracked peers should include other"
+            );
         });
     }
 }

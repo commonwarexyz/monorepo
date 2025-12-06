@@ -210,7 +210,7 @@ mod test {
 
         let resolver_cfg = marshal_resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            manager: oracle.manager(validator.clone()),
             blocker: control.clone(),
             mailbox_size: 200,
             requester_config: requester::Config {
@@ -362,7 +362,7 @@ mod test {
                     context.with_label("engine"),
                     engine::Config {
                         signer,
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -606,7 +606,7 @@ mod test {
                         context.with_label("engine"),
                         engine::Config {
                             signer: signer.clone(),
-                            manager: oracle.manager(),
+                            manager: oracle.manager(public_key.clone()),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
@@ -727,7 +727,7 @@ mod test {
                         context.with_label("engine"),
                         engine::Config {
                             signer: signer.clone(),
-                            manager: oracle.manager(),
+                            manager: oracle.manager(public_key.clone()),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
@@ -888,7 +888,7 @@ mod test {
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -973,7 +973,7 @@ mod test {
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -1132,7 +1132,7 @@ mod test {
                         context.with_label(&format!("engine_{idx}")),
                         engine::Config {
                             signer: signer.clone(),
-                            manager: oracle.manager(),
+                            manager: oracle.manager(public_key.clone()),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
@@ -1217,7 +1217,7 @@ mod test {
                     context.with_label("engine_0"),
                     engine::Config {
                         signer: signer.clone(),
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -1388,7 +1388,7 @@ mod test {
                         context.with_label(&format!("engine_{idx}")),
                         engine::Config {
                             signer: signer.clone(),
-                            manager: oracle.manager(),
+                            manager: oracle.manager(public_key.clone()),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
@@ -1474,7 +1474,7 @@ mod test {
                     context.with_label("engine_0"),
                     engine::Config {
                         signer: signer.clone(),
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -1642,7 +1642,7 @@ mod test {
                             context.with_label("engine"),
                             engine::Config {
                                 signer: signer.clone(),
-                                manager: oracle.manager(),
+                                manager: oracle.manager(public_key.clone()),
                                 blocker: oracle.control(public_key.clone()),
                                 namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                                 participant_config: None,
@@ -1844,7 +1844,7 @@ mod test {
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
-                        manager: oracle.manager(),
+                        manager: oracle.manager(public_key.clone()),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
@@ -1958,7 +1958,7 @@ mod test {
                 context.with_label("engine"),
                 engine::Config {
                     signer: signer.clone(),
-                    manager: oracle.manager(),
+                    manager: oracle.manager(public_key.clone()),
                     blocker: oracle.control(public_key.clone()),
                     namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                     participant_config: None,
