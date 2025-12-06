@@ -14,7 +14,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
