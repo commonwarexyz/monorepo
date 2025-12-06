@@ -117,6 +117,11 @@ pub struct Config<C: Signer> {
 
     /// Quota for peers messages a peer can send us.
     pub allowed_peers_rate: Quota,
+
+    /// Whether to rate limit outbound messages using the same rate as inbound.
+    /// When enabled, outbound messages are delayed if they exceed the per-channel rate limit,
+    /// preventing the remote peer from rate limiting us.
+    pub rate_limit_outbound: bool,
 }
 
 impl<C: Signer> Config<C> {
@@ -155,6 +160,7 @@ impl<C: Signer> Config<C> {
             allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
             allowed_peers_rate: Quota::per_second(NZU32!(2)),
+            rate_limit_outbound: true,
         }
     }
 
@@ -198,6 +204,7 @@ impl<C: Signer> Config<C> {
             allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
             allowed_peers_rate: Quota::per_second(NZU32!(5)),
+            rate_limit_outbound: true,
         }
     }
 
@@ -234,6 +241,7 @@ impl<C: Signer> Config<C> {
             allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 32,
             allowed_peers_rate: Quota::per_second(NZU32!(5)),
+            rate_limit_outbound: true,
         }
     }
 }

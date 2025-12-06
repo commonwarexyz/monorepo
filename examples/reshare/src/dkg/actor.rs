@@ -29,7 +29,6 @@ use commonware_utils::{
     Acknowledgement, TryCollect, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::counter::Counter;
 use rand::{
     rngs::StdRng,
@@ -49,14 +48,13 @@ pub struct Config<C, P> {
     pub signer: C,
     pub num_participants_per_epoch: u32,
     pub mailbox_size: usize,
-    pub rate_limit: Quota,
 
     pub partition_prefix: String,
 }
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -69,7 +67,6 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     num_participants_per_epoch: u32,
-    rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
     epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, EpochState<V>>,
     failed_rounds: Counter,
@@ -77,7 +74,7 @@ where
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -128,7 +125,6 @@ where
                 mailbox,
                 signer: config.signer,
                 num_participants_per_epoch: config.num_participants_per_epoch,
-                rate_limit: config.rate_limit,
                 round_metadata,
                 epoch_metadata,
                 failed_rounds,
@@ -252,7 +248,6 @@ where
                 .try_collect::<Set<_>>()
                 .expect("participants are unique"),
             &mut dkg_mux,
-            self.rate_limit,
             &mut self.round_metadata,
         )
         .await;
@@ -462,7 +457,6 @@ where
                             next_dealers,
                             next_players,
                             &mut dkg_mux,
-                            self.rate_limit,
                             &mut self.round_metadata,
                         )
                         .await;

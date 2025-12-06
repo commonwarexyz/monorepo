@@ -18,4 +18,8 @@ pub struct Config<C: PublicKey> {
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
+    /// Whether to rate limit outbound messages using the same rate as inbound.
+    /// When enabled, outbound messages are delayed if they exceed the per-channel rate limit,
+    /// preventing the remote peer from rate limiting us.
+    pub rate_limit_outbound: bool,
 }

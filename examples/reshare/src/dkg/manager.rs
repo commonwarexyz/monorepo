@@ -30,10 +30,6 @@ use commonware_utils::{
     union,
 };
 use futures::FutureExt;
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, ops::Deref};
 use tracing::{debug, error, info, warn};
@@ -57,7 +53,7 @@ const CONCURRENCY: usize = 1;
 /// - Finalize the DKG/reshare round, returning the resulting [Output].
 pub struct DkgManager<'ctx, E, V, C, S, R>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
     V: Variant,
     C: Signer,
     S: Sender<PublicKey = C::PublicKey>,
@@ -86,11 +82,6 @@ where
 
     /// The inbound communication channel for peers.
     receiver: SubReceiver<R>,
-
-    /// The rate limiter for sending messages.
-    #[allow(clippy::type_complexity)]
-    rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
 
     /// [Dealer] metadata, if this manager is also dealing.
     dealer_meta: Option<DealerMetadata<C, V>>,
@@ -131,7 +122,7 @@ pub enum RoundResult<V: Variant> {
 
 impl<'ctx, E, V, C, S, R> DkgManager<'ctx, E, V, C, S, R>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
     V: Variant,
     C: Signer,
     S: Sender<PublicKey = C::PublicKey>,
@@ -154,7 +145,6 @@ where
         dealers: Set<C::PublicKey>,
         players: Set<C::PublicKey>,
         mux: &'ctx mut MuxHandle<S, R>,
-        send_rate_limit: Quota,
         store: &'ctx mut Metadata<E, U64, RoundInfo<V, C>>,
     ) -> Self {
         let mut player = players.position(&signer.public_key()).map(|signer_index| {
@@ -234,8 +224,6 @@ where
 
         let (s, r) = mux.register(epoch.get()).await.unwrap();
 
-        let rate_limiter =
-            RateLimiter::hashmap_with_clock(send_rate_limit, context.deref().clone());
         let previous = public
             .map(|public| {
                 share.map_or(RoundResult::Polynomial(public.clone()), |share| {
@@ -253,7 +241,6 @@ where
             players,
             sender: s,
             receiver: r,
-            rate_limiter,
             dealer_meta,
             player,
             arbiter,
@@ -285,11 +272,6 @@ where
             .collect::<Vec<_>>();
 
         for (idx, contributor) in needs_broadcast {
-            if self.rate_limiter.check_key(contributor).is_err() {
-                debug!(round, player = ?contributor, "rate limited; skipping share send");
-                continue;
-            }
-
             let share = shares.get(idx).cloned().unwrap();
 
             if let Some((signer_index, ref mut player)) = self.player {

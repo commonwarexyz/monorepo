@@ -73,6 +73,11 @@ pub struct Config<C: Signer> {
     /// Quota for ping messages received from a peer.
     pub allowed_ping_rate: Quota,
 
+    /// Whether to rate limit outbound messages using the same rate as inbound.
+    /// When enabled, outbound messages are delayed if they exceed the per-channel rate limit,
+    /// preventing the remote peer from rate limiting us.
+    pub rate_limit_outbound: bool,
+
     /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
 
@@ -118,6 +123,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
             allowed_ping_rate: Quota::per_minute(NZU32!(2)),
+            rate_limit_outbound: true,
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
@@ -149,6 +155,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             allowed_ping_rate: Quota::per_second(NZU32!(2)),
+            rate_limit_outbound: true,
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
@@ -175,6 +182,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
             allowed_ping_rate: Quota::per_second(NZU32!(5)),
+            rate_limit_outbound: true,
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
