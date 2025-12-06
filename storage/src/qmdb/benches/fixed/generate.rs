@@ -2,8 +2,9 @@
 //! fixed-size values.
 
 use crate::fixed::{
-    gen_random_kv, gen_random_kv_batched, get_ordered_any, get_ordered_current, get_store,
-    get_unordered_any, get_unordered_current, get_variable_any, Variant, VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
+    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered,
+    get_current_unordered, get_store, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -48,8 +49,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                     let commit_frequency =
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let duration = match variant {
-                                        Variant::AnyUnordered => {
-                                            let db = get_unordered_any(ctx.clone()).await;
+                                        Variant::AnyUnorderedFixed => {
+                                            let db = get_any_unordered_fixed(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -60,8 +61,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::AnyOrdered => {
-                                            let db = get_ordered_any(ctx.clone()).await;
+                                        Variant::AnyOrderedFixed => {
+                                            let db = get_any_ordered_fixed(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -84,8 +85,20 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::Variable => {
-                                            let db = get_variable_any(ctx.clone()).await;
+                                        Variant::AnyUnorderedVariable => {
+                                            let db = get_any_unordered_variable(ctx.clone()).await;
+                                            test_db(
+                                                db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
+                                        }
+                                        Variant::AnyOrderedVariable => {
+                                            let db = get_any_ordered_variable(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -97,7 +110,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentUnordered => {
-                                            let db = get_unordered_current(ctx.clone()).await;
+                                            let db = get_current_unordered(ctx.clone()).await;
                                             let db = AnyExt::new(db);
                                             test_db(
                                                 db,
@@ -110,7 +123,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentOrdered => {
-                                            let db = get_ordered_current(ctx.clone()).await;
+                                            let db = get_current_ordered(ctx.clone()).await;
                                             let db = AnyExt::new(db);
                                             test_db(
                                                 db,
