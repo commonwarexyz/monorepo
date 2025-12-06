@@ -316,7 +316,7 @@ where
         ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(
@@ -363,7 +363,7 @@ where
         ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
     ) {
         let dkg_handle = self.dkg.start(
