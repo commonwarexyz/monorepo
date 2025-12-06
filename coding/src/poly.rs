@@ -684,7 +684,7 @@ impl PolynomialVector {
             let row_i = &mut vandermonde_matrix[i];
             let mut w_ij = F::one();
             for j in 0..rows {
-                // Remember, the coeffients of the polynomial are in reverse bit order!
+                // Remember, the coefficients of the polynomial are in reverse bit order!
                 row_i[reverse_bits(lg_rows, j as u64) as usize] = w_ij;
                 w_ij = w_ij * w_i;
             }
@@ -725,7 +725,7 @@ impl PolynomialVector {
     /// for any i. This will be the case for [Polynomial::vanishing].
     /// If this isn't the case, the result may be junk.
     ///
-    /// If `q` doesn't divide a partiular polynomial in this vector, the result
+    /// If `q` doesn't divide a particular polynomial in this vector, the result
     /// for that polynomial is not guaranteed to be anything meaningful.
     fn divide(&mut self, mut q: Polynomial) {
         // The algorithm operates column wise.
