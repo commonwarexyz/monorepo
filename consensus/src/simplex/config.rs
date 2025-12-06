@@ -9,6 +9,7 @@ use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
+use std::net::SocketAddr;
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -104,6 +105,13 @@ pub struct Config<
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
+    
+    /// Address to bind the observer port. 
+    /// Observers can be registered to listen to consensus progress updates.
+    pub listen_addr: Option<SocketAddr>,
+    
+    /// Max number of observers allowed.
+    pub max_observers: Option<usize>,
 }
 
 impl<

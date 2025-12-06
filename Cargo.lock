@@ -1136,6 +1136,7 @@ dependencies = [
  "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
+ "commonware-stream",
  "commonware-utils",
  "futures",
  "governor",
