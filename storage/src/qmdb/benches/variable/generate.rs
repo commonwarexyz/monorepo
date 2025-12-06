@@ -2,7 +2,8 @@
 //! that supports variable-size values.
 
 use crate::variable::{
-    gen_random_kv, gen_random_kv_batched, get_any, get_store, Variant, VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_store, Variant,
+    VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -60,8 +61,20 @@ fn bench_variable_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::Any => {
-                                            let db = get_any(ctx.clone()).await;
+                                        Variant::AnyUnordered => {
+                                            let db = get_any_unordered(ctx.clone()).await;
+                                            test_db(
+                                                db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
+                                        }
+                                        Variant::AnyOrdered => {
+                                            let db = get_any_ordered(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
