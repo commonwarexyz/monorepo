@@ -612,12 +612,12 @@ where
 mod tests {
     use super::*;
     use crate::{
-        adb::operation::{fixed::unordered::Operation, Committable},
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         mmr::{
             journaled::{Config as MmrConfig, Mmr},
             Location,
         },
+        qmdb::operation::{fixed::unordered::Operation, Committable},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};

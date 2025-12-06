@@ -7,4 +7,4 @@ mod requester;
 
 pub use config::Config;
 pub(crate) use metrics::{Metrics, PeerLabel};
-pub use requester::{Request, Requester, ID};
+pub use requester::{Error, Request, Requester, ID};

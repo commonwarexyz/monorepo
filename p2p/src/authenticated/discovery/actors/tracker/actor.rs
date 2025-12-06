@@ -15,7 +15,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{set::Ordered, union, SystemTimeExt};
+use commonware_utils::{ordered::Set, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
@@ -52,7 +52,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -295,7 +295,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, set::Ordered, NZU32};
+    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -426,9 +426,10 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Ordered<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+            let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
-                .collect();
+                .try_collect()
+                .unwrap();
             oracle.update(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
             let _ = mailbox.dialable().await;
@@ -479,7 +480,7 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .update(0, Ordered::from([tracker_pk.clone(), auth_pk.clone()]))
+                .update(0, [tracker_pk.clone(), auth_pk.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -548,7 +549,7 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
-                .update(0, Ordered::from([tracker_pk, pk1.clone()]))
+                .update(0, [tracker_pk, pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -588,7 +589,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -622,7 +623,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -671,7 +672,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -686,7 +687,9 @@ mod tests {
                 false,
             );
 
-            let set1 = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
+            let set1: Set<_> = [tracker_pk.clone(), pk1.clone(), pk2.clone()]
+                .try_into()
+                .unwrap();
             oracle.update(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -742,7 +745,9 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
-            let peer_set_0_peers = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
+            let peer_set_0_peers: Set<_> = [tracker_pk.clone(), pk1.clone(), pk2.clone()]
+                .try_into()
+                .unwrap();
             oracle.update(0, peer_set_0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -823,7 +828,7 @@ mod tests {
             assert!(!mailbox.listenable(peer_pk3.clone()).await);
 
             oracle
-                .update(0, Ordered::from([peer_pk.clone(), peer_pk2.clone()]))
+                .update(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -852,7 +857,9 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.update(0, Ordered::from([peer_pk.clone()])).await;
+            oracle
+                .update(0, [peer_pk.clone()].try_into().unwrap())
+                .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.listenable(peer_pk.clone()).await);
@@ -936,7 +943,10 @@ mod tests {
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
             oracle
-                .update(0, Ordered::from([tracker_pk, pk1.clone(), pk2.clone()]))
+                .update(
+                    0,
+                    [tracker_pk, pk1.clone(), pk2.clone()].try_into().unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -979,8 +989,9 @@ mod tests {
             );
 
             // --- Register set 0, then Construct for authorized peer1 ---
-            let set0_peers =
-                Ordered::from([tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]);
+            let set0_peers: Set<_> = [tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]
+                .try_into()
+                .unwrap();
             oracle.update(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1049,11 +1060,11 @@ mod tests {
 
             // --- Set eviction and peer killing ---
             let (_peer3_s, peer3_pk) = new_signer_and_pk(3);
-            let set1_peers = Ordered::from([tracker_pk.clone(), peer2_pk.clone()]); // New set without peer1
+            let set1_peers: Set<_> = [tracker_pk.clone(), peer2_pk.clone()].try_into().unwrap(); // New set without peer1
             oracle.update(1, set1_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let set2_peers = Ordered::from([tracker_pk.clone(), peer3_pk.clone()]); // Another new set without peer1
+            let set2_peers: Set<_> = [tracker_pk.clone(), peer3_pk.clone()].try_into().unwrap(); // Another new set without peer1
             oracle.update(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
             context.sleep(Duration::from_millis(10)).await;
 

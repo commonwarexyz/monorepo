@@ -5,7 +5,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
     PublicKey,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
@@ -24,7 +24,7 @@ pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
     /// The dealers for the epoch.
-    pub dealers: Ordered<P>,
+    pub dealers: Set<P>,
 }
 
 /// Inbound communication channel for epoch transitions.

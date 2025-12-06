@@ -59,7 +59,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
-use commonware_utils::{set::Ordered, NZU32};
+use commonware_utils::{ordered::Set, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -126,14 +126,15 @@ fn main() {
     if allowed_keys.len() == 0 {
         panic!("Please provide at least one friend");
     }
-    let recipients = allowed_keys
+    let recipients: Set<_> = allowed_keys
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

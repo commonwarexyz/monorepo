@@ -4,13 +4,13 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
-        self,
-        any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
-        operation,
-        store::Db,
-    },
     mmr::{Location, Proof},
+    qmdb::{
+        self,
+        any::{unordered::fixed::Any, FixedConfig as Config},
+        operation,
+        store::CleanStore,
+    },
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -74,7 +74,7 @@ where
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
                 Operation::Update(key, value) => {
@@ -84,28 +84,28 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    Db::commit(database, metadata).await?;
+                    database.commit(metadata).await?;
                 }
             }
         }
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self, None).await?;
+    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
+        self.commit(None).await?;
         Ok(())
     }
 
     fn root(&self) -> Key {
-        AnyDb::root(self)
+        CleanStore::root(self)
     }
 
     fn op_count(&self) -> Location {
-        Db::op_count(self)
+        self.op_count()
     }
 
     fn lower_bound(&self) -> Location {
-        Db::inactivity_floor_loc(self)
+        self.inactivity_floor_loc()
     }
 
     fn historical_proof(
@@ -113,8 +113,8 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        AnyDb::historical_proof(self, op_count, start_loc, max_ops)
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+        CleanStore::historical_proof(self, op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {

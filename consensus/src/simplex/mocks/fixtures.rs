@@ -8,7 +8,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{quorum, set::OrderedAssociated};
+use commonware_utils::{ordered::BiMap, quorum, TryCollect};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -26,7 +26,7 @@ pub struct Fixture<S> {
 pub fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
-) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
+) -> BiMap<ed25519::PublicKey, ed25519::PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
@@ -36,7 +36,8 @@ where
             let public_key = private_key.public_key();
             (public_key, private_key)
         })
-        .collect()
+        .try_collect()
+        .expect("ed25519 public keys are unique")
 }
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
@@ -84,11 +85,12 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
-    let signers = participants
+    let signers: BiMap<_, _> = participants
         .clone()
         .into_iter()
         .zip(bls_public)
-        .collect::<OrderedAssociated<_, _>>();
+        .try_collect()
+        .expect("ed25519 public keys are unique");
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))

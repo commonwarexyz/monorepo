@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::ordered::{Map, Set};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -35,22 +35,22 @@ enum FuzzInput {
 fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::FromVec { data } => {
-            let ordered = Ordered::from(data.clone());
-            let _ = ordered.len();
-            let _ = ordered.is_empty();
-            let _ = ordered.iter().count();
-            let _: Vec<u32> = ordered.into();
+            let set = Set::from_iter_dedup(data);
+            let _ = set.len();
+            let _ = set.is_empty();
+            let _ = set.iter().count();
+            let _: Vec<u32> = set.into();
         }
 
         FuzzInput::FromSlice { data } => {
-            let ordered = Ordered::from(data.as_slice());
-            let _ = ordered.len();
-            let _ = ordered.is_empty();
+            let set = Set::from_iter_dedup(data.iter().cloned());
+            let _ = set.len();
+            let _ = set.is_empty();
         }
 
         FuzzInput::FromArray { data } => {
-            let ordered = Ordered::from(data);
-            let _ = ordered.len();
+            let set = Set::from_iter_dedup(data);
+            let _ = set.len();
         }
 
         FuzzInput::Operations {
@@ -58,25 +58,21 @@ fn fuzz(input: FuzzInput) {
             index,
             search,
         } => {
-            let ordered = Ordered::from(data);
-            let _ = ordered.get(index);
-            let _ = ordered.position(&search);
-            let _ = ordered.iter().count();
+            let set = Set::from_iter_dedup(data);
+            let _ = set.get(index);
+            let _ = set.position(&search);
+            let _ = set.iter().count();
         }
 
         FuzzInput::AssociatedInsert { keys, values } => {
-            let pairs: Vec<(u32, u64)> = keys
-                .iter()
-                .zip(values.iter())
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            let assoc = OrderedAssociated::from(pairs);
+            let pairs = keys.iter().zip(values.iter()).map(|(k, v)| (*k, *v));
+            let map = Map::from_iter_dedup(pairs);
 
-            let _ = assoc.is_empty();
-            let _ = assoc.len();
+            let _ = map.is_empty();
+            let _ = map.len();
 
-            for (i, _) in assoc.keys().iter().enumerate() {
-                let _ = assoc.value(i);
+            for (i, _) in map.keys().iter().enumerate() {
+                let _ = map.value(i);
             }
         }
 
@@ -86,24 +82,18 @@ fn fuzz(input: FuzzInput) {
             search_key,
             index,
         } => {
-            let pairs: Vec<(u32, u64)> = keys
-                .iter()
-                .zip(values.iter())
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            let assoc = OrderedAssociated::from(pairs);
+            let pairs = keys.iter().zip(values.iter()).map(|(k, v)| (*k, *v));
+            let map = Map::from_iter_dedup(pairs);
 
-            let _ = assoc.len();
-            let _ = assoc.position(&search_key);
-            let _ = assoc.get(index);
-            let _ = assoc.value(index);
-            let _ = assoc.get_value(&search_key);
-            let _ = assoc.keys();
-            let _ = assoc.values();
+            let _ = map.len();
+            let _ = map.position(&search_key);
+            let _ = map.get(index);
+            let _ = map.value(index);
+            let _ = map.get_value(&search_key);
+            let _ = map.keys();
+            let _ = map.values();
 
-            for _ in assoc.iter_pairs() {
-                // Just iterate, no checks
-            }
+            for _ in map.iter_pairs() {}
         }
     }
 }

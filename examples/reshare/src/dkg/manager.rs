@@ -25,8 +25,8 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
     max_faults,
+    ordered::{Quorum, Set},
     sequence::U64,
-    set::{Ordered, OrderedQuorum},
     union,
 };
 use futures::FutureExt;
@@ -76,10 +76,10 @@ where
     previous: RoundResult<V>,
 
     /// The dealers in the round.
-    dealers: Ordered<C::PublicKey>,
+    dealers: Set<C::PublicKey>,
 
     /// The players in the round.
-    players: Ordered<C::PublicKey>,
+    players: Set<C::PublicKey>,
 
     /// The outbound communication channel for peers.
     sender: SubSender<S>,
@@ -112,7 +112,7 @@ struct DealerMetadata<C: Signer, V: Variant> {
     /// The [Dealer]'s commitment.
     commitment: Public<V>,
     /// The [Dealer]'s shares for all players.
-    shares: Ordered<group::Share>,
+    shares: Set<group::Share>,
     /// Signed acknowledgements from contributors.
     acks: BTreeMap<u32, Ack<C::Signature>>,
     /// The constructed dealing for inclusion in a block, if any.
@@ -151,8 +151,8 @@ where
         public: Option<Public<V>>,
         share: Option<group::Share>,
         signer: &'ctx mut C,
-        dealers: Ordered<C::PublicKey>,
-        players: Ordered<C::PublicKey>,
+        dealers: Set<C::PublicKey>,
+        players: Set<C::PublicKey>,
         mux: &'ctx mut MuxHandle<S, R>,
         send_rate_limit: Quota,
         store: &'ctx mut Metadata<E, U64, RoundInfo<V, C>>,
@@ -583,7 +583,7 @@ where
     }
 
     /// Finalize the DKG/reshare round, returning the [Output].
-    pub async fn finalize(self, round: u64) -> (Ordered<C::PublicKey>, RoundResult<V>, bool) {
+    pub async fn finalize(self, round: u64) -> (Set<C::PublicKey>, RoundResult<V>, bool) {
         let (result, disqualified) = self.arbiter.finalize();
         let result = match result {
             Ok(output) => output,

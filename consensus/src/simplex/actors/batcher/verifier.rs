@@ -446,7 +446,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
+    use commonware_utils::{ordered::Set, quorum, quorum_from_slice, TryCollect};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -475,7 +475,11 @@ mod tests {
         shares
             .into_iter()
             .map(|share| {
-                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
+                bls12381_threshold::Scheme::new(
+                    participants.clone().try_into().unwrap(),
+                    &polynomial,
+                    share,
+                )
             })
             .collect()
     }
@@ -484,7 +488,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
 
-        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+        let participants: Set<_> = private_keys
+            .iter()
+            .map(|p| p.public_key())
+            .try_collect()
+            .unwrap();
 
         private_keys
             .into_iter()

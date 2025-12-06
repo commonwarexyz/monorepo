@@ -12,9 +12,7 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
-    parse_macro_input,
-    spanned::Spanned,
-    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 mod nextest;
@@ -358,9 +356,8 @@ impl ToTokens for SelectInput {
 ///
 /// # Fusing
 ///
-/// This macro handles both the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
-/// and [pinning](https://docs.rs/futures/latest/futures/macro.pin_mut.html) of (fused) futures in
-/// a `select`-specific scope.
+/// This macro handles the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
+/// futures in a `select`-specific scope.
 ///
 /// # Example
 ///
@@ -391,30 +388,16 @@ pub fn select(input: TokenStream) -> TokenStream {
     let SelectInput { branches } = parse_macro_input!(input as SelectInput);
 
     // Generate code from provided statements
-    let mut stmts = Vec::new();
     let mut select_branches = Vec::new();
-    for (
-        index,
-        Branch {
-            pattern,
-            future,
-            block,
-        },
-    ) in branches.into_iter().enumerate()
+    for Branch {
+        pattern,
+        future,
+        block,
+    } in branches.into_iter()
     {
-        // Generate a unique identifier for each future
-        let future_ident = Ident::new(&format!("__select_future_{index}"), pattern.span());
-
-        // Fuse and pin each future
-        let stmt = quote! {
-            let #future_ident = (#future).fuse();
-            futures::pin_mut!(#future_ident);
-        };
-        stmts.push(stmt);
-
         // Generate branch for `select_biased!` macro
         let branch_code = quote! {
-            #pattern = #future_ident => #block,
+            #pattern = (#future).fuse() => #block,
         };
         select_branches.push(branch_code);
     }
@@ -423,7 +406,6 @@ pub fn select(input: TokenStream) -> TokenStream {
     quote! {
         {
             use futures::FutureExt as _;
-            #(#stmts)*
 
             futures::select_biased! {
                 #(#select_branches)*
@@ -433,7 +415,7 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Input for [select_loop].
+/// Input for [select_loop!].
 ///
 /// Parses: `context, on_stopped => { block }, { branches... }`
 struct SelectLoopInput {
