@@ -132,8 +132,6 @@ pub enum Error {
     RangeOutOfBounds(Location),
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location),
-    #[error("bitmap has unmerkleized updates")]
-    DirtyState,
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
     #[error("invalid pinned nodes")]

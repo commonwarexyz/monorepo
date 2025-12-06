@@ -144,11 +144,10 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
-        let mut shutdown = self.context.stopped();
         select_loop! {
-            _ = &mut shutdown => {
+            self.context,
+            on_stopped => {
                 debug!("context shutdown, stopping dialer");
-                break;
             },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Update the deadline.
@@ -181,7 +180,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                     self.queue = tracker.dialable().await;
                     self.queue.shuffle(&mut self.context);
                 }
-            }
+            },
         }
     }
 }

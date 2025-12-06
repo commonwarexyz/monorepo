@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    adb::verify::verify_multi_proof,
     mmr::{Location, Position, Proof, StandardHasher as Standard},
+    qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
 

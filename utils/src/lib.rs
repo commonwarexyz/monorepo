@@ -30,7 +30,26 @@ pub mod channels;
 pub mod hex_literal;
 #[cfg(feature = "std")]
 pub mod net;
-pub mod set;
+pub mod ordered;
+
+/// A type that can be constructed from an iterator, possibly failing.
+pub trait TryFromIterator<T>: Sized {
+    /// The error type returned when construction fails.
+    type Error;
+
+    /// Attempts to construct `Self` from an iterator.
+    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error>;
+}
+
+/// Extension trait for iterators that provides fallible collection.
+pub trait TryCollect: Iterator + Sized {
+    /// Attempts to collect elements into a collection that may fail.
+    fn try_collect<C: TryFromIterator<Self::Item>>(self) -> Result<C, C::Error> {
+        C::try_from_iter(self)
+    }
+}
+
+impl<I: Iterator> TryCollect for I {}
 #[cfg(feature = "std")]
 pub use net::IpAddrExt;
 #[cfg(feature = "std")]

@@ -308,3 +308,13 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.journal.destroy().await.map_err(Error::Journal)
     }
 }
+
+impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
+    type Key = u64;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(*key).await
+    }
+}

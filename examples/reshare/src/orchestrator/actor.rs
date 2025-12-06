@@ -11,7 +11,7 @@ use commonware_consensus::{
     simplex::{
         self,
         signing_scheme::Scheme,
-        types::{Context, Voter},
+        types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
@@ -146,11 +146,11 @@ where
 
     async fn run(
         mut self,
-        (pending_sender, pending_receiver): (
+        (vote_sender, vote_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        (recovered_sender, recovered_receiver): (
+        (certificate_sender, certificate_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -166,8 +166,8 @@ where
         // Start muxers for each physical channel used by consensus
         let (mux, mut pending_mux, mut pending_backup) = Muxer::builder(
             self.context.with_label("pending_mux"),
-            pending_sender,
-            pending_receiver,
+            vote_sender,
+            vote_receiver,
             self.muxer_size,
         )
         .with_backup()
@@ -175,8 +175,8 @@ where
         mux.start();
         let (mux, mut recovered_mux, mut recovered_global_sender) = Muxer::builder(
             self.context.with_label("recovered_mux"),
-            recovered_sender,
-            recovered_receiver,
+            certificate_sender,
+            certificate_receiver,
             self.muxer_size,
         )
         .with_global_sender()
@@ -196,6 +196,10 @@ where
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping orchestrator");
+            },
             message = pending_backup.next() => {
                 // If a message is received in an unregistered sub-channel in the pending network,
                 // attempt to forward the orchestrator for the epoch.
@@ -272,7 +276,7 @@ where
                 // Forward the finalization to the sender. This operation is best-effort.
                 //
                 // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                let message = Voter::<S, H::Digest>::Finalization(finalization);
+                let message = Certificate::<S, H::Digest>::Finalization(finalization);
                 if recovered_global_sender
                     .send(
                         epoch.get(),

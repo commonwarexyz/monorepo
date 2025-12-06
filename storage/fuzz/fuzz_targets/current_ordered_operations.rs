@@ -4,11 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::{
-        current::{ordered::Current, Config},
-        store::Db as _,
-    },
     mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
+    qmdb::current::{ordered::Current, Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -116,7 +113,9 @@ fn fuzz(data: FuzzInput) {
                     let v = Value::new(*value);
 
                     let empty = db.is_empty();
-                    db.update(k, v).await.expect("update should not fail");
+                    let mut dirty_db = db.into_dirty();
+                    dirty_db.update(k, v).await.expect("update should not fail");
+                    db = dirty_db.merkleize().await.unwrap();
                     let result = expected_state.insert(*key, *value);
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -132,7 +131,9 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    db.delete(k).await.expect("delete should not fail");
+                    let mut dirty_db = db.into_dirty();
+                    dirty_db.delete(k).await.expect("delete should not fail");
+                    db = dirty_db.merkleize().await.unwrap();
                     if expected_state.remove(key).is_some() {
                         all_keys.insert(*key);
                         uncommitted_ops += 1;
@@ -196,7 +197,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let _root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
@@ -209,7 +210,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                        let current_root = db.root();
 
                         // Adjust start_loc and max_ops to be within the valid range
                         let start_loc = Location::new(start_loc % *current_op_count).unwrap();
@@ -249,7 +250,7 @@ fn fuzz(data: FuzzInput) {
                     };
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let root = db.root();
 
                     if let Ok(res) = db
                         .range_proof(hasher.inner(), start_loc, *max_ops)
@@ -277,7 +278,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let current_root = db.root();
 
                     match db.key_value_proof(hasher.inner(), k).await {
                         Ok((proof, info)) => {
@@ -300,7 +301,7 @@ fn fuzz(data: FuzzInput) {
                                 }
                             }
                         }
-                        Err(commonware_storage::adb::Error::KeyNotFound) => {
+                        Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             assert!(!expected_state.contains_key(key), "Proof generation failed for existing key {key:?}");
                         }
                         Err(e) => {
@@ -318,7 +319,7 @@ fn fuzz(data: FuzzInput) {
                         uncommitted_ops = 0;
                     }
 
-                    let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    let current_root = db.root();
 
                     match db.exclusion_proof(hasher.inner(), &k).await {
                         Ok((proof, info)) => {
@@ -331,7 +332,7 @@ fn fuzz(data: FuzzInput) {
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
-                        Err(commonware_storage::adb::Error::KeyExists) => {
+                        Err(commonware_storage::qmdb::Error::KeyExists) => {
                             assert!(expected_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
                         }
                         Err(e) => {

@@ -128,6 +128,10 @@ where
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping engine");
+            },
             // Command from the mailbox
             command = self.mailbox.next() => {
                 if let Some(command) = command {

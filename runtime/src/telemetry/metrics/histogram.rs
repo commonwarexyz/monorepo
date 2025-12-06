@@ -81,6 +81,16 @@ impl<C: Clock> Timed<C> {
             canceled: false,
         }
     }
+
+    /// Time an operation, recording only if it returns `Some`.
+    pub fn time_some<T, F: FnOnce() -> Option<T>>(&self, f: F) -> Option<T> {
+        let start = self.clock.current();
+        let result = f();
+        if result.is_some() {
+            self.histogram.observe_between(start, self.clock.current());
+        }
+        result
+    }
 }
 
 /// A timer that records a duration when dropped.

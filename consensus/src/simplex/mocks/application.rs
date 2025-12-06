@@ -23,6 +23,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
@@ -49,7 +50,7 @@ pub struct Mailbox<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Mailbox<D, P> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
+    pub(super) const fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
@@ -262,6 +263,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Handle actions
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping application");
+            },
             message = self.mailbox.next() => {
                 let message =match message {
                     Some(message) => message,

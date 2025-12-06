@@ -87,6 +87,11 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping round");
+                return None;
+            },
             _ = self.context.sleep_until(t_signature) => {
                 debug!(round, "signature timeout");
                 break;

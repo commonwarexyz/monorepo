@@ -115,6 +115,8 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 just miri <module>::
 ```
 
+_Always use `just` commands for testing (uses `nextest` for parallel execution)._
+
 ### Extended Checks (before PR)
 
 ```bash
@@ -146,10 +148,12 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Development Workflow
 1. Make changes in relevant primitive directory
-2. Run `just test -p <crate-name>` for quick iteration
-3. Run CI fast checks before committing (see CI section above)
-4. Use `just fix-fmt` for formatting
-5. Run full CI checks locally before creating PR
+2. Run `just test -p <crate-name> <test_name>` for quick iteration
+3. Run `just test -p <crate-name>` to verify all crate tests pass
+4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
+5. Run `just pre-pr` before creating a PR
+
+_Avoid running tests for the entire workspace unless absolutely necessary. This can take a LONG time to run._
 
 ## Reviewing PRs
 When reviewing PRs, focus the majority of your effort on correctness and performance (not style). Pay special attention to bugs
@@ -221,8 +225,8 @@ let (network, mut oracle) = Network::new(
 network.start();
 
 // Register multiple channels per peer for different message types
-let (pending_sender, pending_receiver) = oracle.register(pk, 0).await.unwrap();
-let (recovered_sender, recovered_receiver) = oracle.register(pk, 1).await.unwrap();
+let (vote_sender, vote_receiver) = oracle.register(pk, 0).await.unwrap();
+let (certificate_sender, certificate_receiver) = oracle.register(pk, 1).await.unwrap();
 let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap();
 
 // Configure network links with realistic conditions
@@ -465,6 +469,10 @@ fn test_storage_conformance() {
 - **Cleanup After Tests**: Use `destroy()` to remove test data
 - **Test Pruning**: Verify old data can be safely removed
 - **Test Concurrent Access**: Multiple readers/writers on same storage
+- **Failures Are Fatal**: Errors returned by mutable methods (e.g. `put`,
+`delete`, `sync`) are treated as unrecoverable. The database may be in an inconsistent state after
+such an error. Callers must not use a database after a mutable method returns an error. Reviews
+need not comment the database being in an inconsistent state after such an error.
 
 ## Code Style Guide
 
@@ -544,6 +552,7 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
+- Always place imports at the top of a module (never inline)
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations

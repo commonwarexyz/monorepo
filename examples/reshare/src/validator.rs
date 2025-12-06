@@ -193,7 +193,10 @@ mod test {
         (Sender<PublicKey>, Receiver<PublicKey>),
         (
             mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<Sha256, PrivateKey, MinSig>>>,
+            commonware_resolver::p2p::Mailbox<
+                handler::Request<Block<Sha256, PrivateKey, MinSig>>,
+                PublicKey,
+            >,
         ),
     ) {
         let mut control = oracle.control(validator.clone());
@@ -251,6 +254,7 @@ mod test {
                 mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
                 commonware_resolver::p2p::Mailbox<
                     handler::Request<Block<Sha256, PrivateKey, MinSig>>,
+                    PublicKey,
                 >,
             ),
         ),
