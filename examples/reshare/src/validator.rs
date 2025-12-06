@@ -159,7 +159,7 @@ mod test {
         application::{Block, EdScheme, ThresholdScheme},
         BLOCKS_PER_EPOCH,
     };
-    use commonware_consensus::marshal::ingress::handler;
+    use commonware_consensus::marshal::resolver::handler;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey},

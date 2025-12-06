@@ -1,10 +1,10 @@
-//! Interface for a store of finalized blocks, used by [Actor](super::Actor).
+//! Interfaces for stores of finalized certificates and blocks.
 
 use crate::{
     simplex::{signing_scheme::Scheme, types::Finalization},
     Block,
 };
-use commonware_cryptography::{Committable, Digest};
+use commonware_cryptography::{Digest, Digestible};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
@@ -12,9 +12,12 @@ use commonware_storage::{
 };
 use std::{error::Error, future::Future};
 
-/// Durable store for [Finalizations](Finalization) keyed by height and commitment.
+/// Durable store for [Finalizations](Finalization) keyed by height and block digest.
 pub trait Certificates: Send + Sync + 'static {
-    /// The type of commitment included in consensus certificates.
+    /// The type of [Digest] used for block digests.
+    type BlockDigest: Digest;
+
+    /// The type of [Digest] included in consensus certificates.
     type Commitment: Digest;
 
     /// The type of signing [Scheme] used by consensus.
@@ -23,7 +26,7 @@ pub trait Certificates: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
 
-    /// Store a finalization certificate, keyed by height and commitment.
+    /// Store a finalization certificate, keyed by height and block digest.
     ///
     /// Implementations must:
     /// - Durably sync the write before returning; successful completion implies that the certificate is persisted.
@@ -32,7 +35,7 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Arguments
     ///
     /// * `height`: The application height associated with the finalization.
-    /// * `commitment`: The block commitment associated with the finalization.
+    /// * `digest`: The block digest associated with the finalization.
     /// * `finalization`: The finalization certificate.
     ///
     /// # Returns
@@ -41,18 +44,18 @@ pub trait Certificates: Send + Sync + 'static {
     fn put(
         &mut self,
         height: u64,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a [Finalization] by height or commitment.
+    /// Retrieve a [Finalization] by height or corresponding block digest.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the application height or
-    /// its commitment.
+    /// its corresponding block digest.
     ///
     /// # Arguments
     ///
-    /// * `id`: The finalization identifier (height or commitment) to fetch.
+    /// * `id`: The finalization identifier (height or digest) to fetch.
     ///
     /// # Returns
     ///
@@ -60,7 +63,7 @@ pub trait Certificates: Send + Sync + 'static {
     #[allow(clippy::type_complexity)]
     fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> impl Future<
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
@@ -83,7 +86,7 @@ pub trait Certificates: Send + Sync + 'static {
     fn last_index(&self) -> Option<u64>;
 }
 
-/// Durable store for finalized [Blocks](Block) keyed by height and commitment.
+/// Durable store for finalized [Blocks](Block) keyed by height and block digest.
 pub trait Blocks: Send + Sync + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;
@@ -91,7 +94,7 @@ pub trait Blocks: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
 
-    /// Store a finalized block, keyed by height and commitment.
+    /// Store a finalized block, keyed by height and block digest.
     ///
     /// Implementations must:
     /// - Durably sync the write before returning; successful completion implies that the block is persisted.
@@ -99,28 +102,28 @@ pub trait Blocks: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `block`: The finalized block, which provides its `height()` and `commitment()`.
+    /// * `block`: The finalized block, which provides its `height()` and `digest()`.
     ///
     /// # Returns
     ///
     /// `Ok(())` once the write is synced, or `Err` if persistence fails.
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a finalized block by height or commitment.
+    /// Retrieve a finalized block by height or block digest.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the block height or
-    /// its commitment.
+    /// its block digest.
     ///
     /// # Arguments
     ///
-    /// * `id`: The block identifier (height or commitment) to fetch.
+    /// * `id`: The block identifier (height or digest) to fetch.
     ///
     /// # Returns
     ///
     /// `Ok(Some(block))` if present, `Ok(None)` if missing, or `Err` on read failure.
     fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
@@ -175,12 +178,14 @@ pub trait Blocks: Send + Sync + 'static {
     fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>);
 }
 
-impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
+impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
 where
     E: Storage + Metrics + Clock,
+    B: Digest,
     C: Digest,
     S: Scheme,
 {
+    type BlockDigest = B;
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
@@ -188,15 +193,15 @@ where
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height, commitment, finalization).await
+        self.put_sync(height, digest, finalization).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -211,7 +216,7 @@ where
     }
 }
 
-impl<E, B> Blocks for immutable::Archive<E, B::Commitment, B>
+impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
 where
     E: Storage + Metrics + Clock,
     B: Block,
@@ -220,13 +225,12 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height(), block.commitment(), block)
-            .await
+        self.put_sync(block.height(), block.digest(), block).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -245,13 +249,15 @@ where
     }
 }
 
-impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
+impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
 where
     T: Translator<Key = C> + Send + Sync + 'static,
     E: Storage + Metrics + Clock,
+    B: Digest,
     C: Digest,
     S: Scheme,
 {
+    type BlockDigest = B;
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
@@ -259,15 +265,15 @@ where
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::Commitment,
+        digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height, commitment, finalization).await
+        self.put_sync(height, digest, finalization).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::Commitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -281,9 +287,9 @@ where
     }
 }
 
-impl<T, E, B> Blocks for prunable::Archive<T, E, B::Commitment, B>
+impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
 where
-    T: Translator<Key = B::Commitment> + Send + Sync + 'static,
+    T: Translator<Key = B::Digest> + Send + Sync + 'static,
     E: Storage + Metrics + Clock,
     B: Block,
 {
@@ -291,13 +297,12 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height(), block.commitment(), block)
-            .await
+        self.put_sync(block.height(), block.digest(), block).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
