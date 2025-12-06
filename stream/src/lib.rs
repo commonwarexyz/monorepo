@@ -181,7 +181,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn) = dial_start(
             &mut ctx,
-            Context::new(current_time, ok_timestamps, config.signing_key, peer),
+            Context::new(
+                current_time,
+                ok_timestamps,
+                config.signing_key,
+                peer,
+                config.namespace.clone(),
+            ),
         );
         send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
 
@@ -246,6 +252,7 @@ pub async fn listen<
                 ok_timestamps,
                 config.signing_key,
                 peer.clone(),
+                config.namespace.clone(),
             ),
             msg1,
         )?;

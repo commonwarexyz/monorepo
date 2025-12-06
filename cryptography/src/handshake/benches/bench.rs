@@ -19,11 +19,23 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
 
     let (d_state, msg1) = dial_start(
         &mut rng,
-        Context::new(0, 0..1, dialer_crypto.clone(), listener_crypto.public_key()),
+        Context::new(
+            0,
+            0..1,
+            dialer_crypto.clone(),
+            listener_crypto.public_key(),
+            b"bench_namespace".to_vec(),
+        ),
     );
     let (l_state, msg2) = listen_start(
         &mut rng,
-        Context::new(0, 0..1, listener_crypto, dialer_crypto.public_key()),
+        Context::new(
+            0,
+            0..1,
+            listener_crypto,
+            dialer_crypto.public_key(),
+            b"bench_namespace".to_vec(),
+        ),
         msg1,
     )?;
     let (msg3, d_send, _) = dial_end(d_state, msg2)?;
