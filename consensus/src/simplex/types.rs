@@ -635,26 +635,18 @@ impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
 pub struct Proposal<D: Digest> {
     /// The round in which this proposal is made
     pub round: Round,
-    /// The view of the parent proposal that this one builds upon
-    pub parent: View,
+    /// The index of the leader proposing this block
+    pub leader: u32,
+    /// The view and payload of the parent proposal that this one builds upon
+    pub parent: (View, D),
     /// The actual payload/content of the proposal (typically a digest of the block data)
     pub payload: D,
-}
-
-impl<D: Digest> Proposal<D> {
-    /// Creates a new proposal with the specified view, parent view, and payload.
-    pub const fn new(round: Round, parent: View, payload: D) -> Self {
-        Self {
-            round,
-            parent,
-            payload,
-        }
-    }
 }
 
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
+        UInt(self.leader).write(writer);
         self.parent.write(writer);
         self.payload.write(writer)
     }
@@ -665,10 +657,12 @@ impl<D: Digest> Read for Proposal<D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let parent = View::read(reader)?;
+        let leader = UInt::<u32>::read(reader)?.into();
+        let parent = (View::read(reader)?, D::read(reader)?);
         let payload = D::read(reader)?;
         Ok(Self {
             round,
+            leader,
             parent,
             payload,
         })
@@ -677,7 +671,10 @@ impl<D: Digest> Read for Proposal<D> {
 
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.parent.encode_size() + self.payload.encode_size()
+        self.round.encode_size()
+            + UInt(self.leader).encode_size()
+            + self.parent.encode_size()
+            + self.payload.encode_size()
     }
 }
 
@@ -2192,11 +2189,12 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
+        let proposal = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let encoded = proposal.encode();
         let decoded = Proposal::<Sha256>::decode(encoded).unwrap();
         assert_eq!(proposal, decoded);
@@ -2204,7 +2202,12 @@ mod tests {
 
     fn notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
 
         let encoded = notarize.encode();
@@ -2224,11 +2227,12 @@ mod tests {
     }
 
     fn notarization_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
+        let proposal = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2293,7 +2297,12 @@ mod tests {
 
     fn finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
@@ -2312,7 +2321,12 @@ mod tests {
 
     fn finalization_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let finalizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2348,7 +2362,12 @@ mod tests {
         assert!(matches!(decoded_request, Backfiller::Request(r) if r == request));
 
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2391,7 +2410,12 @@ mod tests {
 
     fn response_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
 
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2433,16 +2457,18 @@ mod tests {
     }
 
     fn conflicting_notarize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal1 = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
-        let proposal2 = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(2),
-        );
+        let proposal1 = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
+        let proposal2 = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(2),
+        };
         let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
         let notarize2 = Notarize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
@@ -2464,16 +2490,18 @@ mod tests {
     }
 
     fn conflicting_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal1 = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
-        let proposal2 = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(2),
-        );
+        let proposal1 = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
+        let proposal2 = Proposal {
+            round: Round::new(Epoch::new(0), View::new(10)),
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(2),
+        };
         let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
         let finalize2 = Finalize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
@@ -2496,7 +2524,12 @@ mod tests {
 
     fn nullify_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
@@ -2519,7 +2552,12 @@ mod tests {
 
     fn notarize_verify_wrong_namespace<S: Scheme>(scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(1));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
@@ -2537,7 +2575,12 @@ mod tests {
 
     fn notarize_verify_wrong_scheme<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(2));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(2),
+        };
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
@@ -2557,7 +2600,12 @@ mod tests {
 
     fn notarization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(3));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(3),
+        };
         let quorum = quorum_from_slice(schemes) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2587,7 +2635,12 @@ mod tests {
 
     fn notarization_verify_wrong_namespace<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(4));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(4),
+        };
         let quorum = quorum_from_slice(schemes) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2617,7 +2670,12 @@ mod tests {
         let quorum = quorum_from_slice(schemes) as usize;
         assert!(quorum > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(5));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(5),
+        };
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum - 1)
@@ -2641,8 +2699,18 @@ mod tests {
 
     fn conflicting_notarize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal1 = Proposal::new(round, View::new(5), sample_digest(6));
-        let proposal2 = Proposal::new(round, View::new(5), sample_digest(7));
+        let proposal1 = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(6),
+        };
+        let proposal2 = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(7),
+        };
 
         let notarize1 = Notarize::sign(scheme, NAMESPACE, proposal1).unwrap();
         let notarize2 = Notarize::sign(scheme, NAMESPACE, proposal2).unwrap();
@@ -2666,7 +2734,12 @@ mod tests {
 
     fn nullify_finalize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(8));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(8),
+        };
 
         let nullify = Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap();
         let finalize = Finalize::sign(scheme, NAMESPACE, proposal).unwrap();
@@ -2690,7 +2763,12 @@ mod tests {
 
     fn finalization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
-        let proposal = Proposal::new(round, View::new(5), sample_digest(9));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(5), sample_digest(0)),
+            payload: sample_digest(9),
+        };
         let quorum = quorum_from_slice(schemes) as usize;
         let finalizes: Vec<_> = schemes
             .iter()

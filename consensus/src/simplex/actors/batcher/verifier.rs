@@ -507,7 +507,12 @@ mod tests {
         parent_view: View,
         payload_val: u8,
     ) -> Notarize<S, Sha256> {
-        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (parent_view, sample_digest(0)),
+            payload: sample_digest(payload_val),
+        };
         Notarize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
@@ -523,7 +528,12 @@ mod tests {
         parent_view: View,
         payload_val: u8,
     ) -> Finalize<S, Sha256> {
-        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (parent_view, sample_digest(0)),
+            payload: sample_digest(payload_val),
+        };
         Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
@@ -813,8 +823,18 @@ mod tests {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
-        let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
-        let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
+        let proposal_a = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(0), sample_digest(0)),
+            payload: sample_digest(10),
+        };
+        let proposal_b = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(0), sample_digest(0)),
+            payload: sample_digest(20),
+        };
 
         let notarize_a = Notarize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
         let notarize_b = Notarize::sign(&schemes[1], NAMESPACE, proposal_b.clone()).unwrap();
@@ -962,7 +982,12 @@ mod tests {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
-        let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
+        let leader_proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(0), sample_digest(0)),
+            payload: sample_digest(1),
+        };
         verifier.set_leader_proposal(leader_proposal);
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());

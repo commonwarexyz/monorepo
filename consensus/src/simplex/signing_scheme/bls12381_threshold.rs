@@ -711,11 +711,12 @@ mod tests {
     }
 
     fn sample_proposal(epoch: Epoch, view: View, tag: u8) -> Proposal<Sha256Digest> {
-        Proposal::new(
-            Round::new(epoch, view),
-            view.previous().unwrap(),
-            Sha256::hash(&[tag]),
-        )
+        Proposal {
+            round: Round::new(epoch, view),
+            leader: 0,
+            parent: (view.previous().unwrap(), Sha256Digest::from([0u8; 32])),
+            payload: Sha256::hash(&[tag]),
+        }
     }
 
     fn signer_shares_must_match_participant_indices<V: Variant>() {

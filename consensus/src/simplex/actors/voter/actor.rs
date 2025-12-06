@@ -797,11 +797,14 @@ impl<
                     }
 
                     // Construct proposal
-                    let proposal = Proposal::new(
-                        context.round,
-                        context.parent.0,
-                        proposed,
-                    );
+                    let leader = self.state.leader_index(context.round.view())
+                        .expect("leader must be set when proposing");
+                    let proposal = Proposal {
+                        round: context.round,
+                        leader,
+                        parent: context.parent,
+                        payload: proposed,
+                    };
                     if !self.state.proposed(proposal) {
                         warn!(round = ?context.round, "dropped our proposal");
                         continue;

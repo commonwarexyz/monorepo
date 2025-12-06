@@ -488,16 +488,18 @@ mod tests {
             verifier,
             ..
         } = ed25519(&mut rng, 4);
-        let proposal_a = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([1u8; 32]),
-        );
-        let proposal_b = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([2u8; 32]),
-        );
+        let proposal_a = Proposal {
+            round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([1u8; 32]),
+        };
+        let proposal_b = Proposal {
+            round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([2u8; 32]),
+        };
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
@@ -541,16 +543,18 @@ mod tests {
             verifier,
             ..
         } = ed25519(&mut rng, 4);
-        let proposal_a = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([1u8; 32]),
-        );
-        let proposal_b = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([2u8; 32]),
-        );
+        let proposal_a = Proposal {
+            round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([1u8; 32]),
+        };
+        let proposal_b = Proposal {
+            round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([2u8; 32]),
+        };
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
@@ -604,11 +608,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let proposal = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([1u8; 32]),
-        );
+        let proposal = Proposal {
+            round: Rnd::new(Epoch::new(1), View::new(1)),
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([1u8; 32]),
+        };
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
 
@@ -641,7 +646,12 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let view = 2;
         let round = Rnd::new(Epoch::new(5), View::new(view));
-        let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([40u8; 32]));
+        let proposal = Proposal {
+            round,
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([40u8; 32]),
+        };
 
         // Create notarization
         let notarize_local =
@@ -709,7 +719,12 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let view = 2;
         let round_info = Rnd::new(Epoch::new(5), View::new(view));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+        let proposal = Proposal {
+            round: round_info,
+            leader: 0,
+            parent: (View::new(0), Sha256Digest::from([0u8; 32])),
+            payload: Sha256Digest::from([40u8; 32]),
+        };
 
         // Create finalized vote
         let finalize_local = Finalize::sign(&local_scheme, namespace, proposal).expect("finalize");
