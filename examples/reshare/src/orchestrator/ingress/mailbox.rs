@@ -9,7 +9,7 @@ use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
-/// Messages that can be sent to the orchestrator.
+/// Messages that can be sent to the orchestrator for epoch management.
 pub enum Message<V: Variant, P: PublicKey> {
     Enter(EpochTransition<V, P>),
     Exit(Epoch),

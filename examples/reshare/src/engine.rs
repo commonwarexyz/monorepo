@@ -101,6 +101,7 @@ where
     orchestrator: orchestrator::Actor<
         E,
         B,
+        P,
         V,
         C,
         H,
@@ -265,6 +266,7 @@ where
             context.with_label("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
+                manager: config.manager.clone(),
                 application,
                 scheme_provider,
                 marshal: marshal_mailbox,

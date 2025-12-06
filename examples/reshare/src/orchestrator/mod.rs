@@ -3,9 +3,5 @@
 mod actor;
 pub use actor::{Actor, Config};
 
-mod finalization_tracker;
-
 mod ingress;
-pub use ingress::{EpochTransition, Mailbox};
-
-mod wire;
+pub use ingress::mailbox::{EpochTransition, Mailbox};
