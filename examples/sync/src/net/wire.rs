@@ -5,8 +5,8 @@ use commonware_codec::{
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{
-    adb::sync::Target,
     mmr::{Location, Proof},
+    qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
 

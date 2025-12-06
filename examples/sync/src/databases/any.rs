@@ -4,13 +4,13 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    mmr::{Location, Proof},
+    qmdb::{
         self,
         any::{unordered::fixed::Any, FixedConfig as Config},
         operation,
         store::CleanStore,
     },
-    mmr::{Location, Proof},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -74,7 +74,7 @@ where
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
                 Operation::Update(key, value) => {
@@ -91,7 +91,7 @@ where
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
         self.commit(None).await?;
         Ok(())
     }
@@ -113,7 +113,7 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         CleanStore::historical_proof(self, op_count, start_loc, max_ops)
     }
 

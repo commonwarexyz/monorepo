@@ -21,15 +21,15 @@ libfuzzer-sys.workspace = true
 rand.workspace = true
 
 [[bin]]
-name = "adb_unordered_operations"
-path = "fuzz_targets/adb_unordered_operations.rs"
+name = "qmdb_unordered_operations"
+path = "fuzz_targets/qmdb_unordered_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "adb_ordered_operations"
-path = "fuzz_targets/adb_ordered_operations.rs"
+name = "qmdb_ordered_operations"
+path = "fuzz_targets/qmdb_ordered_operations.rs"
 test = false
 doc = false
 bench = false
@@ -112,22 +112,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "adb_any_fixed_sync"
-path = "fuzz_targets/adb_any_fixed_sync.rs"
+name = "qmdb_any_fixed_sync"
+path = "fuzz_targets/qmdb_any_fixed_sync.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "adb_any_variable_sync"
-path = "fuzz_targets/adb_any_variable_sync.rs"
+name = "qmdb_any_variable_sync"
+path = "fuzz_targets/qmdb_any_variable_sync.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "adb_keyless"
-path = "fuzz_targets/adb_keyless.rs"
+name = "qmdb_keyless"
+path = "fuzz_targets/qmdb_keyless.rs"
 test = false
 doc = false
 bench = false
@@ -175,8 +175,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "adb_immutable"
-path = "fuzz_targets/adb_immutable.rs"
+name = "qmdb_immutable"
+path = "fuzz_targets/qmdb_immutable.rs"
 test = false
 doc = false
 bench = false
