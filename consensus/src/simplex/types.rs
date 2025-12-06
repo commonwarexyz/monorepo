@@ -499,6 +499,8 @@ pub enum Artifact<S: Scheme, D: Digest> {
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
+    /// A notarization was locally certified.
+    Certification(Round, bool),
 }
 
 impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
@@ -528,6 +530,11 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
                 5u8.write(writer);
                 v.write(writer);
             }
+            Self::Certification(r, b) => {
+                6u8.write(writer);
+                r.write(writer);
+                b.write(writer);
+            }
         }
     }
 }
@@ -541,6 +548,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
             Self::Finalization(v) => v.encode_size(),
+            Self::Certification(r, b) => r.encode_size() + b.encode_size(),
         }
     }
 }
@@ -592,6 +600,7 @@ impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
             Self::Finalization(v) => v.epoch(),
+            Self::Certification(r, _) => r.epoch(),
         }
     }
 }
@@ -605,6 +614,7 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
             Self::Finalization(v) => v.view(),
+            Self::Certification(r, _) => r.view(),
         }
     }
 }
@@ -1585,6 +1595,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     ConflictingFinalize(ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
+    /// A notarization was locally certified.
+    Certification(Notarization<S, D>),
 }
 
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
@@ -1645,6 +1657,10 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
                 8u8.hash(state);
                 v.hash(state);
             }
+            Self::Certification(v) => {
+                9u8.hash(state);
+                v.hash(state);
+            }
         }
     }
 }
@@ -1662,6 +1678,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Self::ConflictingNotarize(_) => false,
             Self::ConflictingFinalize(_) => false,
             Self::NullifyFinalize(_) => false,
+            Self::Certification(_) => false,
         }
     }
 
@@ -1681,6 +1698,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Self::ConflictingNotarize(c) => c.verify(scheme, namespace),
             Self::ConflictingFinalize(c) => c.verify(scheme, namespace),
             Self::NullifyFinalize(c) => c.verify(scheme, namespace),
+            Self::Certification(n) => n.verify(rng, scheme, namespace),
         }
     }
 }
@@ -1724,6 +1742,10 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 8u8.write(writer);
                 v.write(writer);
             }
+            Self::Certification(v) => {
+                9u8.write(writer);
+                v.write(writer);
+            }
         }
     }
 }
@@ -1740,6 +1762,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
             Self::ConflictingNotarize(v) => v.encode_size(),
             Self::ConflictingFinalize(v) => v.encode_size(),
             Self::NullifyFinalize(v) => v.encode_size(),
+            Self::Certification(v) => v.encode_size(),
         }
     }
 }
@@ -1786,6 +1809,10 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Self::NullifyFinalize(v))
             }
+            9 => {
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
+                Ok(Self::Certification(v))
+            }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",
                 "Invalid type",
@@ -1806,6 +1833,7 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
             Self::ConflictingNotarize(v) => v.epoch(),
             Self::ConflictingFinalize(v) => v.epoch(),
             Self::NullifyFinalize(v) => v.epoch(),
+            Self::Certification(v) => v.epoch(),
         }
     }
 }
@@ -1822,6 +1850,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
             Self::ConflictingNotarize(v) => v.view(),
             Self::ConflictingFinalize(v) => v.view(),
             Self::NullifyFinalize(v) => v.view(),
+            Self::Certification(v) => v.view(),
         }
     }
 }
