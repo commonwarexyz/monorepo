@@ -25,6 +25,7 @@ pub enum Message<P: PublicKey> {
         response: oneshot::Sender<Option<Set<P>>>,
     },
     Subscribe {
+        me: P,
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
     },
     LimitBandwidth {
@@ -95,20 +96,28 @@ impl<P: PublicKey> Oracle<P> {
         }
     }
 
-    /// Create a new [Manager].
+    /// Create a new [Manager] for the given peer.
+    ///
+    /// The `me` parameter identifies the local peer and ensures it is always
+    /// included in the tracked peers returned by subscriptions.
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    pub fn manager(&self) -> Manager<P> {
+    pub fn manager(&self, me: P) -> Manager<P> {
         Manager {
+            me,
             oracle: self.clone(),
         }
     }
 
-    /// Create a new [SocketManager].
+    /// Create a new [SocketManager] for the given peer.
+    ///
+    /// The `me` parameter identifies the local peer and ensures it is always
+    /// included in the tracked peers returned by subscriptions.
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    pub fn socket_manager(&self) -> SocketManager<P> {
+    pub fn socket_manager(&self, me: P) -> SocketManager<P> {
         SocketManager {
+            me,
             oracle: self.clone(),
         }
     }
@@ -226,9 +235,12 @@ impl<P: PublicKey> Oracle<P> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
+    ///
+    /// The `me` parameter identifies the local peer and ensures it is always
+    /// included in the tracked peers (the third element of the tuple).
+    async fn subscribe(&mut self, me: P) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
         let (sender, receiver) = mpsc::unbounded();
-        let _ = self.sender.send(Message::Subscribe { sender }).await;
+        let _ = self.sender.send(Message::Subscribe { me, sender }).await;
         receiver
     }
 }
@@ -238,6 +250,9 @@ impl<P: PublicKey> Oracle<P> {
 /// Useful for mocking [crate::authenticated::discovery].
 #[derive(Debug, Clone)]
 pub struct Manager<P: PublicKey> {
+    /// The public key of the local peer.
+    me: P,
+
     /// The oracle to send messages to.
     oracle: Oracle<P>,
 }
@@ -257,7 +272,7 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe().await
+        self.oracle.subscribe(self.me.clone()).await
     }
 }
 
@@ -272,6 +287,9 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
 /// all [SocketAddr]s to be valid.
 #[derive(Debug, Clone)]
 pub struct SocketManager<P: PublicKey> {
+    /// The public key of the local peer.
+    me: P,
+
     /// The oracle to send messages to.
     oracle: Oracle<P>,
 }
@@ -292,7 +310,7 @@ impl<P: PublicKey> crate::Manager for SocketManager<P> {
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe().await
+        self.oracle.subscribe(self.me.clone()).await
     }
 }
 

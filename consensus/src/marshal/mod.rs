@@ -246,7 +246,7 @@ mod tests {
         let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            manager: oracle.manager(validator.clone()),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
@@ -473,7 +473,7 @@ mod tests {
             let mut actors = Vec::new();
 
             // Register the initial peer set.
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(participants[0].clone());
             manager
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
@@ -619,7 +619,7 @@ mod tests {
             let mut actors = Vec::new();
 
             // Register the initial peer set.
-            let mut manager = oracle.manager();
+            let mut manager = oracle.manager(participants[0].clone());
             manager
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
