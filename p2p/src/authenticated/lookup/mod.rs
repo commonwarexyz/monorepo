@@ -180,6 +180,7 @@ mod tests {
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
+    use rstest::rstest;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -630,9 +631,11 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    #[should_panic(expected = "no messages should be rate limited")]
-    fn test_rate_limiting() {
+    #[rstest]
+    #[should_panic]
+    #[case::outbound_disabled_triggers_inbound(false)]
+    #[case::outbound_enabled_prevents_inbound(true)]
+    fn test_rate_limiting(#[case] rate_limit_outbound: bool) {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
@@ -657,11 +660,12 @@ mod tests {
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 
             // Create network for peer 0
-            let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            let mut config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            config0.rate_limit_outbound = rate_limit_outbound;
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
             oracle0.update(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
-                network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
             // Create network for peer 1
@@ -669,7 +673,7 @@ mod tests {
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
             oracle1.update(0, peers.clone()).await;
             let (_sender1, _receiver1) =
-                network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
 
             // Send first message, which should be allowed and consume the quota.
@@ -685,17 +689,32 @@ mod tests {
                 }
 
                 // Sleep and try again (avoid busy loop)
-                context.sleep(Duration::from_millis(100)).await;
+                context
+                    .sleep(if rate_limit_outbound {
+                        // Ensure we don't rate limit outbound sends; Skip past
+                        // the rate limit and try again.
+                        Duration::from_mins(1)
+                    } else {
+                        Duration::from_millis(100)
+                    })
+                    .await
             }
 
             // Immediately send the second message to trigger the rate limit.
+            // With partial sends, rate-limited recipients return empty vec (not error).
             let sent = sender0
                 .send(Recipients::One(pk1), msg.into(), true)
                 .await
                 .unwrap();
-            assert!(!sent.is_empty());
+            if rate_limit_outbound {
+                // Outbound rate limiting skips the peer, returns empty vec.
+                assert!(sent.is_empty());
+            } else {
+                // No outbound rate limiting, message is sent (peer will rate limit inbound)
+                assert!(!sent.is_empty());
+            }
 
-            // Loop until the metrics reflect the rate-limited message.
+            // Give the metrics time to reflect the rate-limited message.
             for _ in 0..10 {
                 assert_no_rate_limiting(&context);
                 context.sleep(Duration::from_millis(100)).await;

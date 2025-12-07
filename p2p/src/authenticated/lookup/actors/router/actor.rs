@@ -169,6 +169,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         // Communicate success back to sender (if still alive)
                         let _ = success.send(sent);
                     }
+                    Message::Connected { response } => {
+                        let peers = self.connections.keys().cloned().collect();
+                        let _ = response.send(peers);
+                    }
                 }
             }
         }
