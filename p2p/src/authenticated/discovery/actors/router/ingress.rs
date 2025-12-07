@@ -25,6 +25,8 @@ pub enum Message<P: PublicKey> {
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
+    /// Get a list of currently connected peers.
+    Connected { response: oneshot::Sender<Vec<P>> },
 }
 
 impl<P: PublicKey> Mailbox<Message<P>> {
@@ -80,6 +82,16 @@ impl<P: PublicKey> Messenger<P> {
                 priority,
                 success: sender,
             })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    /// Gets a list of currently connected peers.
+    pub async fn connected(&mut self) -> Vec<P> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Connected { response: sender })
             .await
             .unwrap();
         receiver.await.unwrap()

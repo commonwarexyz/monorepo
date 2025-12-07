@@ -90,6 +90,11 @@ pub struct Config<C: Signer> {
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
     pub tracked_peer_sets: usize,
+
+    /// Whether or not to rate limit outgoing sends using the same [Quota]
+    /// as inbound sends. This should generally be enabled to prevent
+    /// other peers from rate limiting this instance.
+    pub rate_limit_outbound: bool,
 }
 
 impl<C: Signer> Config<C> {
@@ -121,6 +126,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
+            rate_limit_outbound: true,
         }
     }
 
@@ -152,6 +158,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
+            rate_limit_outbound: true,
         }
     }
 
@@ -178,6 +185,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
+            rate_limit_outbound: true,
         }
     }
 }
