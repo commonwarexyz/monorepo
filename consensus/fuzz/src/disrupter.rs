@@ -347,8 +347,7 @@ where
                 }
             }
             Message::Nullify => {
-                let view = self.random_view(self.view);
-                let round = Round::new(Epoch::new(EPOCH), View::new(view));
+                let round = Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view)));
                 if let Some(vote) =
                     Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
                 {
