@@ -40,8 +40,6 @@ impl<T> NonEmptyVec<T> {
     /// # Safety
     ///
     /// The caller must ensure that the vector is not empty.
-    /// This is intended for use by the `non_empty_vec!` macro.
-    #[doc(hidden)]
     pub const fn from_vec_unchecked(vec: Vec<T>) -> Self {
         Self(vec)
     }
