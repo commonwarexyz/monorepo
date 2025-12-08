@@ -249,7 +249,6 @@ impl<
                                     trace!(?key, "updated targets for existing fetch");
                                 }
                             }
-                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -259,7 +258,6 @@ impl<
                                 self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
                                 self.consumer.failed(key.clone(), ()).await;
                             }
-                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                         }
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
@@ -274,10 +272,9 @@ impl<
                                 timer.cancel();
                                 self.consumer.failed(key, ()).await;
                             }
-                            let removed = (before - self.fetch_timers.len()) as u64;
-                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
 
                             // Metrics
+                            let removed = (before - self.fetch_timers.len()) as u64;
                             if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
@@ -296,7 +293,6 @@ impl<
                                 timer.cancel();
                                 self.consumer.failed(key, ()).await;
                             }
-                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
 
                             // Metrics
                             if removed == 0 {
@@ -306,6 +302,7 @@ impl<
                             }
                         }
                     }
+                    assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                 },
 
                 // Handle completed server requests
