@@ -249,6 +249,7 @@ impl<
                                     trace!(?key, "updated targets for existing fetch");
                                 }
                             }
+                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -258,6 +259,7 @@ impl<
                                 self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
                                 self.consumer.failed(key.clone(), ()).await;
                             }
+                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                         }
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
