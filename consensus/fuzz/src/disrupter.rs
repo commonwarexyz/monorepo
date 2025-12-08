@@ -211,11 +211,11 @@ where
                 .await;
         }
 
-        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
+        let Ok(last_vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
             return;
         };
-        self.view = vote.view().get();
-        match vote {
+        self.view = last_vote.view().get();
+        match last_vote {
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
