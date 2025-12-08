@@ -1,4 +1,8 @@
 //! Benchmarks of QMDB variants on fixed-size values.
+//!
+//! While this benchmark involves updating a database with fixed-size values, we also include the db
+//! variants capable of handling variable-size values to gauge the impact of the extra indirection
+//! they perform.
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
@@ -32,8 +36,8 @@ enum Variant {
     AnyOrderedFixed,
     AnyUnorderedVariable,
     AnyOrderedVariable,
-    CurrentUnordered,
-    CurrentOrdered,
+    CurrentUnorderedFixed,
+    CurrentOrderedFixed,
 }
 
 impl Variant {
@@ -44,8 +48,8 @@ impl Variant {
             Self::AnyOrderedFixed => "any::ordered::fixed",
             Self::AnyUnorderedVariable => "any::unordered::variable",
             Self::AnyOrderedVariable => "any::ordered::variable",
-            Self::CurrentUnordered => "current::unordered",
-            Self::CurrentOrdered => "current::ordered",
+            Self::CurrentUnorderedFixed => "current::unordered::fixed",
+            Self::CurrentOrderedFixed => "current::ordered::fixed",
         }
     }
 }
@@ -56,8 +60,8 @@ const VARIANTS: [Variant; 7] = [
     Variant::AnyOrderedFixed,
     Variant::AnyUnorderedVariable,
     Variant::AnyOrderedVariable,
-    Variant::CurrentUnordered,
-    Variant::CurrentOrdered,
+    Variant::CurrentUnorderedFixed,
+    Variant::CurrentOrderedFixed,
 ];
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
@@ -190,7 +194,7 @@ async fn get_any_ordered_fixed(ctx: Context) -> OAnyDb {
 }
 
 /// Get an unordered current QMDB instance.
-async fn get_current_unordered(ctx: Context) -> UCurrentDb {
+async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -199,7 +203,7 @@ async fn get_current_unordered(ctx: Context) -> UCurrentDb {
 }
 
 /// Get an ordered current QMDB instance.
-async fn get_current_ordered(ctx: Context) -> OCurrentDb {
+async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)

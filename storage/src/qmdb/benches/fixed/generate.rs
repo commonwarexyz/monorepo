@@ -3,8 +3,8 @@
 
 use crate::fixed::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
-    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered,
-    get_current_unordered, get_store, Variant, VARIANTS,
+    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
+    get_current_unordered_fixed, get_store, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -109,8 +109,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::CurrentUnordered => {
-                                            let db = get_current_unordered(ctx.clone()).await;
+                                        Variant::CurrentUnorderedFixed => {
+                                            let db = get_current_unordered_fixed(ctx.clone()).await;
                                             let db = AnyExt::new(db);
                                             test_db(
                                                 db,
@@ -122,8 +122,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::CurrentOrdered => {
-                                            let db = get_current_ordered(ctx.clone()).await;
+                                        Variant::CurrentOrderedFixed => {
+                                            let db = get_current_ordered_fixed(ctx.clone()).await;
                                             let db = AnyExt::new(db);
                                             test_db(
                                                 db,
