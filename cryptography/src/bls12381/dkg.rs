@@ -483,7 +483,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     #[must_use]
     fn check_dealer_pub_msg(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
-        if self.degree() != pub_msg.commitment.degree() {
+        if self.degree() != pub_msg.commitment.degree_exact() {
             return false;
         }
         if let Some(previous) = self.previous.as_ref() {
