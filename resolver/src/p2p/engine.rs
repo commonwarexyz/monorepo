@@ -261,27 +261,48 @@ impl<
                         }
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
-                            let before = self.fetcher.len();
-                            self.fetcher.retain(predicate);
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            // Remove from fetcher
+                            self.fetcher.retain(&predicate);
+
+                            // Clean up timers and notify consumer
+                            let before = self.fetch_timers.len();
+                            let removed = self.fetch_timers.extract_if(|k, _| !predicate(k)).collect::<Vec<_>>();
+                            for (key, timer) in removed {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
+                            }
+
+                            // Metrics
+                            let removed = (before - self.fetch_timers.len()) as u64;
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                         Message::Clear => {
                             trace!("mailbox: clear");
-                            let before = self.fetcher.len();
+
+                            // Clear fetcher
                             self.fetcher.clear();
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            // Drain timers and notify consumer
+                            let removed = self.fetch_timers.len() as u64;
+                            for (key, timer) in self.fetch_timers.drain() {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
+                            }
+
+                            // Metrics
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                     }
+                    assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                 },
 
                 // Handle completed server requests
