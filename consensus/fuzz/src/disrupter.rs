@@ -70,13 +70,21 @@ where
     }
 
     fn mutation(&mut self) -> Mutation {
-        let buf = self.fuzz_input.random_byte();
-        Mutation::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Mutation::All)
+        match self.fuzz_input.random_byte() % 4 {
+            0 => Mutation::Payload,
+            1 => Mutation::View,
+            2 => Mutation::Parent,
+            _ => Mutation::All,
+        }
     }
 
     fn message(&mut self) -> Message {
-        let buf = self.fuzz_input.random_byte();
-        Message::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Message::Random)
+        match self.fuzz_input.random_byte() % 4 {
+            0 => Message::Notarize,
+            1 => Message::Finalize,
+            2 => Message::Nullify,
+            _ => Message::Random,
+        }
     }
 
     fn random_view(&mut self, current: u64) -> u64 {
@@ -87,8 +95,8 @@ where
         match self.fuzz_input.random_byte() % 7 {
             // Too old (pre-finalized) - should be filtered
             0 => {
-                if lf == 0 {
-                    0
+                if lf <= 1 {
+                    current
                 } else {
                     self.fuzz_input.random_u64() % lf
                 }
@@ -356,7 +364,8 @@ where
                 }
             }
             Message::Nullify => {
-                let round = Round::new(Epoch::new(EPOCH), View::new(self.view));
+                let view = self.random_view(self.view);
+                let round = Round::new(Epoch::new(EPOCH), View::new(view));
                 if let Some(vote) =
                     Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
                 {
