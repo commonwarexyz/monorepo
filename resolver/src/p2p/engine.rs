@@ -294,6 +294,7 @@ impl<
                                 timer.cancel();
                                 self.consumer.failed(key, ()).await;
                             }
+                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
 
                             // Metrics
                             if removed == 0 {
