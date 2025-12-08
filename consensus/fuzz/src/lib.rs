@@ -262,7 +262,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             }
             join_all(finalizers).await;
         } else {
-            context.sleep(Duration::from_secs(5)).await;
+            context.sleep(Duration::from_secs(10)).await;
         }
 
         let states = invariants::extract(reporters);
