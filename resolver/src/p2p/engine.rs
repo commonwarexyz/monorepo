@@ -261,24 +261,53 @@ impl<
                         }
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
-                            let before = self.fetcher.len();
+
+                            // Collect keys to remove
+                            let removed: Vec<_> = self.fetch_timers
+                                .keys()
+                                .filter(|k| !predicate(k))
+                                .cloned()
+                                .collect();
+
+                            // Clean up timers and notify consumer
+                            for key in &removed {
+                                self.fetch_timers
+                                    .remove(key)
+                                    .expect("key must exist, comes from filtered iterator")
+                                    .cancel();
+                                self.consumer.failed(key.clone(), ()).await;
+                            }
+
+                            // Retain in fetcher
                             self.fetcher.retain(predicate);
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            assert_eq!(self.fetcher.len(), self.fetch_timers.len());
+
+                            // Metrics
+                            if removed.is_empty() {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed.len() as u64);
                             }
                         }
                         Message::Clear => {
                             trace!("mailbox: clear");
-                            let before = self.fetcher.len();
+
+                            // Drain timers and notify consumer
+                            let count = self.fetcher.len();
+                            for (key, timer) in self.fetch_timers.drain() {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
+                            }
+
+                            // Clear fetcher
                             self.fetcher.clear();
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            // Metrics
+                            if count == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, count as u64);
                             }
                         }
                     }
