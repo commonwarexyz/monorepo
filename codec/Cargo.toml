@@ -18,6 +18,7 @@ default = [ "std" ]
 std = [ "bytes/std", "thiserror/std" ]
 conformance = [
 	"dep:arbitrary",
+	"dep:commonware-macros",
 	"dep:rand",
 	"dep:rand_chacha",
 	"dep:serde",
@@ -27,6 +28,7 @@ conformance = [
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
+commonware-macros = { workspace = true, optional = true }
 paste.workspace = true
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }

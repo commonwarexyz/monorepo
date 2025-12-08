@@ -1036,6 +1036,7 @@ version = "0.0.63"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-macros",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",

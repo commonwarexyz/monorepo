@@ -433,6 +433,7 @@ macro_rules! conformance_tests {
     // Recursive case: generate test, add one to counter, recurse
     ([$($counter:tt)*] $type:ty => $n_cases:expr $(, $rest_type:ty => $rest_n:expr)*) => {
         $crate::paste::paste! {
+            #[commonware_macros::test_group("codec_conformance")]
             #[test]
             fn [<test_conformance_ $($counter)* x>]() {
                 $crate::conformance::run_conformance_test::<$type>(
