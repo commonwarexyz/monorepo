@@ -211,3 +211,11 @@ pub use codec::*;
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
+
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
+// Re-export paste for use in conformance macros
+#[cfg(feature = "conformance")]
+#[doc(hidden)]
+pub use paste;

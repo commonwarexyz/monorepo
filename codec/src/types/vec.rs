@@ -136,4 +136,13 @@ mod tests {
         expected_long_u8.extend_from_slice(&[0xCC; 200]);
         assert_eq!(v_long_u8.encode(), expected_long_u8.as_slice());
     }
+
+    #[cfg(feature = "conformance")]
+    mod conformance {
+        crate::conformance_tests! {
+            Vec<u8> => 5,
+            Vec<u16> => 5,
+            Vec<u32> => 5,
+        }
+    }
 }

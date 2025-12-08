@@ -260,4 +260,13 @@ mod tests {
 
         assert_eq!(map1.encode(), map2.encode());
     }
+
+    #[cfg(feature = "conformance")]
+    mod conformance {
+        use super::*;
+
+        crate::conformance_tests! {
+            BTreeMap<u32, u32> => 5,
+        }
+    }
 }

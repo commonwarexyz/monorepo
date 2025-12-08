@@ -440,4 +440,26 @@ mod tests {
             &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
         );
     }
+
+    #[cfg(feature = "conformance")]
+    mod conformance {
+        crate::conformance_tests! {
+            u8 => 5,
+            u16 => 5,
+            u32 => 5,
+            u64 => 5,
+            u128 => 5,
+            i8 => 5,
+            i16 => 5,
+            i32 => 5,
+            i64 => 5,
+            i128 => 5,
+            f32 => 5,
+            f64 => 5,
+            bool => 5,
+            [u8; 32] => 5,
+            Option<u64> => 5,
+            () => 5,
+        }
+    }
 }
