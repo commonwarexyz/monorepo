@@ -1131,6 +1131,7 @@ dependencies = [
 name = "commonware-consensus"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-broadcast",

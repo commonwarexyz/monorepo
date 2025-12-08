@@ -73,7 +73,7 @@ pub struct TypeSection {
 /// A single test case.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TestCase {
-    /// Seed used to generate the test value via proptest.
+    /// Seed used to generate the test value via [arbitrary].
     pub seed: u64,
     /// Expected hex-encoded bytes after encoding.
     pub expected: String,

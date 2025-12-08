@@ -67,6 +67,19 @@ impl<C: Element> EncodeSize for Eval<C> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<C: Element> arbitrary::Arbitrary<'_> for Eval<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            index: u.arbitrary::<u32>()?,
+            value: u.arbitrary::<C>()?,
+        })
+    }
+}
+
 /// A polynomial that is using a scalar for the variable x and a generic
 /// element for the coefficients.
 ///
