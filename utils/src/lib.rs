@@ -31,6 +31,7 @@ pub mod hex_literal;
 #[cfg(feature = "std")]
 pub mod net;
 pub mod ordered;
+pub mod vec;
 
 /// A type that can be constructed from an iterator, possibly failing.
 pub trait TryFromIterator<T>: Sized {

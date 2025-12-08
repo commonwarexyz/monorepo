@@ -1,0 +1,582 @@
+//! A vector type that guarantees at least one element.
+
+use crate::TryFromIterator;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use core::{
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut, Index, IndexMut},
+    slice::SliceIndex,
+};
+use thiserror::Error;
+
+#[cfg(not(feature = "std"))]
+type VecIntoIter<T> = alloc::vec::IntoIter<T>;
+#[cfg(feature = "std")]
+type VecIntoIter<T> = std::vec::IntoIter<T>;
+
+/// Errors that can occur when creating a [`NonEmptyVec`].
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The collection was empty.
+    #[error("cannot create NonEmptyVec from empty collection")]
+    Empty,
+}
+
+/// A vector that is guaranteed to contain at least one element.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NonEmptyVec<T>(Vec<T>);
+
+impl<T> NonEmptyVec<T> {
+    /// Creates a new [`NonEmptyVec`] with a single element.
+    pub fn new(first: T) -> Self {
+        Self(vec![first])
+    }
+
+    /// Creates a [`NonEmptyVec`] from a [`Vec`] without checking if it's empty.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the vector is not empty.
+    /// This is intended for use by the `non_empty_vec!` macro.
+    #[doc(hidden)]
+    pub const fn from_vec_unchecked(vec: Vec<T>) -> Self {
+        Self(vec)
+    }
+
+    /// Returns the number of elements in the vector.
+    ///
+    /// This is guaranteed to be at least 1.
+    pub const fn len(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.0.len()).unwrap()
+    }
+
+    /// Returns a reference to the first element.
+    ///
+    /// Unlike [`slice::first`], this doesn't return an `Option`.
+    pub fn first(&self) -> &T {
+        self.0.first().unwrap()
+    }
+
+    /// Returns a mutable reference to the first element.
+    ///
+    /// Unlike [`slice::first_mut`], this doesn't return an `Option`.
+    pub fn first_mut(&mut self) -> &mut T {
+        self.0.first_mut().unwrap()
+    }
+
+    /// Returns a reference to the last element.
+    ///
+    /// Unlike [`slice::last`], this doesn't return an `Option`.
+    pub fn last(&self) -> &T {
+        self.0.last().unwrap()
+    }
+
+    /// Returns a mutable reference to the last element.
+    ///
+    /// Unlike [`slice::last_mut`], this doesn't return an `Option`.
+    pub fn last_mut(&mut self) -> &mut T {
+        self.0.last_mut().unwrap()
+    }
+
+    /// Appends an element to the back of the vector.
+    pub fn push(&mut self, value: T) {
+        self.0.push(value);
+    }
+
+    /// Inserts an element at position `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > len`.
+    pub fn insert(&mut self, index: usize, element: T) {
+        self.0.insert(index, element);
+    }
+
+    /// Extends the vector with the contents of an iterator.
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.0.extend(iter);
+    }
+
+    /// Removes the last element and returns it, or `None` if there is only one
+    /// element.
+    ///
+    /// This ensures the vector always has at least one element.
+    pub fn pop(&mut self) -> Option<T> {
+        if self.0.len() > 1 {
+            self.0.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Removes and returns the element at position `index`, or `None` if
+    /// removing would leave the vector empty.
+    ///
+    /// This ensures the vector always has at least one element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= len`.
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        if self.0.len() > 1 {
+            Some(self.0.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Consumes the [`NonEmptyVec`] and returns the underlying [`Vec`].
+    pub fn into_vec(self) -> Vec<T> {
+        self.0
+    }
+
+    /// Returns an iterator over the elements.
+    pub fn iter(&self) -> core::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+
+    /// Returns a mutable iterator over the elements.
+    pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
+        self.0.iter_mut()
+    }
+}
+
+impl<T> Deref for NonEmptyVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for NonEmptyVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T> AsRef<[T]> for NonEmptyVec<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> AsRef<Vec<T>> for NonEmptyVec<T> {
+    fn as_ref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T, I: SliceIndex<[T]>> Index<I> for NonEmptyVec<T> {
+    type Output = I::Output;
+
+    fn index(&self, index: I) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl<T, I: SliceIndex<[T]>> IndexMut<I> for NonEmptyVec<T> {
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        &mut self.0[index]
+    }
+}
+
+impl<T> From<NonEmptyVec<T>> for Vec<T> {
+    fn from(vec: NonEmptyVec<T>) -> Self {
+        vec.0
+    }
+}
+
+impl<T> TryFrom<Vec<T>> for NonEmptyVec<T> {
+    type Error = Error;
+
+    fn try_from(vec: Vec<T>) -> Result<Self, Self::Error> {
+        if vec.is_empty() {
+            Err(Error::Empty)
+        } else {
+            Ok(Self(vec))
+        }
+    }
+}
+
+impl<T: Clone> TryFrom<&[T]> for NonEmptyVec<T> {
+    type Error = Error;
+
+    fn try_from(slice: &[T]) -> Result<Self, Self::Error> {
+        if slice.is_empty() {
+            Err(Error::Empty)
+        } else {
+            Ok(Self(slice.to_vec()))
+        }
+    }
+}
+
+impl<T, const N: usize> TryFrom<[T; N]> for NonEmptyVec<T> {
+    type Error = Error;
+
+    fn try_from(arr: [T; N]) -> Result<Self, Self::Error> {
+        if N == 0 {
+            Err(Error::Empty)
+        } else {
+            Ok(Self(arr.into()))
+        }
+    }
+}
+
+impl<T: Clone, const N: usize> TryFrom<&[T; N]> for NonEmptyVec<T> {
+    type Error = Error;
+
+    fn try_from(arr: &[T; N]) -> Result<Self, Self::Error> {
+        Self::try_from(arr.as_slice())
+    }
+}
+
+impl<T> TryFromIterator<T> for NonEmptyVec<T> {
+    type Error = Error;
+
+    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error> {
+        let vec: Vec<T> = iter.into_iter().collect();
+        Self::try_from(vec)
+    }
+}
+
+impl<T> IntoIterator for NonEmptyVec<T> {
+    type Item = T;
+    type IntoIter = VecIntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a NonEmptyVec<T> {
+    type Item = &'a T;
+    type IntoIter = core::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = core::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+impl<T: Write> Write for NonEmptyVec<T> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl<T: Read> Read for NonEmptyVec<T> {
+    type Cfg = (RangeCfg<usize>, T::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let items = Vec::read_cfg(buf, cfg)?;
+        if items.is_empty() {
+            return Err(commonware_codec::Error::Invalid(
+                "NonEmptyVec",
+                "cannot decode empty vector",
+            ));
+        }
+        Ok(Self(items))
+    }
+}
+
+/// Creates a [`NonEmptyVec`] containing the given elements.
+///
+/// This macro will fail to compile if no elements are provided.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::non_empty_vec;
+///
+/// let v = non_empty_vec![1, 2, 3];
+/// assert_eq!(v.len().get(), 3);
+/// assert_eq!(v.first(), &1);
+/// assert_eq!(v.last(), &3);
+///
+/// // This would fail to compile:
+/// // let empty = non_empty_vec![];
+/// ```
+#[macro_export]
+macro_rules! non_empty_vec {
+    ($first:expr $(, $rest:expr)* $(,)?) => {
+        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$first $(, $rest)*])
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new() {
+        let v = NonEmptyVec::new(42);
+        assert_eq!(v.len().get(), 1);
+        assert_eq!(v.first(), &42);
+        assert_eq!(v.last(), &42);
+    }
+
+    #[test]
+    fn test_macro() {
+        let v = non_empty_vec![1, 2, 3];
+        assert_eq!(v.len().get(), 3);
+        assert_eq!(v.first(), &1);
+        assert_eq!(v.last(), &3);
+
+        let v = non_empty_vec![42];
+        assert_eq!(v.len().get(), 1);
+        assert_eq!(v.first(), &42);
+
+        // Trailing comma support
+        let v = non_empty_vec![1, 2, 3,];
+        assert_eq!(v.len().get(), 3);
+    }
+
+    #[test]
+    fn test_try_from_vec() {
+        let v: NonEmptyVec<i32> = vec![1, 2, 3].try_into().unwrap();
+        assert_eq!(v.len().get(), 3);
+
+        let result: Result<NonEmptyVec<i32>, _> = Vec::new().try_into();
+        assert_eq!(result, Err(Error::Empty));
+    }
+
+    #[test]
+    fn test_try_from_slice() {
+        let v: NonEmptyVec<i32> = [1, 2, 3].as_slice().try_into().unwrap();
+        assert_eq!(v.len().get(), 3);
+
+        let empty: &[i32] = &[];
+        let result: Result<NonEmptyVec<i32>, _> = empty.try_into();
+        assert_eq!(result, Err(Error::Empty));
+    }
+
+    #[test]
+    fn test_try_from_array() {
+        let v: NonEmptyVec<i32> = [1, 2, 3].try_into().unwrap();
+        assert_eq!(v.len().get(), 3);
+
+        let result: Result<NonEmptyVec<i32>, _> = [0i32; 0].try_into();
+        assert_eq!(result, Err(Error::Empty));
+    }
+
+    #[test]
+    fn test_try_from_iterator() {
+        use crate::TryCollect;
+
+        let v: NonEmptyVec<i32> = (1..=3).try_collect().unwrap();
+        assert_eq!(v.len().get(), 3);
+
+        let result: Result<NonEmptyVec<i32>, _> = core::iter::empty().try_collect();
+        assert_eq!(result, Err(Error::Empty));
+    }
+
+    #[test]
+    fn test_first_last() {
+        let mut v = non_empty_vec![1, 2, 3];
+
+        assert_eq!(v.first(), &1);
+        assert_eq!(v.last(), &3);
+
+        *v.first_mut() = 10;
+        *v.last_mut() = 30;
+
+        assert_eq!(v.first(), &10);
+        assert_eq!(v.last(), &30);
+    }
+
+    #[test]
+    fn test_push() {
+        let mut v = non_empty_vec![1];
+        v.push(2);
+        v.push(3);
+        assert_eq!(v.len().get(), 3);
+        assert_eq!(v.last(), &3);
+    }
+
+    #[test]
+    fn test_insert() {
+        let mut v = non_empty_vec![1, 3];
+        v.insert(1, 2);
+        assert_eq!(&*v, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut v = non_empty_vec![1];
+        v.extend([2, 3, 4]);
+        assert_eq!(v.len().get(), 4);
+        assert_eq!(&*v, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_pop() {
+        let mut v = non_empty_vec![1, 2, 3];
+
+        assert_eq!(v.pop(), Some(3));
+        assert_eq!(v.len().get(), 2);
+
+        assert_eq!(v.pop(), Some(2));
+        assert_eq!(v.len().get(), 1);
+
+        // Cannot pop the last element
+        assert_eq!(v.pop(), None);
+        assert_eq!(v.len().get(), 1);
+        assert_eq!(v.first(), &1);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut v = non_empty_vec![1, 2, 3];
+
+        assert_eq!(v.remove(1), Some(2));
+        assert_eq!(&*v, &[1, 3]);
+
+        assert_eq!(v.remove(0), Some(1));
+        assert_eq!(&*v, &[3]);
+
+        // Cannot remove the last element
+        assert_eq!(v.remove(0), None);
+        assert_eq!(&*v, &[3]);
+    }
+
+    #[test]
+    fn test_deref() {
+        let v = non_empty_vec![3, 1, 2];
+
+        // slice methods via Deref
+        assert_eq!(v.len().get(), 3);
+        assert!(v.contains(&2));
+        assert_eq!(v.get(1), Some(&1));
+    }
+
+    #[test]
+    fn test_deref_mut() {
+        let mut v = non_empty_vec![3, 1, 2];
+
+        // Mutable slice methods via DerefMut
+        v.sort();
+        assert_eq!(&*v, &[1, 2, 3]);
+
+        v.reverse();
+        assert_eq!(&*v, &[3, 2, 1]);
+
+        v.swap(0, 2);
+        assert_eq!(&*v, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_into_vec() {
+        let v = non_empty_vec![1, 2, 3];
+        let vec: Vec<i32> = v.into_vec();
+        assert_eq!(vec, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_from_non_empty_vec() {
+        let v = non_empty_vec![1, 2, 3];
+        let vec: Vec<i32> = v.into();
+        assert_eq!(vec, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_index() {
+        let v = non_empty_vec![1, 2, 3];
+        assert_eq!(v[0], 1);
+        assert_eq!(v[1], 2);
+        assert_eq!(v[2], 3);
+        assert_eq!(&v[0..2], &[1, 2]);
+
+        // IndexMut
+        let mut v = non_empty_vec![1, 2, 3];
+        v[0] = 10;
+        v[1..3].copy_from_slice(&[20, 30]);
+        assert_eq!(&*v, &[10, 20, 30]);
+    }
+
+    #[test]
+    fn test_iterators() {
+        let v = non_empty_vec![1, 2, 3];
+
+        // iter()
+        let sum: i32 = v.iter().sum();
+        assert_eq!(sum, 6);
+
+        // iter_mut()
+        let mut v = non_empty_vec![1, 2, 3];
+        for x in v.iter_mut() {
+            *x *= 2;
+        }
+        assert_eq!(&*v, &[2, 4, 6]);
+
+        // IntoIterator (owned)
+        let v = non_empty_vec![1, 2, 3];
+        let collected: Vec<_> = v.into_iter().collect();
+        assert_eq!(collected, vec![1, 2, 3]);
+
+        // IntoIterator (borrowed)
+        let v = non_empty_vec![1, 2, 3];
+        let collected: Vec<_> = (&v).into_iter().copied().collect();
+        assert_eq!(collected, vec![1, 2, 3]);
+
+        // IntoIterator (borrowed mut)
+        let mut v = non_empty_vec![1, 2, 3];
+        for x in &mut v {
+            *x += 10;
+        }
+        assert_eq!(&*v, &[11, 12, 13]);
+    }
+
+    #[test]
+    fn test_codec_roundtrip() {
+        let v = non_empty_vec![1u8, 2, 3];
+
+        let mut buf = Vec::with_capacity(v.encode_size());
+        v.write(&mut buf);
+
+        let decoded =
+            NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=10), ()))
+                .unwrap();
+
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn test_codec_rejects_empty() {
+        let empty: Vec<u8> = vec![];
+        let mut buf = Vec::new();
+        empty.write(&mut buf);
+
+        let result =
+            NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=10), ()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_ref() {
+        let v = non_empty_vec![1, 2, 3];
+
+        let slice: &[i32] = v.as_ref();
+        assert_eq!(slice, &[1, 2, 3]);
+
+        let vec_ref: &Vec<i32> = v.as_ref();
+        assert_eq!(vec_ref, &vec![1, 2, 3]);
+    }
+}
