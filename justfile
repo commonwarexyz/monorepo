@@ -3,7 +3,7 @@ set positional-arguments := true
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 
-alias f := fix
+alias f := fix-fmt
 alias l := lint
 alias b := build
 alias t := test
