@@ -17,7 +17,7 @@ use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_utils::union_unique;
+use commonware_utils::{non_empty_vec, union_unique, vec::NonEmptyVec};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -473,7 +473,7 @@ where
 /// each set of partial signatures has the same indices.
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
-    mut many_evals: Vec<I>,
+    many_evals: NonEmptyVec<I>,
     #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
@@ -482,6 +482,7 @@ where
     V::Signature: 'a,
 {
     // Process first set of evaluations
+    let mut many_evals = many_evals.into_vec();
     let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
     let evals = prepare_evaluations(threshold, evals)?;
     let mut prepared_evals = vec![evals];
@@ -562,7 +563,8 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second], 2)?;
+    let mut sigs =
+        threshold_signature_recover_multiple::<V, _>(threshold, non_empty_vec![first, second], 2)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))

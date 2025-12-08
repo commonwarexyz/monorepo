@@ -9,6 +9,7 @@ use crate::bls12381::{
         variant::Variant,
     },
 };
+use commonware_utils::vec::NonEmptyVec;
 use rand_core::CryptoRngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
@@ -155,7 +156,9 @@ pub fn recover_public_with_weights<V: Variant>(
             })
             .collect::<Result<Vec<_>, _>>()
     }) {
-        Ok(points) => poly::Public::<V>::from(points),
+        Ok(points) => poly::Public::<V>::from(
+            NonEmptyVec::try_from(points).expect("commitments checked to be non-empty"),
+        ),
         Err(e) => return Err(e),
     };
 

@@ -10,6 +10,7 @@ use commonware_cryptography::bls12381::primitives::{
     poly::{Eval, Poly},
     variant::{MinPk, MinSig, Variant},
 };
+use commonware_utils::vec::NonEmptyVec;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone)]
@@ -472,7 +473,7 @@ fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
+    Ok(Poly::from(NonEmptyVec::try_from(coeffs).unwrap()))
 }
 
 fn arbitrary_vec_scalar(
@@ -761,7 +762,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::PolyNew { degree } => {
             // Skip random polynomial generation that requires RNG
             let coeffs = vec![Scalar::zero(); (degree + 1) as usize];
-            let _ = Poly::from(coeffs);
+            let _ = Poly::from(NonEmptyVec::try_from(coeffs).unwrap());
         }
 
         FuzzOperation::PolyEvaluate { poly, index } => {

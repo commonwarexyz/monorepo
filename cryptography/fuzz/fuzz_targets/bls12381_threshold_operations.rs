@@ -7,6 +7,7 @@ use commonware_cryptography::bls12381::primitives::{
     poly::{Eval, Poly, Weight},
     variant::{MinPk, MinSig},
 };
+use commonware_utils::vec::NonEmptyVec;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -347,7 +348,7 @@ fn fuzz(op: FuzzOperation) {
                                 .unwrap_or(G1::one());
                             (degree + 1) as usize
                         ];
-                        Poly::from(coeffs)
+                        Poly::from(NonEmptyVec::try_from(coeffs).unwrap())
                     }
                     None => return,
                 };
@@ -382,7 +383,7 @@ fn fuzz(op: FuzzOperation) {
                                 .unwrap_or(G2::one());
                             (degree + 1) as usize
                         ];
-                        Poly::from(coeffs)
+                        Poly::from(NonEmptyVec::try_from(coeffs).unwrap())
                     }
                     None => return,
                 };
@@ -490,7 +491,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
                 let _ = threshold_signature_recover_multiple::<MinPk, _>(
                     threshold,
-                    groups_refs,
+                    NonEmptyVec::try_from(groups_refs).unwrap(),
                     concurrency,
                 );
             }
@@ -508,7 +509,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
                 let _ = threshold_signature_recover_multiple::<MinSig, _>(
                     threshold,
-                    groups_refs,
+                    NonEmptyVec::try_from(groups_refs).unwrap(),
                     concurrency,
                 );
             }

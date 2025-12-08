@@ -19,6 +19,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
 };
+use commonware_utils::{vec::NonEmptyVec, TryCollect, TryFromIterator};
 use core::{hash::Hash, iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
@@ -76,7 +77,7 @@ impl<C: Element> EncodeSize for Eval<C> {
 /// which is always a scalar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
-pub struct Poly<C>(Vec<C>);
+pub struct Poly<C>(NonEmptyVec<C>);
 
 /// Returns a new scalar polynomial of the given degree where each coefficients is
 /// sampled at random using kernel randomness.
@@ -95,7 +96,8 @@ pub fn new(degree: u32) -> Poly<Scalar> {
 pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
     let coeffs = (0..=degree).map(|_| Scalar::from_rand(rng));
-    Poly::from_iter(coeffs)
+    Poly::try_from_iter(coeffs)
+        .expect("coeffs always has at least one element (degree 0 means `[0]`)")
 }
 
 /// Returns a new scalar polynomial with a particular value for the constant coefficient.
@@ -106,10 +108,10 @@ pub fn new_with_constant(
     mut rng: impl CryptoRngCore,
     constant: Scalar,
 ) -> Poly<Scalar> {
-    // (Use skip to avoid an empty range complaint)
-    Poly::from_iter(
+    Poly::try_from_iter(
         iter::once(constant).chain((0..=degree).skip(1).map(|_| Scalar::from_rand(&mut rng))),
     )
+    .expect("iter::once guarantees at least one element")
 }
 
 /// A Barycentric Weight for interpolation at x=0.
@@ -191,33 +193,35 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
     Ok(weights)
 }
 
-impl<C> FromIterator<C> for Poly<C> {
-    fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
-        Self(iter.into_iter().collect())
+impl<C> TryFromIterator<C> for Poly<C> {
+    type Error = commonware_utils::vec::Error;
+
+    fn try_from_iter<I: IntoIterator<Item = C>>(iter: I) -> Result<Self, Self::Error> {
+        Ok(Self(NonEmptyVec::try_from_iter(iter)?))
     }
 }
 
 impl<C> Poly<C> {
     /// Creates a new polynomial from the given coefficients.
-    pub const fn from(c: Vec<C>) -> Self {
+    pub const fn from(c: NonEmptyVec<C>) -> Self {
         Self(c)
     }
 
     /// Returns the constant term of the polynomial.
     pub fn constant(&self) -> &C {
-        &self.0[0]
+        self.0.first()
     }
 
     /// Returns the degree of the polynomial
     pub const fn degree(&self) -> u32 {
-        (self.0.len() - 1) as u32 // check size in deserialize, safe to cast
+        (self.0.len().get() - 1) as u32 // check size in deserialize, safe to cast
     }
 
     /// Returns the number of required shares to reconstruct the polynomial.
     ///
     /// This will be the threshold.
     pub const fn required(&self) -> u32 {
-        self.0.len() as u32 // check size in deserialize, safe to cast
+        self.0.len().get() as u32 // check size in deserialize, safe to cast
     }
 }
 
@@ -237,14 +241,15 @@ impl<C: Element> Poly<C> {
                 commitment.mul(c);
                 commitment
             })
-            .collect::<Vec<C>>();
+            .try_collect()
+            .expect("commits must be non-empty since it comes from a Poly");
 
         Self::from(commits)
     }
 
     /// Returns a zero polynomial.
     pub fn zero() -> Self {
-        Self::from(vec![C::zero()])
+        Self::from(NonEmptyVec::new(C::zero()))
     }
 
     /// Returns the given coefficient at the requested index.
@@ -267,7 +272,7 @@ impl<C: Element> Poly<C> {
 
         // if we have a smaller degree we should pad with zeros
         if self.0.len() < other.0.len() {
-            self.0.resize(other.0.len(), C::zero())
+            self.0.resize(other.0.len(), C::zero());
         }
 
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
@@ -379,7 +384,7 @@ impl<C: Element> Read for Poly<C> {
     type Cfg = RangeCfg<NonZeroU32>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        let coeffs = Vec::<C>::read_cfg(buf, &((*range).into(), ()))?;
+        let coeffs = NonEmptyVec::read_cfg(buf, &((*range).into(), ()))?;
         Ok(Self(coeffs))
     }
 }
@@ -401,7 +406,7 @@ pub mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
     use commonware_codec::{Decode, Encode};
-    use commonware_utils::NZU32;
+    use commonware_utils::{TryCollect, NZU32};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -456,7 +461,8 @@ pub mod tests {
                 p.mul(coeff);
                 p
             })
-            .collect::<Vec<_>>();
+            .try_collect()
+            .unwrap();
         let commitment = Poly::from(commitment);
         assert_eq!(commitment, Poly::commit(secret));
     }

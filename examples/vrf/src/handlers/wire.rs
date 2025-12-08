@@ -256,6 +256,7 @@ mod tests {
         ed25519::{PrivateKey, Signature},
         PrivateKeyExt, Signer,
     };
+    use commonware_utils::vec::NonEmptyVec;
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -287,7 +288,7 @@ mod tests {
         let mut public = <MinSig as Variant>::Public::one();
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         public.mul(&scalar);
-        poly::Public::<MinSig>::from(vec![public; T])
+        poly::Public::<MinSig>::from(NonEmptyVec::try_from(vec![public; T]).unwrap())
     }
 
     #[test]

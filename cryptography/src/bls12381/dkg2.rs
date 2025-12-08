@@ -292,7 +292,7 @@ use crate::{
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    quorum, TryCollect, NZU32,
+    quorum, TryCollect, TryFromIterator, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -340,6 +340,8 @@ fn recover_public_with_weights<V: Variant>(
     threshold: u32,
     concurrency: usize,
 ) -> poly::Public<V> {
+    assert!(threshold > 0);
+
     let work = |coeff| {
         // Extract evaluations for this coefficient from all commitments
         let evals = commitments
@@ -354,8 +356,8 @@ fn recover_public_with_weights<V: Variant>(
         msm_interpolate(weights, &evals).expect("interpolation should not fail")
     };
     let range = 0..threshold;
-    if concurrency <= 1 || threshold <= 1 {
-        range.map(work).collect()
+    if concurrency <= 1 || threshold == 1 {
+        Poly::try_from_iter(range.map(work)).expect("range is guaranteed to be non-empty")
     } else {
         // Build a thread pool with the specified concurrency
         let pool = ThreadPoolBuilder::new()
@@ -364,14 +366,10 @@ fn recover_public_with_weights<V: Variant>(
             .expect("Unable to build thread pool");
 
         // Recover signatures
-        pool.install(move || {
-            range
-                .into_par_iter()
-                .map(work)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .collect()
-        })
+        Poly::try_from_iter(
+            pool.install(move || range.into_par_iter().map(work).collect::<Vec<_>>()),
+        )
+        .expect("range is guaranteed to be non-empty")
     }
 }
 
