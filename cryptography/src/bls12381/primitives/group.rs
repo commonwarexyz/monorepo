@@ -488,7 +488,7 @@ impl Debug for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "Share(index={}, private=PrivateKey([REDACTED])",
+            "Share(index={}, private=PrivateKey([REDACTED]))",
             self.index,
         )
     }
