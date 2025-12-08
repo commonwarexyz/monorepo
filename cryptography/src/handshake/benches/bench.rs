@@ -3,6 +3,7 @@ use commonware_cryptography::{
     handshake::{
         dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
     },
+    transcript::Transcript,
     PrivateKeyExt as _, Signer,
 };
 use criterion::criterion_main;
@@ -20,21 +21,21 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     let (d_state, msg1) = dial_start(
         &mut rng,
         Context::new(
+            &Transcript::new(b"bench_namespace"),
             0,
             0..1,
             dialer_crypto.clone(),
             listener_crypto.public_key(),
-            b"bench_namespace".to_vec(),
         ),
     );
     let (l_state, msg2) = listen_start(
         &mut rng,
         Context::new(
+            &Transcript::new(b"bench_namespace"),
             0,
             0..1,
             listener_crypto,
             dialer_crypto.public_key(),
-            b"bench_namespace".to_vec(),
         ),
         msg1,
     )?;

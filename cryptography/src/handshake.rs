@@ -37,7 +37,6 @@ use crate::{
     PublicKey, Signature, Signer, Verifier,
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
-use commonware_utils::union;
 use core::ops::Range;
 use rand_core::CryptoRngCore;
 
@@ -185,25 +184,26 @@ pub struct Context<S, P> {
     ok_timestamps: Range<u64>,
     my_identity: S,
     peer_identity: P,
-    app_namespace: Vec<u8>,
+    transcript: Transcript,
 }
 
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(
+        base: &Transcript,
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
-        app_namespace: Vec<u8>,
     ) -> Self {
+        let transcript = base.fork(NAMESPACE);
         Self {
             current_time: current_time_ms,
             ok_timestamps,
             my_identity,
             peer_identity,
-            app_namespace,
+            transcript,
         }
     }
 }
@@ -219,12 +219,11 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         my_identity,
         peer_identity,
-        app_namespace,
+        transcript,
     } = ctx;
     let esk = SecretKey::new(rng);
     let epk = esk.public();
-    let ns = union(NAMESPACE, &app_namespace);
-    let mut transcript = Transcript::new(&ns);
+    let mut transcript = transcript;
     let sig = transcript
         .commit(current_time.encode())
         .commit(peer_identity.encode())
@@ -301,13 +300,12 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
         ok_timestamps,
-        app_namespace,
+        transcript,
     } = ctx;
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
-    let ns = union(NAMESPACE, &app_namespace);
-    let mut transcript = Transcript::new(&ns);
+    let mut transcript = transcript;
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(my_identity.public_key().encode())
@@ -359,7 +357,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use crate::{ed25519::PrivateKey, transcript::Transcript, PrivateKeyExt as _, Signer};
     use commonware_codec::{Codec, DecodeExt};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -376,24 +374,24 @@ mod test {
 
         let (d_state, msg1) = dial_start(
             &mut rng,
-            Context {
-                current_time: 0,
-                ok_timestamps: 0..1,
-                my_identity: dialer_crypto.clone(),
-                peer_identity: listener_crypto.public_key(),
-                app_namespace: b"test_namespace".to_vec(),
-            },
+            Context::new(
+                &Transcript::new(b"test_namespace"),
+                0,
+                0..1,
+                dialer_crypto.clone(),
+                listener_crypto.public_key(),
+            ),
         );
         test_encode_roundtrip(&msg1);
         let (l_state, msg2) = listen_start(
             &mut rng,
-            Context {
-                current_time: 0,
-                ok_timestamps: 0..1,
-                my_identity: listener_crypto,
-                peer_identity: dialer_crypto.public_key(),
-                app_namespace: b"test_namespace".to_vec(),
-            },
+            Context::new(
+                &Transcript::new(b"test_namespace"),
+                0,
+                0..1,
+                listener_crypto,
+                dialer_crypto.public_key(),
+            ),
             msg1,
         )?;
         test_encode_roundtrip(&msg2);
