@@ -262,52 +262,44 @@ impl<
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
 
-                            // Collect keys to remove
-                            let removed: Vec<_> = self.fetch_timers
-                                .keys()
-                                .filter(|k| !predicate(k))
-                                .cloned()
-                                .collect();
+                            // Remove from fetcher
+                            self.fetcher.retain(&predicate);
 
                             // Clean up timers and notify consumer
-                            for key in &removed {
-                                self.fetch_timers
-                                    .remove(key)
-                                    .expect("key must exist, comes from filtered iterator")
-                                    .cancel();
-                                self.consumer.failed(key.clone(), ()).await;
+                            let before = self.fetch_timers.len();
+                            let removed = self.fetch_timers.extract_if(|k, _| !predicate(k)).collect::<Vec<_>>();
+                            for (key, timer) in removed {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
                             }
-
-                            // Retain in fetcher
-                            self.fetcher.retain(predicate);
-
+                            let removed = (before - self.fetch_timers.len()) as u64;
                             assert_eq!(self.fetcher.len(), self.fetch_timers.len());
 
                             // Metrics
-                            if removed.is_empty() {
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, removed.len() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                         Message::Clear => {
                             trace!("mailbox: clear");
 
+                            // Clear fetcher
+                            self.fetcher.clear();
+
                             // Drain timers and notify consumer
-                            let count = self.fetcher.len();
+                            let removed = self.fetch_timers.len() as u64;
                             for (key, timer) in self.fetch_timers.drain() {
                                 timer.cancel();
                                 self.consumer.failed(key, ()).await;
                             }
 
-                            // Clear fetcher
-                            self.fetcher.clear();
-
                             // Metrics
-                            if count == 0 {
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, count as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                     }
