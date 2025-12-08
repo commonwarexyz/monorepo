@@ -476,13 +476,21 @@ impl EncodeSize for Share {
 
 impl Display for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(
+            f,
+            "Share(index={}, private=PrivateKey([REDACTED]))",
+            self.index,
+        )
     }
 }
 
 impl Debug for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(
+            f,
+            "Share(index={}, private=PrivateKey([REDACTED])",
+            self.index,
+        )
     }
 }
 
