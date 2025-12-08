@@ -141,13 +141,13 @@ impl From<ed25519_consensus::SigningKey> for PrivateKey {
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("XXXXXXX")
+        f.write_str("PrivateKey([REDACTED])")
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("XXXXXXX")
+        f.write_str("[REDACTED]")
     }
 }
 
