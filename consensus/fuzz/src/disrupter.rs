@@ -37,7 +37,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     participants: Set<PublicKey>,
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
-    view: u64,
+    last_vote: u64,
     last_finalized: u64,
     last_nullified: u64,
     last_notarized: u64,
@@ -56,7 +56,7 @@ where
         fuzz_input: FuzzInput,
     ) -> Self {
         Self {
-            view: 0,
+            last_vote: 0,
             last_finalized: 0,
             last_nullified: 0,
             last_notarized: 0,
@@ -211,11 +211,11 @@ where
                 .await;
         }
 
-        let Ok(last_vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
+        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
             return;
         };
-        self.view = last_vote.view().get();
-        match last_vote {
+        self.last_vote = vote.view().get();
+        match vote {
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
@@ -245,7 +245,7 @@ where
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
-                    let v = self.random_view(self.view);
+                    let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
                     if let Some(v) =
                         Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
@@ -322,7 +322,10 @@ where
 
     async fn send_random(&mut self, sender: &mut impl Sender) {
         let proposal = Proposal::new(
-            Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view))),
+            Round::new(
+                Epoch::new(EPOCH),
+                View::new(self.random_view(self.last_vote)),
+            ),
             View::new(self.parent()),
             self.payload(),
         );
@@ -347,7 +350,10 @@ where
                 }
             }
             Message::Nullify => {
-                let round = Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view)));
+                let round = Round::new(
+                    Epoch::new(EPOCH),
+                    View::new(self.random_view(self.last_vote)),
+                );
                 if let Some(vote) =
                     Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
                 {
