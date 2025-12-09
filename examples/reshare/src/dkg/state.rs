@@ -14,7 +14,7 @@ use commonware_cryptography::{
     transcript::Summary,
     PublicKey,
 };
-use commonware_runtime::{buffer::PoolRef, ContextCell, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_storage::journal::{
     contiguous::variable::{Config as CVConfig, Journal as CVJournal},
     segmented::variable::{Config as SVConfig, Journal as SVJournal},
@@ -162,8 +162,8 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// with in-memory BTreeMaps for fast lookups. The journal ensures
 /// durability while the maps provide O(log n) access.
 pub struct State<E: Storage + Metrics, V: Variant, P: PublicKey> {
-    dkg_states_journal: CVJournal<ContextCell<E>, DkgState<V, P>>,
-    dkg_msgs_journal: SVJournal<ContextCell<E>, DkgEvent<V, P>>,
+    states: CVJournal<E, DkgState<V, P>>,
+    msgs: SVJournal<E, DkgEvent<V, P>>,
 
     // In-memory state
     current_dkg_state: Option<(Epoch, DkgState<V, P>)>,
@@ -174,11 +174,10 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     /// Initialize storage, creating partitions if needed.
     /// Replays journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let cell = ContextCell::new(context);
         let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
 
-        let dkg_states_journal = CVJournal::init(
-            cell.with_label("dkg-states"),
+        let states = CVJournal::init(
+            context.with_label("states"),
             CVConfig {
                 partition: format!("{partition_prefix}_dkg_states"),
                 compression: None,
@@ -191,8 +190,8 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         .await
         .expect("should be able to init dkg_states journal");
 
-        let dkg_msgs_journal = SVJournal::init(
-            cell.with_label("dkg-msgs"),
+        let msgs = SVJournal::init(
+            context.with_label("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_dkg_msgs"),
                 compression: None,
@@ -206,13 +205,13 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
 
         // Replay dkg_states to get current state
         let current_dkg_state = {
-            let size = dkg_states_journal.size();
+            let size = states.size();
             if size == 0 {
                 None
             } else {
                 Some((
                     Epoch::new(size - 1),
-                    dkg_states_journal
+                    states
                         .read(size - 1)
                         .await
                         .expect("should be able to read dkg_state"),
@@ -223,7 +222,7 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         // Replay dkg_msgs to populate epoch caches
         let mut epoch_caches = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         {
-            let replay = dkg_msgs_journal
+            let replay = msgs
                 .replay(0, 0, READ_BUFFER)
                 .await
                 .expect("should be able to replay dkg_msgs");
@@ -248,8 +247,8 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         }
 
         Self {
-            dkg_states_journal,
-            dkg_msgs_journal,
+            states,
+            msgs,
             current_dkg_state,
             epoch_caches,
         }
@@ -320,14 +319,14 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     ) {
         // Persist to journal
         let section = epoch.get();
-        self.dkg_msgs_journal
+        self.msgs
             .append(
                 section,
                 DkgEvent::Dealer(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
             .expect("should be able to write to dkg_msgs");
-        self.dkg_msgs_journal
+        self.msgs
             .sync(section)
             .await
             .expect("should be able to sync dkg_msgs");
@@ -342,11 +341,11 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     pub async fn append_player_ack(&mut self, epoch: Epoch, player: P, ack: PlayerAck<P>) {
         // Persist to journal
         let section = epoch.get();
-        self.dkg_msgs_journal
+        self.msgs
             .append(section, DkgEvent::Player(player.clone(), ack.clone()))
             .await
             .expect("should be able to write to dkg_msgs");
-        self.dkg_msgs_journal
+        self.msgs
             .sync(section)
             .await
             .expect("should be able to sync dkg_msgs");
@@ -361,11 +360,11 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     pub async fn append_log(&mut self, epoch: Epoch, dealer: P, log: DealerLog<V, P>) {
         // Persist to journal
         let section = epoch.get();
-        self.dkg_msgs_journal
+        self.msgs
             .append(section, DkgEvent::Log(dealer.clone(), log.clone()))
             .await
             .expect("should be able to write to dkg_msgs");
-        self.dkg_msgs_journal
+        self.msgs
             .sync(section)
             .await
             .expect("should be able to sync dkg_msgs");
@@ -376,30 +375,30 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
 
     /// Persists new epoch state, advancing to the next epoch.
     pub async fn append_dkg_state(&mut self, state: DkgState<V, P>) {
-        // Update in-memory state first (clone before moving to journal)
-        let size = self.dkg_states_journal.size();
-        let epoch = Epoch::new(size);
-        self.current_dkg_state = Some((epoch, state.clone()));
-
         // Persist to journal
-        self.dkg_states_journal
-            .append(state)
+        self.states
+            .append(state.clone())
             .await
             .expect("should be able to write to dkg_state");
-        self.dkg_states_journal
+        self.states
             .sync()
             .await
             .expect("should be able to sync dkg_state");
+
+        // Update in-memory state first (clone before moving to journal)
+        let size = self.states.size();
+        let epoch = Epoch::new(size - 1);
+        self.current_dkg_state = Some((epoch, state));
     }
 
     /// Removes all data from epochs older than `min`.
     pub async fn prune(&mut self, min: Epoch) {
         let section = min.get();
-        self.dkg_msgs_journal
+        self.msgs
             .prune(section)
             .await
             .expect("should be able to prune dkg_msgs");
-        self.dkg_states_journal
+        self.states
             .prune(section)
             .await
             .expect("should be able to prune dkg_states");
