@@ -36,8 +36,15 @@ check-fmt:
 clippy *args='':
     cargo clippy --all-targets $@ -- -D warnings
 
+# Fix clippy lints
+fix-clippy *args='':
+    cargo clippy --all-targets --fix --allow-dirty $@
+
 # Runs all lints (fmt, clippy, and docs.)
 lint: check-fmt clippy check-docs
+
+# Fixes all lint issues in the workspace
+fix: fix-clippy fix-fmt fix-toml-fmt
 
 # Tests benchmarks in a given crate
 test-benches crate *args='':
