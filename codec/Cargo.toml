@@ -14,8 +14,8 @@ documentation = "https://docs.rs/commonware-codec"
 workspace = true
 
 [features]
-default = ["std"]
-std = ["thiserror/std", "bytes/std"]
+default = [ "std" ]
+std = [ "bytes/std", "thiserror/std" ]
 
 [dependencies]
 bytes.workspace = true

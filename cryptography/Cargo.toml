@@ -50,20 +50,29 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-parallel = ["blake3/rayon", "rayon"]
-default = ["std"]
-fuzz = ["dep:anyhow", "dep:arbitrary"]
+parallel = [ "blake3/rayon", "rayon" ]
+default = [ "std" ]
+fuzz = [ "dep:anyhow", "dep:arbitrary" ]
 std = [
-    "commonware-codec/std",
-    "commonware-utils/std",
-    "rand/std",
-    "rand/std_rng",
-    "thiserror/std",
-    "rayon",
-    "ed25519-consensus/std",
-    "p256/std",
-    "chacha20poly1305/std",
-    "chacha20poly1305/getrandom",
+	"anyhow?/std",
+	"blake3/std",
+	"bytes/std",
+	"chacha20poly1305/getrandom",
+	"chacha20poly1305/std",
+	"commonware-codec/std",
+	"commonware-utils/std",
+	"ecdsa/std",
+	"ed25519-consensus/std",
+	"getrandom/std",
+	"p256/std",
+	"rand/std",
+	"rand/std_rng",
+	"rand_chacha/std",
+	"rand_core/std",
+	"rayon",
+	"sha2/std",
+	"thiserror/std",
+	"zeroize/std",
 ]
 
 [[bench]]

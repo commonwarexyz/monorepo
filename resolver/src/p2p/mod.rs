@@ -1231,4 +1231,163 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_retain() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Retain before fetching should have no effect
+            mailbox1.retain(|_| true).await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            mailbox1.fetch(key.clone()).await;
+
+            // Retain with predicate that excludes the key
+            // This must clean up fetch timers entry for the key
+            let key_clone = key.clone();
+            mailbox1.retain(move |k| k != &key_clone).await;
+
+            // Consumer should receive failed event
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual) => {
+                    assert_eq!(key_actual, key);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been retained out"),
+            }
+
+            // Now add link so fetches can complete
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Fetch same key again, if fetch timers wasn't cleaned up, this would
+            // be treated as a duplicate and silently ignored
+            mailbox1.fetch(key.clone()).await;
+
+            // Should succeed
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 5"));
+                }
+                Event::Failed(_) => unreachable!(),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_clear() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            // No link yet - fetch will stay in-flight
+            let key = Key(6);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 6"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Clear before fetching should have no effect
+            mailbox1.clear().await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            mailbox1.fetch(key.clone()).await;
+
+            // Clear all fetches
+            mailbox1.clear().await;
+
+            // Consumer should receive failed event
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual) => {
+                    assert_eq!(key_actual, key);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been cleared"),
+            }
+
+            // Now add link so fetches can complete
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Fetch same key again, if fetch_timers wasn't cleaned up, this would
+            // be treated as a duplicate and silently ignored
+            mailbox1.fetch(key.clone()).await;
+
+            // Should succeed
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 6"));
+                }
+                Event::Failed(_) => unreachable!(),
+            }
+        });
+    }
 }

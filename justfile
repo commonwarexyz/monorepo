@@ -36,8 +36,15 @@ check-fmt:
 clippy *args='':
     cargo clippy --all-targets $@ -- -D warnings
 
-# Runs all lints (fmt, clippy, and docs.)
-lint: check-fmt clippy check-docs
+# Fix clippy lints
+fix-clippy *args='':
+    cargo clippy --all-targets --fix --allow-dirty $@
+
+# Runs all lints (fmt, clippy, docs, and features.)
+lint: check-fmt clippy check-docs check-features
+
+# Fixes all lint issues in the workspace
+fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
 # Tests benchmarks in a given crate
 test-benches crate *args='':
@@ -69,3 +76,11 @@ udeps:
 # Run miri tests on a given module
 miri module *args='':
     MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
+
+# Run zepter feature checks
+check-features:
+    zepter run check && zepter format features
+
+# Fix feature propagation and formatting
+fix-features:
+    zepter && zepter format features --fix
