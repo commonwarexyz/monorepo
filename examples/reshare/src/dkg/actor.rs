@@ -35,10 +35,13 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
-use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, num::NonZeroU32};
 use tracing::{debug, info, warn};
+
+/// Rate limiter for DKG messages.
+type DkgRateLimiter<K, E> =
+    RateLimiter<K, HashMapStateStore<K>, E, NoOpMiddleware<<E as GClock>::Instant>>;
 
 /// Wire message type for DKG protocol communication.
 pub enum DkgMessage<V: Variant, P: PublicKey> {
@@ -115,8 +118,7 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
-    rate_limit: Quota,
-    failed_rounds: Counter,
+    rate_limiter: DkgRateLimiter<C::PublicKey, E>,
     partition_prefix: String,
 }
 
@@ -130,25 +132,17 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
-        let failed_rounds = Counter::default();
-        context.register(
-            "failed_rounds",
-            "Number of failed DKG/reshare rounds",
-            failed_rounds.clone(),
-        );
-
-        let context = ContextCell::new(context);
-
+        let rate_limiter =
+            RateLimiter::hashmap_with_clock(config.rate_limit, context.with_label("rate_limiter"));
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 manager: config.manager,
                 mailbox,
                 signer: config.signer,
                 peer_config: config.peer_config,
-                rate_limit: config.rate_limit,
-                failed_rounds,
+                rate_limiter,
                 partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
@@ -299,15 +293,6 @@ where
             )
             .expect("round info configuration should be correct");
 
-            // Initialize rate limiter for this round
-            #[allow(clippy::type_complexity)]
-            let rate_limiter: RateLimiter<
-                C::PublicKey,
-                HashMapStateStore<C::PublicKey>,
-                ContextCell<E>,
-                NoOpMiddleware<<ContextCell<E> as GClock>::Instant>,
-            > = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
-
             // Initialize dealer state if we are a dealer
             let mut dealer_state: Option<DealerState<V, C>> = if am_dealer {
                 let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
@@ -455,7 +440,7 @@ where
                                     &self_pk,
                                     &mut state,
                                     epoch,
-                                    &rate_limiter,
+                                    &self.rate_limiter,
                                     ds,
                                     player_state.as_mut(),
                                     &mut round_sender,
@@ -506,10 +491,6 @@ where
                                     ),
                                 }
                             };
-
-                            if !success {
-                                self.failed_rounds.inc();
-                            }
 
                             info!(
                                 success,
@@ -634,17 +615,11 @@ where
         }
     }
 
-    #[allow(clippy::type_complexity)]
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
         state: &mut State<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
-        rate_limiter: &RateLimiter<
-            C::PublicKey,
-            HashMapStateStore<C::PublicKey>,
-            ContextCell<E>,
-            NoOpMiddleware<<ContextCell<E> as GClock>::Instant>,
-        >,
+        rate_limiter: &DkgRateLimiter<C::PublicKey, E>,
         dealer_state: &mut DealerState<V, C>,
         mut player_state: Option<&mut PlayerState<V, C>>,
         sender: &mut S,
