@@ -76,8 +76,12 @@ impl<V: Variant, P: PublicKey> Read for DkgState<V, P> {
 
 /// An event we want to record to replay later, if we crash.
 enum DkgEvent<V: Variant, P: PublicKey> {
+    /// A dealer message we received and committed to ack (as a player).
+    /// Once persisted, we will always generate the same ack for this dealer.
     Dealer(P, DealerPubMsg<V>, DealerPrivMsg),
+    /// A player ack we received (as a dealer).
     Player(P, PlayerAck<P>),
+    /// A finalized dealer log.
     Log(P, DealerLog<V, P>),
 }
 
@@ -346,7 +350,7 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
             .await;
     }
 
-    /// Persists a player acknowledgment for crash recovery.
+    /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
     pub async fn append_player_ack(&self, epoch: Epoch, player: P, ack: PlayerAck<P>) {
         self.inner
             .write()

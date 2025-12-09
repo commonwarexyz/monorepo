@@ -276,21 +276,19 @@ where
 
             // Initialize player state if we are a player
             let mut player_state: Option<PlayerState<V, C>> = if am_player {
-                let mut player = Player::new(round_info.clone(), self.signer.clone())
+                let player = Player::new(round_info.clone(), self.signer.clone())
                     .expect("should be able to create player");
+                let mut ps = PlayerState::new(player);
 
-                let mut acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>> = BTreeMap::new();
-
-                // Replay stored dealer messages
+                // Replay persisted dealer messages - these represent our commitments.
+                // We will regenerate the same acks from them.
                 let replay_msgs = state.dealer_msgs(epoch).await;
                 for (dealer, pub_msg, priv_msg) in replay_msgs {
-                    if let Some(ack) = player.dealer_message(dealer.clone(), pub_msg, priv_msg) {
-                        acks.insert(dealer.clone(), ack);
-                        debug!(?epoch, ?dealer, "replayed dealer message");
-                    }
+                    ps.process_committed_dealer_msg(dealer.clone(), pub_msg, priv_msg);
+                    debug!(?epoch, ?dealer, "replayed committed dealer message");
                 }
 
-                Some(PlayerState { player, acks })
+                Some(ps)
             } else {
                 None
             };
@@ -315,6 +313,7 @@ where
                                     &round_info,
                                     dealer_state.as_mut(),
                                     player_state.as_mut(),
+                                    &mut round_sender,
                                 ).await;
                                 continue;
                             }
@@ -374,9 +373,7 @@ where
                         }
 
                         // In the first half of the epoch, continuously distribute shares
-                        // and process acknowledgements
                         if relative_height < mid_point {
-                            // Distribute shares to players who haven't acknowledged
                             if let Some(ref mut ds) = dealer_state {
                                 Self::distribute_shares(
                                     &self_pk,
@@ -389,22 +386,14 @@ where
                                 )
                                 .await;
                             }
-
-                            // Send acks to dealers
-                            if let Some(ref ps) = player_state {
-                                Self::send_acks(&self_pk, ps, &mut round_sender).await;
-                            }
                         }
 
                         // At the midpoint of the epoch, finalize dealer and create log for inclusion
                         if relative_height == mid_point {
                             if let Some(ref mut ds) = dealer_state {
-                                if ds.finalized_log.is_none() {
-                                    if let Some(dealer) = ds.dealer.take() {
-                                        let log = dealer.finalize();
-                                        ds.finalized_log = Some(log);
-                                        info!(?epoch, "finalized dealer log for inclusion");
-                                    }
+                                if let Some(log) = ds.finalize() {
+                                    info!(?epoch, "finalized dealer log for inclusion");
+                                    drop(log); // Log is stored in ds.finalized_log
                                 }
                             }
                         }
@@ -489,7 +478,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn handle_network_message(
+    async fn handle_network_message<S: Sender<PublicKey = C::PublicKey>>(
         state: &State<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
         max_read_size: NonZeroU32,
@@ -498,6 +487,7 @@ where
         round_info: &Info<V, C::PublicKey>,
         dealer_state: Option<&mut DealerState<V, C>>,
         player_state: Option<&mut PlayerState<V, C>>,
+        network_sender: &mut S,
     ) {
         // Try to parse as a dealer message (pub_msg, priv_msg) for players
         if let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
@@ -505,19 +495,41 @@ where
             &(max_read_size, ()),
         ) {
             if let Some(ps) = player_state {
-                // Verify dealer is valid
+                // Verify round matches
                 if round_info.round() != epoch.get() {
                     return;
                 }
-                if let Some(ack) =
-                    ps.player
-                        .dealer_message(sender_pk.clone(), pub_msg.clone(), priv_msg.clone())
-                {
-                    ps.acks.insert(sender_pk.clone(), ack);
+
+                // Check if we've already committed to this dealer
+                let already_committed = ps.has_committed(&sender_pk);
+
+                // If new, persist the dealer message first (this is our commitment)
+                if !already_committed {
                     state
-                        .append_dealer_msg(epoch, sender_pk.clone(), pub_msg, priv_msg)
+                        .append_dealer_msg(
+                            epoch,
+                            sender_pk.clone(),
+                            pub_msg.clone(),
+                            priv_msg.clone(),
+                        )
                         .await;
-                    debug!(?epoch, dealer = ?sender_pk, "received and stored dealer message");
+                    debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
+                }
+
+                // Process and get the ack (will be same ack if already committed)
+                if let Some(ack) =
+                    ps.process_committed_dealer_msg(sender_pk.clone(), pub_msg, priv_msg)
+                {
+                    // Send the ack immediately
+                    let payload = ack.encode().freeze();
+                    if let Err(e) = network_sender
+                        .send(Recipients::One(sender_pk.clone()), payload, true)
+                        .await
+                    {
+                        warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                    } else {
+                        debug!(?epoch, dealer = ?sender_pk, "sent ack");
+                    }
                 }
             }
             return;
@@ -526,15 +538,7 @@ where
         // Try to parse as a player ack for dealers
         if let Ok(ack) = PlayerAck::<C::PublicKey>::read(&mut msg_bytes.clone()) {
             if let Some(ds) = dealer_state {
-                if !ds.unsent_priv_msgs.contains_key(&sender_pk) {
-                    return;
-                }
-                if let Some(ref mut dealer) = ds.dealer {
-                    if let Err(e) = dealer.receive_player_ack(sender_pk.clone(), ack.clone()) {
-                        warn!(?epoch, player = ?sender_pk, ?e, "bad player ack");
-                        return;
-                    }
-                    ds.unsent_priv_msgs.remove(&sender_pk);
+                if ds.receive_ack(sender_pk.clone(), ack.clone()) {
                     state.append_player_ack(epoch, sender_pk.clone(), ack).await;
                     debug!(?epoch, player = ?sender_pk, "received and stored player ack");
                 }
@@ -566,30 +570,30 @@ where
 
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
-                if let (Some(ref mut ps), Some(ref mut dealer)) =
-                    (&mut player_state, &mut dealer_state.dealer)
-                {
-                    if let Some(ack) = ps.player.dealer_message(
+                if let Some(ref mut ps) = player_state {
+                    // Check if we've already committed to this
+                    let already_committed = ps.has_committed(self_pk);
+
+                    // If new, persist the dealer message first
+                    if !already_committed {
+                        state
+                            .append_dealer_msg(
+                                epoch,
+                                self_pk.clone(),
+                                dealer_state.pub_msg.clone(),
+                                priv_msg.clone(),
+                            )
+                            .await;
+                    }
+
+                    // Process and get the ack
+                    if let Some(ack) = ps.process_committed_dealer_msg(
                         self_pk.clone(),
                         dealer_state.pub_msg.clone(),
                         priv_msg.clone(),
                     ) {
-                        ps.acks.insert(self_pk.clone(), ack.clone());
-
-                        // Process our own ack
-                        if dealer
-                            .receive_player_ack(self_pk.clone(), ack.clone())
-                            .is_ok()
-                        {
-                            dealer_state.unsent_priv_msgs.remove(self_pk);
-                            state
-                                .append_dealer_msg(
-                                    epoch,
-                                    self_pk.clone(),
-                                    dealer_state.pub_msg.clone(),
-                                    priv_msg,
-                                )
-                                .await;
+                        // Process our own ack as dealer
+                        if dealer_state.receive_ack(self_pk.clone(), ack.clone()) {
                             state.append_player_ack(epoch, self_pk.clone(), ack).await;
                             debug!(?epoch, "self-dealt and acked");
                         }
@@ -617,27 +621,6 @@ where
             }
         }
     }
-
-    async fn send_acks<S: Sender<PublicKey = C::PublicKey>>(
-        self_pk: &C::PublicKey,
-        player_state: &PlayerState<V, C>,
-        sender: &mut S,
-    ) {
-        for (dealer, ack) in &player_state.acks {
-            // Don't send acks to ourselves
-            if dealer == self_pk {
-                continue;
-            }
-
-            let payload = ack.encode().freeze();
-            if let Err(e) = sender
-                .send(Recipients::One(dealer.clone()), payload, true)
-                .await
-            {
-                warn!(dealer = ?dealer, ?e, "error sending ack");
-            }
-        }
-    }
 }
 
 /// Internal state for a dealer in the current round.
@@ -648,8 +631,81 @@ struct DealerState<V: Variant, C: Signer> {
     finalized_log: Option<SignedDealerLog<V, C>>,
 }
 
+impl<V: Variant, C: Signer> DealerState<V, C> {
+    /// Process a player ack received from the network.
+    /// Returns true if the ack was successfully processed and this is a new ack.
+    fn receive_ack(&mut self, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) -> bool {
+        if !self.unsent_priv_msgs.contains_key(&player) {
+            return false;
+        }
+        if let Some(ref mut dealer) = self.dealer {
+            if dealer.receive_player_ack(player.clone(), ack).is_ok() {
+                self.unsent_priv_msgs.remove(&player);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Finalize the dealer and produce a signed log for inclusion in a block.
+    fn finalize(&mut self) -> Option<SignedDealerLog<V, C>> {
+        if self.finalized_log.is_some() {
+            return None;
+        }
+        if let Some(dealer) = self.dealer.take() {
+            let log = dealer.finalize();
+            self.finalized_log = Some(log.clone());
+            return Some(log);
+        }
+        None
+    }
+}
+
 /// Internal state for a player in the current round.
 struct PlayerState<V: Variant, C: Signer> {
     player: Player<V, C>,
+    /// Acks we've generated, keyed by dealer. Once we generate an ack for a dealer,
+    /// we will not generate a different one (to avoid conflicting votes).
     acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
+    /// Dealers we've already persisted (and thus committed to acking).
+    committed_dealers: BTreeMap<C::PublicKey, bool>,
+}
+
+impl<V: Variant, C: Signer> PlayerState<V, C> {
+    const fn new(player: Player<V, C>) -> Self {
+        Self {
+            player,
+            acks: BTreeMap::new(),
+            committed_dealers: BTreeMap::new(),
+        }
+    }
+
+    /// Process a dealer message that was persisted (either from recovery or after persisting).
+    /// This generates the ack and marks the dealer as committed.
+    fn process_committed_dealer_msg(
+        &mut self,
+        dealer: C::PublicKey,
+        pub_msg: DealerPubMsg<V>,
+        priv_msg: DealerPrivMsg,
+    ) -> Option<PlayerAck<C::PublicKey>> {
+        self.committed_dealers.insert(dealer.clone(), true);
+        // If we've already generated an ack, return it
+        if let Some(ack) = self.acks.get(&dealer) {
+            return Some(ack.clone());
+        }
+        // Otherwise generate the ack (deterministic based on the persisted message)
+        if let Some(ack) = self
+            .player
+            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+        {
+            self.acks.insert(dealer, ack.clone());
+            return Some(ack);
+        }
+        None
+    }
+
+    /// Check if we've already committed to acking this dealer.
+    fn has_committed(&self, dealer: &C::PublicKey) -> bool {
+        self.committed_dealers.contains_key(dealer)
+    }
 }
