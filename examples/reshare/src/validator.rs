@@ -198,7 +198,7 @@ mod test {
     #[derive(Debug)]
     struct FilteredReceiver<R> {
         inner: R,
-        fail_epochs: HashSet<u64>,
+        failures: HashSet<u64>,
     }
 
     impl<R: Receiver> Receiver for FilteredReceiver<R> {
@@ -209,7 +209,7 @@ mod test {
             loop {
                 let (pk, bytes) = self.inner.recv().await?;
                 let (epoch, _) = mux::parse(bytes.clone()).expect("failed to parse mux message");
-                if self.fail_epochs.contains(&epoch) {
+                if self.failures.contains(&epoch) {
                     debug!(?epoch, "filtered receiver dropping message");
                     continue;
                 }
@@ -258,7 +258,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         is_dkg: bool,
-        fail_epochs: HashSet<u64>,
+        failures: HashSet<u64>,
     }
 
     impl Team {
@@ -286,7 +286,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 is_dkg: false,
-                fail_epochs: HashSet::new(),
+                failures: HashSet::new(),
             }
         }
 
@@ -307,7 +307,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 is_dkg: true,
-                fail_epochs: HashSet::new(),
+                failures: HashSet::new(),
             }
         }
 
@@ -340,7 +340,7 @@ mod test {
                 dkg_sender,
                 FilteredReceiver {
                     inner: dkg_receiver,
-                    fail_epochs: self.fail_epochs.clone(),
+                    failures: self.failures.clone(),
                 },
             );
             let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
@@ -466,7 +466,7 @@ mod test {
         mode: Mode,
         crash: Option<Crash>,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
-        fail_epochs: HashSet<u64>,
+        failures: HashSet<u64>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -505,7 +505,7 @@ mod test {
             } else {
                 Team::reshare(&mut ctx, self.total, &self.per_round)
             };
-            team.fail_epochs = self.fail_epochs.clone();
+            team.failures = self.failures.clone();
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
@@ -649,7 +649,7 @@ mod test {
         }
 
         fn run(self) -> anyhow::Result<PlanResult> {
-            let expected_failures = self.fail_epochs.len() as u64;
+            let expected_failures = self.failures.len() as u64;
             let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
             info!(
                 failures = result.failures,
@@ -680,7 +680,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -713,7 +713,7 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -746,7 +746,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -766,7 +766,7 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -786,7 +786,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -806,7 +806,7 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -826,7 +826,7 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -846,7 +846,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -866,7 +866,7 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -886,7 +886,7 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -910,7 +910,7 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -934,7 +934,7 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -958,7 +958,7 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -982,7 +982,7 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            fail_epochs: HashSet::new(),
+            failures: HashSet::new(),
         }
         .run()
         .unwrap();
@@ -1002,7 +1002,7 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            fail_epochs: HashSet::from([0]),
+            failures: HashSet::from([0]),
         }
         .run()
         .unwrap();
@@ -1022,7 +1022,7 @@ mod test {
             },
             mode: Mode::Reshare(3),
             crash: None,
-            fail_epochs: HashSet::from([0, 2, 3]),
+            failures: HashSet::from([0, 2, 3]),
         }
         .run()
         .unwrap();
@@ -1042,7 +1042,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::from([0]),
+            failures: HashSet::from([0]),
         }
         .run()
         .unwrap();
@@ -1062,7 +1062,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            fail_epochs: HashSet::from([0, 1]),
+            failures: HashSet::from([0, 1]),
         }
         .run()
         .unwrap();
