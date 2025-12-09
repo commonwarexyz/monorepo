@@ -90,6 +90,7 @@ pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
 }
 
 impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
+    /// Returns the maximum number of participants per round.
     pub fn max_participants_per_round(&self) -> u32 {
         self.num_participants_per_round
             .iter()
@@ -98,6 +99,7 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
             .expect("num_participants_per_round must not be empty")
     }
 
+    /// Returns the number of participants in the given round.
     pub fn num_participants_in_round(&self, round: u64) -> u32 {
         self.num_participants_per_round
             [(round % self.num_participants_per_round.len() as u64) as usize]
