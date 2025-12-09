@@ -8,7 +8,8 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{Encode, Read, ReadExt as _};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Encode, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
     types::Epoch,
     utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
@@ -23,7 +24,7 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
-    Digest as _, Hasher, Signer,
+    Digest as _, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
@@ -38,6 +39,59 @@ use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, num::NonZeroU32};
 use tracing::{debug, info, warn};
+
+/// Wire message type for DKG protocol communication.
+pub enum DkgMessage<V: Variant, P: PublicKey> {
+    /// A dealer message containing public and private components for a player.
+    Dealer(DealerPubMsg<V>, DealerPrivMsg),
+    /// A player acknowledgment sent back to a dealer.
+    Ack(PlayerAck<P>),
+}
+
+impl<V: Variant, P: PublicKey> Write for DkgMessage<V, P> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Self::Dealer(pub_msg, priv_msg) => {
+                0u8.write(writer);
+                pub_msg.write(writer);
+                priv_msg.write(writer);
+            }
+            Self::Ack(ack) => {
+                1u8.write(writer);
+                ack.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Variant, P: PublicKey> EncodeSize for DkgMessage<V, P> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
+            Self::Ack(ack) => ack.encode_size(),
+        }
+    }
+}
+
+impl<V: Variant, P: PublicKey> Read for DkgMessage<V, P> {
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let tag = u8::read(reader)?;
+        match tag {
+            0 => {
+                let pub_msg = DealerPubMsg::read_cfg(reader, cfg)?;
+                let priv_msg = DealerPrivMsg::read(reader)?;
+                Ok(Self::Dealer(pub_msg, priv_msg))
+            }
+            1 => {
+                let ack = PlayerAck::read(reader)?;
+                Ok(Self::Ack(ack))
+            }
+            _ => Err(CodecError::Invalid("dkg::DkgMessage", "Invalid type")),
+        }
+    }
+}
 
 pub struct Config<C: Signer, P> {
     pub manager: P,
@@ -284,7 +338,7 @@ where
                 // We will regenerate the same acks from them.
                 let replay_msgs = state.dealer_msgs(epoch).await;
                 for (dealer, pub_msg, priv_msg) in replay_msgs {
-                    ps.process_committed_dealer_msg(dealer.clone(), pub_msg, priv_msg);
+                    ps.handle(dealer.clone(), pub_msg, priv_msg);
                     debug!(?epoch, ?dealer, "replayed committed dealer message");
                 }
 
@@ -489,22 +543,27 @@ where
         player_state: Option<&mut PlayerState<V, C>>,
         network_sender: &mut S,
     ) {
-        // Try to parse as a dealer message (pub_msg, priv_msg) for players
-        if let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
-            &mut msg_bytes.clone(),
-            &(max_read_size, ()),
-        ) {
-            if let Some(ps) = player_state {
+        let msg = match DkgMessage::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(?epoch, ?sender_pk, ?e, "failed to parse DKG message");
+                return;
+            }
+        };
+
+        match msg {
+            DkgMessage::Dealer(pub_msg, priv_msg) => {
+                let Some(ps) = player_state else {
+                    return;
+                };
+
                 // Verify round matches
                 if round_info.round() != epoch.get() {
                     return;
                 }
 
-                // Check if we've already committed to this dealer
-                let already_committed = ps.has_committed(&sender_pk);
-
                 // If new, persist the dealer message first (this is our commitment)
-                if !already_committed {
+                if !ps.has_committed(&sender_pk) {
                     state
                         .append_dealer_msg(
                             epoch,
@@ -516,12 +575,9 @@ where
                     debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
                 }
 
-                // Process and get the ack (will be same ack if already committed)
-                if let Some(ack) =
-                    ps.process_committed_dealer_msg(sender_pk.clone(), pub_msg, priv_msg)
-                {
-                    // Send the ack immediately
-                    let payload = ack.encode().freeze();
+                // Handle the message and send response if any
+                if let Some(response) = ps.handle(sender_pk.clone(), pub_msg, priv_msg) {
+                    let payload = response.encode().freeze();
                     if let Err(e) = network_sender
                         .send(Recipients::One(sender_pk.clone()), payload, true)
                         .await
@@ -532,13 +588,12 @@ where
                     }
                 }
             }
-            return;
-        }
+            DkgMessage::Ack(ack) => {
+                let Some(ds) = dealer_state else {
+                    return;
+                };
 
-        // Try to parse as a player ack for dealers
-        if let Ok(ack) = PlayerAck::<C::PublicKey>::read(&mut msg_bytes.clone()) {
-            if let Some(ds) = dealer_state {
-                if ds.receive_ack(sender_pk.clone(), ack.clone()) {
+                if let Some(ack) = ds.handle(sender_pk.clone(), ack) {
                     state.append_player_ack(epoch, sender_pk.clone(), ack).await;
                     debug!(?epoch, player = ?sender_pk, "received and stored player ack");
                 }
@@ -571,11 +626,8 @@ where
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
-                    // Check if we've already committed to this
-                    let already_committed = ps.has_committed(self_pk);
-
                     // If new, persist the dealer message first
-                    if !already_committed {
+                    if !ps.has_committed(self_pk) {
                         state
                             .append_dealer_msg(
                                 epoch,
@@ -586,14 +638,14 @@ where
                             .await;
                     }
 
-                    // Process and get the ack
-                    if let Some(ack) = ps.process_committed_dealer_msg(
+                    // Handle as player and get response
+                    if let Some(DkgMessage::Ack(ack)) = ps.handle(
                         self_pk.clone(),
                         dealer_state.pub_msg.clone(),
                         priv_msg.clone(),
                     ) {
-                        // Process our own ack as dealer
-                        if dealer_state.receive_ack(self_pk.clone(), ack.clone()) {
+                        // Handle our own ack as dealer
+                        if let Some(ack) = dealer_state.handle(self_pk.clone(), ack) {
                             state.append_player_ack(epoch, self_pk.clone(), ack).await;
                             debug!(?epoch, "self-dealt and acked");
                         }
@@ -602,8 +654,8 @@ where
                 continue;
             }
 
-            // Send to remote player
-            let payload = (dealer_state.pub_msg.clone(), priv_msg).encode().freeze();
+            // Send to remote player using DkgMessage
+            let payload = DkgMessage::<V, C::PublicKey>::Dealer(dealer_state.pub_msg.clone(), priv_msg).encode().freeze();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await
@@ -632,19 +684,19 @@ struct DealerState<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> DealerState<V, C> {
-    /// Process a player ack received from the network.
-    /// Returns true if the ack was successfully processed and this is a new ack.
-    fn receive_ack(&mut self, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) -> bool {
+    /// Handle an incoming ack from a player.
+    /// Returns the ack if it was successfully processed (for persistence).
+    fn handle(&mut self, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) -> Option<PlayerAck<C::PublicKey>> {
         if !self.unsent_priv_msgs.contains_key(&player) {
-            return false;
+            return None;
         }
         if let Some(ref mut dealer) = self.dealer {
-            if dealer.receive_player_ack(player.clone(), ack).is_ok() {
+            if dealer.receive_player_ack(player.clone(), ack.clone()).is_ok() {
                 self.unsent_priv_msgs.remove(&player);
-                return true;
+                return Some(ack);
             }
         }
-        false
+        None
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
@@ -680,26 +732,26 @@ impl<V: Variant, C: Signer> PlayerState<V, C> {
         }
     }
 
-    /// Process a dealer message that was persisted (either from recovery or after persisting).
-    /// This generates the ack and marks the dealer as committed.
-    fn process_committed_dealer_msg(
+    /// Handle an incoming dealer message (already persisted).
+    /// Returns an ack response message if one should be sent.
+    fn handle(
         &mut self,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<PlayerAck<C::PublicKey>> {
+    ) -> Option<DkgMessage<V, C::PublicKey>> {
         self.committed_dealers.insert(dealer.clone(), true);
         // If we've already generated an ack, return it
         if let Some(ack) = self.acks.get(&dealer) {
-            return Some(ack.clone());
+            return Some(DkgMessage::Ack(ack.clone()));
         }
         // Otherwise generate the ack (deterministic based on the persisted message)
         if let Some(ack) = self
             .player
             .dealer_message(dealer.clone(), pub_msg, priv_msg)
         {
-            self.acks.insert(dealer, ack.clone());
-            return Some(ack);
+            self.acks.insert(dealer.clone(), ack.clone());
+            return Some(DkgMessage::Ack(ack));
         }
         None
     }
