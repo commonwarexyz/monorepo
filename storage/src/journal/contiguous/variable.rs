@@ -1608,7 +1608,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_a  t_size_boundary".to_string(),
+                partition: "init_at_size_boundary".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),

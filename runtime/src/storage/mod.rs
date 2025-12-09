@@ -12,9 +12,10 @@ pub mod tokio;
 /// Partition names must only contain alphanumeric characters, dashes ('-'),
 /// or underscores ('_').
 pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
-    if partition
-        .chars()
-        .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
+    if partition.is_empty()
+        || partition
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
     {
         return Err(crate::Error::PartitionNameInvalid(partition.into()));
     }

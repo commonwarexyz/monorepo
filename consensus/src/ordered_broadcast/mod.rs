@@ -242,7 +242,7 @@ mod tests {
                     journal_heights_per_section: 10,
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
-                    journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                    journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
@@ -877,7 +877,7 @@ mod tests {
                         journal_heights_per_section: 10,
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
-                        journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                        journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
@@ -929,7 +929,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
-                            "ordered-broadcast-seq/{}/",
+                            "ordered-broadcast-seq-{}-",
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
