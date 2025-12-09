@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::{ordered::Set, quorum};
+use commonware_utils::{ordered::Set, quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -27,7 +27,11 @@ impl Bench {
             .collect::<Vec<_>>();
         let me = private_keys.first().unwrap().clone();
         let me_pk = me.public_key();
-        let dealers = Set::from_iter_dedup(private_keys.iter().map(|sk| sk.public_key()));
+        let dealers = private_keys
+            .iter()
+            .map(|sk| sk.public_key())
+            .try_collect::<Set<_>>()
+            .unwrap();
 
         let (output, shares) = if previous {
             let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.clone()).unwrap();
