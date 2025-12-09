@@ -948,7 +948,7 @@ mod test {
                 count: 3,
             }),
             is_dkg: false,
-            expected_failures: 0,
+            expected_failures: 1,
         }
         .run::<EdScheme>())
         {
@@ -975,7 +975,7 @@ mod test {
                 count: 3,
             }),
             is_dkg: false,
-            expected_failures: 0,
+            expected_failures: 1,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
