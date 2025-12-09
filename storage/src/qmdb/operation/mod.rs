@@ -11,6 +11,7 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 pub mod fixed;
+pub mod operation;
 pub mod variable;
 
 // Context byte prefixes for identifying the operation type.
