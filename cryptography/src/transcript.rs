@@ -473,7 +473,7 @@ mod test {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Summary => 10,
+            Summary => 1024,
         }
     }
 }

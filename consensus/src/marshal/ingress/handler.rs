@@ -555,7 +555,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Request<B> => 10,
+            Request<B> => 1024,
         }
     }
 }

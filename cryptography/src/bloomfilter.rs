@@ -125,11 +125,11 @@ impl EncodeSize for BloomFilter {
 impl arbitrary::Arbitrary<'_> for BloomFilter {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let hashers = u8::arbitrary(u)?;
-        let bits_len = u.arbitrary_len::<u64>()?;
+        // Ensure at least 1 bit to avoid empty bitmap
+        let bits_len = u.arbitrary_len::<u64>()?.max(1);
         let mut bits = BitMap::with_capacity(bits_len as u64);
-        for i in 0..bits_len as u64 {
-            let bit = u.arbitrary::<bool>()?;
-            bits.set(i, bit);
+        for _ in 0..bits_len {
+            bits.push(u.arbitrary::<bool>()?);
         }
         Ok(Self { hashers, bits })
     }
@@ -267,7 +267,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            BloomFilter => 10,
+            BloomFilter => 1024,
         }
     }
 }

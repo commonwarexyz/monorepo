@@ -222,7 +222,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Digest => 10,
+            Digest => 1024,
         }
     }
 }

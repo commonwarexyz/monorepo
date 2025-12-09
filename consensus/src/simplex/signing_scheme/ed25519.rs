@@ -1046,7 +1046,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Certificate => 10
+            Certificate => 1024
         }
     }
 }

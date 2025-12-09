@@ -1,199 +1,27 @@
-[[Digest.cases]]
-seed = 0
-expected = "6c3b9aa767f785b537c0d8ba5fa54677e6a6e281320dfbb27c889b8fa460670f"
+["commonware_cryptography::blake3::tests::conformance::Digest"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 
-[[Digest.cases]]
-seed = 1
-expected = "b10da48cea4c09676b8e0efcd806941465060736032bb898420d0863dca72538"
+["commonware_cryptography::bloomfilter::tests::conformance::BloomFilter"]
+n_cases = 1024
+hash = "9dc837e220a8de29ce0b370754c50a4e62f90e99665722fe6ed57198d0f05820"
 
-[[Digest.cases]]
-seed = 2
-expected = "c51b8a31c98b9fe13065b485c9f8658c194c430843570ccac2720a3b30b47adb"
+["commonware_cryptography::ed25519::scheme::tests::conformance::PrivateKey"]
+n_cases = 1024
+hash = "929838171771a8edb9f1ab4659035b928e17b218e862a39276fdeab33515277e"
 
-[[Digest.cases]]
-seed = 3
-expected = "5de9bc1bb4cb7a9f9cf991a32230d014b44274ea5464a352f089a8cccc486915"
+["commonware_cryptography::ed25519::scheme::tests::conformance::PublicKey"]
+n_cases = 1024
+hash = "977776541e0edf8c34822f4fefe6299d668a1cd43657b2a4b4dbb5f8ca36f6ed"
 
-[[Digest.cases]]
-seed = 4
-expected = "22cfaefc92e4edb9b0ae01a63a95df11f1279b7b6bdde4e048f6ece8f8c8f2c2"
+["commonware_cryptography::ed25519::scheme::tests::conformance::Signature"]
+n_cases = 1024
+hash = "068f1c5ed28f557da506f5bb3a802790777a429180545aaf09e9ff503d6ccf02"
 
-[[Digest.cases]]
-seed = 5
-expected = "5b7b6135be198533f7c7ec46651216b762e6d47e69b408d1bc79d641f9ae06de"
+["commonware_cryptography::sha256::tests::conformance::Digest"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 
-[[Digest.cases]]
-seed = 6
-expected = "e6c2614f6ebd4c6b5055bf86866fae7b56a9602a99133250ba8b7f516dff9dc4"
-
-[[Digest.cases]]
-seed = 7
-expected = "bb43d723345365283a299b2ed359012b31952445b9704bb4e33a3e09b6b70bba"
-
-[[Digest.cases]]
-seed = 8
-expected = "5e969c4ac2f287128d6fd71e7d111dbd19a5b2bea59da5d5d908044a514f5f8e"
-
-[[Digest.cases]]
-seed = 9
-expected = "1f942b810f26371d126fb6f3ceb731c85bc46ef778621f58fd23e1a095796d2c"
-
-[[PrivateKey.cases]]
-seed = 0
-expected = "b6e8bdace250f9f7a01ea01ae15d24dde55a32733dae5fdace38110a3711b843"
-
-[[PrivateKey.cases]]
-seed = 1
-expected = "22ec068250e57660b6c35683731ca76290c6489238b187d950a6ef9c0d8bc6a5"
-
-[[PrivateKey.cases]]
-seed = 2
-expected = "64f503f49ec6d14a791c99dfaf6bb485d1f05dc61109e3cc46c7ec5de5d5f81f"
-
-[[PrivateKey.cases]]
-seed = 3
-expected = "ac6620c7be66f095e1aa13dd3447e897c0b2c8aff7f7fa1eadb14f8f54725f98"
-
-[[PrivateKey.cases]]
-seed = 4
-expected = "f315a8a1d3ecd436108c36d6f6585a3102f4031cf60cd4252e12a79defce325d"
-
-[[PrivateKey.cases]]
-seed = 5
-expected = "39446ad34b6c6ee53a3c60d215c796536fb934db2aa0f9b2fcc568f169ee0d1b"
-
-[[PrivateKey.cases]]
-seed = 6
-expected = "f313067d0cfcd03aed1f91248602ac3177db487de8f4116e2596d48a8fd83013"
-
-[[PrivateKey.cases]]
-seed = 7
-expected = "1b83f9cb77aa4bdbaa03c91c512b0d5982c7bb9437931e19b5a083e538f61e20"
-
-[[PrivateKey.cases]]
-seed = 8
-expected = "698c60468774b690664e755b34114fa02744a2edab413d449658cf8d083e2801"
-
-[[PrivateKey.cases]]
-seed = 9
-expected = "165a800ef3a04f8658279fef73d3babe20eb6475582e1e2489208f93a9493f98"
-
-[[PublicKey.cases]]
-seed = 0
-expected = "85cdde096b9fcc656f7542c5f2e3dc2f1c0dea59c4f271db987d3d96d00e513d"
-
-[[PublicKey.cases]]
-seed = 1
-expected = "7340dece9f83e1505a324e065c1b23d230fd3aff9e6180b4d1671e938a7b7113"
-
-[[PublicKey.cases]]
-seed = 2
-expected = "60717681dd05fa6acc124eafecc11a61be4ace5bea0670d265727d35985f1609"
-
-[[PublicKey.cases]]
-seed = 3
-expected = "3505f863474f0b176898014aa423517d42de2a35c6be5b8046931e5deafcc7fa"
-
-[[PublicKey.cases]]
-seed = 4
-expected = "05982425dfd64db60b851cdad98de1c4ed145a0036cbf99baa5a4b0bd5a1baca"
-
-[[PublicKey.cases]]
-seed = 5
-expected = "21e399bd33d402b5dd2dbb51254c1f60e93d80d8a6d4b7819f57ce89f3ce5e2b"
-
-[[PublicKey.cases]]
-seed = 6
-expected = "4c3bc20a08c6d4296bfdee7d8df699f736b4af865dc8e58c70556c70adb7873e"
-
-[[PublicKey.cases]]
-seed = 7
-expected = "040e2fe882b34086f203ccc0f445ba45e28eb629025630e0e45ce0cc7d4784aa"
-
-[[PublicKey.cases]]
-seed = 8
-expected = "dd7e3bd385f41acdccb51a14680c1469e1170f833ad3455e68c9909dbba38bf4"
-
-[[PublicKey.cases]]
-seed = 9
-expected = "73c650488b1a0511773c8526bce804f7d3a20f80b45ba8b6da4e9020df2dce93"
-
-[[Signature.cases]]
-seed = 0
-expected = "bb482a19fc665b035c48d0cf0ac3983a0f8146346560b7bffd1fde5a47c71f45e19f17cc80971eccc00f7c50988110e7cb188aad93adc39bd12e4001397c9209"
-
-[[Signature.cases]]
-seed = 1
-expected = "6b50c1f5ef77ac84baaf2bc6670845db536763e890387812b65fb8117954b742491a5fa02e049768b5b981c2822589da79caa3d9b2f914c4c84de70baf2bbd07"
-
-[[Signature.cases]]
-seed = 2
-expected = "dac0f9a321e91c41c8700d89715646d808d8179f8c981e4ecb37233404370f7b3b2e0d41c6ccb05ab0f046dfa8b85f38e1515f38d169278623db00cb54365b06"
-
-[[Signature.cases]]
-seed = 3
-expected = "10b93b19a686d919bda4dd858be1f469b7dd75e8d91596974833cd4fb62cc990bc6f01e8ba47559b587af082acdbad60b05f240e1117d81990fb38935bb81b07"
-
-[[Signature.cases]]
-seed = 4
-expected = "d4bd33705da550ae15d7b1457f7c9579ca98b43783e3f178bcd9211cb9a59ca398c91ee7c63c25e95252de1ea0b0c9d286200afd47ae59ac5da1a5be63e39e0a"
-
-[[Signature.cases]]
-seed = 5
-expected = "97840ac74dceb4c9b6b85991a2c4d102b405dedd117c0d65432b9ebd341d0cd4828f8390734c2c1af98f0eee98d797d9f77ec591e6ad9c392d4782f7c2f74b09"
-
-[[Signature.cases]]
-seed = 6
-expected = "d9430dae31817251b52047dedee507fab2c5aa9fed767926f2f28f1fb22c48f2ef4c24a1101c9f2e910cf8aaba767a0589ab93b8b4e16df6c8725be0d1cba701"
-
-[[Signature.cases]]
-seed = 7
-expected = "63887ad6320adac481b9b9ed242ac74ad435598998f6a7aa45e68d2330a1c0e2f6a8ac827f9a0c3c95e0f06111c21208897b54c08d4c0a98153771ef4bcc6409"
-
-[[Signature.cases]]
-seed = 8
-expected = "d93821b04af24bc5054ad5d3cfb82856b35923019578b85c06c2eca5e12096a099a09084d9e1e4096025864f2714eeb757c26fcbc124b4d13360d96ee4023e09"
-
-[[Signature.cases]]
-seed = 9
-expected = "bb078c4df7d57bbe1c03a4cf275be36cdf6fedb53d65e38b57ae397d2404cc856b7b49f0cd81c3f364cd40603f519add24f05ecdd11bf8ffada406aa858aa203"
-
-[[Summary.cases]]
-seed = 0
-expected = "6c3b9aa767f785b537c0d8ba5fa54677e6a6e281320dfbb27c889b8fa460670f"
-
-[[Summary.cases]]
-seed = 1
-expected = "b10da48cea4c09676b8e0efcd806941465060736032bb898420d0863dca72538"
-
-[[Summary.cases]]
-seed = 2
-expected = "c51b8a31c98b9fe13065b485c9f8658c194c430843570ccac2720a3b30b47adb"
-
-[[Summary.cases]]
-seed = 3
-expected = "5de9bc1bb4cb7a9f9cf991a32230d014b44274ea5464a352f089a8cccc486915"
-
-[[Summary.cases]]
-seed = 4
-expected = "22cfaefc92e4edb9b0ae01a63a95df11f1279b7b6bdde4e048f6ece8f8c8f2c2"
-
-[[Summary.cases]]
-seed = 5
-expected = "5b7b6135be198533f7c7ec46651216b762e6d47e69b408d1bc79d641f9ae06de"
-
-[[Summary.cases]]
-seed = 6
-expected = "e6c2614f6ebd4c6b5055bf86866fae7b56a9602a99133250ba8b7f516dff9dc4"
-
-[[Summary.cases]]
-seed = 7
-expected = "bb43d723345365283a299b2ed359012b31952445b9704bb4e33a3e09b6b70bba"
-
-[[Summary.cases]]
-seed = 8
-expected = "5e969c4ac2f287128d6fd71e7d111dbd19a5b2bea59da5d5d908044a514f5f8e"
-
-[[Summary.cases]]
-seed = 9
-expected = "1f942b810f26371d126fb6f3ceb731c85bc46ef778621f58fd23e1a095796d2c"
+["commonware_cryptography::transcript::test::conformance::Summary"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"

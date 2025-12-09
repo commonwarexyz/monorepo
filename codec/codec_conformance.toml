@@ -1,699 +1,135 @@
-[["()".cases]]
-seed = 0
-expected = ""
-
-[["()".cases]]
-seed = 1
-expected = ""
-
-[["()".cases]]
-seed = 2
-expected = ""
-
-[["()".cases]]
-seed = 3
-expected = ""
-
-[["()".cases]]
-seed = 4
-expected = ""
-
-[["(u32, u32)".cases]]
-seed = 0
-expected = "a79a3b6cb585f767"
-
-[["(u32, u32)".cases]]
-seed = 1
-expected = "8ca40db167094cea"
-
-[["(u32, u32)".cases]]
-seed = 2
-expected = "318a1bc5e19f8bc9"
-
-[["(u32, u32)".cases]]
-seed = 3
-expected = "1bbce95d9f7acbb4"
-
-[["(u32, u32)".cases]]
-seed = 4
-expected = "fcaecf22b9ede492"
-
-[["(u32, u32, u32)".cases]]
-seed = 0
-expected = "a79a3b6cb585f767bad8c037"
-
-[["(u32, u32, u32)".cases]]
-seed = 1
-expected = "8ca40db167094ceafc0e8e6b"
-
-[["(u32, u32, u32)".cases]]
-seed = 2
-expected = "318a1bc5e19f8bc985b46530"
-
-[["(u32, u32, u32)".cases]]
-seed = 3
-expected = "1bbce95d9f7acbb4a391f99c"
-
-[["(u32, u32, u32)".cases]]
-seed = 4
-expected = "fcaecf22b9ede492a601aeb0"
-
-[["(u32, u32, u32, u32)".cases]]
-seed = 0
-expected = "a79a3b6cb585f767bad8c0377746a55f"
-
-[["(u32, u32, u32, u32)".cases]]
-seed = 1
-expected = "8ca40db167094ceafc0e8e6b149406d8"
-
-[["(u32, u32, u32, u32)".cases]]
-seed = 2
-expected = "318a1bc5e19f8bc985b465308c65f8c9"
-
-[["(u32, u32, u32, u32)".cases]]
-seed = 3
-expected = "1bbce95d9f7acbb4a391f99c14d03022"
-
-[["(u32, u32, u32, u32)".cases]]
-seed = 4
-expected = "fcaecf22b9ede492a601aeb011df953a"
-
-[["(u32, u32, u32, u32, u32)".cases]]
-seed = 0
-expected = "a79a3b6cb585f767bad8c0377746a55f81e2a6e6"
-
-[["(u32, u32, u32, u32, u32)".cases]]
-seed = 1
-expected = "8ca40db167094ceafc0e8e6b149406d836070665"
-
-[["(u32, u32, u32, u32, u32)".cases]]
-seed = 2
-expected = "318a1bc5e19f8bc985b465308c65f8c908434c19"
-
-[["(u32, u32, u32, u32, u32)".cases]]
-seed = 3
-expected = "1bbce95d9f7acbb4a391f99c14d03022ea7442b4"
-
-[["(u32, u32, u32, u32, u32)".cases]]
-seed = 4
-expected = "fcaecf22b9ede492a601aeb011df953a7b9b27f1"
-
-[["(u32, u32, u32, u32, u32, u32)".cases]]
-seed = 0
-expected = "a79a3b6cb585f767bad8c0377746a55f81e2a6e6b2fb0d32"
-
-[["(u32, u32, u32, u32, u32, u32)".cases]]
-seed = 1
-expected = "8ca40db167094ceafc0e8e6b149406d83607066598b82b03"
-
-[["(u32, u32, u32, u32, u32, u32)".cases]]
-seed = 2
-expected = "318a1bc5e19f8bc985b465308c65f8c908434c19ca0c5743"
-
-[["(u32, u32, u32, u32, u32, u32)".cases]]
-seed = 3
-expected = "1bbce95d9f7acbb4a391f99c14d03022ea7442b452a36454"
-
-[["(u32, u32, u32, u32, u32, u32)".cases]]
-seed = 4
-expected = "fcaecf22b9ede492a601aeb011df953a7b9b27f1e0e4dd6b"
-
-[["BTreeMap<u32, u32>".cases]]
-seed = 0
-expected = "00"
-
-[["BTreeMap<u32, u32>".cases]]
-seed = 1
-expected = "01ea8ca40d6b67094c"
-
-[["BTreeMap<u32, u32>".cases]]
-seed = 2
-expected = "040c5743080a72c2cac9318a1b30e19f8bdb7ab4302e8a2b41f8c985b44c198c65"
-
-[["BTreeMap<u32, u32>".cases]]
-seed = 3
-expected = "023022a39142b414d0b41bbce99c9f7acb"
-
-[["BTreeMap<u32, u32>".cases]]
-seed = 4
-expected = "00"
-
-[["BTreeSet<u8>".cases]]
-seed = 0
-expected = "00"
-
-[["BTreeSet<u8>".cases]]
-seed = 1
-expected = "010d"
-
-[["BTreeSet<u8>".cases]]
-seed = 2
-expected = "011b"
-
-[["BTreeSet<u8>".cases]]
-seed = 3
-expected = "01e9"
-
-[["BTreeSet<u8>".cases]]
-seed = 4
-expected = "00"
-
-[[Bytes.cases]]
-seed = 0
-expected = "049a678537"
-
-[[Bytes.cases]]
-seed = 1
-expected = "01a4"
-
-[[Bytes.cases]]
-seed = 2
-expected = "068ac99f30b4c9"
-
-[[Bytes.cases]]
-seed = 3
-expected = "06bcb47a9c9122"
-
-[[Bytes.cases]]
-seed = 4
-expected = "01ae"
-
-[["HashMap<u32, u32>".cases]]
-seed = 0
-expected = "00"
-
-[["HashMap<u32, u32>".cases]]
-seed = 1
-expected = "01ea8ca40d6b67094c"
-
-[["HashMap<u32, u32>".cases]]
-seed = 2
-expected = "040c5743080a72c2cac9318a1b30e19f8bdb7ab4302e8a2b41f8c985b44c198c65"
-
-[["HashMap<u32, u32>".cases]]
-seed = 3
-expected = "023022a39142b414d0b41bbce99c9f7acb"
-
-[["HashMap<u32, u32>".cases]]
-seed = 4
-expected = "00"
-
-[["HashSet<u32>".cases]]
-seed = 0
-expected = "00"
-
-[["HashSet<u32>".cases]]
-seed = 1
-expected = "01ea8ca40d"
-
-[["HashSet<u32>".cases]]
-seed = 2
-expected = "026530e19fc9318a1b"
-
-[["HashSet<u32>".cases]]
-seed = 3
-expected = "03b41bbce9d03022a3f99c9f7a"
-
-[["HashSet<u32>".cases]]
-seed = 4
-expected = "00"
-
-[[Ipv4Addr.cases]]
-seed = 0
-expected = "a79a3b6c"
-
-[[Ipv4Addr.cases]]
-seed = 1
-expected = "8ca40db1"
-
-[[Ipv4Addr.cases]]
-seed = 2
-expected = "318a1bc5"
-
-[[Ipv4Addr.cases]]
-seed = 3
-expected = "1bbce95d"
-
-[[Ipv4Addr.cases]]
-seed = 4
-expected = "fcaecf22"
-
-[[Ipv6Addr.cases]]
-seed = 0
-expected = "7746a55fbad8c037b585f767a79a3b6c"
-
-[[Ipv6Addr.cases]]
-seed = 1
-expected = "149406d8fc0e8e6b67094cea8ca40db1"
-
-[[Ipv6Addr.cases]]
-seed = 2
-expected = "8c65f8c985b46530e19f8bc9318a1bc5"
-
-[[Ipv6Addr.cases]]
-seed = 3
-expected = "14d03022a391f99c9f7acbb41bbce95d"
-
-[[Ipv6Addr.cases]]
-seed = 4
-expected = "11df953aa601aeb0b9ede492fcaecf22"
-
-[["Option<u32>".cases]]
-seed = 0
-expected = "0108d17eae"
-
-[["Option<u32>".cases]]
-seed = 1
-expected = "01ee3d2b28"
-
-[["Option<u32>".cases]]
-seed = 2
-expected = "00"
-
-[["Option<u32>".cases]]
-seed = 3
-expected = "01d3038337"
-
-[["Option<u32>".cases]]
-seed = 4
-expected = "00"
-
-[["Option<u64>".cases]]
-seed = 0
-expected = "00"
-
-[["Option<u64>".cases]]
-seed = 1
-expected = "016b67094cea8ca40d"
-
-[["Option<u64>".cases]]
-seed = 2
-expected = "0130e19f8bc9318a1b"
-
-[["Option<u64>".cases]]
-seed = 3
-expected = "019c9f7acbb41bbce9"
-
-[["Option<u64>".cases]]
-seed = 4
-expected = "00"
-
-[[SocketAddr.cases]]
-seed = 0
-expected = "06e67746a55fbad8c037b585f767a79a3be2a6"
-
-[[SocketAddr.cases]]
-seed = 1
-expected = "04ea8ca40d094c"
-
-[[SocketAddr.cases]]
-seed = 2
-expected = "04c9318a1b9f8b"
-
-[[SocketAddr.cases]]
-seed = 3
-expected = "04b41bbce97acb"
-
-[[SocketAddr.cases]]
-seed = 4
-expected = "06f111df953aa601aeb0b9ede492fcaecf9b27"
-
-[[SocketAddrV4.cases]]
-seed = 0
-expected = "a79a3b6cf767"
-
-[[SocketAddrV4.cases]]
-seed = 1
-expected = "8ca40db14cea"
-
-[[SocketAddrV4.cases]]
-seed = 2
-expected = "318a1bc58bc9"
-
-[[SocketAddrV4.cases]]
-seed = 3
-expected = "1bbce95dcbb4"
-
-[[SocketAddrV4.cases]]
-seed = 4
-expected = "fcaecf22e492"
-
-[[SocketAddrV6.cases]]
-seed = 0
-expected = "7746a55fbad8c037b585f767a79a3b6ca6e6"
-
-[[SocketAddrV6.cases]]
-seed = 1
-expected = "149406d8fc0e8e6b67094cea8ca40db10665"
-
-[[SocketAddrV6.cases]]
-seed = 2
-expected = "8c65f8c985b46530e19f8bc9318a1bc54c19"
-
-[[SocketAddrV6.cases]]
-seed = 3
-expected = "14d03022a391f99c9f7acbb41bbce95d42b4"
-
-[[SocketAddrV6.cases]]
-seed = 4
-expected = "11df953aa601aeb0b9ede492fcaecf2227f1"
-
-[["Vec<u16>".cases]]
-seed = 0
-expected = "00"
-
-[["Vec<u16>".cases]]
-seed = 1
-expected = "01a40d"
-
-[["Vec<u16>".cases]]
-seed = 2
-expected = "058a1b8bc930e185b465f8"
-
-[["Vec<u16>".cases]]
-seed = 3
-expected = "02bce9cbb4"
-
-[["Vec<u16>".cases]]
-seed = 4
-expected = "00"
-
-[["Vec<u32>".cases]]
-seed = 0
-expected = "00"
-
-[["Vec<u32>".cases]]
-seed = 1
-expected = "01ea8ca40d"
-
-[["Vec<u32>".cases]]
-seed = 2
-expected = "02c9318a1b6530e19f"
-
-[["Vec<u32>".cases]]
-seed = 3
-expected = "03b41bbce9f99c9f7ad03022a3"
-
-[["Vec<u32>".cases]]
-seed = 4
-expected = "00"
-
-[["Vec<u8>".cases]]
-seed = 0
-expected = "00"
-
-[["Vec<u8>".cases]]
-seed = 1
-expected = "010d"
-
-[["Vec<u8>".cases]]
-seed = 2
-expected = "011b"
-
-[["Vec<u8>".cases]]
-seed = 3
-expected = "01e9"
-
-[["Vec<u8>".cases]]
-seed = 4
-expected = "00"
-
-[["[u8; 32]".cases]]
-seed = 0
-expected = "6c3b9aa767f785b537c0d8ba5fa54677e6a6e281320dfbb27c889b8fa460670f"
-
-[["[u8; 32]".cases]]
-seed = 1
-expected = "b10da48cea4c09676b8e0efcd806941465060736032bb898420d0863dca72538"
-
-[["[u8; 32]".cases]]
-seed = 2
-expected = "c51b8a31c98b9fe13065b485c9f8658c194c430843570ccac2720a3b30b47adb"
-
-[["[u8; 32]".cases]]
-seed = 3
-expected = "5de9bc1bb4cb7a9f9cf991a32230d014b44274ea5464a352f089a8cccc486915"
-
-[["[u8; 32]".cases]]
-seed = 4
-expected = "22cfaefc92e4edb9b0ae01a63a95df11f1279b7b6bdde4e048f6ece8f8c8f2c2"
-
-[[bool.cases]]
-seed = 0
-expected = "00"
-
-[[bool.cases]]
-seed = 1
-expected = "01"
-
-[[bool.cases]]
-seed = 2
-expected = "01"
-
-[[bool.cases]]
-seed = 3
-expected = "01"
-
-[[bool.cases]]
-seed = 4
-expected = "00"
-
-[[f32.cases]]
-seed = 0
-expected = "a79a3b6c"
-
-[[f32.cases]]
-seed = 1
-expected = "8ca40db1"
-
-[[f32.cases]]
-seed = 2
-expected = "318a1bc5"
-
-[[f32.cases]]
-seed = 3
-expected = "1bbce95d"
-
-[[f32.cases]]
-seed = 4
-expected = "fcaecf22"
-
-[[f64.cases]]
-seed = 0
-expected = "b585f767a79a3b6c"
-
-[[f64.cases]]
-seed = 1
-expected = "67094cea8ca40db1"
-
-[[f64.cases]]
-seed = 2
-expected = "e19f8bc9318a1bc5"
-
-[[f64.cases]]
-seed = 3
-expected = "9f7acbb41bbce95d"
-
-[[f64.cases]]
-seed = 4
-expected = "b9ede492fcaecf22"
-
-[[i128.cases]]
-seed = 0
-expected = "7746a55fbad8c037b585f767a79a3b6c"
-
-[[i128.cases]]
-seed = 1
-expected = "149406d8fc0e8e6b67094cea8ca40db1"
-
-[[i128.cases]]
-seed = 2
-expected = "8c65f8c985b46530e19f8bc9318a1bc5"
-
-[[i128.cases]]
-seed = 3
-expected = "14d03022a391f99c9f7acbb41bbce95d"
-
-[[i128.cases]]
-seed = 4
-expected = "11df953aa601aeb0b9ede492fcaecf22"
-
-[[i16.cases]]
-seed = 0
-expected = "3b6c"
-
-[[i16.cases]]
-seed = 1
-expected = "0db1"
-
-[[i16.cases]]
-seed = 2
-expected = "1bc5"
-
-[[i16.cases]]
-seed = 3
-expected = "e95d"
-
-[[i16.cases]]
-seed = 4
-expected = "cf22"
-
-[[i32.cases]]
-seed = 0
-expected = "a79a3b6c"
-
-[[i32.cases]]
-seed = 1
-expected = "8ca40db1"
-
-[[i32.cases]]
-seed = 2
-expected = "318a1bc5"
-
-[[i32.cases]]
-seed = 3
-expected = "1bbce95d"
-
-[[i32.cases]]
-seed = 4
-expected = "fcaecf22"
-
-[[i64.cases]]
-seed = 0
-expected = "b585f767a79a3b6c"
-
-[[i64.cases]]
-seed = 1
-expected = "67094cea8ca40db1"
-
-[[i64.cases]]
-seed = 2
-expected = "e19f8bc9318a1bc5"
-
-[[i64.cases]]
-seed = 3
-expected = "9f7acbb41bbce95d"
-
-[[i64.cases]]
-seed = 4
-expected = "b9ede492fcaecf22"
-
-[[i8.cases]]
-seed = 0
-expected = "6c"
-
-[[i8.cases]]
-seed = 1
-expected = "b1"
-
-[[i8.cases]]
-seed = 2
-expected = "c5"
-
-[[i8.cases]]
-seed = 3
-expected = "5d"
-
-[[i8.cases]]
-seed = 4
-expected = "22"
-
-[[u128.cases]]
-seed = 0
-expected = "7746a55fbad8c037b585f767a79a3b6c"
-
-[[u128.cases]]
-seed = 1
-expected = "149406d8fc0e8e6b67094cea8ca40db1"
-
-[[u128.cases]]
-seed = 2
-expected = "8c65f8c985b46530e19f8bc9318a1bc5"
-
-[[u128.cases]]
-seed = 3
-expected = "14d03022a391f99c9f7acbb41bbce95d"
-
-[[u128.cases]]
-seed = 4
-expected = "11df953aa601aeb0b9ede492fcaecf22"
-
-[[u16.cases]]
-seed = 0
-expected = "3b6c"
-
-[[u16.cases]]
-seed = 1
-expected = "0db1"
-
-[[u16.cases]]
-seed = 2
-expected = "1bc5"
-
-[[u16.cases]]
-seed = 3
-expected = "e95d"
-
-[[u16.cases]]
-seed = 4
-expected = "cf22"
-
-[[u32.cases]]
-seed = 0
-expected = "a79a3b6c"
-
-[[u32.cases]]
-seed = 1
-expected = "8ca40db1"
-
-[[u32.cases]]
-seed = 2
-expected = "318a1bc5"
-
-[[u32.cases]]
-seed = 3
-expected = "1bbce95d"
-
-[[u32.cases]]
-seed = 4
-expected = "fcaecf22"
-
-[[u64.cases]]
-seed = 0
-expected = "b585f767a79a3b6c"
-
-[[u64.cases]]
-seed = 1
-expected = "67094cea8ca40db1"
-
-[[u64.cases]]
-seed = 2
-expected = "e19f8bc9318a1bc5"
-
-[[u64.cases]]
-seed = 3
-expected = "9f7acbb41bbce95d"
-
-[[u64.cases]]
-seed = 4
-expected = "b9ede492fcaecf22"
-
-[[u8.cases]]
-seed = 0
-expected = "6c"
-
-[[u8.cases]]
-seed = 1
-expected = "b1"
-
-[[u8.cases]]
-seed = 2
-expected = "c5"
-
-[[u8.cases]]
-seed = 3
-expected = "5d"
-
-[[u8.cases]]
-seed = 4
-expected = "22"
+["commonware_codec::types::btree_map::tests::conformance::BTreeMap<u32, u32>"]
+n_cases = 1024
+hash = "50faddad1116de4876604ce756fded13f10468fa1ab3da6dc6510cfcb5c48ff4"
+
+["commonware_codec::types::btree_set::tests::conformance::BTreeSet<u8>"]
+n_cases = 1024
+hash = "f2de124e52a4df6f7d0cebdd1135e1afd5b70d4ecc339d8be9deb20b213455bf"
+
+["commonware_codec::types::bytes::tests::conformance::Bytes"]
+n_cases = 1024
+hash = "fdd4c85d5e7d598fc52a95403b81d92dd7816dd8c93d0a7330014a2e71c27e59"
+
+["commonware_codec::types::hash_map::tests::conformance::HashMap<u32, u32>"]
+n_cases = 1024
+hash = "50faddad1116de4876604ce756fded13f10468fa1ab3da6dc6510cfcb5c48ff4"
+
+["commonware_codec::types::hash_set::tests::conformance::HashSet<u32>"]
+n_cases = 1024
+hash = "18fd2f3e052208b254639e83e8d6cd6f8e0106dfc46b048b5bbf8128d98b430b"
+
+["commonware_codec::types::net::test::conformance::Ipv4Addr"]
+n_cases = 1024
+hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+
+["commonware_codec::types::net::test::conformance::Ipv6Addr"]
+n_cases = 1024
+hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+
+["commonware_codec::types::net::test::conformance::SocketAddr"]
+n_cases = 1024
+hash = "df17643dc192ebd573579445dbfdc656e4892977e976c386a1eeb29ca573f484"
+
+["commonware_codec::types::net::test::conformance::SocketAddrV4"]
+n_cases = 1024
+hash = "d8b220e0a72164fd7ab432382e2caa9b55d29936fe50e721a2ef349bd48781ab"
+
+["commonware_codec::types::net::test::conformance::SocketAddrV6"]
+n_cases = 1024
+hash = "6903da75416ba669f6cacb645863dbac9ee99514f6e33c8836c0d142bc8bb8d1"
+
+["commonware_codec::types::primitives::tests::conformance::()"]
+n_cases = 1024
+hash = "9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47"
+
+["commonware_codec::types::primitives::tests::conformance::Option<u64>"]
+n_cases = 1024
+hash = "ac91aab3d31a9d58d9c31f288560fb9692c1285994afd06240597b3af6bee94a"
+
+["commonware_codec::types::primitives::tests::conformance::[u8; 32]"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_codec::types::primitives::tests::conformance::bool"]
+n_cases = 1024
+hash = "198713cff6a8fc4143ad7d76abc9cefbc4a83da1788db166c9e27e2840d027a5"
+
+["commonware_codec::types::primitives::tests::conformance::f32"]
+n_cases = 1024
+hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+
+["commonware_codec::types::primitives::tests::conformance::f64"]
+n_cases = 1024
+hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+
+["commonware_codec::types::primitives::tests::conformance::i128"]
+n_cases = 1024
+hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+
+["commonware_codec::types::primitives::tests::conformance::i16"]
+n_cases = 1024
+hash = "72a03c0af64a719dc2d631f62dd89eb3598d89e83d5b9a8d5e2063f89f4dddf9"
+
+["commonware_codec::types::primitives::tests::conformance::i32"]
+n_cases = 1024
+hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+
+["commonware_codec::types::primitives::tests::conformance::i64"]
+n_cases = 1024
+hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+
+["commonware_codec::types::primitives::tests::conformance::i8"]
+n_cases = 1024
+hash = "9d268d53456ebe649d11612abd902fe35ac0fee91ad8ffbd461699437a89d511"
+
+["commonware_codec::types::primitives::tests::conformance::u128"]
+n_cases = 1024
+hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+
+["commonware_codec::types::primitives::tests::conformance::u16"]
+n_cases = 1024
+hash = "72a03c0af64a719dc2d631f62dd89eb3598d89e83d5b9a8d5e2063f89f4dddf9"
+
+["commonware_codec::types::primitives::tests::conformance::u32"]
+n_cases = 1024
+hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+
+["commonware_codec::types::primitives::tests::conformance::u64"]
+n_cases = 1024
+hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+
+["commonware_codec::types::primitives::tests::conformance::u8"]
+n_cases = 1024
+hash = "9d268d53456ebe649d11612abd902fe35ac0fee91ad8ffbd461699437a89d511"
+
+["commonware_codec::types::tuple::tests::conformance::(u32, u32)"]
+n_cases = 1024
+hash = "49bb8d8e9ac244f12e95b4482687ab507c9ee97391d5afdeca8fda25e602bd9b"
+
+["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32)"]
+n_cases = 1024
+hash = "4bebea29c2ebb927cf66d44cb6aacab3e979ca1face178bcbe5f2896f0f266f3"
+
+["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32)"]
+n_cases = 1024
+hash = "016f7acec4791710636f82b846e87ad9b0ad89789e82c300cc0d402ecb94154b"
+
+["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32)"]
+n_cases = 1024
+hash = "f23042be1c6572852a173fdba41662241604c2c98d4d271ac787e1bd71f8f09a"
+
+["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32, u32)"]
+n_cases = 1024
+hash = "c402750ddf30a844610002a45736a43ae6b91edbfc61bad5909f6f8052525fe5"
+
+["commonware_codec::types::vec::tests::conformance::Vec<u16>"]
+n_cases = 1024
+hash = "675f7187132dd4de4e68a2aebcdb6737ff54f7539571fd8ff2efe4bc56054229"
+
+["commonware_codec::types::vec::tests::conformance::Vec<u32>"]
+n_cases = 1024
+hash = "06ac8dd33cb08c890be9ba3fe9b82c15badc845608587c3505cd9e6a69709d70"
+
+["commonware_codec::types::vec::tests::conformance::Vec<u8>"]
+n_cases = 1024
+hash = "1331d8e7b269e960f14b2e4aa27a44bc6375ac1d00096b814a49f7a3c9cb8409"

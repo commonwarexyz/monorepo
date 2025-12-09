@@ -2,21 +2,24 @@
 //!
 //! This module provides utilities for verifying that codec implementations
 //! maintain backward compatibility by comparing encoded output against
-//! known-good test vectors stored in TOML files.
+//! known-good hash values stored in TOML files.
 //!
 //! # Storage Format
 //!
-//! Test vectors are stored in a TOML file using the array of tables syntax:
+//! Test vectors are stored in a TOML file with a single hash per type:
 //!
 //! ```toml
-//! [["Vec<u8>".cases]]
-//! seed = 0
-//! expected = "abc123"
+//! ["Vec<u8>"]
+//! n_cases = 100
+//! hash = "abc123..."
 //!
-//! [["Vec<u8>".cases]]
-//! seed = 1
-//! expected = "def456"
+//! ["Vec<u16>"]
+//! n_cases = 100
+//! hash = "def456..."
 //! ```
+//!
+//! The hash is computed by generating `n_cases` arbitrary values (using seeds
+//! 0..n_cases), encoding each one, and hashing all the encoded bytes together.
 //!
 //! # Usage
 //!
@@ -24,21 +27,21 @@
 //!
 //! ```ignore
 //! conformance_tests! {
-//!     Vec<u8> => 5,
-//!     Vec<u16> => 5,
+//!     Vec<u8> => 100,
+//!     Vec<u16> => 100,
 //! }
 //! ```
 //!
 //! # Behavior
 //!
-//! - Missing test cases are automatically added to `codec_conformance.toml`
-//! - Format changes (mismatches) cause test failures
+//! - Missing types are automatically added to `codec_conformance.toml`
+//! - Format changes (hash mismatches) cause test failures
 //! - File locking prevents concurrent write corruption across processes
 //!
 //! # Regeneration Mode
 //!
 //! When `cfg(generate_conformance_tests)` is set, tests regenerate their
-//! expected values in the TOML file. Use this to intentionally update
+//! expected hashes in the TOML file. Use this to intentionally update
 //! the codec format:
 //!
 //! ```bash
@@ -50,33 +53,26 @@ use arbitrary::{Arbitrary, Unstructured};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt::Debug, fs, path::Path};
 
-/// A conformance test file containing test cases for multiple types.
+/// A conformance test file containing test data for multiple types.
 ///
 /// The file is a TOML document with sections for each type name.
-/// Uses `BTreeMap<String, TypeSection>` directly to produce clean TOML output.
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct ConformanceFile {
-    /// Test cases indexed by stringified type name.
-    pub types: BTreeMap<String, TypeSection>,
+    /// Test data indexed by stringified type name.
+    pub types: BTreeMap<String, TypeEntry>,
 }
 
-/// Test cases for a single type.
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
-pub struct TypeSection {
-    /// Individual test cases.
-    pub cases: Vec<TestCase>,
-}
-
-/// A single test case.
+/// Conformance test data for a single type.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TestCase {
-    /// Seed used to generate the test value via [arbitrary].
-    pub seed: u64,
-    /// Expected hex-encoded bytes after encoding.
-    pub expected: String,
+pub struct TypeEntry {
+    /// Number of test cases that were hashed together.
+    pub n_cases: usize,
+    /// Hex-encoded SHA-256 hash of all encoded values concatenated together.
+    pub hash: String,
 }
 
 /// Errors that can occur when loading conformance files.
@@ -165,31 +161,26 @@ where
     T::arbitrary(&mut unstructured).expect("failed to generate arbitrary value")
 }
 
-/// Result of running conformance tests for a single type.
-#[derive(Debug, Default)]
-pub struct ConformanceResult {
-    /// Test cases that failed (format changed).
-    pub failures: Vec<ConformanceFailure>,
-    /// Test cases that are missing from the conformance file.
-    pub missing: Vec<TestCase>,
-}
+/// Compute the conformance hash for a type.
+///
+/// Generates `n_cases` arbitrary values, encodes each one, and hashes
+/// all the encoded bytes together using SHA-256.
+pub fn compute_conformance_hash<T>(n_cases: usize) -> String
+where
+    T: Encode + for<'a> Arbitrary<'a>,
+{
+    let mut hasher = Sha256::new();
 
-/// A single conformance test failure.
-#[derive(Debug)]
-pub struct ConformanceFailure {
-    /// The seed that produced the failure.
-    pub seed: u64,
-    /// The expected hex-encoded bytes.
-    pub expected: String,
-    /// The actual hex-encoded bytes.
-    pub actual: String,
-}
+    for seed in 0..n_cases as u64 {
+        let value: T = generate_value(seed);
+        let encoded = value.encode();
 
-impl ConformanceResult {
-    /// Returns true if all tests passed and no cases are missing.
-    pub const fn is_ok(&self) -> bool {
-        self.failures.is_empty() && self.missing.is_empty()
+        // Write length prefix to avoid ambiguity between concatenated values
+        hasher.update((encoded.len() as u64).to_le_bytes());
+        hasher.update(&encoded);
     }
+
+    hex_encode(&hasher.finalize())
 }
 
 /// Run conformance tests for a type.
@@ -198,20 +189,19 @@ impl ConformanceResult {
 ///
 /// # Behavior
 ///
-/// - If test cases are missing, they are automatically added to the conformance file.
-/// - If test cases exist but the encoded output differs, the test fails (format changed).
-/// - When `cfg(generate_conformance_tests)` is set, outputs TOML to stdout instead
-///   of modifying the file.
+/// - If the type is missing from the file, it is automatically added.
+/// - If the hash differs, the test fails (format changed).
+/// - When `cfg(generate_conformance_tests)` is set, regenerates the hash.
 ///
 /// # Arguments
 ///
 /// * `type_name` - The stringified type name (used as the TOML section key)
-/// * `n_cases` - Number of test cases to generate (seeds 0..n_cases)
+/// * `n_cases` - Number of test cases to hash together (seeds 0..n_cases)
 /// * `conformance_path` - Path to the conformance TOML file
 ///
 /// # Panics
 ///
-/// Panics if any existing test case fails (format changed).
+/// Panics if the hash doesn't match (format changed).
 pub fn run_conformance_test<T>(type_name: &str, n_cases: usize, conformance_path: &str)
 where
     T: Encode + for<'a> Arbitrary<'a> + Debug,
@@ -229,53 +219,23 @@ where
     }
 }
 
-/// A file-based lock for cross-process synchronization.
+/// Acquire an exclusive lock on the conformance file.
 ///
-/// Uses atomic file creation to ensure only one process can hold the lock.
-/// The lock file is automatically removed when dropped.
-struct FileLock {
-    path: std::path::PathBuf,
-    _file: std::fs::File,
-}
+/// Uses OS-level file locking which is automatically released when the
+/// process exits, even if killed.
+fn acquire_lock(path: &Path) -> fs::File {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .unwrap_or_else(|e| panic!("failed to open conformance file: {e}"));
 
-impl FileLock {
-    /// Acquire an exclusive lock on the given path.
-    ///
-    /// Creates a `.lock` file next to the target path. Blocks until the lock
-    /// is acquired, polling every 10ms.
-    fn acquire(path: &Path) -> Self {
-        use std::io::ErrorKind;
+    file.lock()
+        .unwrap_or_else(|e| panic!("failed to lock conformance file: {e}"));
 
-        let lock_path = path.with_extension("toml.lock");
-
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(file) => {
-                    return Self {
-                        path: lock_path,
-                        _file: file,
-                    };
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    // Lock held by another process, wait and retry
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(e) => {
-                    panic!("failed to acquire conformance file lock: {e}");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    file
 }
 
 #[cfg(not(generate_conformance_tests))]
@@ -283,39 +243,67 @@ fn verify_and_update_conformance<T>(type_name: &str, n_cases: usize, path: &Path
 where
     T: Encode + for<'a> Arbitrary<'a> + Debug,
 {
-    let _lock = FileLock::acquire(path);
+    use std::io::{Read, Seek, Write};
+    let mut lock = acquire_lock(path);
 
-    let mut file = ConformanceFile::load_or_default(path)
-        .unwrap_or_else(|e| panic!("failed to load conformance file: {e}"));
+    let mut contents = String::new();
+    lock.read_to_string(&mut contents)
+        .unwrap_or_else(|e| panic!("failed to read conformance file: {e}"));
 
-    let result = check_conformance::<T>(type_name, n_cases, &file);
+    let mut file: ConformanceFile = if contents.is_empty() {
+        ConformanceFile::default()
+    } else {
+        toml::from_str(&contents)
+            .unwrap_or_else(|e| panic!("failed to parse conformance file: {e}"))
+    };
 
-    // If there are failures (format changes), panic immediately
-    if !result.failures.is_empty() {
-        let mut msg =
-            format!("Conformance test failed for '{type_name}'.\n\nFormat changes detected:\n");
-        for f in &result.failures {
-            msg.push_str(&format!(
-                "  seed {}: expected \"{}\" but got \"{}\"\n",
-                f.seed, f.expected, f.actual
-            ));
+    let actual_hash = compute_conformance_hash::<T>(n_cases);
+
+    match file.types.get(type_name) {
+        Some(entry) => {
+            // Verify the hash matches
+            if entry.hash != actual_hash {
+                panic!(
+                    "Conformance test failed for '{type_name}'.\n\n\
+                     Format change detected:\n\
+                     - expected: \"{}\"\n\
+                     - actual:   \"{actual_hash}\"\n\n\
+                     If this change is intentional, regenerate with:\n\
+                     RUSTFLAGS=\"--cfg generate_conformance_tests\" cargo test",
+                    entry.hash
+                );
+            }
+            // Verify n_cases matches
+            if entry.n_cases != n_cases {
+                panic!(
+                    "Conformance test failed for '{type_name}'.\n\n\
+                     n_cases mismatch: expected {}, got {n_cases}\n\n\
+                     If this change is intentional, regenerate with:\n\
+                     RUSTFLAGS=\"--cfg generate_conformance_tests\" cargo test",
+                    entry.n_cases
+                );
+            }
         }
-        panic!("{msg}");
-    }
+        None => {
+            // Add the missing entry
+            file.types.insert(
+                type_name.to_string(),
+                TypeEntry {
+                    n_cases,
+                    hash: actual_hash,
+                },
+            );
 
-    // If there are missing cases, add them to the file
-    if !result.missing.is_empty() {
-        let section = file.types.entry(type_name.to_string()).or_default();
-        for case in result.missing {
-            section.cases.push(case);
+            // Write the updated file
+            let toml_str =
+                toml::to_string_pretty(&file).expect("failed to serialize conformance file");
+            lock.set_len(0)
+                .expect("failed to truncate conformance file");
+            lock.seek(std::io::SeekFrom::Start(0))
+                .expect("failed to seek conformance file");
+            lock.write_all(toml_str.as_bytes())
+                .expect("failed to write conformance file");
         }
-
-        // Sort cases by seed for consistency
-        section.cases.sort_by_key(|c| c.seed);
-
-        // Write the updated file
-        let toml_str = toml::to_string_pretty(&file).expect("failed to serialize conformance file");
-        fs::write(path, toml_str).expect("failed to write conformance file");
     }
 }
 
@@ -324,94 +312,48 @@ fn regenerate_conformance<T>(type_name: &str, n_cases: usize, path: &Path)
 where
     T: Encode + for<'a> Arbitrary<'a> + Debug,
 {
-    let _lock = FileLock::acquire(path);
+    use std::io::{Read, Seek, Write};
+    let mut lock = acquire_lock(path);
 
-    let mut file = ConformanceFile::load_or_default(path)
-        .unwrap_or_else(|e| panic!("failed to load conformance file: {e}"));
+    let mut contents = String::new();
+    lock.read_to_string(&mut contents)
+        .unwrap_or_else(|e| panic!("failed to read conformance file: {e}"));
 
-    // Generate new test cases for this type
-    let mut cases = Vec::with_capacity(n_cases);
-    for seed in 0..n_cases as u64 {
-        let value: T = generate_value(seed);
-        let encoded = hex_encode(&value.encode());
-        cases.push(TestCase {
-            seed,
-            expected: encoded,
-        });
-    }
+    let mut file: ConformanceFile = if contents.is_empty() {
+        ConformanceFile::default()
+    } else {
+        toml::from_str(&contents)
+            .unwrap_or_else(|e| panic!("failed to parse conformance file: {e}"))
+    };
 
-    // Replace the section for this type
+    let hash = compute_conformance_hash::<T>(n_cases);
+
+    // Update or insert the entry for this type
     file.types
-        .insert(type_name.to_string(), TypeSection { cases });
+        .insert(type_name.to_string(), TypeEntry { n_cases, hash });
 
     // Write the updated file
     let toml_str = toml::to_string_pretty(&file).expect("failed to serialize conformance file");
-    fs::write(path, toml_str).expect("failed to write conformance file");
-}
-
-/// Check conformance for a type without panicking.
-///
-/// Returns a [`ConformanceResult`] with any failures or missing cases.
-pub fn check_conformance<T>(
-    type_name: &str,
-    n_cases: usize,
-    file: &ConformanceFile,
-) -> ConformanceResult
-where
-    T: Encode + for<'a> Arbitrary<'a> + Debug,
-{
-    let section = file.types.get(type_name);
-
-    // Build a map of seed -> expected bytes for quick lookup
-    let case_map: BTreeMap<u64, &str> = section
-        .map(|s| {
-            s.cases
-                .iter()
-                .map(|c| (c.seed, c.expected.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut result = ConformanceResult::default();
-
-    for seed in 0..n_cases as u64 {
-        let value: T = generate_value(seed);
-        let encoded = hex_encode(&value.encode());
-
-        match case_map.get(&seed) {
-            Some(expected) => {
-                if *expected != encoded {
-                    result.failures.push(ConformanceFailure {
-                        seed,
-                        expected: (*expected).to_string(),
-                        actual: encoded,
-                    });
-                }
-            }
-            None => {
-                result.missing.push(TestCase {
-                    seed,
-                    expected: encoded,
-                });
-            }
-        }
-    }
-
-    result
+    lock.set_len(0)
+        .expect("failed to truncate conformance file");
+    lock.seek(std::io::SeekFrom::Start(0))
+        .expect("failed to seek conformance file");
+    lock.write_all(toml_str.as_bytes())
+        .expect("failed to write conformance file");
 }
 
 /// Define conformance tests for codec types.
 ///
 /// This macro generates test functions that verify encodings match expected
-/// values stored in `codec_conformance.toml`.
+/// hash values stored in `codec_conformance.toml`.
 ///
 /// # Usage
 ///
 /// ```ignore
 /// conformance_tests! {
-///     Vec<u8> => 5,
-///     Vec<u16> => 5,
-///     BTreeMap<u32, String> => 5,
+///     Vec<u8> => 100,
+///     Vec<u16> => 100,
+///     BTreeMap<u32, String> => 100,
 /// }
 /// ```
 ///
@@ -437,7 +379,7 @@ macro_rules! conformance_tests {
             #[test]
             fn [<test_conformance_ $($counter)* x>]() {
                 $crate::conformance::run_conformance_test::<$type>(
-                    stringify!($type),
+                    concat!(module_path!(), "::", stringify!($type)),
                     $n_cases,
                     concat!(env!("CARGO_MANIFEST_DIR"), "/codec_conformance.toml"),
                 );
@@ -495,18 +437,36 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_conformance_hash_deterministic() {
+        let hash1 = compute_conformance_hash::<u32>(10);
+        let hash2 = compute_conformance_hash::<u32>(10);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_conformance_hash_different_types() {
+        let hash_u32 = compute_conformance_hash::<u32>(10);
+        let hash_u64 = compute_conformance_hash::<u64>(10);
+        assert_ne!(hash_u32, hash_u64);
+    }
+
+    #[test]
+    fn test_compute_conformance_hash_different_n_cases() {
+        let hash_10 = compute_conformance_hash::<u32>(10);
+        let hash_20 = compute_conformance_hash::<u32>(20);
+        assert_ne!(hash_10, hash_20);
+    }
+
+    #[test]
     fn test_conformance_file_parse() {
         let toml = r#"
 ["u32"]
-cases = [
-    { seed = 0, expected = "00000000" },
-    { seed = 42, expected = "0000002a" },
-]
+n_cases = 100
+hash = "abc123"
 
 ["Vec<u8>"]
-cases = [
-    { seed = 0, expected = "00" },
-]
+n_cases = 50
+hash = "def456"
 "#;
 
         let file: ConformanceFile = toml::from_str(toml).unwrap();
@@ -514,65 +474,8 @@ cases = [
         assert!(file.types.contains_key("u32"));
         assert!(file.types.contains_key("Vec<u8>"));
 
-        let u32_section = file.types.get("u32").unwrap();
-        assert_eq!(u32_section.cases.len(), 2);
-        assert_eq!(u32_section.cases[0].seed, 0);
-        assert_eq!(u32_section.cases[0].expected, "00000000");
-    }
-
-    #[test]
-    fn test_check_conformance_success() {
-        // Generate the expected value for seed 0
-        let value: u8 = generate_value(0);
-        let expected = hex_encode(&crate::Encode::encode(&value));
-
-        // Update the test to use the actual generated value
-        let toml_with_actual = format!(
-            r#"
-["u8"]
-cases = [
-    {{ seed = 0, expected = "{expected}" }},
-]
-"#
-        );
-        let file: ConformanceFile = toml::from_str(&toml_with_actual).unwrap();
-
-        let result = check_conformance::<u8>("u8", 1, &file);
-        assert!(result.is_ok(), "Expected success but got: {:?}", result);
-    }
-
-    #[test]
-    fn test_check_conformance_failure() {
-        let toml = r#"
-["u8"]
-cases = [
-    { seed = 0, expected = "ff" },
-]
-"#;
-        let file: ConformanceFile = toml::from_str(toml).unwrap();
-
-        // This should fail because the expected value is wrong
-        let result = check_conformance::<u8>("u8", 1, &file);
-
-        // The value generated for seed 0 is unlikely to be 0xff
-        // If it happens to be, this test would need adjustment
-        let value: u8 = generate_value(0);
-        if value != 0xff {
-            assert!(!result.is_ok());
-            assert_eq!(result.failures.len(), 1);
-            assert_eq!(result.failures[0].seed, 0);
-            assert_eq!(result.failures[0].expected, "ff");
-        }
-    }
-
-    #[test]
-    fn test_check_conformance_missing() {
-        let file = ConformanceFile::default();
-
-        let result = check_conformance::<u8>("u8", 3, &file);
-
-        assert!(!result.is_ok());
-        assert!(result.failures.is_empty());
-        assert_eq!(result.missing.len(), 3);
+        let u32_entry = file.types.get("u32").unwrap();
+        assert_eq!(u32_entry.n_cases, 100);
+        assert_eq!(u32_entry.hash, "abc123");
     }
 }

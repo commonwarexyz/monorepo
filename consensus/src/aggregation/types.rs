@@ -517,11 +517,11 @@ mod tests {
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_codec::conformance_tests! {
-            Item<Sha256Digest> => 10,
-            Ack<MinSig, Sha256Digest> => 10,
-            TipAck<MinSig, Sha256Digest> => 10,
-            Certificate<MinSig, Sha256Digest> => 10,
-            Activity<MinSig, Sha256Digest> => 10,
+            Item<Sha256Digest> => 1024,
+            Ack<MinSig, Sha256Digest> => 1024,
+            TipAck<MinSig, Sha256Digest> => 1024,
+            Certificate<MinSig, Sha256Digest> => 1024,
+            Activity<MinSig, Sha256Digest> => 1024,
         }
     }
 }

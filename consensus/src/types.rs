@@ -750,9 +750,9 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Epoch => 10,
-            View => 10,
-            Round => 10
+            Epoch => 1024,
+            View => 1024,
+            Round => 1024
         }
     }
 }

@@ -1563,8 +1563,8 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Signature<MinSig> => 10,
-            Seed<MinSig> => 10
+            Signature<MinSig> => 1024,
+            Seed<MinSig> => 1024
         }
     }
 }

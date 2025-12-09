@@ -215,7 +215,7 @@ mod tests {
         use super::*;
 
         crate::conformance_tests! {
-            BTreeSet<u8> => 5,
+            BTreeSet<u8> => 1024,
         }
     }
 }

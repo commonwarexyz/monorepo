@@ -86,7 +86,7 @@ impl Read for Signers {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signers {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let participants = u.arbitrary_len::<u8>()?;
+        let participants = u.arbitrary_len::<u8>()? % 255;
         let signer_count = u.arbitrary_len::<u8>()?.min(participants);
         let signers = (0..signer_count as u32).collect::<Vec<_>>();
         Ok(Self::from(participants, signers))

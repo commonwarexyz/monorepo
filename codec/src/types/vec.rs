@@ -140,9 +140,9 @@ mod tests {
     #[cfg(feature = "conformance")]
     mod conformance {
         crate::conformance_tests! {
-            Vec<u8> => 5,
-            Vec<u16> => 5,
-            Vec<u32> => 5,
+            Vec<u8> => 1024,
+            Vec<u16> => 1024,
+            Vec<u32> => 1024,
         }
     }
 }

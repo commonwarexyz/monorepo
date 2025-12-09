@@ -124,7 +124,7 @@ mod tests {
         }
 
         crate::conformance_tests! {
-            Bytes => 5,
+            Bytes => 1024,
         }
     }
 }
