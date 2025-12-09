@@ -210,6 +210,7 @@ where
         mux.start();
 
         'actor: loop {
+            // Get latest epoch and state
             let (epoch, dkg_state) = state.dkg_state().expect("dkg_state should be initialized");
 
             // Prune everything older than the previous epoch
@@ -217,6 +218,7 @@ where
                 state.prune(prev).await;
             }
 
+            // Initialize dealer and player sets
             let (dealers, players, next_players) = if is_dkg {
                 (
                     self.peer_config.participants.clone(),
@@ -224,32 +226,31 @@ where
                     Set::try_from([]).unwrap(),
                 )
             } else {
+                // In reshare mode, the initial dealer set must exactly match the players that
+                // hold shares from the prior output.
+                let dealers = self.peer_config.dealers(dkg_state.round);
+                let previous_players = dkg_state.output.as_ref().unwrap().players();
+                if dkg_state.round == 0 {
+                    assert_eq!(
+                        &dealers, previous_players,
+                        "dealers for round 0 must equal previous output players"
+                    );
+                } else {
+                    assert!(
+                        dealers
+                            .iter()
+                            .all(|d| previous_players.position(d).is_some()),
+                        "dealers for round {} must be drawn from previous output players",
+                        dkg_state.round
+                    );
+                }
+
                 (
-                    self.peer_config.dealers(dkg_state.round),
+                    dealers,
                     self.peer_config.dealers(dkg_state.round + 1),
                     self.peer_config.dealers(dkg_state.round + 2),
                 )
             };
-
-            // In reshare mode, the initial dealer set must exactly match the players that
-            // hold shares from the prior output.
-            if !is_dkg {
-                if let Some(ref output) = dkg_state.output {
-                    let prev_players = output.players();
-                    if dkg_state.round == 0 {
-                        assert_eq!(
-                            &dealers, prev_players,
-                            "dealers for round 0 must equal previous output players"
-                        );
-                    } else {
-                        assert!(
-                            dealers.iter().all(|d| prev_players.position(d).is_some()),
-                            "dealers for round {} must be drawn from previous output players",
-                            dkg_state.round
-                        );
-                    }
-                }
-            }
 
             // Any given peer set includes:
             // - Dealers and players for the active epoch
@@ -283,6 +284,12 @@ where
                 .report(orchestrator::Message::Enter(transition))
                 .await;
 
+            // Register a channel for this round
+            let (mut round_sender, mut round_receiver) = dkg_mux
+                .register(epoch.get())
+                .await
+                .expect("should be able to create channel");
+
             let round_info = Info::new(
                 namespace::APPLICATION,
                 epoch.get(),
@@ -291,12 +298,6 @@ where
                 players.clone(),
             )
             .expect("round info configuration should be correct");
-
-            // Register a channel for this round
-            let (mut round_sender, mut round_receiver) = dkg_mux
-                .register(epoch.get())
-                .await
-                .expect("should be able to create channel");
 
             // Initialize rate limiter for this round
             #[allow(clippy::type_complexity)]
