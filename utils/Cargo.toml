@@ -38,18 +38,20 @@ num-bigint = { workspace = true, default-features = false }
 rstest.workspace = true
 
 [features]
-default = ["std"]
+default = [ "std" ]
 std = [
-    "rand/std",
-    "rand/std_rng",
-    "thiserror/std",
-    "bytes/std",
-    "commonware-codec/std",
-    "futures",
-    "num-bigint",
-    "num-rational",
-    "num-integer",
-    "num-traits",
+	"bytes/std",
+	"commonware-codec/std",
+	"futures",
+	"getrandom/std",
+	"num-bigint",
+	"num-bigint?/std",
+	"num-integer",
+	"num-rational",
+	"num-traits",
+	"rand/std",
+	"rand/std_rng",
+	"thiserror/std",
 ]
 
 [lib]

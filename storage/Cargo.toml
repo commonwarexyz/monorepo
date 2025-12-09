@@ -39,8 +39,23 @@ rstest.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
-default = ["std"]
-std = ["tracing", "commonware-runtime", "rayon", "thiserror/std", "bytes/std", "commonware-codec/std", "commonware-cryptography/std", "commonware-utils/std", "futures", "futures-util", "zstd", "prometheus-client", "crc32fast/std"]
+default = [ "std" ]
+std = [
+	"anyhow/std",
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-cryptography/std",
+	"commonware-runtime",
+	"commonware-utils/std",
+	"crc32fast/std",
+	"futures",
+	"futures-util",
+	"prometheus-client",
+	"rayon",
+	"thiserror/std",
+	"tracing",
+	"zstd",
+]
 fuzzing = []
 
 [lib]
