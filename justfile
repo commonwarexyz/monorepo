@@ -44,7 +44,7 @@ fix-clippy *args='':
 lint: check-fmt clippy check-docs
 
 # Fixes all lint issues in the workspace
-fix: fix-clippy fix-fmt fix-toml-fmt
+fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
 # Tests benchmarks in a given crate
 test-benches crate *args='':
@@ -76,3 +76,11 @@ udeps:
 # Run miri tests on a given module
 miri module *args='':
     MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
+
+# Run zepter feature checks
+check-features:
+    zepter run check && zepter format features
+
+# Fix feature propagation and formatting
+fix-features:
+    zepter && zepter format features --fix
