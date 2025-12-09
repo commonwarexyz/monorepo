@@ -285,6 +285,7 @@ where
                 .await
                 .expect("should be able to create channel");
 
+            // Prepare round info
             let round_info = Info::new(
                 namespace::APPLICATION,
                 epoch.get(),
@@ -315,7 +316,6 @@ where
             };
 
             let mut epoch_done = false;
-
             while !epoch_done {
                 let mailbox_msg = select! {
                     _ = self.context.stopped() => {
