@@ -21,8 +21,8 @@ use std::{
 };
 use tracing::{error, info};
 
-const PENDING_CHANNEL: u64 = 0;
-const RECOVERED_CHANNEL: u64 = 1;
+const VOTE_CHANNEL: u64 = 0;
+const CERTIFICATE_CHANNEL: u64 = 1;
 const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
 const MARSHAL_CHANNEL: u64 = 4;
@@ -78,11 +78,11 @@ pub async fn run<S>(
 
     let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
-    let pending_limit = Quota::per_second(NZU32!(128));
-    let pending = network.register(PENDING_CHANNEL, pending_limit, MESSAGE_BACKLOG);
+    let vote_limit = Quota::per_second(NZU32!(128));
+    let votes = network.register(VOTE_CHANNEL, vote_limit, MESSAGE_BACKLOG);
 
-    let recovered_limit = Quota::per_second(NZU32!(128));
-    let recovered = network.register(RECOVERED_CHANNEL, recovered_limit, MESSAGE_BACKLOG);
+    let certificate_limit = Quota::per_second(NZU32!(128));
+    let certificates = network.register(CERTIFICATE_CHANNEL, certificate_limit, MESSAGE_BACKLOG);
 
     let resolver_limit = Quota::per_second(NZU32!(128));
     let resolver = network.register(RESOLVER_CHANNEL, resolver_limit, MESSAGE_BACKLOG);
@@ -137,8 +137,8 @@ pub async fn run<S>(
 
     let p2p_handle = network.start();
     let engine_handle = engine.start(
-        pending,
-        recovered,
+        votes,
+        certificates,
         resolver,
         broadcaster,
         dkg,
@@ -298,8 +298,8 @@ mod test {
             };
 
             let mut control = oracle.control(pk.clone());
-            let pending = control.register(PENDING_CHANNEL).await.unwrap();
-            let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
+            let votes = control.register(VOTE_CHANNEL).await.unwrap();
+            let certificates = control.register(CERTIFICATE_CHANNEL).await.unwrap();
             let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
             let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
             let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
@@ -341,8 +341,8 @@ mod test {
             .await;
 
             let handle = engine.start(
-                pending,
-                recovered,
+                votes,
+                certificates,
                 resolver,
                 broadcast,
                 dkg,

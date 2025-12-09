@@ -286,11 +286,11 @@ where
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -319,8 +319,8 @@ where
         spawn_cell!(
             self.context,
             self.run(
-                pending,
-                recovered,
+                votes,
+                certificates,
                 resolver,
                 broadcast,
                 dkg,
@@ -335,11 +335,11 @@ where
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn run(
         self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -378,7 +378,7 @@ where
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
         let orchestrator_handle =
             self.orchestrator
-                .start(pending, recovered, resolver, orchestrator);
+                .start(votes, certificates, resolver, orchestrator);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
