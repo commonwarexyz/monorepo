@@ -161,7 +161,7 @@ where
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
         orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
-        dkg_chan: (
+        dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -169,8 +169,7 @@ where
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(output, share, orchestrator, dkg_chan, callback)
-                .await
+            self.run(output, share, orchestrator, dkg, callback).await
         )
     }
 
@@ -211,9 +210,7 @@ where
         mux.start();
 
         'actor: loop {
-            let (epoch, dkg_state) = state
-                .dkg_state()
-                .expect("dkg_state should be initialized");
+            let (epoch, dkg_state) = state.dkg_state().expect("dkg_state should be initialized");
 
             // Prune everything older than the previous epoch
             if let Some(prev) = epoch.previous() {
@@ -271,8 +268,8 @@ where
                 .await;
 
             let self_pk = self.signer.public_key();
-            let am_dealer = dealers.position(&self_pk).is_some()
-                && !state.has_submitted_log(epoch, &self_pk);
+            let am_dealer =
+                dealers.position(&self_pk).is_some() && !state.has_submitted_log(epoch, &self_pk);
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
@@ -480,35 +477,34 @@ where
                         if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_some() {
                             // Finalize the round before acknowledging
                             let logs = state.logs(epoch);
-                            let (success, next_round, next_output, next_share) =
-                                if let Some(ps) = player_state.take() {
-                                    match ps.player.finalize(logs, 1) {
-                                        Ok((new_output, new_share)) => (
-                                            true,
-                                            dkg_state.round + 1,
-                                            Some(new_output),
-                                            Some(new_share),
-                                        ),
-                                        Err(_) => (
-                                            false,
-                                            dkg_state.round,
-                                            dkg_state.output.clone(),
-                                            dkg_state.share.clone(),
-                                        ),
-                                    }
-                                } else {
-                                    match observe(round_info.clone(), logs, 1) {
-                                        Ok(output) => {
-                                            (true, dkg_state.round + 1, Some(output), None)
-                                        }
-                                        Err(_) => (
-                                            false,
-                                            dkg_state.round,
-                                            dkg_state.output.clone(),
-                                            dkg_state.share.clone(),
-                                        ),
-                                    }
-                                };
+                            let (success, next_round, next_output, next_share) = if let Some(ps) =
+                                player_state.take()
+                            {
+                                match ps.player.finalize(logs, 1) {
+                                    Ok((new_output, new_share)) => (
+                                        true,
+                                        dkg_state.round + 1,
+                                        Some(new_output),
+                                        Some(new_share),
+                                    ),
+                                    Err(_) => (
+                                        false,
+                                        dkg_state.round,
+                                        dkg_state.output.clone(),
+                                        dkg_state.share.clone(),
+                                    ),
+                                }
+                            } else {
+                                match observe(round_info.clone(), logs, 1) {
+                                    Ok(output) => (true, dkg_state.round + 1, Some(output), None),
+                                    Err(_) => (
+                                        false,
+                                        dkg_state.round,
+                                        dkg_state.output.clone(),
+                                        dkg_state.share.clone(),
+                                    ),
+                                }
+                            };
 
                             if !success {
                                 self.failed_rounds.inc();
