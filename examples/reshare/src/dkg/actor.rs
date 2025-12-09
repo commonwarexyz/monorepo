@@ -257,17 +257,15 @@ where
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
-            if let Some(output) = dkg_state.output.as_ref() {
-                let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
-                    epoch,
-                    poly: Some(output.public().clone()),
-                    share: dkg_state.share.clone(),
-                    dealers: dealers.clone(),
-                };
-                orchestrator
-                    .report(orchestrator::Message::Enter(transition))
-                    .await;
-            }
+            let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
+                epoch,
+                poly: dkg_state.output.as_ref().map(|o| o.public().clone()),
+                share: dkg_state.share.clone(),
+                dealers: dealers.clone(),
+            };
+            orchestrator
+                .report(orchestrator::Message::Enter(transition))
+                .await;
 
             let round_info = Info::new(
                 namespace::APPLICATION,

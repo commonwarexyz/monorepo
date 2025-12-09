@@ -225,7 +225,7 @@ mod test {
 
     struct Team {
         peer_config: PeerConfig,
-        output: Output<MinSig, PublicKey>,
+        output: Option<Output<MinSig, PublicKey>>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
     }
@@ -251,7 +251,26 @@ mod test {
             }
             Self {
                 peer_config,
-                output,
+                output: Some(output),
+                participants,
+                handles: Default::default(),
+            }
+        }
+
+        fn reckon_dkg(total: u32, per_round: &[u32]) -> Self {
+            let participants = (0..total)
+                .map(|i| {
+                    let sk = PrivateKey::from_seed(i as u64);
+                    (sk.public_key(), (sk, None::<Share>))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let peer_config = PeerConfig {
+                num_participants_per_round: per_round.to_vec(),
+                participants: Set::from_iter_dedup(participants.keys().cloned()),
+            };
+            Self {
+                peer_config,
+                output: None,
                 participants,
                 handles: Default::default(),
             }
@@ -307,7 +326,7 @@ mod test {
                     manager: oracle.manager(),
                     blocker: oracle.control(pk.clone()),
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
-                    output: Some(self.output.clone()),
+                    output: self.output.clone(),
                     share: share.clone(),
                     orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
@@ -383,6 +402,9 @@ mod test {
         link: Link,
         target: u64,
         crash: Option<Crash>,
+        /// If true, start without an initial output (DKG mode).
+        /// If false, start with a trusted dealer output (reshare mode).
+        is_dkg: bool,
     }
 
     impl Plan {
@@ -392,7 +414,10 @@ mod test {
             SchemeProvider<S, PrivateKey>:
                 EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
-            info!("starting test with {} participants", self.total);
+            info!(
+                "starting test with {} participants, is_dkg={}",
+                self.total, self.is_dkg
+            );
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
@@ -408,7 +433,11 @@ mod test {
             network.start();
 
             debug!("creating team with {} participants", self.total);
-            let mut team = Team::reckon(&mut ctx, self.total, &self.per_round);
+            let mut team = if self.is_dkg {
+                Team::reckon_dkg(self.total, &self.per_round)
+            } else {
+                Team::reckon(&mut ctx, self.total, &self.per_round)
+            };
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
@@ -570,6 +599,7 @@ mod test {
             },
             target: 1,
             crash: None,
+            is_dkg: false,
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -602,6 +632,7 @@ mod test {
             },
             target: 1,
             crash: None,
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -623,6 +654,7 @@ mod test {
             },
             target: 1,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -644,6 +676,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -665,6 +698,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -686,6 +720,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -707,6 +742,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -728,6 +764,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -749,6 +786,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -770,6 +808,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -791,6 +830,7 @@ mod test {
             },
             target: 4,
             crash: None,
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -816,6 +856,7 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -841,6 +882,7 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -866,6 +908,7 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
+            is_dkg: false,
         }
         .run::<EdScheme>())
         {
@@ -891,8 +934,31 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
+            is_dkg: false,
         }
         .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_single_epoch_ed_scheme() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 1,
+            crash: None,
+            is_dkg: true,
+        }
+        .run::<EdScheme>())
         {
             panic!("failure: {e}");
         }
