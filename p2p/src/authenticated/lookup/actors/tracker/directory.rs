@@ -4,7 +4,10 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::{
+    ordered::{Map, Set},
+    TryCollect,
+};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -42,7 +45,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     peers: HashMap<C, Record>,
 
     /// The peer sets
-    sets: BTreeMap<u64, Ordered<C>>,
+    sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
@@ -106,11 +109,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(
-        &mut self,
-        index: u64,
-        peers: OrderedAssociated<C, SocketAddr>,
-    ) -> Option<Vec<C>> {
+    pub fn add_set(&mut self, index: u64, peers: Map<C, SocketAddr>) -> Option<Vec<C>> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -130,7 +129,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(*addr);
+                    let new_ip = entry.update(*addr);
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -163,7 +162,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+    pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
         self.sets.get(index)
     }
 
@@ -196,9 +195,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
-    /// Returns all tracked peers.
-    pub fn tracked(&self) -> Ordered<C> {
-        self.peers.keys().cloned().collect()
+    /// Returns all peers that are part of at least one peer set.
+    pub fn tracked(&self) -> Set<C> {
+        self.peers
+            .iter()
+            .filter(|(_, r)| r.sets() > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("HashMap keys are unique")
     }
 
     /// Returns true if the peer is able to be connected to.
@@ -229,13 +233,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Return all registered IP addresses.
+    ///
+    /// Returns all tracked IPs for each allowed peer, enabling connections
+    /// from any IP a peer has used while in an active peer set.
     pub fn registered(&self) -> HashSet<IpAddr> {
-        // Using `.allowed()` here excludes any peers that are still connected but no longer
-        // part of a peer set (and will be dropped shortly).
+        // Using `.in_peer_set()` here excludes any peers that are blocked, ourselves,
+        // or no longer part of a peer set. Unlike `.allowed()`, this does not filter
+        // based on the current socket's IP, allowing tracked public IPs to be returned
+        // even if the peer's current IP is private.
         self.peers
             .values()
-            .filter(|r| r.allowed(self.allow_private_ips))
-            .filter_map(|r| r.socket().map(|s| s.ip()))
+            .filter(|r| r.in_peer_set())
+            .flat_map(|r| r.ips(self.allow_private_ips))
             .collect()
     }
 
@@ -301,7 +310,7 @@ mod tests {
     };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{set::OrderedAssociated, NZU32};
+    use commonware_utils::NZU32;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -329,7 +338,9 @@ mod tests {
             let deleted = directory
                 .add_set(
                     0,
-                    OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                    [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                        .try_into()
+                        .unwrap(),
                 )
                 .unwrap();
             assert!(
@@ -340,20 +351,22 @@ mod tests {
             let deleted = directory
                 .add_set(
                     1,
-                    OrderedAssociated::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
+                    [(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]
+                        .try_into()
+                        .unwrap(),
                 )
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
             let deleted = directory
-                .add_set(2, vec![(pk_3.clone(), addr_3)].into())
+                .add_set(2, [(pk_3.clone(), addr_3)].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
             let deleted = directory
-                .add_set(3, vec![(pk_3.clone(), addr_3)].into())
+                .add_set(3, [(pk_3.clone(), addr_3)].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
@@ -385,7 +398,9 @@ mod tests {
 
             directory.add_set(
                 0,
-                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                    .try_into()
+                    .unwrap(),
             );
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
@@ -393,14 +408,14 @@ mod tests {
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Update address
-            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4)]));
+            directory.add_set(1, [(pk_1.clone(), addr_4)].try_into().unwrap());
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ignore update to me
-            directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
+            directory.add_set(2, [(my_pk.clone(), addr_3)].try_into().unwrap());
             assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
@@ -408,14 +423,14 @@ mod tests {
 
             // Ensure tracking works for static peers
             let deleted = directory
-                .add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr)]))
+                .add_set(3, [(my_pk.clone(), my_addr)].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
             // Ensure tracking works for dynamic peers
             let deleted = directory
-                .add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3)]))
+                .add_set(4, [(my_pk.clone(), addr_3)].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
@@ -423,7 +438,9 @@ mod tests {
             // Attempt to add an old peer set
             let deleted = directory.add_set(
                 0,
-                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                    .try_into()
+                    .unwrap(),
             );
             assert!(deleted.is_none());
         });
@@ -448,7 +465,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            directory.add_set(0, [(pk_1.clone(), addr_1)].try_into().unwrap());
             directory.block(&pk_1);
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
@@ -461,7 +478,7 @@ mod tests {
                 "Blocked peer should not have a socket"
             );
 
-            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            directory.add_set(1, [(pk_1.clone(), addr_2)].try_into().unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
                 record.blocked(),
@@ -471,6 +488,176 @@ mod tests {
                 record.socket(),
                 None,
                 "Blocked peer should not regain its socket"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_returns_all_tracked_ips() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 11)), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with first IP
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 1);
+            assert!(registered.contains(&addr_1.ip()));
+
+            // Update peer with second IP - should now have both IPs registered
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 2, "Should have both IPs registered");
+            assert!(
+                registered.contains(&addr_1.ip()),
+                "First IP should still be registered"
+            );
+            assert!(
+                registered.contains(&addr_2.ip()),
+                "Second IP should be registered"
+            );
+
+            // Update peer with third IP - should have all three IPs
+            directory.add_set(2, OrderedAssociated::from([(pk_1.clone(), addr_3)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 3, "Should have all three IPs registered");
+            assert!(registered.contains(&addr_1.ip()));
+            assert!(registered.contains(&addr_2.ip()));
+            assert!(registered.contains(&addr_3.ip()));
+        });
+    }
+
+    #[test]
+    fn test_registered_clears_ips_on_peer_removal() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 1, // Only keep one set
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register first peer
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            let registered = directory.registered();
+            assert!(registered.contains(&addr_1.ip()));
+
+            // Register second peer, which evicts first peer (max_sets = 1)
+            directory.add_set(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert!(
+                !registered.contains(&addr_1.ip()),
+                "First peer's IP should be removed"
+            );
+            assert!(
+                registered.contains(&addr_2.ip()),
+                "Second peer's IP should be present"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_clears_ips_on_block() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 10)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with multiple IPs
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_2)]));
+            let registered = directory.registered();
+            assert_eq!(registered.len(), 2);
+
+            // Block the peer - all IPs should be removed
+            directory.block(&pk_1);
+            let registered = directory.registered();
+            assert!(
+                !registered.contains(&addr_1.ip()),
+                "Blocked peer's first IP should be removed"
+            );
+            assert!(
+                !registered.contains(&addr_2.ip()),
+                "Blocked peer's second IP should be removed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_registered_returns_public_ips_when_current_is_private() {
+        // Regression test: when allow_private_ips is false and a peer's current
+        // IP is private, their tracked public IPs should still be returned.
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: false, // Important: private IPs not allowed
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(54, 12, 1, 9)), 1235);
+        let private_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Register peer with public IP
+            directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), public_addr)]));
+            let registered = directory.registered();
+            assert!(
+                registered.contains(&public_addr.ip()),
+                "Public IP should be registered"
+            );
+
+            // Update peer to private IP - public IP should still be registered
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), private_addr)]));
+            let registered = directory.registered();
+            assert!(
+                registered.contains(&public_addr.ip()),
+                "Public IP should still be registered even when current IP is private"
+            );
+            assert!(
+                !registered.contains(&private_addr.ip()),
+                "Private IP should not be registered when allow_private_ips is false"
             );
         });
     }

@@ -60,7 +60,7 @@ use crate::journal::{
     Error,
 };
 use bytes::BufMut;
-use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
+use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -100,7 +100,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> {
+pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
 

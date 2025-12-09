@@ -208,6 +208,11 @@ impl<C: PublicKey> Record<C> {
         matches!(self.address, Address::Blocked)
     }
 
+    /// Returns the number of peer sets this peer is part of.
+    pub const fn sets(&self) -> usize {
+        self.sets
+    }
+
     /// Returns `true` if the record is dialable.
     ///
     /// A record is dialable if:

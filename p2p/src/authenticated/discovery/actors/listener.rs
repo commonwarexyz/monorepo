@@ -158,12 +158,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections as fast as our rate limiter allows
-        let mut shutdown = self.context.stopped();
         let mut accepted = 0;
         select_loop! {
-            _ = &mut shutdown => {
+            self.context,
+            on_stopped => {
                 debug!("context shutdown, stopping listener");
-                break;
             },
             conn = listener.accept() => {
                 // Accept a new connection

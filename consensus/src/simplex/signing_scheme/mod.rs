@@ -34,12 +34,12 @@ cfg_if::cfg_if! {
 }
 
 use crate::{
-    simplex::types::{Vote, VoteContext, VoteVerification},
+    simplex::types::{Signature, SignatureVerification, Subject},
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{set::Ordered, union};
+use commonware_utils::{ordered::Set, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -74,22 +74,22 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn me(&self) -> Option<u32>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Ordered<Self::PublicKey>;
+    fn participants(&self) -> &Set<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-    ) -> Option<Vote<Self>>;
+        subject: Subject<'_, D>,
+    ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
+        subject: Subject<'_, D>,
+        signature: &Signature<Self>,
     ) -> bool;
 
     /// Batch-verifies votes and separates valid messages from the voter indices that failed
@@ -100,41 +100,41 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
+        subject: Subject<'_, D>,
+        signatures: I,
+    ) -> SignatureVerification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
-        let verified = votes.into_iter().filter_map(|vote| {
-            if self.verify_vote(namespace, context, &vote) {
-                Some(vote)
+        let verified = signatures.into_iter().filter_map(|sig| {
+            if self.verify_vote(namespace, subject, &sig) {
+                Some(sig)
             } else {
-                invalid.insert(vote.signer);
+                invalid.insert(sig.signer);
                 None
             }
         });
 
-        VoteVerification::new(verified.collect(), invalid.into_iter().collect())
+        SignatureVerification::new(verified.collect(), invalid.into_iter().collect())
     }
 
     /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
     ///
     /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Vote<Self>>;
+        I: IntoIterator<Item = Signature<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
@@ -148,7 +148,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+        I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {
         for (context, certificate) in certificates {
             if !self.verify_certificate(rng, namespace, context, certificate) {
@@ -224,14 +224,14 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    subject: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
-    match context {
-        VoteContext::Notarize { proposal } => {
+    match subject {
+        Subject::Notarize { proposal } => {
             (notarize_namespace(namespace), proposal.encode().to_vec())
         }
-        VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
-        VoteContext::Finalize { proposal } => {
+        Subject::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
+        Subject::Finalize { proposal } => {
             (finalize_namespace(namespace), proposal.encode().to_vec())
         }
     }
@@ -244,15 +244,15 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    subject: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),
-        match context {
-            VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+        match subject {
+            Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
                 proposal.round.encode().to_vec()
             }
-            VoteContext::Nullify { round } => round.encode().to_vec(),
+            Subject::Nullify { round } => round.encode().to_vec(),
         },
     )
 }

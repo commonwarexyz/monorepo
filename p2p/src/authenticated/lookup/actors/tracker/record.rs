@@ -1,5 +1,8 @@
 use commonware_utils::IpAddrExt;
-use std::net::SocketAddr;
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, SocketAddr},
+};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -45,51 +48,61 @@ pub struct Record {
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
+
+    /// All IP addresses this peer has been associated with.
+    /// Used for accepting incoming connections from any known IP.
+    tracked_ips: BTreeSet<IpAddr>,
 }
 
 impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub const fn known(socket: SocketAddr) -> Self {
+    pub fn known(socket: SocketAddr) -> Self {
         Self {
             address: Address::Known(socket),
             status: Status::Inert,
             sets: 0,
             persistent: false,
+            tracked_ips: BTreeSet::from([socket.ip()]),
         }
     }
 
     /// Create a new record with the local node's information.
-    pub const fn myself() -> Self {
+    pub fn myself() -> Self {
         Self {
             address: Address::Myself,
             status: Status::Inert,
             sets: 0,
             persistent: true,
+            tracked_ips: BTreeSet::new(),
         }
     }
 
     // ---------- Setters ----------
 
     /// Update the record with a new address.
-    pub const fn update(&mut self, socket: SocketAddr) {
+    ///
+    /// Returns `true` if a new IP was added to the tracked set.
+    pub fn update(&mut self, socket: SocketAddr) -> bool {
         if matches!(self.address, Address::Myself | Address::Blocked) {
-            return;
+            return false;
         }
         self.address = Address::Known(socket);
+        self.tracked_ips.insert(socket.ip())
     }
 
     /// Attempt to mark the peer as blocked.
     ///
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
-    pub const fn block(&mut self) -> bool {
+    pub fn block(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself) {
             return false;
         }
         self.address = Address::Blocked;
         self.persistent = false;
+        self.tracked_ips.clear();
         true
     }
 
@@ -142,6 +155,11 @@ impl Record {
         matches!(self.address, Address::Blocked)
     }
 
+    /// Returns the number of peer sets this peer is part of.
+    pub const fn sets(&self) -> usize {
+        self.sets
+    }
+
     /// Returns `true` if the record is dialable.
     ///
     /// A record is dialable if:
@@ -176,6 +194,17 @@ impl Record {
         }
     }
 
+    /// Returns an iterator over all tracked IP addresses for this peer.
+    ///
+    /// If `allow_private_ips` is false, private IPs are filtered out.
+    #[allow(unstable_name_collisions)]
+    pub fn ips(&self, allow_private_ips: bool) -> impl Iterator<Item = IpAddr> + '_ {
+        self.tracked_ips
+            .iter()
+            .copied()
+            .filter(move |ip| allow_private_ips || ip.is_global())
+    }
+
     /// Returns `true` if the peer is reserved (or active).
     /// This is used to determine if we should attempt to reserve the peer again.
     pub const fn reserved(&self) -> bool {
@@ -196,6 +225,15 @@ impl Record {
                 (self.sets > 0 || self.persistent) && (allow_private_ips || addr.ip().is_global())
             }
         }
+    }
+
+    /// Returns `true` if the peer is part of a peer set and can have registered IPs.
+    ///
+    /// Unlike [`allowed()`](Self::allowed), this does not check the current socket's IP,
+    /// only whether the peer is in a peer set and not blocked/myself.
+    pub const fn in_peer_set(&self) -> bool {
+        !matches!(self.address, Address::Blocked | Address::Myself)
+            && (self.sets > 0 || self.persistent)
     }
 }
 #[cfg(test)]
@@ -430,5 +468,150 @@ mod tests {
             record_private.allowed(true),
             "Private IPs allowed when flag is true"
         );
+    }
+
+    #[test]
+    fn test_tracked_ips_initial_state() {
+        let socket = test_socket();
+        let record = Record::known(socket);
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 1);
+        assert!(ips.contains(&socket.ip()));
+    }
+
+    #[test]
+    fn test_tracked_ips_accumulates_on_update() {
+        let socket1 = SocketAddr::from(([54, 12, 1, 9], 8080));
+        let socket2 = SocketAddr::from(([54, 12, 1, 10], 8080));
+        let socket3 = SocketAddr::from(([54, 12, 1, 11], 8080));
+
+        let mut record = Record::known(socket1);
+
+        // Update with new IP - should return true
+        assert!(record.update(socket2), "Should return true for new IP");
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+        assert!(ips.contains(&socket1.ip()));
+        assert!(ips.contains(&socket2.ip()));
+
+        // Update with same IP - should return false
+        assert!(
+            !record.update(socket2),
+            "Should return false for existing IP"
+        );
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+
+        // Update with third IP
+        assert!(record.update(socket3), "Should return true for new IP");
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 3);
+        assert!(ips.contains(&socket1.ip()));
+        assert!(ips.contains(&socket2.ip()));
+        assert!(ips.contains(&socket3.ip()));
+
+        // Primary socket should be the latest
+        assert_eq!(record.socket(), Some(socket3));
+    }
+
+    #[test]
+    fn test_tracked_ips_cleared_on_block() {
+        let socket1 = SocketAddr::from(([54, 12, 1, 9], 8080));
+        let socket2 = SocketAddr::from(([54, 12, 1, 10], 8080));
+
+        let mut record = Record::known(socket1);
+        record.update(socket2);
+        assert_eq!(record.ips(true).count(), 2);
+
+        record.block();
+        assert_eq!(record.ips(true).count(), 0);
+    }
+
+    #[test]
+    fn test_tracked_ips_filters_private() {
+        let public_socket = SocketAddr::from(([54, 12, 1, 9], 8080));
+        let private_socket = SocketAddr::from(([10, 0, 0, 1], 8080));
+
+        let mut record = Record::known(public_socket);
+        record.update(private_socket);
+
+        // With allow_private_ips = true, both IPs should be returned
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+
+        // With allow_private_ips = false, only public IP should be returned
+        let ips: Vec<_> = record.ips(false).collect();
+        assert_eq!(ips.len(), 1);
+        assert!(ips.contains(&public_socket.ip()));
+    }
+
+    #[test]
+    fn test_myself_has_no_tracked_ips() {
+        let record = Record::myself();
+        assert_eq!(record.ips(true).count(), 0);
+    }
+
+    #[test]
+    fn test_update_ignored_for_blocked() {
+        let socket1 = SocketAddr::from(([54, 12, 1, 9], 8080));
+        let socket2 = SocketAddr::from(([54, 12, 1, 10], 8080));
+
+        let mut record = Record::known(socket1);
+        record.block();
+        assert!(
+            !record.update(socket2),
+            "Update should be ignored for blocked"
+        );
+        assert_eq!(record.ips(true).count(), 0);
+    }
+
+    #[test]
+    fn test_update_ignored_for_myself() {
+        let socket = SocketAddr::from(([54, 12, 1, 9], 8080));
+
+        let mut record = Record::myself();
+        assert!(
+            !record.update(socket),
+            "Update should be ignored for myself"
+        );
+        assert_eq!(record.ips(true).count(), 0);
+    }
+
+    #[test]
+    fn test_in_peer_set() {
+        let public_socket = SocketAddr::from(([54, 12, 1, 9], 8080));
+        let private_socket = SocketAddr::from(([10, 0, 0, 1], 8080));
+
+        // Not in peer set initially (sets = 0)
+        let mut record = Record::known(public_socket);
+        assert!(!record.in_peer_set());
+
+        // In peer set after increment
+        record.increment();
+        assert!(record.in_peer_set());
+
+        // Still in peer set even with private IP
+        record.update(private_socket);
+        assert!(
+            record.in_peer_set(),
+            "Should be in peer set regardless of IP"
+        );
+
+        // Not in peer set after decrement
+        record.decrement();
+        assert!(!record.in_peer_set());
+
+        // Blocked peer is not in peer set
+        let mut record = Record::known(public_socket);
+        record.increment();
+        record.block();
+        assert!(
+            !record.in_peer_set(),
+            "Blocked peer should not be in peer set"
+        );
+
+        // Myself is never in peer set (for registered() purposes)
+        let record = Record::myself();
+        assert!(!record.in_peer_set(), "Myself should not be in peer set");
     }
 }

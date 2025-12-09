@@ -8,7 +8,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, marker::PhantomData};
 
@@ -16,18 +16,18 @@ use std::{collections::HashSet, marker::PhantomData};
 #[derive(Clone)]
 pub struct Output {
     /// List of active players.
-    pub active: Ordered<u32>,
+    pub active: Set<u32>,
 
     /// List of inactive players (that we need to send
     /// a reveal for).
-    pub inactive: Ordered<u32>,
+    pub inactive: Set<u32>,
 }
 
 /// Track acknowledgements from players.
 #[derive(Clone)]
 pub struct Dealer<P: PublicKey, V: Variant> {
     threshold: u32,
-    players: Ordered<P>,
+    players: Set<P>,
 
     acks: HashSet<u32>,
 
@@ -39,8 +39,8 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     pub fn new<R: CryptoRngCore>(
         rng: &mut R,
         share: Option<Share>,
-        players: Ordered<P>,
-    ) -> (Self, poly::Public<V>, Ordered<Share>) {
+        players: Set<P>,
+    ) -> (Self, poly::Public<V>, Set<Share>) {
         // Generate shares and commitment
         let players_len = players.len() as u32;
         let threshold = players.quorum();
@@ -54,7 +54,7 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
                 _phantom: PhantomData,
             },
             commitment,
-            shares.into_iter().collect(),
+            shares.try_into().expect("shares are unique"),
         )
     }
 
@@ -91,8 +91,8 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
             }
         }
         Some(Output {
-            active: active.into_iter().collect(),
-            inactive: inactive.into_iter().collect(),
+            active: active.try_into().expect("indices are unique"),
+            inactive: inactive.try_into().expect("indices are unique"),
         })
     }
 }

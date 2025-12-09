@@ -724,6 +724,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Put a key-value pair into the [Freezer].
+    /// If the key already exists, the value is updated.
     pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
         self.puts.inc();
 
@@ -1016,5 +1017,35 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     #[cfg(test)]
     pub const fn resizable(&self) -> u32 {
         self.resizable
+    }
+}
+
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::Store for Freezer<E, K, V> {
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(Identifier::Key(key)).await
+    }
+}
+
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut for Freezer<E, K, V> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.put(key, value).await?;
+        Ok(())
+    }
+}
+
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersistable
+    for Freezer<E, K, V>
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await?;
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
     }
 }

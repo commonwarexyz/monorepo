@@ -233,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::adb::any::unordered::sync::init_journal_at_size(
+        let offsets = crate::qmdb::any::unordered::sync::init_journal_at_size(
             context,
             fixed::Config {
                 partition: cfg.offsets_partition(),
@@ -266,7 +266,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///   empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes to `range.start`
-    /// - Unexpected data beyond `range.end`: returns [crate::adb::Error::UnexpectedData].
+    /// - Unexpected data beyond `range.end`: returns [crate::qmdb::Error::UnexpectedData].
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -277,12 +277,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     /// # Errors
-    /// Returns [crate::adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
-    ) -> Result<Self, crate::adb::Error> {
+    ) -> Result<Self, crate::qmdb::Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -314,7 +314,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Check if data exceeds the sync range
         if size > range.end {
-            return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(
+            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
                 size,
             )));
         }
@@ -2040,7 +2040,7 @@ mod tests {
                 .await;
 
                 // Should return UnexpectedData error since data exists beyond upper_bound
-                assert!(matches!(result, Err(crate::adb::Error::UnexpectedData(_))));
+                assert!(matches!(result, Err(crate::qmdb::Error::UnexpectedData(_))));
             }
         });
     }

@@ -383,7 +383,7 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    O: CodecFixed<Cfg = ()> + Encode,
+    O: CodecFixed<Cfg = ()>,
     H: Hasher,
 {
     /// Create a new [Journal] for fixed-length operations.
@@ -612,12 +612,12 @@ where
 mod tests {
     use super::*;
     use crate::{
-        adb::operation::{fixed::unordered::Operation, Committable},
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         mmr::{
             journaled::{Config as MmrConfig, Mmr},
             Location,
         },
+        qmdb::operation::{fixed::unordered::Operation, Committable},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};

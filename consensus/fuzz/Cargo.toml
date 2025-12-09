@@ -10,15 +10,71 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 commonware-codec.workspace = true
-commonware-consensus.workspace = true
+commonware-consensus = { workspace = true, features = ["fuzz"] }
 commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
 
 [[bin]]
 name = "simplex_select_leader"
 path = "fuzz_targets/simplex_select_leader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_messages"
+path = "fuzz_targets/simplex_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attributable_map"
+path = "fuzz_targets/attributable_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519"
+path = "fuzz_targets/simplex_ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
 test = false
 doc = false
 bench = false

@@ -10,7 +10,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
@@ -21,7 +21,7 @@ pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
     context: ContextCell<E>,
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
-    contributors: Ordered<C>,
+    contributors: Set<C>,
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
@@ -31,7 +31,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
-        contributors: Ordered<C>,
+        contributors: Set<C>,
     ) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -82,6 +82,11 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
             1,
         );
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping arbiter");
+                return (None, HashSet::new());
+            },
             _ = self.context.sleep_until(timeout) => {
                 warn!(round, "timed out waiting for commitments");
                 break

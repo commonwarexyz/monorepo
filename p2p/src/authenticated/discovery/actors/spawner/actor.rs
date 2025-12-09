@@ -109,11 +109,10 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
-        let mut shutdown = self.context.stopped();
         select_loop! {
-            _ = &mut shutdown => {
+            self.context,
+            on_stopped => {
                 debug!("context shutdown, stopping spawner");
-                break;
             },
             msg = self.receiver.next() => {
                 let Some(msg) = msg else {
