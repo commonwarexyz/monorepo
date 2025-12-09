@@ -40,8 +40,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, and docs.)
-lint: check-fmt clippy check-docs
+# Runs all lints (fmt, clippy, docs, and features.)
+lint: check-fmt clippy check-docs check-features
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features

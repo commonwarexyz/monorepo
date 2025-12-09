@@ -50,11 +50,11 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-external = ["pin-project"]
+external = [ "pin-project" ]
 test-utils = []
-iouring-storage = ["io-uring"]
-iouring-network = ["io-uring"]
-tokio-console = ["dep:console-subscriber", "tokio/tracing"]
+iouring-storage = [ "io-uring" ]
+iouring-network = [ "io-uring" ]
+tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
