@@ -1,5 +1,5 @@
 use super::{
-    state::{Dealer, Epoch as EpochState, Player, Storage},
+    state::{Dealer, Epoch as EpochState, Player, PlayerResponse, Storage},
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
@@ -17,13 +17,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{
-            observe, Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Info, Output,
-            Player as CryptoPlayer, PlayerAck,
-        },
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
         primitives::{group::Share, variant::Variant},
     },
-    transcript::{Summary, Transcript},
+    transcript::Summary,
     Digest as _, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select;
@@ -38,7 +35,7 @@ use governor::{
     RateLimiter,
 };
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
 
 /// Rate limiter for messages.
@@ -265,8 +262,7 @@ where
                 .await;
 
             let self_pk = self.signer.public_key();
-            let am_dealer =
-                dealers.position(&self_pk).is_some() && !storage.has_submitted_log(epoch, &self_pk);
+            let am_dealer = dealers.position(&self_pk).is_some();
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
@@ -295,51 +291,22 @@ where
             )
             .expect("round info configuration should be correct");
 
-            // Initialize dealer state if we are a dealer
+            // Initialize dealer state if we are a dealer (factory handles log submission check)
             let mut dealer_state: Option<Dealer<V, C>> = if am_dealer {
-                let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
-                    Transcript::resume(epoch_state.rng_seed).noise(b"dealer-rng"),
-                    round_info.clone(),
+                storage.create_dealer(
+                    epoch,
                     self.signer.clone(),
+                    round_info.clone(),
                     epoch_state.share.clone(),
+                    epoch_state.rng_seed,
                 )
-                .expect("should be able to create dealer");
-
-                // Replay stored acks
-                let mut unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg> =
-                    priv_msgs.into_iter().collect();
-                let replay_acks = storage.player_acks(epoch);
-                for (player, ack) in replay_acks {
-                    if unsent_priv_msgs.contains_key(&player)
-                        && crypto_dealer
-                            .receive_player_ack(player.clone(), ack.clone())
-                            .is_ok()
-                    {
-                        unsent_priv_msgs.remove(&player);
-                        debug!(?epoch, ?player, "replayed player ack");
-                    }
-                }
-
-                Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent_priv_msgs))
             } else {
                 None
             };
 
             // Initialize player state if we are a player
             let mut player_state: Option<Player<V, C>> = if am_player {
-                let crypto_player = CryptoPlayer::new(round_info.clone(), self.signer.clone())
-                    .expect("should be able to create player");
-                let mut ps = Player::new(crypto_player);
-
-                // Replay persisted dealer messages - these represent our commitments.
-                // We will regenerate the same acks from them.
-                let replay_msgs = storage.dealer_msgs(epoch);
-                for (dealer, pub_msg, priv_msg) in replay_msgs {
-                    ps.handle(dealer.clone(), pub_msg, priv_msg);
-                    debug!(?epoch, ?dealer, "replayed committed dealer message");
-                }
-
-                Some(ps)
+                storage.create_player(epoch, self.signer.clone(), round_info.clone())
             } else {
                 None
             };
@@ -571,30 +538,30 @@ where
                     return;
                 }
 
-                // If new, persist the dealer message first (this is our commitment)
-                if !ps.has_committed(&sender_pk) {
-                    storage
-                        .append_dealer_msg(
-                            epoch,
-                            sender_pk.clone(),
-                            pub_msg.clone(),
-                            priv_msg.clone(),
-                        )
-                        .await;
-                    debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
-                }
-
-                // Handle the message and send response if any
-                if let Some(response) = ps.handle(sender_pk.clone(), pub_msg, priv_msg) {
-                    let payload = response.encode().freeze();
-                    if let Err(e) = network_sender
-                        .send(Recipients::One(sender_pk.clone()), payload, true)
-                        .await
-                    {
-                        warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
-                    } else {
-                        debug!(?epoch, dealer = ?sender_pk, "sent ack");
+                // Handle the message
+                let response = match ps.handle(sender_pk.clone(), pub_msg.clone(), priv_msg.clone())
+                {
+                    PlayerResponse::New(msg) => {
+                        // New commitment - persist the dealer message
+                        storage
+                            .append_dealer_msg(epoch, sender_pk.clone(), pub_msg, priv_msg)
+                            .await;
+                        debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
+                        msg
                     }
+                    PlayerResponse::Cached(msg) => msg,
+                    PlayerResponse::Invalid => return,
+                };
+
+                // Send the ack
+                let payload = response.encode().freeze();
+                if let Err(e) = network_sender
+                    .send(Recipients::One(sender_pk.clone()), payload, true)
+                    .await
+                {
+                    warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                } else {
+                    debug!(?epoch, dealer = ?sender_pk, "sent ack");
                 }
             }
             Message::Ack(ack) => {
@@ -631,29 +598,25 @@ where
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
-                    // If new, persist the dealer message first
-                    if !ps.has_committed(self_pk) {
-                        storage
-                            .append_dealer_msg(
-                                epoch,
-                                self_pk.clone(),
-                                dealer_state.pub_msg().clone(),
-                                priv_msg.clone(),
-                            )
-                            .await;
-                    }
+                    let pub_msg = dealer_state.pub_msg().clone();
 
-                    // Handle as player and get response
-                    if let Some(Message::Ack(ack)) = ps.handle(
-                        self_pk.clone(),
-                        dealer_state.pub_msg().clone(),
-                        priv_msg.clone(),
-                    ) {
-                        // Handle our own ack as dealer
-                        if let Some(ack) = dealer_state.handle(self_pk.clone(), ack) {
-                            storage.append_player_ack(epoch, self_pk.clone(), ack).await;
-                            debug!(?epoch, "self-dealt and acked");
+                    // Handle as player
+                    let ack = match ps.handle(self_pk.clone(), pub_msg.clone(), priv_msg.clone()) {
+                        PlayerResponse::New(Message::Ack(ack)) => {
+                            // New commitment - persist the dealer message
+                            storage
+                                .append_dealer_msg(epoch, self_pk.clone(), pub_msg, priv_msg)
+                                .await;
+                            ack
                         }
+                        PlayerResponse::Cached(Message::Ack(ack)) => ack,
+                        _ => continue,
+                    };
+
+                    // Handle our own ack as dealer
+                    if let Some(ack) = dealer_state.handle(self_pk.clone(), ack) {
+                        storage.append_player_ack(epoch, self_pk.clone(), ack).await;
+                        debug!(?epoch, "self-dealt and acked");
                     }
                 }
                 continue;

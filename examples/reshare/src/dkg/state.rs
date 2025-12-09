@@ -10,12 +10,12 @@ use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Output,
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
     },
-    transcript::Summary,
+    transcript::{Summary, Transcript},
     PublicKey, Signer,
 };
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
@@ -29,6 +29,7 @@ use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroUsize},
 };
+use tracing::debug;
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
@@ -408,6 +409,64 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         // Remove old epoch caches
         self.epoch_caches.retain(|&epoch, _| epoch >= min);
     }
+
+    /// Create a Dealer for the given epoch, replaying any stored acks.
+    /// Returns None if we've already submitted a log this epoch.
+    pub fn create_dealer<C: Signer<PublicKey = P>>(
+        &self,
+        epoch: EpochNum,
+        signer: C,
+        round_info: Info<V, P>,
+        share: Option<Share>,
+        rng_seed: Summary,
+    ) -> Option<Dealer<V, C>> {
+        if self.has_submitted_log(epoch, &signer.public_key()) {
+            return None;
+        }
+
+        let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
+            Transcript::resume(rng_seed).noise(b"dealer-rng"),
+            round_info,
+            signer,
+            share,
+        )
+        .expect("should be able to create dealer");
+
+        // Replay stored acks
+        let mut unsent: BTreeMap<P, DealerPrivMsg> = priv_msgs.into_iter().collect();
+        for (player, ack) in self.player_acks(epoch) {
+            if unsent.contains_key(&player)
+                && crypto_dealer
+                    .receive_player_ack(player.clone(), ack)
+                    .is_ok()
+            {
+                unsent.remove(&player);
+                debug!(?epoch, ?player, "replayed player ack");
+            }
+        }
+
+        Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent))
+    }
+
+    /// Create a Player for the given epoch, replaying any stored dealer messages.
+    pub fn create_player<C: Signer<PublicKey = P>>(
+        &self,
+        epoch: EpochNum,
+        signer: C,
+        round_info: Info<V, P>,
+    ) -> Option<Player<V, C>> {
+        let crypto_player =
+            CryptoPlayer::new(round_info, signer).expect("should be able to create player");
+        let mut player = Player::new(crypto_player);
+
+        // Replay persisted dealer messages (these will all be Cached responses)
+        for (dealer, pub_msg, priv_msg) in self.dealer_msgs(epoch) {
+            let _ = player.handle(dealer.clone(), pub_msg, priv_msg);
+            debug!(?epoch, ?dealer, "replayed committed dealer message");
+        }
+
+        Some(player)
+    }
 }
 
 /// Internal state for a dealer in the current round.
@@ -486,14 +545,22 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 }
 
+/// Result of handling a dealer message.
+pub enum PlayerResponse<V: Variant, P: PublicKey> {
+    /// New dealer message, ack generated. Caller should persist the dealer message.
+    New(Message<V, P>),
+    /// Already seen this dealer, returning cached ack.
+    Cached(Message<V, P>),
+    /// Invalid dealer message, no ack generated.
+    Invalid,
+}
+
 /// Internal state for a player in the current round.
 pub struct Player<V: Variant, C: Signer> {
     player: CryptoPlayer<V, C>,
     /// Acks we've generated, keyed by dealer. Once we generate an ack for a dealer,
     /// we will not generate a different one (to avoid conflicting votes).
     acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
-    /// Dealers we've already persisted (and thus committed to acking).
-    committed_dealers: BTreeMap<C::PublicKey, bool>,
 }
 
 impl<V: Variant, C: Signer> Player<V, C> {
@@ -501,37 +568,30 @@ impl<V: Variant, C: Signer> Player<V, C> {
         Self {
             player,
             acks: BTreeMap::new(),
-            committed_dealers: BTreeMap::new(),
         }
     }
 
-    /// Handle an incoming dealer message (already persisted).
-    /// Returns an ack response message if one should be sent.
+    /// Handle an incoming dealer message.
+    /// Returns whether this is a new commitment (should be persisted) or cached.
     pub fn handle(
         &mut self,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<Message<V, C::PublicKey>> {
-        self.committed_dealers.insert(dealer.clone(), true);
-        // If we've already generated an ack, return it
+    ) -> PlayerResponse<V, C::PublicKey> {
+        // If we've already generated an ack, return the cached version
         if let Some(ack) = self.acks.get(&dealer) {
-            return Some(Message::Ack(ack.clone()));
+            return PlayerResponse::Cached(Message::Ack(ack.clone()));
         }
-        // Otherwise generate the ack (deterministic based on the persisted message)
+        // Otherwise generate a new ack
         if let Some(ack) = self
             .player
             .dealer_message(dealer.clone(), pub_msg, priv_msg)
         {
             self.acks.insert(dealer, ack.clone());
-            return Some(Message::Ack(ack));
+            return PlayerResponse::New(Message::Ack(ack));
         }
-        None
-    }
-
-    /// Check if we've already committed to acking this dealer.
-    pub fn has_committed(&self, dealer: &C::PublicKey) -> bool {
-        self.committed_dealers.contains_key(dealer)
+        PlayerResponse::Invalid
     }
 
     /// Finalize the player's participation in the DKG round.
