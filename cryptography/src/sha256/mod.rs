@@ -216,4 +216,13 @@ mod tests {
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Digest => 10,
+        }
+    }
 }

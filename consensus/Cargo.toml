@@ -48,6 +48,5 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = [ "arbitrary" ]
 fuzz = []
 arbitrary = [ "commonware-cryptography/arbitrary", "dep:arbitrary" ]

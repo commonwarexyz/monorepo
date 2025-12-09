@@ -151,6 +151,16 @@ impl Display for PrivateKey {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::from_rng(&mut rand))
+    }
+}
+
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
@@ -814,5 +824,16 @@ mod tests {
         }
         let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            PrivateKey => 10,
+            PublicKey => 10,
+            Signature => 10,
+        }
     }
 }
