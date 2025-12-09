@@ -479,7 +479,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -742,7 +742,7 @@ mod tests {
                 };
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: signing.clone(),
                 };
                 let reporter =
@@ -901,7 +901,7 @@ mod tests {
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: participants.clone().into(),
+                        participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
@@ -1085,7 +1085,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1203,7 +1203,7 @@ mod tests {
             // Configure engine
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let mut reporter =
@@ -1339,7 +1339,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1584,7 +1584,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1766,7 +1766,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -1973,7 +1973,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -2179,7 +2179,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -2373,7 +2373,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2562,7 +2562,7 @@ mod tests {
 
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(), // Reporter always uses correct namespace
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2722,7 +2722,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2890,7 +2890,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2995,7 +2995,7 @@ mod tests {
             // Start engine
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[idx].clone(),
             };
             let reporter =
@@ -3133,7 +3133,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -3299,7 +3299,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -3475,7 +3475,7 @@ mod tests {
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -3633,7 +3633,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -3788,7 +3788,7 @@ mod tests {
             // Create engine
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -3957,7 +3957,7 @@ mod tests {
 
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let mock_reporter = mocks::reporter::Reporter::new(
@@ -4196,7 +4196,7 @@ mod tests {
                     // Honest engines
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: participants.clone().into(),
+                        participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
@@ -4522,7 +4522,7 @@ mod tests {
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -4668,7 +4668,7 @@ mod tests {
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
@@ -5111,7 +5111,7 @@ mod tests {
 
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: participants.as_ref().into(),
+                        participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
@@ -5168,7 +5168,7 @@ mod tests {
 
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.as_ref().into(),
+                    participants: participants.as_ref().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =

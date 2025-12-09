@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{unordered::Current, Config},
     mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
+    qmdb::current::{unordered::Current, Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -282,7 +282,7 @@ fn fuzz(data: FuzzInput) {
                                 }
                             }
                         }
-                        Err(commonware_storage::adb::Error::KeyNotFound) => {
+                        Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             let expected_value = expected_state.get(key);
                             if let Some(Some(_)) = expected_value {
                                 panic!("Key {key:?} should exist but proof generation failed");

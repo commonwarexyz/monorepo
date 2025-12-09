@@ -2,7 +2,7 @@
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
 
-Continuously synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html) and [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)
+Continuously synchronize state between a server and client with [qmdb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html) and [qmdb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)
 
 ## Components
 

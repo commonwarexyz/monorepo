@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{ordered::Current, Config},
     mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
+    qmdb::current::{ordered::Current, Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -301,7 +301,7 @@ fn fuzz(data: FuzzInput) {
                                 }
                             }
                         }
-                        Err(commonware_storage::adb::Error::KeyNotFound) => {
+                        Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             assert!(!expected_state.contains_key(key), "Proof generation failed for existing key {key:?}");
                         }
                         Err(e) => {
@@ -332,7 +332,7 @@ fn fuzz(data: FuzzInput) {
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
-                        Err(commonware_storage::adb::Error::KeyExists) => {
+                        Err(commonware_storage::qmdb::Error::KeyExists) => {
                             assert!(expected_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
                         }
                         Err(e) => {

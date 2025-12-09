@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -31,14 +31,14 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 #[derive(Clone, Debug)]
 pub struct Config<P: PublicKey, S: Scheme> {
     pub namespace: Vec<u8>,
-    pub participants: Ordered<P>,
+    pub participants: Set<P>,
     pub scheme: S,
 }
 
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
-    pub participants: Ordered<P>,
+    pub participants: Set<P>,
     scheme: S,
 
     namespace: Vec<u8>,

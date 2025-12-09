@@ -12,7 +12,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future};
 
@@ -83,10 +83,7 @@ pub trait Manager: Debug + Clone + Send + 'static {
     fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
 
     /// Fetch the ordered set of peers for a given ID.
-    fn peer_set(
-        &mut self,
-        id: u64,
-    ) -> impl Future<Output = Option<Ordered<Self::PublicKey>>> + Send;
+    fn peer_set(&mut self, id: u64) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
 
     /// Subscribe to notifications when new peer sets are added.
     ///
@@ -96,7 +93,7 @@ pub trait Manager: Debug + Clone + Send + 'static {
     fn subscribe(
         &mut self,
     ) -> impl Future<
-        Output = mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)>,
+        Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
     > + Send;
 }
 

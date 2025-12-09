@@ -5,7 +5,6 @@
 //! pruned.
 
 use crate::{
-    adb::any::unordered::sync::{init_journal, init_journal_at_size},
     journal::{
         contiguous::fixed::{Config as JConfig, Journal},
         Error as JError,
@@ -25,6 +24,7 @@ use crate::{
         Error::{self, *},
         Proof,
     },
+    qmdb::any::unordered::sync::{init_journal, init_journal_at_size},
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
@@ -444,7 +444,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         context: E,
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<D>,
-    ) -> Result<Self, crate::adb::Error> {
+    ) -> Result<Self, crate::qmdb::Error> {
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {

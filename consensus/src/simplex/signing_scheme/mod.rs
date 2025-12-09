@@ -39,7 +39,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{set::Ordered, union};
+use commonware_utils::{ordered::Set, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -74,7 +74,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn me(&self) -> Option<u32>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Ordered<Self::PublicKey>;
+    fn participants(&self) -> &Set<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

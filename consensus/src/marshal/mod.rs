@@ -474,7 +474,9 @@ mod tests {
 
             // Register the initial peer set.
             let mut manager = oracle.manager();
-            manager.update(0, participants.clone().into()).await;
+            manager
+                .update(0, participants.clone().try_into().unwrap())
+                .await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
@@ -618,7 +620,9 @@ mod tests {
 
             // Register the initial peer set.
             let mut manager = oracle.manager();
-            manager.update(0, participants.clone().into()).await;
+            manager
+                .update(0, participants.clone().try_into().unwrap())
+                .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),

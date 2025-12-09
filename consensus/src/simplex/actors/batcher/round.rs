@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use tracing::warn;
 
@@ -23,7 +23,7 @@ pub struct Round<
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Ordered<P>,
+    participants: Set<P>,
 
     blocker: B,
     reporter: R,
@@ -56,7 +56,7 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<P, S, B, D, R>
 {
-    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(participants: Set<P>, scheme: S, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum();
         let len = participants.len();
         Self {

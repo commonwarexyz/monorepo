@@ -2,8 +2,8 @@
 
 use crate::Key;
 use commonware_storage::{
-    adb::{self, operation::Keyed},
     mmr::{Location, Proof},
+    qmdb::{self, operation::Keyed},
 };
 use std::{future::Future, num::NonZeroU64};
 
@@ -52,10 +52,10 @@ pub trait Syncable {
     fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), adb::Error>>;
+    ) -> impl Future<Output = Result<(), qmdb::Error>>;
 
     /// Commit pending operations to the database.
-    fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
+    fn commit(&mut self) -> impl Future<Output = Result<(), qmdb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;
@@ -72,7 +72,7 @@ pub trait Syncable {
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;

@@ -15,7 +15,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Output of a DKG/Resharing procedure.
@@ -39,7 +39,7 @@ pub struct Player<P: PublicKey, V: Variant> {
     previous: Option<poly::Public<V>>,
     concurrency: usize,
 
-    dealers: Ordered<P>,
+    dealers: Set<P>,
 
     dealings: BTreeMap<u32, (poly::Public<V>, Share)>,
 }
@@ -49,8 +49,8 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
     pub fn new(
         me: P,
         previous: Option<poly::Public<V>>,
-        dealers: Ordered<P>,
-        recipients: Ordered<P>,
+        dealers: Set<P>,
+        recipients: Set<P>,
         concurrency: usize,
     ) -> Self {
         let me_idx = recipients.index(&me).expect("player not in recipients");
