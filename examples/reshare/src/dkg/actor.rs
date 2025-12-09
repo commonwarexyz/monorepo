@@ -9,7 +9,7 @@ use crate::{
     BLOCKS_PER_EPOCH,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Encode, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
     types::Epoch,
     utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
@@ -543,13 +543,14 @@ where
         player_state: Option<&mut PlayerState<V, C>>,
         network_sender: &mut S,
     ) {
-        let msg = match DkgMessage::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(?epoch, ?sender_pk, ?e, "failed to parse DKG message");
-                return;
-            }
-        };
+        let msg =
+            match DkgMessage::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(?epoch, ?sender_pk, ?e, "failed to parse DKG message");
+                    return;
+                }
+            };
 
         match msg {
             DkgMessage::Dealer(pub_msg, priv_msg) => {
@@ -655,7 +656,10 @@ where
             }
 
             // Send to remote player using DkgMessage
-            let payload = DkgMessage::<V, C::PublicKey>::Dealer(dealer_state.pub_msg.clone(), priv_msg).encode().freeze();
+            let payload =
+                DkgMessage::<V, C::PublicKey>::Dealer(dealer_state.pub_msg.clone(), priv_msg)
+                    .encode()
+                    .freeze();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await
@@ -686,12 +690,19 @@ struct DealerState<V: Variant, C: Signer> {
 impl<V: Variant, C: Signer> DealerState<V, C> {
     /// Handle an incoming ack from a player.
     /// Returns the ack if it was successfully processed (for persistence).
-    fn handle(&mut self, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) -> Option<PlayerAck<C::PublicKey>> {
+    fn handle(
+        &mut self,
+        player: C::PublicKey,
+        ack: PlayerAck<C::PublicKey>,
+    ) -> Option<PlayerAck<C::PublicKey>> {
         if !self.unsent_priv_msgs.contains_key(&player) {
             return None;
         }
         if let Some(ref mut dealer) = self.dealer {
-            if dealer.receive_player_ack(player.clone(), ack.clone()).is_ok() {
+            if dealer
+                .receive_player_ack(player.clone(), ack.clone())
+                .is_ok()
+            {
                 self.unsent_priv_msgs.remove(&player);
                 return Some(ack);
             }
@@ -750,7 +761,7 @@ impl<V: Variant, C: Signer> PlayerState<V, C> {
             .player
             .dealer_message(dealer.clone(), pub_msg, priv_msg)
         {
-            self.acks.insert(dealer.clone(), ack.clone());
+            self.acks.insert(dealer, ack.clone());
             return Some(DkgMessage::Ack(ack));
         }
         None
