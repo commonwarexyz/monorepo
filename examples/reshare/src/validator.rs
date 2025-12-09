@@ -178,7 +178,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Runner as _, Spawner,
     };
-    use commonware_utils::{ordered::Set, union};
+    use commonware_utils::{union, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -241,7 +241,7 @@ mod test {
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
                 num_participants_per_round: per_round.to_vec(),
-                participants: Set::from_iter_dedup(participants.keys().cloned()),
+                participants: participants.keys().cloned().try_collect().unwrap(),
             };
             let (output, shares) =
                 deal(&mut rng, peer_config.dealers(0)).expect("deal should succeed");
@@ -268,7 +268,7 @@ mod test {
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
                 num_participants_per_round: per_round.to_vec(),
-                participants: Set::from_iter_dedup(participants.keys().cloned()),
+                participants: participants.keys().cloned().try_collect().unwrap(),
             };
             Self {
                 peer_config,
@@ -379,7 +379,7 @@ mod test {
             // First register all participants with oracle
             let mut manager = oracle.manager();
             manager
-                .update(0, Set::from_iter_dedup(self.participants.keys().cloned()))
+                .update(0, self.participants.keys().cloned().try_collect().unwrap())
                 .await;
 
             // Now add links between all participants
@@ -643,8 +643,18 @@ mod test {
             expected_failures: 0,
         };
         for seed in 0..3 {
-            let res0 = Plan { seed, ..plan.clone() }.run().unwrap();
-            let res1 = Plan { seed, ..plan.clone() }.run().unwrap();
+            let res0 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run()
+            .unwrap();
+            let res1 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run()
+            .unwrap();
             assert_eq!(res0, res1);
         }
     }
@@ -666,8 +676,18 @@ mod test {
             expected_failures: 0,
         };
         for seed in 0..3 {
-            let res0 = Plan { seed, ..plan.clone() }.run().unwrap();
-            let res1 = Plan { seed, ..plan.clone() }.run().unwrap();
+            let res0 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run()
+            .unwrap();
+            let res1 = Plan {
+                seed,
+                ..plan.clone()
+            }
+            .run()
+            .unwrap();
             assert_eq!(res0, res1);
         }
     }

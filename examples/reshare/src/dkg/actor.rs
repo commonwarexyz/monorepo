@@ -221,7 +221,7 @@ where
                 (
                     self.peer_config.participants.clone(),
                     self.peer_config.dealers(0),
-                    Set::from_iter_dedup([]),
+                    Set::try_from([]).unwrap(),
                 )
             } else {
                 (

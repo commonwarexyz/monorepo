@@ -11,7 +11,7 @@ use commonware_cryptography::{
 use commonware_utils::{
     from_hex, hex,
     ordered::{Map, Set},
-    quorum, NZU32,
+    quorum, TryCollect, NZU32,
 };
 use rand::{
     rngs::{OsRng, StdRng},
@@ -95,7 +95,7 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
             .iter()
             .copied()
             .max()
-            .unwrap()
+            .expect("num_participants_per_round must not be empty")
     }
 
     pub fn num_participants_in_round(&self, round: u64) -> u32 {
@@ -114,10 +114,14 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
         let p_iter = self.participants.iter().cloned();
         let to_choose = self.num_participants_in_round(round) as usize;
         if round == 0 {
-            return Set::from_iter_dedup(p_iter.take(to_choose));
+            return p_iter.take(to_choose).try_collect().unwrap();
         }
         let mut rng = StdRng::seed_from_u64(round);
-        Set::from_iter_dedup(p_iter.choose_multiple(&mut rng, to_choose))
+        p_iter
+            .choose_multiple(&mut rng, to_choose)
+            .into_iter()
+            .try_collect()
+            .unwrap()
     }
 }
 
@@ -128,7 +132,7 @@ pub fn run(args: super::SetupArgs) {
         return;
     }
 
-    fs::create_dir_all(&args.datadir).unwrap();
+    fs::create_dir_all(&args.datadir).expect("failed to create data directory");
 
     let (polynomial, identities) = generate_identities(
         args.with_dkg,
@@ -181,7 +185,7 @@ fn generate_identities(
     // Generate consensus key
     let threshold = quorum(num_participants_per_epoch);
     let (output, shares) = if is_dkg {
-        (None, Map::from_iter_dedup([]))
+        (None, Map::try_from([]).unwrap())
     } else {
         let (output, shares) = deal(
             OsRng,
@@ -233,30 +237,26 @@ fn generate_configs(
             signing_key: signer.clone(),
             share: share.clone(),
         };
-        let config_file = File::create(&config_path).unwrap();
-        serde_json::to_writer_pretty(config_file, &participant_config).unwrap();
+        let config_file =
+            File::create(&config_path).expect("failed to create participant config file");
+        serde_json::to_writer_pretty(config_file, &participant_config)
+            .expect("failed to serialize participant config");
 
         configs.push(config_path);
     }
     info!("wrote participant configurations");
 
-    let peers = if args.with_dkg {
-        PeerConfig {
-            num_participants_per_round: vec![args.num_participants_per_epoch],
-            participants: Set::from_iter_dedup(
-                identities.iter().map(|(signer, _)| signer.public_key()),
-            ),
-        }
-    } else {
-        PeerConfig {
-            num_participants_per_round: vec![args.num_participants_per_epoch],
-            participants: Set::from_iter_dedup(
-                identities.iter().map(|(signer, _)| signer.public_key()),
-            ),
-        }
+    let peers = PeerConfig {
+        num_participants_per_round: vec![args.num_participants_per_epoch],
+        participants: identities
+            .iter()
+            .map(|(signer, _)| signer.public_key())
+            .try_collect()
+            .unwrap(),
     };
-    let peers_file = File::create(args.datadir.join("peers.json")).unwrap();
-    serde_json::to_writer_pretty(peers_file, &peers).unwrap();
+    let peers_file =
+        File::create(args.datadir.join("peers.json")).expect("failed to create peers config file");
+    serde_json::to_writer_pretty(peers_file, &peers).expect("failed to serialize peers config");
     info!("wrote peers map");
 
     configs
@@ -346,7 +346,7 @@ mod serde_hex_ordered {
 
                     out.push(T::decode(&mut bytes.as_ref()).map_err(serde::de::Error::custom)?);
                 }
-                Ok(Set::from_iter_dedup(out))
+                Set::try_from(out).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
             }
         }
 
