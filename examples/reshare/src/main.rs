@@ -21,7 +21,6 @@ mod dkg;
 mod engine;
 mod namespace;
 mod orchestrator;
-mod self_channel;
 mod setup;
 mod validator;
 
