@@ -228,10 +228,11 @@ mod test {
         output: Option<Output<MinSig, PublicKey>>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
+        is_dkg: bool,
     }
 
     impl Team {
-        fn reckon(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
+        fn reshare(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -254,10 +255,11 @@ mod test {
                 output: Some(output),
                 participants,
                 handles: Default::default(),
+                is_dkg: false,
             }
         }
 
-        fn reckon_dkg(total: u32, per_round: &[u32]) -> Self {
+        fn dkg(total: u32, per_round: &[u32]) -> Self {
             let participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -273,10 +275,11 @@ mod test {
                 output: None,
                 participants,
                 handles: Default::default(),
+                is_dkg: true,
             }
         }
 
-        async fn start_one<S>(
+        async fn start_one_inner<S>(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
@@ -350,17 +353,29 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
-        async fn start<S>(
+        async fn start_one(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) {
+            if self.is_dkg {
+                self.start_one_inner::<EdScheme>(ctx, oracle, updates, pk)
+                    .await;
+            } else {
+                self.start_one_inner::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
+                    .await;
+            }
+        }
+
+        async fn start(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
-        ) where
-            S: Scheme<PublicKey = PublicKey>,
-            SchemeProvider<S, PrivateKey>:
-                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
-        {
+        ) {
             // First register all participants with oracle
             let mut manager = oracle.manager();
             manager
@@ -395,16 +410,22 @@ mod test {
     }
 
     #[derive(Clone)]
+    enum Mode {
+        /// DKG mode: No initial output, uses EdScheme. Runs a single DKG.
+        Dkg,
+        /// Reshare mode: Starts with trusted dealer output, uses ThresholdScheme.
+        /// The value specifies how many successful reshares to complete.
+        Reshare(u64),
+    }
+
+    #[derive(Clone)]
     struct Plan {
         seed: u64,
         total: u32,
         per_round: Vec<u32>,
         link: Link,
-        target: u64,
+        mode: Mode,
         crash: Option<Crash>,
-        /// If true, start without an initial output (DKG mode).
-        /// If false, start with a trusted dealer output (reshare mode).
-        is_dkg: bool,
         /// Minimum number of failures expected (for tests with lossy networks/crashes).
         expected_failures: u64,
     }
@@ -416,15 +437,14 @@ mod test {
     }
 
     impl Plan {
-        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<PlanResult>
-        where
-            S: Scheme<PublicKey = PublicKey>,
-            SchemeProvider<S, PrivateKey>:
-                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
-        {
+        async fn run_inner(self, mut ctx: deterministic::Context) -> anyhow::Result<PlanResult> {
+            let (is_dkg, target) = match self.mode {
+                Mode::Dkg => (true, 1),
+                Mode::Reshare(target) => (false, target),
+            };
             info!(
-                "starting test with {} participants, is_dkg={}",
-                self.total, self.is_dkg
+                "starting test with {} participants, is_dkg={}, target={}",
+                self.total, is_dkg, target
             );
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
@@ -441,17 +461,17 @@ mod test {
             network.start();
 
             debug!("creating team with {} participants", self.total);
-            let mut team = if self.is_dkg {
-                Team::reckon_dkg(self.total, &self.per_round)
+            let mut team = if is_dkg {
+                Team::dkg(self.total, &self.per_round)
             } else {
-                Team::reckon(&mut ctx, self.total, &self.per_round)
+                Team::reshare(&mut ctx, self.total, &self.per_round)
             };
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
 
             debug!("starting team actors and connecting");
-            team.start::<S>(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
+            team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
                 .await;
 
             debug!("waiting for updates");
@@ -516,7 +536,7 @@ mod test {
                                 }
                             }
                         }
-                        if successes >= self.target {
+                        if successes >= target {
                             success_target_reached_epoch = Some(epoch);
                         }
                         let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)
@@ -536,7 +556,7 @@ mod test {
                         }
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
-                            if successes >= self.target {
+                            if successes >= target {
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
                                     failures,
@@ -552,7 +572,7 @@ mod test {
                         };
 
                         info!(pk = ?pk, "restarting participant");
-                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        team.start_one(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired
@@ -588,14 +608,9 @@ mod test {
             }
         }
 
-        fn run<S>(self) -> anyhow::Result<PlanResult>
-        where
-            S: Scheme<PublicKey = PublicKey>,
-            SchemeProvider<S, PrivateKey>:
-                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
-        {
+        fn run(self) -> anyhow::Result<PlanResult> {
             let expected_failures = self.expected_failures;
-            let result = Runner::seeded(self.seed).start(|ctx| self.run_inner::<S>(ctx))?;
+            let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
             info!(
                 failures = result.failures,
                 expected_failures, "test completed"
@@ -613,7 +628,7 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn plan_deterministic() {
+    fn dkg_deterministic() {
         let plan = Plan {
             seed: 0,
             total: 4,
@@ -623,32 +638,21 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 1,
+            mode: Mode::Dkg,
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         };
         for seed in 0..3 {
-            let res0 = Plan {
-                seed,
-                ..plan.clone()
-            }
-            .run::<EdScheme>()
-            .unwrap_or_else(|e| panic!("failure: {e}"));
-            let res1 = Plan {
-                seed,
-                ..plan.clone()
-            }
-            .run::<EdScheme>()
-            .unwrap_or_else(|e| panic!("failure: {e}"));
+            let res0 = Plan { seed, ..plan.clone() }.run().unwrap();
+            let res1 = Plan { seed, ..plan.clone() }.run().unwrap();
             assert_eq!(res0, res1);
         }
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn single_epoch_ed_scheme_success() {
-        if let Err(e) = (Plan {
+    fn reshare_deterministic() {
+        let plan = Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -657,21 +661,21 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 1,
+            mode: Mode::Reshare(1),
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
-        }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
+        };
+        for seed in 0..3 {
+            let res0 = Plan { seed, ..plan.clone() }.run().unwrap();
+            let res1 = Plan { seed, ..plan.clone() }.run().unwrap();
+            assert_eq!(res0, res1);
         }
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn single_epoch_threshold_scheme_success() {
-        if let Err(e) = (Plan {
+    fn dkg_single_epoch() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -680,21 +684,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 1,
+            mode: Mode::Dkg,
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_ed_scheme_all_participants() {
-        if let Err(e) = (Plan {
+    fn reshare_single_epoch() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -703,21 +704,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Reshare(1),
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_scheme_all_participants() {
-        if let Err(e) = (Plan {
+    fn dkg_four_epochs() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -726,21 +724,38 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Dkg,
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_ed_scheme_changing_size() {
-        if let Err(e) = (Plan {
+    fn reshare_four_epochs() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: None,
+            expected_failures: 0,
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_four_epochs_changing_size() {
+        Plan {
             seed: 0,
             total: 8,
             per_round: vec![3, 4, 5],
@@ -749,44 +764,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Reshare(4),
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_scheme_changing_size() {
-        if let Err(e) = (Plan {
-            seed: 0,
-            total: 8,
-            per_round: vec![3, 4, 5],
-            link: Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            },
-            target: 4,
-            crash: None,
-            is_dkg: false,
-            expected_failures: 0,
-        }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn four_epoch_ed_all_participants_lossy() {
-        if let Err(e) = (Plan {
+    fn dkg_four_epochs_lossy() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -795,21 +784,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 0.7,
             },
-            target: 4,
+            mode: Mode::Dkg,
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_scheme_all_participants_lossy() {
-        if let Err(e) = (Plan {
+    fn reshare_four_epochs_lossy() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -818,21 +804,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 0.7,
             },
-            target: 4,
+            mode: Mode::Reshare(4),
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_ed_scheme_rotating_subset() {
-        if let Err(e) = (Plan {
+    fn reshare_four_epochs_rotating_subset() {
+        Plan {
             seed: 0,
             total: 8,
             per_round: vec![4],
@@ -841,44 +824,18 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Reshare(4),
             crash: None,
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_scheme_rotating_subset() {
-        if let Err(e) = (Plan {
-            seed: 0,
-            total: 8,
-            per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            },
-            target: 4,
-            crash: None,
-            is_dkg: false,
-            expected_failures: 0,
-        }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn four_epoch_ed_with_crashes_and_recovery() {
-        if let Err(e) = (Plan {
+    fn dkg_four_epochs_with_crashes() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -887,25 +844,22 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Dkg,
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_with_crashes_and_recovery() {
-        if let Err(e) = (Plan {
+    fn reshare_four_epochs_with_crashes() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -914,25 +868,22 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Reshare(4),
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            is_dkg: false,
             expected_failures: 0,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_ed_with_many_crashes_and_recovery() {
-        if let Err(e) = (Plan {
+    fn dkg_four_epochs_with_many_crashes() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -941,25 +892,22 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Dkg,
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            is_dkg: false,
             expected_failures: 1,
         }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn four_epoch_threshold_with_many_crashes_and_recovery() {
-        if let Err(e) = (Plan {
+    fn reshare_four_epochs_with_many_crashes() {
+        Plan {
             seed: 0,
             total: 4,
             per_round: vec![4],
@@ -968,41 +916,15 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            target: 4,
+            mode: Mode::Reshare(4),
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            is_dkg: false,
             expected_failures: 1,
         }
-        .run::<ThresholdScheme<MinSig>>())
-        {
-            panic!("failure: {e}");
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn dkg_single_epoch_ed_scheme() {
-        if let Err(e) = (Plan {
-            seed: 0,
-            total: 4,
-            per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            },
-            target: 1,
-            crash: None,
-            is_dkg: true,
-            expected_failures: 0,
-        }
-        .run::<EdScheme>())
-        {
-            panic!("failure: {e}");
-        }
+        .run()
+        .unwrap();
     }
 }
