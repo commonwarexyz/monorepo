@@ -711,7 +711,7 @@ mod test {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            mode: Mode::Reshare(1),
+            mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
         };

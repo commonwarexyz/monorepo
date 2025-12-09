@@ -456,13 +456,11 @@ where
                                     ),
                                 }
                             };
-
-                            info!(
-                                success,
-                                ?epoch,
-                                "finalized epoch's reshare; instructing reconfiguration after reshare.",
-                            );
-
+                            if success {
+                                info!(?epoch, "epoch succeeded");
+                            } else {
+                                warn!(?epoch, "epoch failed");
+                            }
                             storage
                                 .append_epoch(EpochState {
                                     round: next_round,
