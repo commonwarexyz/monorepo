@@ -266,8 +266,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns all tracked peers.
     pub fn tracked(&self) -> OrderedSet<C> {
         self.peers
-            .keys()
-            .cloned()
+            .iter()
+            .filter(|(_, r)| r.sets() > 0)
+            .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")
     }
