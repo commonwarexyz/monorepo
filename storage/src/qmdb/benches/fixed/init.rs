@@ -2,9 +2,10 @@
 //! generated database with fixed-size values.
 
 use crate::fixed::{
-    any_cfg, current_cfg, gen_random_kv, get_ordered_any, get_ordered_current, get_store,
-    get_unordered_any, get_unordered_current, get_variable_any, store_cfg, variable_any_cfg,
-    OAnyDb, OCurrentDb, StoreDb, UAnyDb, UCurrentDb, VariableAnyDb, Variant, THREADS, VARIANTS,
+    any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
+    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
+    get_current_unordered_fixed, get_store, store_cfg, variable_any_cfg, OAnyDb, OCurrentDb,
+    OVAnyDb, StoreDb, UAnyDb, UCurrentDb, UVAnyDb, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -49,24 +50,24 @@ fn bench_fixed_init(c: &mut Criterion) {
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::AnyUnordered => {
-                            let db = get_unordered_any(ctx.clone()).await;
+                        Variant::AnyUnorderedFixed => {
+                            let db = get_any_unordered_fixed(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::AnyOrdered => {
-                            let db = get_ordered_any(ctx.clone()).await;
+                        Variant::AnyOrderedFixed => {
+                            let db = get_any_ordered_fixed(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::CurrentUnordered => {
-                            let db = get_unordered_current(ctx.clone()).await;
+                        Variant::CurrentUnorderedFixed => {
+                            let db = get_current_unordered_fixed(ctx.clone()).await;
                             let db = AnyExt::new(db);
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
@@ -74,8 +75,8 @@ fn bench_fixed_init(c: &mut Criterion) {
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::CurrentOrdered => {
-                            let db = get_ordered_current(ctx.clone()).await;
+                        Variant::CurrentOrderedFixed => {
+                            let db = get_current_ordered_fixed(ctx.clone()).await;
                             let db = AnyExt::new(db);
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
@@ -83,8 +84,16 @@ fn bench_fixed_init(c: &mut Criterion) {
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::Variable => {
-                            let db = get_variable_any(ctx.clone()).await;
+                        Variant::AnyUnorderedVariable => {
+                            let db = get_any_unordered_variable(ctx.clone()).await;
+                            let mut db =
+                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
+                                    .await;
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
+                        }
+                        Variant::AnyOrderedVariable => {
+                            let db = get_any_ordered_variable(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
@@ -122,41 +131,47 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::AnyUnordered => {
+                                    Variant::AnyUnorderedFixed => {
                                         let db = UAnyDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::AnyOrdered => {
+                                    Variant::AnyOrderedFixed => {
                                         let db = OAnyDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::CurrentUnordered => {
+                                    Variant::CurrentUnorderedFixed => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::CurrentOrdered => {
+                                    Variant::CurrentOrderedFixed => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::Variable => {
-                                        let db = VariableAnyDb::init(
-                                            ctx.clone(),
-                                            variable_any_cfg.clone(),
-                                        )
-                                        .await
-                                        .unwrap();
+                                    Variant::AnyUnorderedVariable => {
+                                        let db =
+                                            UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
+                                                .await
+                                                .unwrap();
+                                        assert_ne!(db.op_count(), 0);
+                                        db.close().await.unwrap();
+                                    }
+                                    Variant::AnyOrderedVariable => {
+                                        let db =
+                                            OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
+                                                .await
+                                                .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
@@ -175,24 +190,28 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let db = get_store(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
-                        Variant::AnyUnordered => {
-                            let db = get_unordered_any(ctx.clone()).await;
+                        Variant::AnyUnorderedFixed => {
+                            let db = get_any_unordered_fixed(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
-                        Variant::AnyOrdered => {
-                            let db = get_ordered_any(ctx.clone()).await;
+                        Variant::AnyOrderedFixed => {
+                            let db = get_any_ordered_fixed(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
-                        Variant::CurrentUnordered => {
-                            let db = get_unordered_current(ctx.clone()).await;
+                        Variant::CurrentUnorderedFixed => {
+                            let db = get_current_unordered_fixed(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
-                        Variant::CurrentOrdered => {
-                            let db = get_ordered_current(ctx.clone()).await;
+                        Variant::CurrentOrderedFixed => {
+                            let db = get_current_ordered_fixed(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
-                        Variant::Variable => {
-                            let db = get_variable_any(ctx.clone()).await;
+                        Variant::AnyUnorderedVariable => {
+                            let db = get_any_unordered_variable(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::AnyOrderedVariable => {
+                            let db = get_any_ordered_variable(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                     }
