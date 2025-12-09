@@ -1,6 +1,6 @@
 use super::types::Index;
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use std::collections::{btree_map, BTreeMap, HashMap};
 
 /// A data structure that keeps track of the reported tip for each validator.
@@ -38,7 +38,7 @@ impl<P: PublicKey> SafeTip<P> {
     /// # Panics
     ///
     /// Panics if the validator set is empty.
-    pub fn init(&mut self, validators: &Ordered<P>) {
+    pub fn init(&mut self, validators: &Set<P>) {
         // Ensure the validator set is not empty
         assert!(!validators.is_empty());
 
@@ -70,7 +70,7 @@ impl<P: PublicKey> SafeTip<P> {
     /// # Panics
     ///
     /// Panics if the new validator set is not the same size as the existing set.
-    pub fn reconcile(&mut self, validators: &Ordered<P>) {
+    pub fn reconcile(&mut self, validators: &Set<P>) {
         // Verify the new validator set size
         assert!(
             validators.len() == self.tips.len(),
@@ -255,11 +255,11 @@ mod tests {
         PrivateKey::from_seed(i).public_key()
     }
 
-    fn setup_safe_tip(validator_count: usize) -> (SafeTip<PublicKey>, Ordered<PublicKey>) {
+    fn setup_safe_tip(validator_count: usize) -> (SafeTip<PublicKey>, Set<PublicKey>) {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let validators = (1..=validator_count)
             .map(|i| key(i as u64))
-            .collect::<Ordered<_>>();
+            .collect::<Set<_>>();
         safe_tip.init(&validators);
         (safe_tip, validators)
     }
@@ -267,7 +267,7 @@ mod tests {
     fn setup_with_tips(
         validator_count: usize,
         tips: &[Index],
-    ) -> (SafeTip<PublicKey>, Ordered<PublicKey>) {
+    ) -> (SafeTip<PublicKey>, Set<PublicKey>) {
         let (mut safe_tip, validators) = setup_safe_tip(validator_count);
         for (i, &tip) in tips.iter().enumerate() {
             if i < validators.len() && tip > 0 {

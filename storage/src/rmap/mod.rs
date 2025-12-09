@@ -18,7 +18,7 @@ pub struct RMap {
 
 impl RMap {
     /// Creates a new, empty [RMap].
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             ranges: BTreeMap::new(),
         }

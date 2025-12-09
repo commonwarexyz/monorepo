@@ -17,37 +17,37 @@ pub struct Outbound {
 }
 
 impl Outbound {
-    pub fn notarize() -> &'static Self {
+    pub const fn notarize() -> &'static Self {
         &Self {
             message: MessageType::Notarize,
         }
     }
 
-    pub fn notarization() -> &'static Self {
+    pub const fn notarization() -> &'static Self {
         &Self {
             message: MessageType::Notarization,
         }
     }
 
-    pub fn nullify() -> &'static Self {
+    pub const fn nullify() -> &'static Self {
         &Self {
             message: MessageType::Nullify,
         }
     }
 
-    pub fn nullification() -> &'static Self {
+    pub const fn nullification() -> &'static Self {
         &Self {
             message: MessageType::Nullification,
         }
     }
 
-    pub fn finalize() -> &'static Self {
+    pub const fn finalize() -> &'static Self {
         &Self {
             message: MessageType::Finalize,
         }
     }
 
-    pub fn finalization() -> &'static Self {
+    pub const fn finalization() -> &'static Self {
         &Self {
             message: MessageType::Finalization,
         }
@@ -68,13 +68,6 @@ impl Inbound {
         }
     }
 
-    pub fn notarization(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Notarization,
-        }
-    }
-
     pub fn nullify(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
@@ -82,17 +75,24 @@ impl Inbound {
         }
     }
 
-    pub fn nullification(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Nullification,
-        }
-    }
-
     pub fn finalize(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Finalize,
+        }
+    }
+
+    pub fn notarization(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Notarization,
+        }
+    }
+
+    pub fn nullification(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Nullification,
         }
     }
 

@@ -50,7 +50,7 @@ pub struct Handler<B: Block> {
 
 impl<B: Block> Handler<B> {
     /// Creates a new handler.
-    pub fn new(sender: mpsc::Sender<Message<B>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<B>>) -> Self {
         Self { sender }
     }
 }
@@ -110,7 +110,7 @@ pub enum Request<B: Block> {
 
 impl<B: Block> Request<B> {
     /// The subject of the request.
-    fn subject(&self) -> u8 {
+    const fn subject(&self) -> u8 {
         match self {
             Self::Block(_) => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
@@ -122,7 +122,7 @@ impl<B: Block> Request<B> {
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
             (Self::Block(_), _) => unreachable!("we should never retain by block"),

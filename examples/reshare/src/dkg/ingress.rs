@@ -56,7 +56,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub fn new(sender: mpsc::Sender<Message<H, C, V, A>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<H, C, V, A>>) -> Self {
         Self { sender }
     }
 

@@ -8,7 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::channel::{mpsc, oneshot};
 
 /// Messages that can be sent to the tracker actor.
@@ -16,7 +16,7 @@ use futures::channel::{mpsc, oneshot};
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register { index: u64, peers: Ordered<C> },
+    Register { index: u64, peers: Set<C> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -24,13 +24,13 @@ pub enum Message<C: PublicKey> {
         /// The index of the peer set to fetch.
         index: u64,
         /// One-shot channel to send the peer set.
-        responder: oneshot::Sender<Option<Ordered<C>>>,
+        responder: oneshot::Sender<Option<Set<C>>>,
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
         #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<C>, Ordered<C>)>>,
+        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Set<C>, Set<C>)>>,
     },
 
     // ---------- Used by blocker ----------
@@ -208,7 +208,7 @@ pub struct Releaser<C: PublicKey> {
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
@@ -228,14 +228,14 @@ pub struct Oracle<C: PublicKey> {
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
-    type Peers = Ordered<C>;
+    type Peers = Set<C>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -246,13 +246,13 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     /// # Parameters
     ///
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Must be monotonically increasing, per the rules of [Ordered].
+    ///   Must be monotonically increasing, per the rules of [Set].
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
 
-    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::PeerSet {
@@ -265,7 +265,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
 
     async fn subscribe(
         &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
+    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe { responder: sender })

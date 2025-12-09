@@ -9,7 +9,7 @@ use commonware_cryptography::{
     ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
@@ -22,17 +22,14 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Ed25519 {
     /// Participants in the committee.
-    pub participants: Ordered<ed25519::PublicKey>,
+    pub participants: Set<ed25519::PublicKey>,
     /// Key used for generating signatures.
     pub signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
 impl Ed25519 {
     /// Creates a new raw Ed25519 scheme instance.
-    pub fn new(
-        participants: Ordered<ed25519::PublicKey>,
-        private_key: ed25519::PrivateKey,
-    ) -> Self {
+    pub fn new(participants: Set<ed25519::PublicKey>, private_key: ed25519::PrivateKey) -> Self {
         let signer = participants
             .index(&private_key.public_key())
             .map(|index| (index, private_key));
@@ -44,7 +41,7 @@ impl Ed25519 {
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
-    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    pub fn verifier(participants: Set<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -65,7 +62,7 @@ impl Ed25519 {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = context.namespace_and_message(namespace);
-        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
+        let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
         Some(Vote {
             signer: *index,
@@ -89,7 +86,7 @@ impl Ed25519 {
         };
 
         let (namespace, message) = context.namespace_and_message(namespace);
-        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
+        public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature)
     }
 
     /// Batch-verifies votes and returns verified votes and invalid signers.
@@ -119,7 +116,7 @@ impl Ed25519 {
             };
 
             batch.add(
-                Some(namespace.as_ref()),
+                namespace.as_ref(),
                 message.as_ref(),
                 public_key,
                 &vote.signature,
@@ -131,7 +128,7 @@ impl Ed25519 {
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);
                 }
             }
@@ -217,12 +214,7 @@ impl Ed25519 {
                 return false;
             };
 
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+            batch.add(namespace.as_ref(), message.as_ref(), public_key, signature);
         }
 
         true
@@ -360,7 +352,7 @@ mod macros {
                 /// If the provided private key does not match any consensus key in the committee,
                 /// the instance will act as a verifier (unable to generate signatures).
                 pub fn new(
-                    participants: commonware_utils::set::Ordered<
+                    participants: commonware_utils::ordered::Set<
                         commonware_cryptography::ed25519::PublicKey,
                     >,
                     private_key: commonware_cryptography::ed25519::PrivateKey,
@@ -377,7 +369,7 @@ mod macros {
                 ///
                 /// Participants use the same key for both identity and consensus.
                 pub fn verifier(
-                    participants: commonware_utils::set::Ordered<
+                    participants: commonware_utils::ordered::Set<
                         commonware_cryptography::ed25519::PublicKey,
                     >,
                 ) -> Self {
@@ -397,7 +389,7 @@ mod macros {
                     self.raw.me()
                 }
 
-                fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
                     &self.raw.participants
                 }
 
@@ -497,7 +489,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         PrivateKeyExt,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{ordered::Set, quorum};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
     use std::marker::PhantomData;
 
@@ -522,14 +514,14 @@ mod tests {
     }
 
     impl TestScheme {
-        fn new(participants: Ordered<PublicKey>, private_key: PrivateKey) -> Self {
+        fn new(participants: Set<PublicKey>, private_key: PrivateKey) -> Self {
             Self {
                 raw: super::Ed25519::new(participants, private_key),
                 _pd: PhantomData,
             }
         }
 
-        fn verifier(participants: Ordered<PublicKey>) -> Self {
+        fn verifier(participants: Set<PublicKey>) -> Self {
             Self {
                 raw: super::Ed25519::verifier(participants),
                 _pd: PhantomData,
@@ -547,7 +539,7 @@ mod tests {
             self.raw.me()
         }
 
-        fn participants(&self) -> &Ordered<Self::PublicKey> {
+        fn participants(&self) -> &Set<Self::PublicKey> {
             &self.raw.participants
         }
 
@@ -637,8 +629,7 @@ mod tests {
     fn setup_signers(n: u32, seed: u64) -> (Vec<TestScheme>, TestScheme) {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
-        let participants: Ordered<PublicKey> =
-            private_keys.iter().map(|sk| sk.public_key()).collect();
+        let participants: Set<PublicKey> = private_keys.iter().map(|sk| sk.public_key()).collect();
 
         let signers = private_keys
             .into_iter()
@@ -1034,7 +1025,7 @@ mod simplex_tests {
         seed: u64,
     ) -> (
         Vec<Scheme>,
-        Ordered<commonware_cryptography::ed25519::PublicKey>,
+        Set<commonware_cryptography::ed25519::PublicKey>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {

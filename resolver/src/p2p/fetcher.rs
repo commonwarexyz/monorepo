@@ -4,7 +4,7 @@ use commonware_cryptography::PublicKey;
 use commonware_p2p::{
     utils::{
         codec::WrappedSender,
-        requester::{Config, Requester, ID},
+        requester::{Config, Error, Requester, ID},
     },
     Recipients, Sender,
 };
@@ -13,6 +13,7 @@ use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     time::{Duration, SystemTime},
 };
@@ -36,6 +37,18 @@ enum SendError<S: Sender> {
 ///
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancellation). Upon retry, requests may either be placed in active or pending state again.
+///
+/// # Targets
+///
+/// Peers can be registered as "targets" for specific keys, restricting fetches to only those
+/// peers. Targets represent "the only peers who might eventually have the data". When fetching,
+/// only target peers are tried. There is no fallback to other peers, if all targets are
+/// unavailable, the fetch waits for them.
+///
+/// Targets persist through transient failures (timeout, "no data" response, send failure) since
+/// the peer might be slow or might receive the data later. Targets are only removed when:
+/// - A peer is blocked (sent invalid data)
+/// - The fetch succeeds (all targets for that key are cleared)
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
@@ -67,6 +80,12 @@ pub struct Fetcher<
     /// Whether requests are sent with priority over other network messages
     priority_requests: bool,
 
+    /// Per-key target peers restricting which peers are used to fetch each key.
+    /// Only target peers are tried, waiting for them if rate-limited. There is no
+    /// fallback to other peers. Targets persist through transient failures, they are
+    /// only removed when blocked (invalid data) or cleared on successful fetch.
+    targets: HashMap<Key, HashSet<P>>,
+
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
 }
@@ -90,29 +109,82 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             waiter: None,
             retry_timeout,
             priority_requests,
+            targets: HashMap::new(),
             _s: PhantomData,
         }
     }
 
-    /// Makes a fetch request.
+    /// Attempts to send a fetch request for a pending key.
+    ///
+    /// Iterates through pending keys in priority order until one succeeds or all
+    /// participants are rate-limited. Targeted requests that fail due to rate limiting
+    /// are skipped, allowing untargeted requests (or requests with different targets)
+    /// to proceed. Once an untargeted request is rate-limited, iteration stops since
+    /// all participants are busy.
+    ///
+    /// On send failure, the key is retried. Targets are not removed on send failure.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
 
-        // Get peer to send request to
-        let (_, retry) = self.peek_pending().unwrap();
-        let (peer, id) = match self.requester.request(retry) {
-            Ok(selection) => selection,
-            Err(next) => {
-                let waiter = self.context.current().saturating_add(next);
-                self.waiter = Some(waiter);
-                return;
+        // Try pending keys until one succeeds or all participants are rate-limited
+        let mut min_wait: Option<Duration> = None;
+        let mut selected = None;
+        for (key, (_, retry)) in self.pending.iter() {
+            // Try to find a peer for the key
+            let (result, is_targeted) = match self.targets.get(key) {
+                Some(targets) if targets.is_empty() => (Err(Error::NoEligibleParticipants), true),
+                Some(targets) => (
+                    self.requester
+                        .request_filtered(*retry, |p| targets.contains(p)),
+                    true,
+                ),
+                None => (self.requester.request(*retry), false),
+            };
+
+            // Handle the result
+            match result {
+                Ok((peer, id)) => {
+                    selected = Some((key.clone(), peer, id));
+                    break;
+                }
+                Err(Error::RateLimited(wait)) => {
+                    min_wait = Some(min_wait.map_or(wait, |w| w.min(wait)));
+                    if !is_targeted {
+                        // If a request with no targets fails to find a peer, all participants are busy
+                        break;
+                    }
+                    // If a request with targets fails to find a peer, other keys may still be fetchable
+                }
+                Err(Error::NoEligibleParticipants) => {
+                    // If a request with no valid targets exists (blocked or targets no longer allowed), we
+                    // should skip it (may eventually become fetchable if the peer set changes).
+                }
             }
-        };
+        }
 
-        // Wait to pop a key until we know we can make a request
-        let key = self.pop_pending();
+        // Send request if we found a key to fetch
+        if let Some((key, peer, id)) = selected {
+            self.pending.remove(&key);
+            return self.send_request(sender, key, peer, id).await;
+        }
 
+        // No keys could be fetched, set waiter to the next time
+        self.waiter = Some(
+            self.context
+                .current()
+                .saturating_add(min_wait.unwrap_or(Duration::MAX)),
+        );
+    }
+
+    /// Sends a fetch request to a peer.
+    async fn send_request(
+        &mut self,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        key: Key,
+        peer: <NetS as Sender>::PublicKey,
+        id: ID,
+    ) {
         // Send message to peer
         let result = sender
             .send(
@@ -149,13 +221,20 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Retains only the fetches with keys greater than the given key.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
         self.active.retain(|_, k| predicate(k));
-        self.pending.retain(predicate);
+        self.pending.retain(&predicate);
+        self.targets.retain(|k, _| predicate(k));
+
+        // Clear waiter since the key that caused it may have been removed
+        self.waiter = None;
     }
 
     /// Cancels a fetch request.
     ///
     /// Returns `true` if the fetch was canceled.
     pub fn cancel(&mut self, key: &Key) -> bool {
+        // Remove targets for this key
+        self.clear_targets(key);
+
         // Check the pending queue first
         if self.pending.remove(key) {
             return true;
@@ -173,6 +252,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     pub fn clear(&mut self) {
         self.pending.clear();
         self.active.clear();
+        self.targets.clear();
     }
 
     /// Adds a key to the front of the pending queue.
@@ -198,7 +278,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.peek_pending().map(|(deadline, _)| deadline);
+        let pending_deadline = self.pending.peek().map(|(_, (deadline, _))| *deadline);
         pending_deadline.max(self.waiter)
     }
 
@@ -207,20 +287,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.next().map(|(_, deadline)| deadline)
     }
 
-    /// Returns whether the next item in the pending queue is a retry.
-    pub fn peek_pending(&self) -> Option<(SystemTime, bool)> {
-        self.pending.peek().map(|(_, value)| *value)
-    }
-
-    /// Removes and returns the pending key with the earliest deadline.
-    ///
-    /// Panics if there are no pending keys.
-    pub fn pop_pending(&mut self) -> Key {
-        let (key, _) = self.pending.pop().unwrap();
-        key
-    }
-
     /// Removes and returns the key with the next requester timeout.
+    ///
+    /// Targets are not removed on timeout.
     ///
     /// Panics if there are no timeouts.
     pub fn pop_active(&mut self) -> Option<Key> {
@@ -233,13 +302,18 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Remove the existing request information, if any.
         // It is possible that the request was canceled before it timed out.
-        self.active.remove_by_left(&id).map(|(_id, key)| key)
+        self.active.remove_by_left(&id).map(|(_, key)| key)
     }
 
     /// Processes a response from a peer. Removes and returns the relevant key.
     ///
-    /// Returns the key that was fetched if the response was valid.
-    /// Returns None if the response was invalid or not needed.
+    /// Returns the key if the response was valid. Returns `None` if the response was
+    /// invalid or unsolicited.
+    ///
+    /// Targets are not removed here, regardless of response type. Targets persist through
+    /// "no data" responses (peer might get data later). On valid data response, caller
+    /// should call `clear_targets()`. On invalid data, caller should block the peer which
+    /// removes them from all target sets.
     pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
@@ -252,7 +326,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
-        self.active.remove_by_left(&id).map(|(_id, key)| key)
+        self.active.remove_by_left(&id).map(|(_, key)| key)
     }
 
     /// Reconciles the list of peers that can be used to fetch data.
@@ -264,8 +338,41 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Blocks a peer from being used to fetch data.
+    ///
+    /// Also removes the peer from all target sets.
     pub fn block(&mut self, peer: P) {
+        // Remove peer from all target sets (keeping empty entries)
+        for targets in self.targets.values_mut() {
+            targets.remove(&peer);
+        }
+
         self.requester.block(peer);
+    }
+
+    /// Add target peers for fetching a key.
+    ///
+    /// Targets are added to any existing targets for this key.
+    ///
+    /// Clears the waiter to allow immediate retry if the fetch was blocked waiting for targets.
+    pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
+        self.targets.entry(key).or_default().extend(peers);
+
+        // Clear waiter to allow retry with new targets
+        self.waiter = None;
+    }
+
+    /// Clear targeting for a key.
+    ///
+    /// If there is an ongoing fetch for this key, it will try any available peer instead
+    /// of being restricted to targets. Also used to clean up targets after a successful
+    /// or cancelled fetch.
+    ///
+    /// Clears the waiter to allow immediate retry with any available peer.
+    pub fn clear_targets(&mut self, key: &Key) {
+        self.targets.remove(key);
+
+        // Clear waiter to allow retry without targets
+        self.waiter = None;
     }
 
     /// Returns the number of fetches.
@@ -314,18 +421,18 @@ mod tests {
     struct MockError;
 
     impl fmt::Display for MockError {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "mock error")
         }
     }
 
     impl std::error::Error for MockError {}
 
-    // Mock sender for testing
+    // Mock sender that fails
     #[derive(Clone, Debug)]
-    struct MockSender;
+    struct FailMockSender;
 
-    impl Sender for MockSender {
+    impl Sender for FailMockSender {
         type PublicKey = Ed25519PublicKey;
         type Error = MockError;
 
@@ -339,9 +446,30 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher(
+    // Mock sender that succeeds
+    #[derive(Clone, Debug)]
+    struct SuccessMockSender;
+
+    impl Sender for SuccessMockSender {
+        type PublicKey = Ed25519PublicKey;
+        type Error = MockError;
+
+        async fn send(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+            _message: Bytes,
+            _priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            match recipients {
+                Recipients::One(peer) => Ok(vec![peer]),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
+    fn create_test_fetcher<S: Sender<PublicKey = Ed25519PublicKey>>(
         context: Context,
-    ) -> Fetcher<Context, Ed25519PublicKey, MockKey, MockSender> {
+    ) -> Fetcher<Context, Ed25519PublicKey, MockKey, S> {
         let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
         let requester_config = RequesterConfig {
             me: Some(public_key),
@@ -359,7 +487,7 @@ mod tests {
     fn test_retain_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add some keys to pending and active states
             fetcher.add_retry(MockKey(1));
@@ -380,10 +508,8 @@ mod tests {
             fetcher.retain(|key| key.0 <= 10);
 
             // Check that only keys with value <= 10 remain
-            // MockKey(1) from pending should remain
-            // MockKey(10) from active should remain
-            // MockKey(2), MockKey(3) from pending should be removed (2 <= 10 and 3 <= 10, wait that's wrong)
-            // Actually all keys <= 10 should remain: 1, 2, 3, 10
+            // Pending: MockKey(1), MockKey(2), MockKey(3) all remain (1, 2, 3 <= 10)
+            // Active: MockKey(10) remains, MockKey(20) and MockKey(30) removed (20, 30 > 10)
             assert_eq!(fetcher.len(), 4); // Key(1), Key(2), Key(3), Key(10)
             assert_eq!(fetcher.len_pending(), 3); // Key(1), Key(2), Key(3)
             assert_eq!(fetcher.len_active(), 1); // Key(10)
@@ -402,7 +528,7 @@ mod tests {
     fn test_clear_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add some keys to pending and active states
             fetcher.add_retry(MockKey(1));
@@ -437,7 +563,7 @@ mod tests {
     fn test_len_functions() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Initially empty
             assert_eq!(fetcher.len(), 0);
@@ -476,7 +602,7 @@ mod tests {
     fn test_retain_with_empty_collections() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Test retain on empty collections
             fetcher.retain(|_| true);
@@ -491,7 +617,7 @@ mod tests {
     fn test_retain_all_elements_match_predicate() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add keys
             fetcher.add_retry(MockKey(1));
@@ -515,7 +641,7 @@ mod tests {
     fn test_retain_no_elements_match_predicate() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add keys
             fetcher.add_retry(MockKey(1));
@@ -537,7 +663,7 @@ mod tests {
     fn test_cancel_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add keys to both pending and active states
             fetcher.add_retry(MockKey(1));
@@ -574,7 +700,7 @@ mod tests {
     fn test_contains_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Initially empty
             assert!(!fetcher.contains(&MockKey(1)));
@@ -604,7 +730,7 @@ mod tests {
     fn test_add_retry_function() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add first key
             fetcher.add_retry(MockKey(1));
@@ -626,7 +752,7 @@ mod tests {
     fn test_add_retry_duplicate_panics() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             fetcher.add_retry(MockKey(1));
             // This should panic
@@ -638,7 +764,7 @@ mod tests {
     fn test_get_pending_deadline() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // No deadline when empty
             assert!(fetcher.get_pending_deadline().is_none());
@@ -661,7 +787,7 @@ mod tests {
     fn test_get_active_deadline() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher(context);
+            let fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // No deadline when empty (requester has no timeouts)
             assert!(fetcher.get_active_deadline().is_none());
@@ -669,45 +795,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pop_pending() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
-
-            // Add keys
-            fetcher.add_retry(MockKey(1));
-            fetcher.add_retry(MockKey(2));
-            assert_eq!(fetcher.len_pending(), 2);
-
-            // Pop first key
-            let key = fetcher.pop_pending();
-            assert!(key == MockKey(1) || key == MockKey(2)); // Order may vary due to priority queue
-            assert_eq!(fetcher.len_pending(), 1);
-
-            // Pop second key
-            let key2 = fetcher.pop_pending();
-            assert!(key2 == MockKey(1) || key2 == MockKey(2));
-            assert_ne!(key, key2); // Should be different keys
-            assert_eq!(fetcher.len_pending(), 0);
-        });
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_pop_pending_empty_panics() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
-            // This should panic
-            fetcher.pop_pending();
-        });
-    }
-
-    #[test]
     fn test_pop_active() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher(context);
+            let fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // No active requests, should return None when popping
             // (This tests the case where requester.next() returns None or the active map doesn't contain the key)
@@ -719,7 +810,7 @@ mod tests {
     fn test_pop_by_id() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
             let dummy_peer =
                 commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
 
@@ -738,15 +829,15 @@ mod tests {
     fn test_reconcile_and_block() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
-            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[peer1.clone(), peer2]);
 
             // Test block peer
-            fetcher.block(peer1.clone());
+            fetcher.block(peer1);
 
             // Initially no blocked peers (this depends on internal requester state)
             // The len_blocked function returns the count from the requester
@@ -757,7 +848,7 @@ mod tests {
     fn test_len_blocked() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Initially no blocked peers
             let initial_blocked = fetcher.len_blocked();
@@ -776,7 +867,7 @@ mod tests {
     fn test_edge_cases_empty_state() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let fetcher = create_test_fetcher(context);
+            let fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Test all functions on empty fetcher
             assert_eq!(fetcher.len(), 0);
@@ -792,7 +883,7 @@ mod tests {
     fn test_cancel_edge_cases() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Cancel from empty fetcher
             assert!(!fetcher.cancel(&MockKey(1)));
@@ -808,7 +899,7 @@ mod tests {
     fn test_retain_preserves_active_state() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add keys to active with specific IDs
             fetcher.active.insert(100, MockKey(1));
@@ -833,7 +924,7 @@ mod tests {
     fn test_mixed_operations() {
         let runner = Runner::default();
         runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
             // Add keys to both pending and active
             fetcher.add_retry(MockKey(1));
@@ -867,7 +958,7 @@ mod tests {
     fn test_ready_vs_retry() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher(context.clone());
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.clone());
 
             // Add some keys to pending and active states
             fetcher.add_retry(MockKey(1));
@@ -878,20 +969,20 @@ mod tests {
             assert_eq!(fetcher.len_pending(), 2);
             assert_eq!(fetcher.len_active(), 0);
 
-            // Get next
+            // Get next (should be the ready key with current time deadline)
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert_eq!(deadline, context.current());
 
-            // Pop key
-            let key = fetcher.pop_pending();
+            // Pop key (ready key should come first)
+            let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(2));
 
-            // Get next
+            // Get next (should be the retry key with delayed deadline)
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert_eq!(deadline, context.current() + Duration::from_millis(100));
 
             // Pop key
-            let key = fetcher.pop_pending();
+            let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(1));
         });
     }
@@ -914,7 +1005,7 @@ mod tests {
                 commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
             fetcher.reconcile(&[public_key, other_public_key]);
-            let mut sender = WrappedSender::new(MockSender {});
+            let mut sender = WrappedSender::new(FailMockSender {});
 
             // Add a key to pending
             fetcher.add_ready(MockKey(1));
@@ -940,6 +1031,407 @@ mod tests {
                 next_deadline,
                 context.current() + Duration::from_millis(100)
             );
+        });
+    }
+
+    #[test]
+    fn test_waiter_cleared_on_target_modification() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher with participants
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(10).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let blocked_peer =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(99).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, peer1.clone()]);
+            let mut sender = WrappedSender::new(FailMockSender {});
+
+            // Block the peer we'll use as target, so fetch has no eligible participants
+            fetcher.block(blocked_peer.clone());
+
+            // Add key with targets pointing only to blocked peer
+            fetcher.add_ready(MockKey(1));
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
+            fetcher.fetch(&mut sender).await;
+
+            // Waiter should be set to far future (no eligible participants)
+            assert!(fetcher.waiter.is_some());
+            let far_future = fetcher.waiter.unwrap();
+            assert!(far_future > context.current() + Duration::from_secs(1000));
+
+            // Add targets should clear the waiter
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            assert!(fetcher.waiter.is_none());
+
+            // Pending deadline should now be reasonable
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline <= context.current() + retry_timeout);
+
+            // Set waiter again by targeting blocked peer
+            fetcher.clear_targets(&MockKey(1));
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
+            fetcher.fetch(&mut sender).await;
+            assert!(fetcher.waiter.is_some());
+
+            // clear_targets should clear the waiter
+            fetcher.clear_targets(&MockKey(1));
+            assert!(fetcher.waiter.is_none());
+        });
+    }
+
+    #[test]
+    fn test_add_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+
+            // Initially no targets
+            assert!(fetcher.targets.is_empty());
+
+            // Add targets for a key
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            assert_eq!(fetcher.targets.len(), 1);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
+
+            // Add more targets for the same key (accumulates)
+            fetcher.add_targets(MockKey(1), [peer2.clone()]);
+            assert_eq!(fetcher.targets.len(), 1);
+            let targets = fetcher.targets.get(&MockKey(1)).unwrap();
+            assert_eq!(targets.len(), 2);
+            assert!(targets.contains(&peer1));
+            assert!(targets.contains(&peer2));
+
+            // Add target for a different key
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            assert_eq!(fetcher.targets.len(), 2);
+            assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
+
+            // Adding duplicate target is idempotent
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+
+            // Add more to reach three targets
+            fetcher.add_targets(MockKey(1), [peer3.clone()]);
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 3);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer3));
+
+            // clear_targets() removes all targets for a key
+            fetcher.clear_targets(&MockKey(1));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+
+            // Add targets on non-existent key creates new entry
+            fetcher.add_targets(MockKey(3), [peer1.clone()]);
+            assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
+        });
+    }
+
+    #[test]
+    fn test_targets_cleanup() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+
+            // cancel() clears targets for key
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
+            assert_eq!(fetcher.targets.len(), 2);
+
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
+
+            assert!(fetcher.cancel(&MockKey(2)));
+            assert!(fetcher.targets.is_empty());
+
+            // clear() clears all targets
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2]);
+            assert_eq!(fetcher.targets.len(), 3);
+
+            fetcher.clear();
+            assert!(fetcher.targets.is_empty());
+
+            // retain() filters targets
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(10), [peer1.clone()]);
+            fetcher.add_targets(MockKey(20), [peer1]);
+            assert_eq!(fetcher.targets.len(), 4);
+
+            fetcher.retain(|key| key.0 <= 5);
+            assert_eq!(fetcher.targets.len(), 2);
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
+            assert!(!fetcher.targets.contains_key(&MockKey(10)));
+            assert!(!fetcher.targets.contains_key(&MockKey(20)));
+        });
+    }
+
+    #[test]
+    fn test_block_removes_from_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+
+            // Add targets for multiple keys with various peers
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone(), peer3.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2.clone()]);
+
+            // Verify initial state
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
+            assert_eq!(fetcher.targets.get(&MockKey(3)).unwrap().len(), 1);
+
+            // Block peer1
+            fetcher.block(peer1.clone());
+
+            // peer1 should be removed from all target sets
+            let key1_targets = fetcher.targets.get(&MockKey(1)).unwrap();
+            assert_eq!(key1_targets.len(), 1);
+            assert!(!key1_targets.contains(&peer1));
+            assert!(key1_targets.contains(&peer2));
+
+            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
+            assert_eq!(key2_targets.len(), 1);
+            assert!(!key2_targets.contains(&peer1));
+            assert!(key2_targets.contains(&peer3));
+
+            // MockKey(3) shouldn't be affected (peer1 wasn't a target)
+            let key3_targets = fetcher.targets.get(&MockKey(3)).unwrap();
+            assert_eq!(key3_targets.len(), 1);
+            assert!(key3_targets.contains(&peer2));
+
+            // Block peer2 - should remove from MockKey(1) and MockKey(3)
+            fetcher.block(peer2);
+
+            // MockKey(1) now has empty targets (entry kept to prevent fallback)
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
+
+            // MockKey(2) still has peer3
+            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
+            assert_eq!(key2_targets.len(), 1);
+            assert!(key2_targets.contains(&peer3));
+
+            // MockKey(3) now has empty targets (entry kept to prevent fallback)
+            assert!(fetcher.targets.contains_key(&MockKey(3)));
+            assert!(fetcher.targets.get(&MockKey(3)).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn test_target_behavior_on_send_failure() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.clone());
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
+            let mut sender = WrappedSender::new(FailMockSender {});
+
+            // Add targets and attempt fetch
+            fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
+            fetcher.add_ready(MockKey(2));
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
+            fetcher.fetch(&mut sender).await;
+            // Both targets should still be present (not removed on send failure)
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
+            assert!(fetcher.pending.contains(&MockKey(2)));
+        });
+    }
+
+    #[test]
+    fn test_target_retention_on_pop() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(SuccessMockSender {});
+
+            // Timeout does not remove target
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
+            fetcher.add_ready(MockKey(1));
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            fetcher.fetch(&mut sender).await;
+            context.sleep(Duration::from_millis(200)).await;
+            assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
+            // Both targets should still be present after timeout
+            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
+            fetcher.targets.clear();
+
+            // Error response ("no data") does not remove target
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_ready(MockKey(2));
+            fetcher.fetch(&mut sender).await;
+            let id = *fetcher.active.iter().next().unwrap().0;
+            assert_eq!(fetcher.pop_by_id(id, &peer1, false), Some(MockKey(2)));
+            // Target should still be present after "no data" response
+            assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
+            fetcher.targets.clear();
+
+            // Data response also preserves targets
+            // (caller must clear targets after data validation)
+            fetcher.add_targets(MockKey(3), [peer1.clone()]);
+            fetcher.add_ready(MockKey(3));
+            fetcher.fetch(&mut sender).await;
+            let id = *fetcher.active.iter().next().unwrap().0;
+            assert_eq!(fetcher.pop_by_id(id, &peer1, true), Some(MockKey(3)));
+            assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
+        });
+    }
+
+    #[test]
+    fn test_no_fallback_when_targets_unavailable() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+
+            // Add only peer1 and peer2 to the peer set (peer3 is not in the peer set)
+            fetcher.reconcile(&[public_key, peer1, peer2]);
+
+            // Target peer3, which is not in the peer set (disconnected)
+            fetcher.add_targets(MockKey(1), [peer3]);
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+
+            // Add key to pending
+            fetcher.add_ready(MockKey(1));
+
+            // Fetch should not fallback to any peer - it should wait indefinitely
+            let mut sender = WrappedSender::new(SuccessMockSender {});
+            fetcher.fetch(&mut sender).await;
+
+            // Targets should still exist (no fallback cleared them)
+            assert!(fetcher.targets.contains_key(&MockKey(1)));
+
+            // Key should still be in pending state (no fallback to available peers)
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Waiter should be set to far future (waiting for target peer)
+            assert!(fetcher.waiter.is_some());
+        });
+    }
+
+    #[test]
+    fn test_clear_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Add targets
+            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2]);
+            fetcher.add_targets(MockKey(2), [peer1]);
+            assert_eq!(fetcher.targets.len(), 2);
+
+            // clear_targets() removes the targets entry entirely
+            fetcher.clear_targets(&MockKey(1));
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+            assert!(fetcher.targets.contains_key(&MockKey(2)));
+
+            // clear_targets() on non-existent key is a no-op
+            fetcher.clear_targets(&MockKey(99));
+            assert_eq!(fetcher.targets.len(), 1);
+
+            // clear_targets() remaining key
+            fetcher.clear_targets(&MockKey(2));
+            assert!(fetcher.targets.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_skips_keys_with_rate_limited_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher with rate limit of 1 per second
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(SuccessMockSender {});
+
+            // Add three keys with different targets:
+            // - MockKey(1) targeted to peer1
+            // - MockKey(2) targeted to peer1 (same peer, will be rate-limited after first)
+            // - MockKey(3) targeted to peer2
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2.clone()]);
+            fetcher.add_ready(MockKey(1));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(2));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(3));
+
+            // First fetch: should pick MockKey(1) targeting peer1
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(!fetcher.pending.contains(&MockKey(1))); // MockKey(1) was fetched
+
+            // Second fetch: MockKey(2) is blocked (peer1 rate-limited), should skip to MockKey(3)
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(fetcher.pending.contains(&MockKey(2))); // MockKey(2) is still pending
+            assert!(!fetcher.pending.contains(&MockKey(3))); // MockKey(3) was fetched
+
+            // Third fetch: only MockKey(2) remains, but peer1 is still rate-limited
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2); // No change
+            assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
+            assert!(fetcher.waiter.is_some()); // Waiter set
+
+            // Wait for rate limit to reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Now MockKey(2) can be fetched
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 3);
+            assert_eq!(fetcher.len_pending(), 0);
         });
     }
 }

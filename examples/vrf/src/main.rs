@@ -85,7 +85,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{quorum, set::Ordered, NZU32};
+use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -100,7 +100,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 fn main() {
     // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -185,14 +185,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let recipients = participants
+    let recipients: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key",);
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -271,7 +272,10 @@ fn main() {
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
-                contributors.clone().into_iter().collect(),
+                contributors
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 corrupt,
                 lazy,
                 forger,
@@ -302,7 +306,7 @@ fn main() {
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
-                contributors.into_iter().collect(),
+                contributors.try_into().expect("public keys are unique"),
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

@@ -48,7 +48,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use std::collections::{BTreeMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
@@ -72,8 +72,8 @@ pub struct Arbiter<P: PublicKey, V: Variant> {
     player_threshold: u32,
     concurrency: usize,
 
-    dealers: Ordered<P>,
-    players: Ordered<P>,
+    dealers: Set<P>,
+    players: Set<P>,
 
     #[allow(clippy::type_complexity)]
     commitments: BTreeMap<u32, (poly::Public<V>, Vec<u32>, Vec<Share>)>,
@@ -84,8 +84,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public<V>>,
-        dealers: Ordered<P>,
-        players: Ordered<P>,
+        dealers: Set<P>,
+        players: Set<P>,
         concurrency: usize,
     ) -> Self {
         Self {
@@ -102,9 +102,18 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
     }
 
-    /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
-    pub fn disqualify(&mut self, participant: P) {
-        self.disqualified.insert(participant);
+    /// Disqualify a dealer from the DKG for external reason (i.e. sending invalid messages).
+    ///
+    /// # Warning
+    ///
+    /// If the [Arbiter] is being run by all participants, all participants must disqualify the
+    /// same public keys (or else will derive different group polynomials).
+    pub fn disqualify(&mut self, dealer: P) -> Result<(), Error> {
+        if self.dealers.index(&dealer).is_none() {
+            return Err(Error::DealerInvalid);
+        }
+        self.disqualified.insert(dealer);
+        Ok(())
     }
 
     /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.

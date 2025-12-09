@@ -10,8 +10,8 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -48,9 +48,9 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
-name = "adb"
+name = "qmdb"
 harness = false
-path = "src/adb/benches/bench.rs"
+path = "src/qmdb/benches/bench.rs"
 
 [[bench]]
 name="archive"

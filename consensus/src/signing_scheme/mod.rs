@@ -2,7 +2,7 @@ use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash, sync::Arc};
 
@@ -15,6 +15,7 @@ pub use crate::{
     impl_bls12381_multisig_scheme, impl_bls12381_threshold_scheme, impl_ed25519_scheme,
 };
 
+// TODO: rename to signature
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
 pub struct Vote<S: Scheme> {
@@ -63,6 +64,7 @@ impl<S: Scheme> Read for Vote<S> {
     }
 }
 
+// TODO: rename to SignatureVerification
 /// Result of verifying a batch of votes.
 pub struct VoteVerification<S: Scheme> {
     /// Contains the votes accepted by the scheme.
@@ -117,7 +119,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn me(&self) -> Option<u32>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Ordered<Self::PublicKey>;
+    fn participants(&self) -> &Set<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

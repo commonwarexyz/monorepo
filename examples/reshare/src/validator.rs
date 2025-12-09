@@ -197,7 +197,10 @@ mod test {
         (Sender<PublicKey>, Receiver<PublicKey>),
         (
             mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<Sha256, PrivateKey, MinSig>>>,
+            commonware_resolver::p2p::Mailbox<
+                handler::Request<Block<Sha256, PrivateKey, MinSig>>,
+                PublicKey,
+            >,
         ),
     ) {
         let mut control = oracle.control(validator.clone());
@@ -255,6 +258,7 @@ mod test {
                 mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
                 commonware_resolver::p2p::Mailbox<
                     handler::Request<Block<Sha256, PrivateKey, MinSig>>,
+                    PublicKey,
                 >,
             ),
         ),
@@ -528,7 +532,7 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link, 1000);
     }
 
     #[test_group("slow")]
@@ -539,7 +543,7 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link, 1000);
     }
 
     fn reshare_failed(seed: u64) -> String {
@@ -1732,15 +1736,18 @@ mod test {
             };
 
             // Handle run
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_ctx {
-                Runner::from(prev_checkpoint)
-            } else {
-                let cfg = deterministic::Config::default()
-                    .with_seed(seed)
-                    .with_timeout(Some(Duration::from_secs(180)));
-                Runner::new(cfg)
-            }
-            .start_and_recover(f);
+
+            let (complete, checkpoint) = prev_ctx
+                .map_or_else(
+                    || {
+                        let cfg = deterministic::Config::default()
+                            .with_seed(seed)
+                            .with_timeout(Some(Duration::from_secs(180)));
+                        Runner::new(cfg)
+                    },
+                    Runner::from,
+                )
+                .start_and_recover(f);
 
             // If complete, break out of the loop
             prev_ctx = Some(checkpoint);

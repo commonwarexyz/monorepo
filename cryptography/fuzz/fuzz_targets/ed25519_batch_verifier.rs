@@ -12,13 +12,13 @@ use rand::{rngs::StdRng, SeedableRng};
 enum BatchOperation {
     AddEd25519 {
         private_key_seed: u64,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
     },
     AddInvalidEd25519 {
         private_key_seed: u64,
         wrong_private_key_seed: u64,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
     },
     VerifyEd25519,
@@ -61,13 +61,13 @@ fn fuzz(input: FuzzInput) {
             } => {
                 let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
                 let public_key = private_key.public_key();
-                let signature = private_key.sign(namespace.as_deref(), &message);
+                let signature = private_key.sign(namespace.as_slice(), &message);
 
                 // Verify individual signature is valid
-                assert!(public_key.verify(namespace.as_deref(), &message, &signature));
+                assert!(public_key.verify(namespace.as_slice(), &message, &signature));
 
                 let added =
-                    ed25519_batch.add(namespace.as_deref(), &message, &public_key, &signature);
+                    ed25519_batch.add(namespace.as_slice(), &message, &public_key, &signature);
                 assert!(added, "Valid signature should be added to batch");
             }
 
@@ -81,15 +81,15 @@ fn fuzz(input: FuzzInput) {
                 let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
                 let wrong_private_key = ed25519::PrivateKey::from_seed(wrong_private_key_seed);
                 let wrong_public_key = wrong_private_key.public_key();
-                let signature = private_key.sign(namespace.as_deref(), &message);
+                let signature = private_key.sign(namespace.as_slice(), &message);
 
                 // Only add if keys are different (invalid signature)
                 if private_key_seed != wrong_private_key_seed {
                     // Verify individual signature is invalid
-                    assert!(!wrong_public_key.verify(namespace.as_deref(), &message, &signature));
+                    assert!(!wrong_public_key.verify(namespace.as_slice(), &message, &signature));
 
                     let added = ed25519_batch.add(
-                        namespace.as_deref(),
+                        namespace.as_slice(),
                         &message,
                         &wrong_public_key,
                         &signature,

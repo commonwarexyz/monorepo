@@ -17,7 +17,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
+use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Bls12381Multisig<P: PublicKey, V: Variant> {
     /// Participants in the committee.
-    pub participants: OrderedAssociated<P, V::Public>,
+    pub participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
     pub signer: Option<(u32, Private)>,
 }
@@ -39,7 +39,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     ///
     /// If the provided private key does not match any consensus key in the committee,
     /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
+    pub fn new(participants: BiMap<P, V::Public>, private_key: Private) -> Self {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
@@ -58,7 +58,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     /// Participants have both an identity key and a consensus key. The identity key
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
-    pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
+    pub fn verifier(participants: BiMap<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     }
 
     /// Returns the ordered set of identity keys.
-    pub fn participants(&self) -> &Ordered<P> {
+    pub fn participants(&self) -> &Set<P> {
         self.participants.keys()
     }
 
@@ -353,7 +353,7 @@ mod macros {
             > Scheme<P, V> {
                 /// Creates a new scheme instance with the provided key material.
                 pub fn new(
-                    participants: commonware_utils::set::OrderedAssociated<P, V::Public>,
+                    participants: commonware_utils::ordered::BiMap<P, V::Public>,
                     private_key: commonware_cryptography::bls12381::primitives::group::Private,
                 ) -> Self {
                     Self {
@@ -366,7 +366,7 @@ mod macros {
 
                 /// Builds a verifier that can authenticate votes and certificates.
                 pub fn verifier(
-                    participants: commonware_utils::set::OrderedAssociated<P, V::Public>,
+                    participants: commonware_utils::ordered::BiMap<P, V::Public>,
                 ) -> Self {
                     Self {
                         raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::verifier(
@@ -389,7 +389,7 @@ mod macros {
                     self.raw.me()
                 }
 
-                fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
                     self.raw.participants()
                 }
 

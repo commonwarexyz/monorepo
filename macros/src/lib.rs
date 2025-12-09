@@ -12,9 +12,7 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
-    parse_macro_input,
-    spanned::Spanned,
-    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 mod nextest;
@@ -310,7 +308,7 @@ struct Branch {
 }
 
 impl Parse for SelectInput {
-    fn parse(input: ParseStream) -> Result<Self> {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
@@ -333,7 +331,7 @@ impl Parse for SelectInput {
             }
         }
 
-        Ok(SelectInput { branches })
+        Ok(Self { branches })
     }
 }
 
@@ -358,9 +356,8 @@ impl ToTokens for SelectInput {
 ///
 /// # Fusing
 ///
-/// This macro handles both the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
-/// and [pinning](https://docs.rs/futures/latest/futures/macro.pin_mut.html) of (fused) futures in
-/// a `select`-specific scope.
+/// This macro handles the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
+/// futures in a `select`-specific scope.
 ///
 /// # Example
 ///
@@ -391,30 +388,16 @@ pub fn select(input: TokenStream) -> TokenStream {
     let SelectInput { branches } = parse_macro_input!(input as SelectInput);
 
     // Generate code from provided statements
-    let mut stmts = Vec::new();
     let mut select_branches = Vec::new();
-    for (
-        index,
-        Branch {
-            pattern,
-            future,
-            block,
-        },
-    ) in branches.into_iter().enumerate()
+    for Branch {
+        pattern,
+        future,
+        block,
+    } in branches.into_iter()
     {
-        // Generate a unique identifier for each future
-        let future_ident = Ident::new(&format!("__select_future_{index}"), pattern.span());
-
-        // Fuse and pin each future
-        let stmt = quote! {
-            let #future_ident = (#future).fuse();
-            futures::pin_mut!(#future_ident);
-        };
-        stmts.push(stmt);
-
         // Generate branch for `select_biased!` macro
         let branch_code = quote! {
-            #pattern = #future_ident => #block,
+            #pattern = (#future).fuse() => #block,
         };
         select_branches.push(branch_code);
     }
@@ -423,7 +406,6 @@ pub fn select(input: TokenStream) -> TokenStream {
     quote! {
         {
             use futures::FutureExt as _;
-            #(#stmts)*
 
             futures::select_biased! {
                 #(#select_branches)*
@@ -433,68 +415,144 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Convenience macro to continuously [select] over a set of futures in biased order. See
-/// [select] for more details.
+/// Input for [select_loop!].
 ///
-/// Expands to a `loop` containing a [select] block. Rather than writing:
+/// Parses: `context, on_stopped => { block }, { branches... }`
+struct SelectLoopInput {
+    context: Expr,
+    shutdown_block: Block,
+    branches: Vec<Branch>,
+}
+
+impl Parse for SelectLoopInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        // Parse context expression
+        let context: Expr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // Parse `on_stopped =>`
+        let on_stopped_ident: Ident = input.parse()?;
+        if on_stopped_ident != "on_stopped" {
+            return Err(Error::new(
+                on_stopped_ident.span(),
+                "expected `on_stopped` keyword",
+            ));
+        }
+        input.parse::<Token![=>]>()?;
+
+        // Parse shutdown block
+        let shutdown_block: Block = input.parse()?;
+
+        // Parse comma after shutdown block
+        input.parse::<Token![,]>()?;
+
+        // Parse branches directly (no surrounding braces)
+        let mut branches = Vec::new();
+        while !input.is_empty() {
+            let pattern = Pat::parse_single(input)?;
+            input.parse::<Token![=]>()?;
+            let future: Expr = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let block: Block = input.parse()?;
+
+            branches.push(Branch {
+                pattern,
+                future,
+                block,
+            });
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(Self {
+            context,
+            shutdown_block,
+            branches,
+        })
+    }
+}
+
+/// Convenience macro to continuously [select!] over a set of futures in biased order,
+/// with a required shutdown handler.
 ///
-/// ```rust
-/// use std::time::Duration;
-/// use commonware_macros::select;
-/// use futures::executor::block_on;
-/// use futures_timer::Delay;
+/// This macro automatically creates a shutdown future from the provided context and requires a
+/// shutdown handler block. The shutdown future is created outside the loop, allowing it to
+/// persist across iterations until shutdown is signaled. The shutdown branch is always checked
+/// first (biased).
 ///
-/// async fn task() -> usize {
-///     42
+/// After the shutdown block is executed, the loop breaks by default. If different control flow
+/// is desired (such as returning from the enclosing function), it must be handled explicitly.
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// select_loop! {
+///     context,
+///     on_stopped => { cleanup },
+///     pattern = future => block,
+///     // ...
 /// }
-//
-/// block_on(async move {
-///     loop {
-///         select! {
-///             _ = Delay::new(Duration::from_secs(1)) => {
-///                 println!("timeout fired");
-///             },
-///             v = task() => {
-///                 println!("task completed with value: {}", v);
-///                 break;
-///             },
-///         }
-///     }
-/// });
 /// ```
 ///
-/// This macro allows writing:
+/// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
+/// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
 ///
-/// ```rust
-/// use std::time::Duration;
+/// # Example
+///
+/// ```rust,ignore
 /// use commonware_macros::select_loop;
-/// use futures::executor::block_on;
-/// use futures_timer::Delay;
 ///
-/// async fn task() -> usize {
-///     42
-/// }
-//
-/// block_on(async move {
+/// async fn run(context: impl commonware_runtime::Spawner) {
 ///     select_loop! {
-///         _ = Delay::new(Duration::from_secs(1)) => {
-///             println!("timeout fired");
+///         context,
+///         on_stopped => {
+///             println!("shutting down");
+///             drop(shutdown);
 ///         },
-///         v = task() => {
-///             println!("task completed with value: {}", v);
-///             break;
+///         msg = receiver.recv() => {
+///             println!("received: {:?}", msg);
 ///         },
 ///     }
-/// });
+/// }
 /// ```
 #[proc_macro]
 pub fn select_loop(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as SelectInput);
+    let SelectLoopInput {
+        context,
+        shutdown_block,
+        branches,
+    } = parse_macro_input!(input as SelectLoopInput);
+
+    // Convert branches to tokens for the inner select!
+    let branch_tokens: Vec<_> = branches
+        .iter()
+        .map(|b| {
+            let pattern = &b.pattern;
+            let future = &b.future;
+            let block = &b.block;
+            quote! { #pattern = #future => #block, }
+        })
+        .collect();
 
     quote! {
-        loop {
-            commonware_macros::select! {
-                #input
+        {
+            let mut shutdown = #context.stopped();
+            loop {
+                commonware_macros::select! {
+                    _ = &mut shutdown => {
+                        #shutdown_block
+
+                        // Break the loop after handling shutdown. Some implementations
+                        // may divert control flow themselves, so this may be unused.
+                        #[allow(unreachable_code)]
+                        break;
+                    },
+                    #(#branch_tokens)*
+                }
             }
         }
     }

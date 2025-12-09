@@ -1154,9 +1154,16 @@ name = "commonware-consensus-fuzz"
 version = "0.0.63"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]
@@ -1165,6 +1172,8 @@ dependencies = [
 name = "commonware-cryptography"
 version = "0.0.63"
 dependencies = [
+ "anyhow",
+ "arbitrary",
  "blake3",
  "blst",
  "bytes",
@@ -1173,6 +1182,7 @@ dependencies = [
  "commonware-codec",
  "commonware-utils",
  "criterion",
+ "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
  "p256",
@@ -1558,6 +1568,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.2.16",
+ "hashbrown 0.16.1",
  "num-bigint",
  "num-integer",
  "num-rational",
@@ -2437,7 +2448,7 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "getrandom 0.3.4",
- "hashbrown 0.16.0",
+ "hashbrown 0.16.1",
  "nonzero_ext",
  "parking_lot",
  "portable-atomic",
@@ -2527,9 +2538,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -2925,7 +2936,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6717a8d2a5a929a1a2eb43a12812498ed141a0bcfb7e8f7844fbdbe4303bba9f"
 dependencies = [
  "equivalent",
- "hashbrown 0.16.0",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]

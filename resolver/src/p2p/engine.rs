@@ -1,7 +1,7 @@
 use super::{
     config::Config,
     fetcher::Fetcher,
-    ingress::{Mailbox, Message},
+    ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
 use crate::Consumer;
@@ -70,7 +70,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key>>,
+    mailbox: mpsc::Receiver<Message<Key, P>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -110,7 +110,7 @@ impl<
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         // TODO(#1833): Metrics should use the post-start context
@@ -228,20 +228,26 @@ impl<
                         return;
                     };
                     match msg {
-                        Message::Fetch { keys } => {
-                            for key in keys {
+                        Message::Fetch(requests) => {
+                            for FetchRequest { key, targets } in requests {
                                 trace!(?key, "mailbox: fetch");
 
                                 // Check if the fetch is already in progress
-                                if self.fetch_timers.contains_key(&key) {
-                                    trace!(?key, "duplicate fetch");
-                                    self.metrics.fetch.inc(Status::Dropped);
-                                    continue;
+                                let is_new = !self.fetch_timers.contains_key(&key);
+
+                                // Update targets (even for existing fetches)
+                                match targets {
+                                    Some(targets) => self.fetcher.add_targets(key.clone(), targets),
+                                    None => self.fetcher.clear_targets(&key),
                                 }
 
-                                // Record fetch start time
-                                self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                                self.fetcher.add_ready(key);
+                                // Only start new fetch if not already in progress
+                                if is_new {
+                                    self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
+                                    self.fetcher.add_ready(key);
+                                } else {
+                                    trace!(?key, "updated targets for existing fetch");
+                                }
                             }
                         }
                         Message::Cancel { key } => {
@@ -337,10 +343,10 @@ impl<
         priority: bool,
     ) {
         // Encode message
-        let payload: wire::Payload<Key> = match response {
-            Ok(data) => wire::Payload::Response(data),
-            Err(_) => wire::Payload::Error,
-        };
+        let payload: wire::Payload<Key> = response.map_or_else(
+            |_| wire::Payload::Error,
+            |data| wire::Payload::Response(data),
+        );
         let msg = wire::Message { id, payload };
 
         // Send message to peer
@@ -389,10 +395,14 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+
+            // Clear all targets for this key
+            self.fetcher.clear_targets(&key);
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
+        // (blocking the peer also removes any targets associated with it)
         self.blocker.block(peer.clone()).await;
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);

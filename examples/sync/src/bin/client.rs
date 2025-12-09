@@ -1,4 +1,4 @@
-//! This client binary creates or opens an [commonware_storage::adb::any] database and
+//! This client binary creates or opens an [commonware_storage::qmdb::any] database and
 //! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
 //! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
@@ -8,7 +8,7 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::adb::{store::Db as _, sync};
+use commonware_storage::qmdb::sync;
 use commonware_sync::{
     any, crate_version,
     databases::{DatabaseType, Syncable},

@@ -230,7 +230,12 @@ impl crate::Sink for Sink {
         let msg_len = msg.len();
 
         while bytes_sent < msg_len {
-            // Figure out how much is left to read and where to read into
+            // Figure out how much is left to send and where to send from.
+            //
+            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
+            // `bytes_sent` is always < `msg_len` due to the loop condition, so
+            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
+            // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts(
                     msg.as_mut_ptr().add(bytes_sent) as *const u8,
@@ -295,7 +300,12 @@ impl crate::Stream for Stream {
         let mut buf = buf.into();
         let buf_len = buf.len();
         while bytes_received < buf_len {
-            // Figure out how much is left to read and where to read into
+            // Figure out how much is left to read and where to read into.
+            //
+            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // `bytes_received` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_received)` stays within bounds and `buf_len - bytes_received`
+            // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
                     buf.as_mut_ptr().add(bytes_received),

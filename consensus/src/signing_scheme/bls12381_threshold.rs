@@ -25,7 +25,10 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
+use commonware_utils::{
+    ordered::{BiMap, Quorum, Set},
+    TryCollect,
+};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
@@ -38,7 +41,7 @@ use std::collections::BTreeSet;
 pub enum Bls12381Threshold<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
-        participants: OrderedAssociated<P, V::Public>,
+        participants: BiMap<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
         /// Local share used to generate partial signatures.
@@ -46,7 +49,7 @@ pub enum Bls12381Threshold<P: PublicKey, V: Variant> {
     },
     Verifier {
         /// Participants in the committee.
-        participants: OrderedAssociated<P, V::Public>,
+        participants: BiMap<P, V::Public>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
@@ -69,13 +72,14 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
+    pub fn new(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedAssociated<_, _>>();
+            .try_collect::<BiMap<_, _>>()
+            .expect("participants are unique");
 
         let public_key = share.public::<V>();
         if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
@@ -104,13 +108,14 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
+    pub fn verifier(participants: Set<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
-            .collect::<OrderedAssociated<_, _>>();
+            .try_collect::<BiMap<_, _>>()
+            .expect("participants are unique");
 
         Self::Verifier {
             participants,
@@ -129,7 +134,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
-    pub fn participants(&self) -> &Ordered<P> {
+    pub fn participants(&self) -> &Set<P> {
         match self {
             Bls12381Threshold::Signer { participants, .. } => participants.keys(),
             Bls12381Threshold::Verifier { participants, .. } => participants.keys(),
@@ -382,7 +387,7 @@ mod macros {
             > Scheme<P, V> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
                 pub fn new(
-                    participants: commonware_utils::set::Ordered<P>,
+                    participants: commonware_utils::ordered::Set<P>,
                     polynomial: &commonware_cryptography::bls12381::primitives::poly::Public<V>,
                     share: commonware_cryptography::bls12381::primitives::group::Share,
                 ) -> Self {
@@ -397,7 +402,7 @@ mod macros {
 
                 /// Creates a verifier that can authenticate partial signatures.
                 pub fn verifier(
-                    participants: commonware_utils::set::Ordered<P>,
+                    participants: commonware_utils::ordered::Set<P>,
                     polynomial: &commonware_cryptography::bls12381::primitives::poly::Public<V>,
                 ) -> Self {
                     Self {
@@ -431,7 +436,7 @@ mod macros {
                     self.raw.me()
                 }
 
-                fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
                     self.raw.participants()
                 }
 

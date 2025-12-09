@@ -1220,4 +1220,49 @@ mod tests {
         let state2 = test_operations_and_restart(1_000);
         assert_eq!(state1, state2);
     }
+
+    #[test_traced]
+    fn test_put_multiple_updates() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the freezer
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                table_partition: "test_table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize freezer");
+
+            let key = test_key("key1");
+
+            freezer
+                .put(key.clone(), 1)
+                .await
+                .expect("Failed to put data");
+            freezer
+                .put(key.clone(), 2)
+                .await
+                .expect("Failed to put data");
+            freezer.sync().await.expect("Failed to sync");
+            assert_eq!(
+                freezer
+                    .get(Identifier::Key(&key))
+                    .await
+                    .expect("Failed to get data")
+                    .unwrap(),
+                2
+            );
+        });
+    }
 }

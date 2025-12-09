@@ -224,7 +224,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Ensures that a section pruned during the current execution is not accessed.
-    fn prune_guard(&self, section: u64) -> Result<(), Error> {
+    const fn prune_guard(&self, section: u64) -> Result<(), Error> {
         if section < self.oldest_retained_section {
             Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
         } else {

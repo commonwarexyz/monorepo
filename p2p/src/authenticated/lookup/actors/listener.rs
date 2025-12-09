@@ -181,6 +181,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         // Loop over incoming connections
         let mut accepted = 0;
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping listener");
+            },
             update = self.mailbox.next() => {
                 let Some(registered_ips) = update else {
                     debug!("mailbox closed");

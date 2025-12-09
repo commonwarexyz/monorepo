@@ -7,7 +7,7 @@ use crate::{
         signing_scheme::{SeededScheme, SimplexScheme},
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
     types::{Round, View},
@@ -15,7 +15,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::Digest;
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -32,14 +32,14 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 #[derive(Clone, Debug)]
 pub struct Config<S: Scheme> {
     pub namespace: Vec<u8>,
-    pub participants: Ordered<S::PublicKey>,
+    pub participants: Set<S::PublicKey>,
     pub scheme: S,
 }
 
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
     context: E,
-    participants: Ordered<S::PublicKey>,
+    pub participants: Set<S::PublicKey>,
     scheme: S,
 
     namespace: Vec<u8>,
@@ -135,7 +135,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
@@ -179,7 +179,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Nullify {
+                    Subject::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -225,7 +225,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,

@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Spawner};
-use commonware_utils::{quorum, set::Ordered};
+use commonware_utils::{ordered::Set, quorum};
 use futures::{channel::mpsc, SinkExt};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
     t: u32,
-    contributors: Ordered<C::PublicKey>,
+    contributors: Set<C::PublicKey>,
 
     corrupt: bool,
     lazy: bool,
@@ -44,7 +44,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         crypto: C,
         dkg_phase_timeout: Duration,
         arbiter: C::PublicKey,
-        contributors: Ordered<C::PublicKey>,
+        contributors: Set<C::PublicKey>,
         corrupt: bool,
         lazy: bool,
         forger: bool,
@@ -193,7 +193,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
-                    let signature = self.crypto.sign(None, b"fake");
+                    let signature = self.crypto.sign(b"fake", b"fake");
                     acks.push(Ack {
                         player: idx as u32,
                         signature,
@@ -240,6 +240,11 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         // Respond to commitments and wait for acks
         let t = self.context.current() + 2 * self.dkg_phase_timeout;
         select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping round");
+                return (round, None);
+            },
             _ = self.context.sleep_until(t) => {
                 debug!(round, "ack timeout");
                 break;

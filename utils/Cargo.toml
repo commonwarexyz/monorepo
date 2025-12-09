@@ -10,11 +10,15 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 futures = { workspace = true, optional = true }
+hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }

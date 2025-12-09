@@ -20,8 +20,8 @@ use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{
     from_hex,
-    set::{Ordered, OrderedQuorum},
-    union, NZUsize, NZU32,
+    ordered::{Quorum, Set},
+    union, NZUsize, TryCollect, NZU32,
 };
 use governor::Quota;
 use std::{
@@ -86,14 +86,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
+    let validators: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -152,7 +153,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
@@ -166,7 +167,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer.clone(),
+        signer,
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -205,12 +206,12 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (pending_sender, pending_receiver) = network.register(
+        let (vote_sender, vote_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (recovered_sender, recovered_receiver) = network.register(
+        let (certificate_sender, certificate_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
@@ -267,8 +268,8 @@ fn main() {
         // Start consensus
         network.start();
         engine.start(
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
 

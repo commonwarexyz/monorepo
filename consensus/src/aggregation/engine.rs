@@ -28,7 +28,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, set::OrderedQuorum, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -779,7 +779,7 @@ impl<
     // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `index`.
-    fn get_journal_section(&self, index: Index) -> u64 {
+    const fn get_journal_section(&self, index: Index) -> u64 {
         index / self.journal_heights_per_section
     }
 

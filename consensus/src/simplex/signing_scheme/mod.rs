@@ -35,14 +35,14 @@ cfg_if::cfg_if! {
 
 use crate::{
     signing_scheme::{Context, Scheme},
-    simplex::types::VoteContext,
+    simplex::types::Subject,
     types::Round,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 
-impl<'a, D: Digest> Context for VoteContext<'a, D> {
+impl<'a, D: Digest> Context for Subject<'a, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         vote_namespace_and_message(namespace, self)
     }
@@ -57,13 +57,10 @@ pub trait SeededScheme: Scheme {
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
 }
 
-pub trait SimplexScheme<D: Digest>:
-    for<'a> SeededScheme<Context<'a, D> = VoteContext<'a, D>>
-{
-}
+pub trait SimplexScheme<D: Digest>: for<'a> SeededScheme<Context<'a, D> = Subject<'a, D>> {}
 
 impl<D: Digest, S> SimplexScheme<D> for S where
-    S: for<'a> SeededScheme<Context<'a, D> = VoteContext<'a, D>>
+    S: for<'a> SeededScheme<Context<'a, D> = Subject<'a, D>>
 {
 }
 
@@ -109,14 +106,14 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: &VoteContext<D>,
+    subject: &Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
-    match context {
-        VoteContext::Notarize { proposal } => {
+    match subject {
+        Subject::Notarize { proposal } => {
             (notarize_namespace(namespace), proposal.encode().to_vec())
         }
-        VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
-        VoteContext::Finalize { proposal } => {
+        Subject::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
+        Subject::Finalize { proposal } => {
             (finalize_namespace(namespace), proposal.encode().to_vec())
         }
     }
@@ -129,15 +126,15 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: &VoteContext<D>,
+    subject: &Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),
-        match context {
-            VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+        match subject {
+            Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
                 proposal.round.encode().to_vec()
             }
-            VoteContext::Nullify { round } => round.encode().to_vec(),
+            Subject::Nullify { round } => round.encode().to_vec(),
         },
     )
 }

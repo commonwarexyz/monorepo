@@ -44,6 +44,18 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+unused-must-use = "deny"
+rust-2018-idioms = "deny"
+
+[workspace.lints.clippy]
+missing-const-for-fn = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+option-if-let-else = "warn"
+undocumented_unsafe_blocks = "deny"
+
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
@@ -78,6 +90,7 @@ console-subscriber = "0.5.0"
 crc32fast = "1.5.0"
 criterion = "0.7.0"
 crossterm = "0.29.0"
+ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = { version = "2.1.0", default-features = false }
 ed25519-zebra = "4.1.0"
 either = "1.13.0"
@@ -85,6 +98,7 @@ futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = "0.3.31"
 governor = "0.10.2"
+hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
 libc = "0.2.172"
 libfuzzer-sys = "0.4.9"
