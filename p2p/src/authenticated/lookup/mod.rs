@@ -937,4 +937,90 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_subscription_includes_self_when_registered() {
+        let base_port = 3000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create self (peer0) and other peers
+            let self_sk = ed25519::PrivateKey::from_seed(0);
+            let self_pk = self_sk.public_key();
+            let self_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+
+            let other_pk = ed25519::PrivateKey::from_seed(1).public_key();
+            let other_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+
+            // Create network for peer0 (self)
+            let config = Config::test(self_sk, self_addr, 1_024 * 1_024);
+            let (network, mut oracle) = Network::new(context.with_label("network"), config);
+            network.start();
+
+            // Subscribe to peer sets
+            let mut subscription = oracle.subscribe().await;
+
+            // Register a peer set that does NOT include self
+            let peer_set: Map<_, _> = [(other_pk.clone(), other_addr)].try_into().unwrap();
+            oracle.update(1, peer_set.clone()).await;
+
+            // Receive subscription notification
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            assert_eq!(new.len(), 1);
+            assert_eq!(all.len(), 1);
+
+            // Self should NOT be in the new set
+            assert!(
+                new.position(&self_pk).is_none(),
+                "new set should not include self"
+            );
+            assert!(
+                new.position(&other_pk).is_some(),
+                "new set should include other"
+            );
+
+            // Self should NOT be in the tracked set (not registered)
+            assert!(
+                all.position(&self_pk).is_none(),
+                "tracked peers should not include self"
+            );
+            assert!(
+                all.position(&other_pk).is_some(),
+                "tracked peers should include other"
+            );
+
+            // Now register a peer set that DOES include self
+            let peer_set: Map<_, _> =
+                [(self_pk.clone(), self_addr), (other_pk.clone(), other_addr)]
+                    .try_into()
+                    .unwrap();
+            oracle.update(2, peer_set.clone()).await;
+
+            // Receive subscription notification
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 2);
+            assert_eq!(new.len(), 2);
+            assert_eq!(all.len(), 2);
+
+            // Both peers should be in the new set
+            assert!(
+                new.position(&self_pk).is_some(),
+                "new set should include self"
+            );
+            assert!(
+                new.position(&other_pk).is_some(),
+                "new set should include other"
+            );
+
+            // Both peers should be in the tracked set
+            assert!(
+                all.position(&self_pk).is_some(),
+                "tracked peers should include self"
+            );
+            assert!(
+                all.position(&other_pk).is_some(),
+                "tracked peers should include other"
+            );
+        });
+    }
 }
