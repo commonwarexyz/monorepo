@@ -325,17 +325,42 @@ where
                     network_msg = round_receiver.recv().fuse() => {
                         match network_msg {
                             Ok((sender_pk, msg_bytes)) => {
-                                Self::handle_network_message(
-                                    &mut storage,
-                                    epoch,
-                                    max_read_size,
-                                    sender_pk,
-                                    msg_bytes,
-                                    &round_info,
-                                    dealer_state.as_mut(),
-                                    player_state.as_mut(),
-                                    &mut round_sender,
-                                ).await;
+                                let msg = match Message::<V, C::PublicKey>::read_cfg(
+                                    &mut msg_bytes.clone(),
+                                    &max_read_size,
+                                ) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
+                                        continue;
+                                    }
+                                };
+                                match msg {
+                                    Message::Dealer(pub_msg, priv_msg) => {
+                                        if let Some(ref mut ps) = player_state {
+                                            Self::handle_dealer_message(
+                                                &mut storage,
+                                                epoch,
+                                                sender_pk,
+                                                pub_msg,
+                                                priv_msg,
+                                                ps,
+                                                &mut round_sender,
+                                            ).await;
+                                        }
+                                    }
+                                    Message::Ack(ack) => {
+                                        if let Some(ref mut ds) = dealer_state {
+                                            Self::handle_ack_message(
+                                                &mut storage,
+                                                epoch,
+                                                sender_pk,
+                                                ack,
+                                                ds,
+                                            ).await;
+                                        }
+                                    }
+                                }
                                 continue;
                             }
                             Err(_) => {
@@ -510,76 +535,51 @@ where
         info!("exiting DKG actor");
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_network_message<S: Sender<PublicKey = C::PublicKey>>(
+    async fn handle_dealer_message<S: Sender<PublicKey = C::PublicKey>>(
         storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
-        max_read_size: NonZeroU32,
         sender_pk: C::PublicKey,
-        msg_bytes: bytes::Bytes,
-        round_info: &Info<V, C::PublicKey>,
-        dealer_state: Option<&mut Dealer<V, C>>,
-        player_state: Option<&mut Player<V, C>>,
+        pub_msg: DealerPubMsg<V>,
+        priv_msg: DealerPrivMsg,
+        player_state: &mut Player<V, C>,
         network_sender: &mut S,
     ) {
-        let msg = match Message::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size)
-        {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
-                return;
-            }
-        };
-
-        match msg {
-            Message::Dealer(pub_msg, priv_msg) => {
-                let Some(ps) = player_state else {
-                    return;
-                };
-
-                // Verify round matches
-                if round_info.round() != epoch.get() {
-                    return;
-                }
-
-                // Handle the message
-                let response = match ps.handle(sender_pk.clone(), pub_msg.clone(), priv_msg.clone())
-                {
-                    PlayerResponse::New(msg) => {
-                        // New commitment - persist the dealer message
-                        storage
-                            .append_dealer_msg(epoch, sender_pk.clone(), pub_msg, priv_msg)
-                            .await;
-                        debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
-                        msg
-                    }
-                    PlayerResponse::Cached(msg) => msg,
-                    PlayerResponse::Invalid => return,
-                };
-
-                // Send the ack
-                let payload = response.encode().freeze();
-                if let Err(e) = network_sender
-                    .send(Recipients::One(sender_pk.clone()), payload, true)
-                    .await
-                {
-                    warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
-                } else {
-                    debug!(?epoch, dealer = ?sender_pk, "sent ack");
-                }
-            }
-            Message::Ack(ack) => {
-                let Some(ds) = dealer_state else {
-                    return;
-                };
-
-                if let Some(ack) = ds.handle(sender_pk.clone(), ack) {
+        let response =
+            match player_state.handle(sender_pk.clone(), pub_msg.clone(), priv_msg.clone()) {
+                PlayerResponse::New(msg) => {
                     storage
-                        .append_player_ack(epoch, sender_pk.clone(), ack)
+                        .append_dealer_msg(epoch, sender_pk.clone(), pub_msg, priv_msg)
                         .await;
-                    debug!(?epoch, player = ?sender_pk, "received and stored player ack");
+                    debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
+                    msg
                 }
-            }
+                PlayerResponse::Cached(msg) => msg,
+                PlayerResponse::Invalid => return,
+            };
+
+        let payload = response.encode().freeze();
+        if let Err(e) = network_sender
+            .send(Recipients::One(sender_pk.clone()), payload, true)
+            .await
+        {
+            warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+        } else {
+            debug!(?epoch, dealer = ?sender_pk, "sent ack");
+        }
+    }
+
+    async fn handle_ack_message(
+        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
+        epoch: Epoch,
+        sender_pk: C::PublicKey,
+        ack: PlayerAck<C::PublicKey>,
+        dealer_state: &mut Dealer<V, C>,
+    ) {
+        if let Some(ack) = dealer_state.handle(sender_pk.clone(), ack) {
+            storage
+                .append_player_ack(epoch, sender_pk.clone(), ack)
+                .await;
+            debug!(?epoch, player = ?sender_pk, "received and stored player ack");
         }
     }
 
