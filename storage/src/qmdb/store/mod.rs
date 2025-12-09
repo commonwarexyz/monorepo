@@ -92,10 +92,7 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{
-            variable::{unordered::Operation, Value},
-            Committable as _, Keyed as _,
-        },
+        operation::{self, operation::Variable, variable::Value, Committable as _, Keyed as _},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -112,6 +109,8 @@ mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 pub use batch::{Batch, Batchable, Getter};
+
+type Operation<K, V> = operation::operation::Operation<K, V, Variable>;
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -351,7 +350,7 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(loc).await? else {
+            let Operation::Update(k, v, _) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -407,7 +406,7 @@ where
             return Ok(None);
         };
 
-        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
+        let Operation::CommitFloor(metadata, _, _) = self.log.read(*last_commit).await? else {
             unreachable!("last commit should be a commit floor operation");
         };
 
@@ -427,7 +426,7 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log.append(Operation::new_update(key, value)).await?;
 
         Ok(())
     }
@@ -442,7 +441,7 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log.append(Operation::new_update(key, value)).await?;
 
         Ok(true)
     }
@@ -456,7 +455,7 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::Delete(key)).await?;
+        self.log.append(Operation::new_delete(key)).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
@@ -495,7 +494,7 @@ where
         // Apply the commit operation with the new inactivity floor.
         let loc = self.inactivity_floor_loc;
         self.log
-            .append(Operation::CommitFloor(metadata, loc))
+            .append(Operation::new_commit_floor(metadata, loc))
             .await?;
 
         // Commit the log to ensure this commit is durable.
