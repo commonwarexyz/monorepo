@@ -197,7 +197,7 @@ mod tests {
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,
-        all_validator_pks: &[PublicKey], // All validators in the system
+        all_validators: &[PublicKey], // All validators in the system
         online_validators: &[(PublicKey, PrivateKey, Share)], // Only the validators to spawn
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
@@ -220,7 +220,7 @@ mod tests {
                     Epoch::new(111),
                     share.clone(),
                     polynomial.clone(),
-                    all_validator_pks.to_vec(), // Use all validators, not just online ones
+                    all_validators.to_vec(), // Use all validators, not just online ones
                 );
                 s
             };
@@ -236,7 +236,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                 namespace,
-                all_validator_pks.len() as u32,
+                all_validators.len() as u32,
                 polynomial.clone(),
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -895,13 +895,14 @@ mod tests {
                 dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
+            let (mut oracle, validators, all_validators, mut registrations) =
+                initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec,
+                    RELIABLE_LINK,
+                )
+                .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
@@ -912,7 +913,7 @@ mod tests {
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
-                &pks,               // All validators (5)
+                &all_validators,    // All validators (5)
                 &online_validators, // Online validators to spawn (4)
                 &mut registrations,
                 &mut automatons.lock().unwrap(),

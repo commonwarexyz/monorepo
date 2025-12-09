@@ -160,6 +160,9 @@ where
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
+        // NOTE: In a production setting with a large validator set, the implementor may want
+        // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
+        // cryptographic operations.
         spawn_cell!(
             self.context,
             self.run(output, share, orchestrator, dkg, callback).await
@@ -175,7 +178,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        mut update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
@@ -195,7 +198,7 @@ where
                 share,
             };
             storage.append_epoch(initial_state).await;
-        };
+        }
 
         // Start a muxer for the physical channel used by DKG/reshare
         let (mux, mut dkg_mux) =
@@ -482,7 +485,7 @@ where
                             } else {
                                 Update::Failure { epoch }
                             };
-                            if let PostUpdate::Stop = update_cb.on_update(update).await {
+                            if let PostUpdate::Stop = callback.on_update(update).await {
                                 // Close the mailbox to prevent accepting any new messages
                                 drop(self.mailbox);
                                 // Exit last consensus instance to avoid useless work while we wait for shutdown

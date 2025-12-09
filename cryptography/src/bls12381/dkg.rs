@@ -1570,12 +1570,12 @@ mod test_plan {
             // Check dealer/player ranges
             for &d in &self.dealers {
                 if d >= num_participants {
-                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]",));
+                    return Err(anyhow!("dealer {d} out of range [1, {num_participants}]"));
                 }
             }
             for &p in &self.players {
                 if p >= num_participants {
-                    return Err(anyhow!("player {p} out of range [1, {num_participants}]",));
+                    return Err(anyhow!("player {p} out of range [1, {num_participants}]"));
                 }
             }
 
