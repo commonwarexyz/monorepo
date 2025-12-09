@@ -504,8 +504,6 @@ mod test {
         link: Link,
         mode: Mode,
         crash: Option<Crash>,
-        /// Minimum number of failures expected (for tests with lossy networks/crashes).
-        expected_failures: u64,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
         fail_epochs: HashSet<u64>,
     }
@@ -690,7 +688,7 @@ mod test {
         }
 
         fn run(self) -> anyhow::Result<PlanResult> {
-            let expected_failures = self.expected_failures;
+            let expected_failures = self.fail_epochs.len() as u64;
             let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
             info!(
                 failures = result.failures,
@@ -721,7 +719,6 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         };
         for seed in 0..3 {
@@ -755,7 +752,6 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         };
         for seed in 0..3 {
@@ -789,7 +785,6 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -810,7 +805,6 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -831,7 +825,6 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -852,7 +845,6 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -873,7 +865,6 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -894,7 +885,6 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -915,7 +905,6 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -936,7 +925,6 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: None,
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -961,7 +949,6 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -986,7 +973,6 @@ mod test {
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -1011,7 +997,6 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -1036,7 +1021,6 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            expected_failures: 0,
             fail_epochs: HashSet::new(),
         }
         .run()
@@ -1046,8 +1030,6 @@ mod test {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn reshare_with_forced_failure() {
-        // Test that forces epoch 0 to fail by dropping all DKG messages,
-        // then verifies recovery in epoch 1
         Plan {
             seed: 0,
             total: 4,
@@ -1059,7 +1041,6 @@ mod test {
             },
             mode: Mode::Reshare(1),
             crash: None,
-            expected_failures: 1,
             fail_epochs: HashSet::from([0]),
         }
         .run()
@@ -1068,9 +1049,7 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn reshare_with_many_forced_failure() {
-        // Test that forces epoch 0 to fail by dropping all DKG messages,
-        // then verifies recovery in epoch 1
+    fn reshare_with_many_forced_failures() {
         Plan {
             seed: 0,
             total: 8,
@@ -1082,7 +1061,6 @@ mod test {
             },
             mode: Mode::Reshare(3),
             crash: None,
-            expected_failures: 3,
             fail_epochs: HashSet::from([0, 2, 3]),
         }
         .run()
@@ -1092,8 +1070,6 @@ mod test {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn dkg_with_forced_failure() {
-        // Test that forces epoch 0 to fail by dropping all DKG messages,
-        // then verifies recovery in epoch 1
         Plan {
             seed: 0,
             total: 4,
@@ -1105,8 +1081,27 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: None,
-            expected_failures: 1,
             fail_epochs: HashSet::from([0]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_with_many_forced_failures() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: None,
+            fail_epochs: HashSet::from([0, 1]),
         }
         .run()
         .unwrap();
