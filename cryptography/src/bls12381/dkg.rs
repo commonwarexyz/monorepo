@@ -2129,7 +2129,8 @@ mod test_plan {
                     if !round
                         .expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32))
                     {
-                        last_successful_players = Some(round.players.iter().cloned().collect());
+                        last_successful_players =
+                            Some(round.players.iter().copied().try_collect().unwrap());
                     }
                     rounds.push(round);
                     Ok(ControlFlow::Continue(()))
