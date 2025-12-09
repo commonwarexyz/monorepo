@@ -942,7 +942,7 @@ mod test {
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
-            expected_failures: 1,
+            expected_failures: 0,
         }
         .run()
         .unwrap();

@@ -411,12 +411,15 @@ where
                             }
                         }
 
-                        // At the midpoint of the epoch, finalize dealer and create log for inclusion
-                        if relative_height == mid_point {
+                        // At or past the midpoint, finalize dealer if not already done.
+                        // The >= check handles restart after midpoint acknowledgment.
+                        if relative_height >= mid_point {
                             if let Some(ref mut ds) = dealer_state {
-                                if let Some(log) = ds.finalize() {
-                                    info!(?epoch, "finalized dealer log for inclusion");
-                                    drop(log); // Log is stored in ds.finalized_log
+                                if ds.finalized_log().is_none() {
+                                    if let Some(log) = ds.finalize() {
+                                        info!(?epoch, "finalized dealer log for inclusion");
+                                        drop(log); // Log is stored in ds.finalized_log
+                                    }
                                 }
                             }
                         }
