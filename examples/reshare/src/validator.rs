@@ -655,9 +655,9 @@ mod test {
                 failures = result.failures,
                 expected_failures, "test completed"
             );
-            if result.failures < expected_failures {
+            if result.failures != expected_failures {
                 return Err(anyhow!(
-                    "expected at least {} failures, got {}",
+                    "expected {} failures, got {}",
                     expected_failures,
                     result.failures
                 ));
