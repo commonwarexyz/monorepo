@@ -8,7 +8,7 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
-use crate::signing_scheme::{Context, Scheme, Vote, VoteVerification};
+use crate::signing_scheme::{Context, Scheme, Signature, SignatureVerification};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -177,7 +177,11 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     }
 
     /// Signs a vote and returns it.
-    pub fn sign_vote<S, D>(&self, namespace: &[u8], context: S::Context<'_, D>) -> Option<Vote<S>>
+    pub fn sign_vote<S, D>(
+        &self,
+        namespace: &[u8],
+        context: S::Context<'_, D>,
+    ) -> Option<Signature<S>>
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
@@ -188,7 +192,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         let signature =
             partial_sign_message::<V>(share, Some(namespace.as_ref()), message.as_ref()).value;
 
-        Some(Vote {
+        Some(Signature {
             signer: share.index,
             signature,
         })
@@ -199,13 +203,13 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         &self,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        vote: &Vote<S>,
+        signature: &Signature<S>,
     ) -> bool
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
     {
-        let Some(evaluated) = self.polynomial().get(vote.signer as usize) else {
+        let Some(evaluated) = self.polynomial().get(signature.signer as usize) else {
             return false;
         };
 
@@ -214,7 +218,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
             evaluated,
             Some(namespace.as_ref()),
             message.as_ref(),
-            &vote.signature,
+            &signature.signature,
         )
         .is_ok()
     }
@@ -225,16 +229,16 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         _rng: &mut R,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        votes: I,
-    ) -> VoteVerification<S>
+        signatures: I,
+    ) -> SignatureVerification<S>
     where
         S: Scheme<Signature = V::Signature>,
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
         let mut invalid = BTreeSet::new();
-        let partials: Vec<_> = votes
+        let partials: Vec<_> = signatures
             .into_iter()
             .map(|vote| PartialSignature::<V> {
                 index: vote.signer,
@@ -258,7 +262,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         let verified = partials
             .into_iter()
             .filter(|partial| !invalid.contains(&partial.index))
-            .map(|partial| Vote {
+            .map(|partial| Signature {
                 signer: partial.index,
                 signature: partial.value,
             })
@@ -266,16 +270,16 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
 
         let invalid_signers = invalid.into_iter().collect();
 
-        VoteVerification::new(verified, invalid_signers)
+        SignatureVerification::new(verified, invalid_signers)
     }
 
     /// Assembles a certificate from a collection of votes.
-    pub fn assemble_certificate<S, I>(&self, votes: I) -> Option<V::Signature>
+    pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<V::Signature>
     where
         S: Scheme<Signature = V::Signature>,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
-        let partials: Vec<_> = votes
+        let partials: Vec<_> = signatures
             .into_iter()
             .map(|vote| PartialSignature::<V> {
                 index: vote.signer,
@@ -444,7 +448,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                ) -> Option<$crate::signing_scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -452,9 +456,9 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    vote: &$crate::signing_scheme::Vote<Self>,
+                    signature: &$crate::signing_scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote(namespace, context, vote)
+                    self.raw.verify_vote(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -462,21 +466,21 @@ mod macros {
                     rng: &mut R,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    votes: I,
-                ) -> $crate::signing_scheme::VoteVerification<Self>
+                    signatures: I,
+                ) -> $crate::signing_scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes(rng, namespace, context, votes)
+                    self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
-                fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+                fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(votes)
+                    self.raw.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<

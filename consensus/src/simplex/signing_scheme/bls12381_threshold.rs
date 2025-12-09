@@ -7,7 +7,7 @@
 //! (as it must be sent by said participant) but can't be used by an external observer.
 
 use crate::{
-    signing_scheme::{self, VoteVerification as SignatureVerification},
+    signing_scheme::{self, SignatureVerification},
     simplex::{
         signing_scheme::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
@@ -388,7 +388,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-    ) -> Option<signing_scheme::Vote<Self>> {
+    ) -> Option<signing_scheme::Signature<Self>> {
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
@@ -406,7 +406,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             seed_signature,
         };
 
-        Some(signing_scheme::Vote {
+        Some(signing_scheme::Signature {
             signer: share.index,
             signature,
         })
@@ -414,7 +414,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = signing_scheme::Vote<Self>>,
+        I: IntoIterator<Item = signing_scheme::Signature<Self>>,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
             .into_iter()
@@ -454,7 +454,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        signature: &signing_scheme::Vote<Self>,
+        signature: &signing_scheme::Signature<Self>,
     ) -> bool {
         let Some(evaluated) = self.polynomial().get(signature.signer as usize) else {
             return false;
@@ -490,7 +490,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = signing_scheme::Vote<Self>>,
+        I: IntoIterator<Item = signing_scheme::Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
@@ -539,7 +539,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| signing_scheme::Vote {
+            .map(|(vote, seed)| signing_scheme::Signature {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,

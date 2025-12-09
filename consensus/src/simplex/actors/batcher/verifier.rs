@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::VoteVerification as SignatureVerification,
+    signing_scheme::SignatureVerification,
     simplex::{
         signing_scheme::SimplexScheme,
         types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},

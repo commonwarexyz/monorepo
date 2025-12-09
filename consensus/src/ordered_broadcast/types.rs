@@ -2,7 +2,7 @@
 
 use super::signing_scheme::OrderedBroadcastScheme;
 use crate::{
-    signing_scheme::{self, Scheme, SchemeProvider, Vote},
+    signing_scheme::{self, Scheme, SchemeProvider, Signature},
     types::Epoch,
 };
 use bytes::{Buf, BufMut};
@@ -626,13 +626,17 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     ///
     /// This is a cryptographic signature that can be combined with other votes
     /// to form a certificate once a quorum is reached.
-    pub vote: Vote<S>,
+    pub signature: Signature<S>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and signature.
-    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, vote: Vote<S>) -> Self {
-        Self { chunk, epoch, vote }
+    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: Signature<S>) -> Self {
+        Self {
+            chunk,
+            epoch,
+            signature,
+        }
     }
 
     /// Verify the Ack.
@@ -650,7 +654,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_vote::<D>(&ack_namespace, ctx, &self.vote)
+        scheme.verify_vote::<D>(&ack_namespace, ctx, &self.signature)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -666,8 +670,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &chunk,
             epoch,
         };
-        let vote = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
-        Some(Self::new(chunk, epoch, vote))
+        let signature = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
+        Some(Self::new(chunk, epoch, signature))
     }
 }
 
@@ -675,7 +679,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
-        self.vote.write(writer);
+        self.signature.write(writer);
     }
 }
 
@@ -685,14 +689,18 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let vote = Vote::read(reader)?;
-        Ok(Self { chunk, epoch, vote })
+        let signature = Signature::read(reader)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            signature,
+        })
     }
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + self.epoch.encode_size() + self.vote.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -973,7 +981,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -987,7 +995,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1032,7 +1040,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_votes: Vec<_> = bls_fixture.schemes[..quorum(4) as usize]
+        let parent_signatures: Vec<_> = bls_fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1045,7 +1053,7 @@ mod tests {
             .collect();
 
         let parent_certificate = bls_fixture.schemes[0]
-            .assemble_certificate(parent_votes)
+            .assemble_certificate(parent_signatures)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid threshold signature
@@ -1086,16 +1094,20 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let vote = SchemeTrait::sign_vote::<Sha256Digest>(&fixture.schemes[0], NAMESPACE, ctx)
+        let signature = SchemeTrait::sign_vote::<Sha256Digest>(&fixture.schemes[0], NAMESPACE, ctx)
             .expect("Should sign vote");
 
-        let ack = Ack::<PublicKey, S<V>, Sha256Digest> { chunk, epoch, vote };
+        let ack = Ack::<PublicKey, S<V>, Sha256Digest> {
+            chunk,
+            epoch,
+            signature,
+        };
         let encoded = ack.encode();
         let decoded = Ack::<PublicKey, S<V>, Sha256Digest>::decode(encoded).unwrap();
 
         assert_eq!(decoded.chunk, ack.chunk);
         assert_eq!(decoded.epoch, ack.epoch);
-        assert_eq!(decoded.vote.signer, ack.vote.signer);
+        assert_eq!(decoded.signature.signer, ack.signature.signer);
     }
 
     #[test]
@@ -1137,7 +1149,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1151,7 +1163,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1219,7 +1231,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1233,7 +1245,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1285,7 +1297,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1297,7 +1309,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_votes)
+            .assemble_certificate(parent_signatures)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S<V>, Sha256Digest>::new(
@@ -1358,7 +1370,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1372,7 +1384,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1403,7 +1415,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1415,7 +1427,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1475,7 +1487,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1487,7 +1499,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_votes)
+            .assemble_certificate(parent_signatures)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1574,7 +1586,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch,
         };
-        let parent_votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1586,7 +1598,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(parent_votes)
+            .assemble_certificate(parent_signatures)
             .expect("Should assemble certificate");
 
         // Create parent with valid threshold signature
@@ -1613,7 +1625,7 @@ mod tests {
         let wrong_fixture = mocks::fixtures::bls12381_threshold::<V, _>(&mut rng, 4);
 
         // Generate threshold signature with the wrong keys
-        let wrong_votes: Vec<_> = wrong_fixture.schemes[..quorum(4) as usize]
+        let wrong_signatures: Vec<_> = wrong_fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1625,7 +1637,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble_certificate(wrong_votes)
+            .assemble_certificate(wrong_signatures)
             .expect("Should assemble certificate");
 
         // Create parent with wrong threshold signature
@@ -1747,7 +1759,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1759,7 +1771,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1774,7 +1786,7 @@ mod tests {
         let wrong_fixture = mocks::fixtures::bls12381_threshold::<V, _>(&mut wrong_rng, 4);
 
         // Generate certificate with the wrong keys
-        let wrong_votes: Vec<_> = wrong_fixture.schemes[..quorum(4) as usize]
+        let wrong_signatures: Vec<_> = wrong_fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1786,7 +1798,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble_certificate(wrong_votes)
+            .assemble_certificate(wrong_signatures)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -1860,7 +1872,7 @@ mod tests {
             chunk: &dummy_chunk,
             epoch: dummy_epoch,
         };
-        let votes: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 SchemeTrait::sign_vote::<Sha256Digest>(
@@ -1872,7 +1884,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("Should assemble certificate");
 
         let parent =

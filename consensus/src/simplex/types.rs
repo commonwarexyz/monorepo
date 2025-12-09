@@ -1,7 +1,7 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    signing_scheme::{Scheme, Vote as Signature},
+    signing_scheme::{Scheme, Signature},
     simplex::signing_scheme::SimplexScheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,

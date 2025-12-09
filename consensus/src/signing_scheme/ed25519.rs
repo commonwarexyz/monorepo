@@ -2,7 +2,7 @@
 //!
 //! This module provides both the raw Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
-use crate::signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification};
+use crate::signing_scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
@@ -54,7 +54,11 @@ impl Ed25519 {
     }
 
     /// Signs a message and returns the signer index and signature.
-    pub fn sign_vote<S, D>(&self, namespace: &[u8], context: S::Context<'_, D>) -> Option<Vote<S>>
+    pub fn sign_vote<S, D>(
+        &self,
+        namespace: &[u8],
+        context: S::Context<'_, D>,
+    ) -> Option<Signature<S>>
     where
         S: Scheme<Signature = ed25519::Signature>,
         D: Digest,
@@ -64,7 +68,7 @@ impl Ed25519 {
         let (namespace, message) = context.namespace_and_message(namespace);
         let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
-        Some(Vote {
+        Some(Signature {
             signer: *index,
             signature,
         })
@@ -75,18 +79,18 @@ impl Ed25519 {
         &self,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        vote: &Vote<S>,
+        signature: &Signature<S>,
     ) -> bool
     where
         S: Scheme<Signature = ed25519::Signature>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.key(vote.signer) else {
+        let Some(public_key) = self.participants.key(signature.signer) else {
             return false;
         };
 
         let (namespace, message) = context.namespace_and_message(namespace);
-        public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature)
+        public_key.verify(namespace.as_ref(), message.as_ref(), &signature.signature)
     }
 
     /// Batch-verifies votes and returns verified votes and invalid signers.
@@ -95,13 +99,13 @@ impl Ed25519 {
         rng: &mut R,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        votes: I,
-    ) -> VoteVerification<S>
+        signatures: I,
+    ) -> SignatureVerification<S>
     where
         S: Scheme<Signature = ed25519::Signature>,
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
         let (namespace, message) = context.namespace_and_message(namespace);
 
@@ -109,9 +113,9 @@ impl Ed25519 {
         let mut candidates = Vec::new();
         let mut batch = Batch::new();
 
-        for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.key(vote.signer) else {
-                invalid.insert(vote.signer);
+        for sig in signatures.into_iter() {
+            let Some(public_key) = self.participants.key(sig.signer) else {
+                invalid.insert(sig.signer);
                 continue;
             };
 
@@ -119,17 +123,17 @@ impl Ed25519 {
                 namespace.as_ref(),
                 message.as_ref(),
                 public_key,
-                &vote.signature,
+                &sig.signature,
             );
 
-            candidates.push((vote, public_key));
+            candidates.push((sig, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
-            for (vote, public_key) in &candidates {
-                if !public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature) {
-                    invalid.insert(vote.signer);
+            for (sig, public_key) in &candidates {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &sig.signature) {
+                    invalid.insert(sig.signer);
                 }
             }
         }
@@ -145,18 +149,18 @@ impl Ed25519 {
             })
             .collect();
 
-        VoteVerification::new(verified, invalid.into_iter().collect())
+        SignatureVerification::new(verified, invalid.into_iter().collect())
     }
 
     /// Assembles a certificate from a collection of votes.
-    pub fn assemble_certificate<S, I>(&self, votes: I) -> Option<Certificate>
+    pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<Certificate>
     where
         S: Scheme<Signature = ed25519::Signature>,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for Vote { signer, signature } in votes {
+        for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
@@ -397,7 +401,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                ) -> Option<$crate::signing_scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -405,9 +409,9 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    vote: &$crate::signing_scheme::Vote<Self>,
+                    signature: &$crate::signing_scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote(namespace, context, vote)
+                    self.raw.verify_vote(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -415,21 +419,21 @@ mod macros {
                     rng: &mut R,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    votes: I,
-                ) -> $crate::signing_scheme::VoteVerification<Self>
+                    signatures: I,
+                ) -> $crate::signing_scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes(rng, namespace, context, votes)
+                    self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
-                fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+                fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(votes)
+                    self.raw.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<
@@ -547,7 +551,7 @@ mod tests {
             &self,
             namespace: &[u8],
             context: Self::Context<'_, D>,
-        ) -> Option<Vote<Self>> {
+        ) -> Option<Signature<Self>> {
             self.raw.sign_vote::<Self, D>(namespace, context)
         }
 
@@ -555,9 +559,10 @@ mod tests {
             &self,
             namespace: &[u8],
             context: Self::Context<'_, D>,
-            vote: &Vote<Self>,
+            signature: &Signature<Self>,
         ) -> bool {
-            self.raw.verify_vote::<Self, D>(namespace, context, vote)
+            self.raw
+                .verify_vote::<Self, D>(namespace, context, signature)
         }
 
         fn verify_votes<R, D, I>(
@@ -565,22 +570,22 @@ mod tests {
             rng: &mut R,
             namespace: &[u8],
             context: Self::Context<'_, D>,
-            votes: I,
-        ) -> VoteVerification<Self>
+            signatures: I,
+        ) -> SignatureVerification<Self>
         where
             R: rand::Rng + rand::CryptoRng,
             D: commonware_cryptography::Digest,
-            I: IntoIterator<Item = Vote<Self>>,
+            I: IntoIterator<Item = Signature<Self>>,
         {
             self.raw
-                .verify_votes::<Self, R, D, I>(rng, namespace, context, votes)
+                .verify_votes::<Self, R, D, I>(rng, namespace, context, signatures)
         }
 
-        fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+        fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
         where
-            I: IntoIterator<Item = Vote<Self>>,
+            I: IntoIterator<Item = Signature<Self>>,
         {
-            self.raw.assemble_certificate::<Self, I>(votes)
+            self.raw.assemble_certificate::<Self, I>(signatures)
         }
 
         fn verify_certificate<
@@ -646,13 +651,13 @@ mod tests {
         let (schemes, _) = setup_signers(4, 42);
         let scheme = &schemes[0];
 
-        let vote = scheme
+        let signature = scheme
             .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_vote::<Sha256Digest>(
             NAMESPACE,
             TestContext { message: MESSAGE },
-            &vote
+            &signature
         ));
     }
 
@@ -669,7 +674,7 @@ mod tests {
         let (schemes, _) = setup_signers(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -683,13 +688,13 @@ mod tests {
             &mut rng,
             NAMESPACE,
             TestContext { message: MESSAGE },
-            votes.clone(),
+            signatures.clone(),
         );
         assert!(result.invalid_signers.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
         // Test 1: Corrupt one vote - invalid signer index
-        let mut votes_corrupted = votes.clone();
+        let mut votes_corrupted = signatures.clone();
         votes_corrupted[0].signer = 999;
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
@@ -701,7 +706,7 @@ mod tests {
         assert_eq!(result.verified.len(), quorum - 1);
 
         // Test 2: Corrupt one vote - invalid signature
-        let mut votes_corrupted = votes.clone();
+        let mut votes_corrupted = signatures.clone();
         votes_corrupted[0].signature = votes_corrupted[1].signature.clone();
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
@@ -719,7 +724,7 @@ mod tests {
         let (schemes, _) = setup_signers(4, 46);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -728,7 +733,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
         // Verify certificate has correct number of signers
         assert_eq!(certificate.signers.count(), quorum);
@@ -766,7 +771,7 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 48);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -775,7 +780,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
         let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -791,7 +796,7 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -800,7 +805,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -826,7 +831,7 @@ mod tests {
         let (schemes, _) = setup_signers(4, 51);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -835,7 +840,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -846,7 +851,7 @@ mod tests {
         let (schemes, _) = setup_signers(4, 52);
         let sub_quorum = 2; // Less than quorum (3)
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(sub_quorum)
             .map(|s| {
@@ -855,7 +860,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(votes).is_none());
+        assert!(schemes[0].assemble_certificate(signatures).is_none());
     }
 
     #[test]
@@ -863,7 +868,7 @@ mod tests {
         let (schemes, _) = setup_signers(4, 53);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let mut votes: Vec<_> = schemes
+        let mut signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -873,9 +878,9 @@ mod tests {
             .collect();
 
         // Corrupt signer index to be out of range
-        votes[0].signer = 999;
+        signatures[0].signer = 999;
 
-        assert!(schemes[0].assemble_certificate(votes).is_none());
+        assert!(schemes[0].assemble_certificate(signatures).is_none());
     }
 
     #[test]
@@ -883,7 +888,7 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 54);
         let participants_len = schemes.len();
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
@@ -892,7 +897,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
         // Artificially truncate to below quorum
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
@@ -912,7 +917,7 @@ mod tests {
     fn test_verify_certificate_rejects_mismatched_signature_count() {
         let (schemes, verifier) = setup_signers(4, 55);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
@@ -921,7 +926,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
@@ -943,7 +948,7 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let votes: Vec<_> = schemes
+            let signatures: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
@@ -951,7 +956,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
         }
 
         let certs_iter = messages
@@ -972,7 +977,7 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let votes: Vec<_> = schemes
+            let signatures: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
@@ -980,7 +985,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
         }
 
         // Corrupt second certificate
@@ -1107,7 +1112,7 @@ mod simplex_tests {
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
-        let mut votes: Vec<_> = schemes
+        let mut signatures: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|scheme| {
@@ -1129,34 +1134,34 @@ mod simplex_tests {
             VoteContext::Notarize {
                 proposal: &proposal,
             },
-            votes.clone(),
+            signatures.clone(),
         );
         assert!(verification.invalid_signers.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
         // Invalid signer index should be detected.
-        votes[0].signer = 999;
+        signatures[0].signer = 999;
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
             VoteContext::Notarize {
                 proposal: &proposal,
             },
-            votes.clone(),
+            signatures.clone(),
         );
         assert_eq!(verification.invalid_signers, vec![999]);
         assert_eq!(verification.verified.len(), quorum - 1);
 
         // Invalid signature should be detected.
-        votes[0].signer = 0;
-        votes[0].signature = votes[1].signature.clone();
+        signatures[0].signer = 0;
+        signatures[0].signature = signatures[1].signature.clone();
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
             VoteContext::Notarize {
                 proposal: &proposal,
             },
-            votes,
+            signatures,
         );
         assert_eq!(verification.invalid_signers, vec![0]);
         assert_eq!(verification.verified.len(), quorum - 1);
@@ -1208,7 +1213,7 @@ mod simplex_tests {
         let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 9, 5);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(2)
             .map(|scheme| {
@@ -1223,7 +1228,7 @@ mod simplex_tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(votes).is_none());
+        assert!(schemes[0].assemble_certificate(signatures).is_none());
     }
 
     #[test]
@@ -1231,7 +1236,7 @@ mod simplex_tests {
         let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 13, 7);
 
-        let mut votes: Vec<_> = schemes
+        let mut signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1245,9 +1250,9 @@ mod simplex_tests {
                     .unwrap()
             })
             .collect();
-        votes[0].signer = 42;
+        signatures[0].signer = 42;
 
-        assert!(schemes[0].assemble_certificate(votes).is_none());
+        assert!(schemes[0].assemble_certificate(signatures).is_none());
     }
 
     #[test]
@@ -1256,7 +1261,7 @@ mod simplex_tests {
         let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 25, 13);
 
-        let mut votes: Vec<_> = schemes
+        let mut signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1271,9 +1276,9 @@ mod simplex_tests {
             })
             .collect();
 
-        votes.push(votes.last().unwrap().clone());
+        signatures.push(signatures.last().unwrap().clone());
 
-        schemes[0].assemble_certificate(votes);
+        schemes[0].assemble_certificate(signatures);
     }
 
     #[test]
@@ -1281,7 +1286,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 15, 8);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1297,7 +1302,7 @@ mod simplex_tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         let verifier = Scheme::verifier(participants);
@@ -1327,7 +1332,7 @@ mod simplex_tests {
         let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 17, 9);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1343,7 +1348,7 @@ mod simplex_tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
@@ -1387,7 +1392,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 19, 10);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1403,7 +1408,7 @@ mod simplex_tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         // Well-formed certificate decodes successfully.
@@ -1444,7 +1449,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 21, 11);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(quorum(schemes.len() as u32) as usize)
             .map(|scheme| {
@@ -1460,7 +1465,7 @@ mod simplex_tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         let verifier = Scheme::verifier(participants);
@@ -1479,7 +1484,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1495,7 +1500,7 @@ mod simplex_tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         let mut truncated = certificate.clone();
@@ -1520,7 +1525,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 25, 13);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1536,7 +1541,7 @@ mod simplex_tests {
             .collect();
 
         let mut certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
@@ -1562,7 +1567,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 26, 14);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1578,7 +1583,7 @@ mod simplex_tests {
             .collect();
 
         let mut certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
 
         // The certificate is valid
@@ -1612,7 +1617,7 @@ mod simplex_tests {
         let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 27, 14);
 
-        let votes: Vec<_> = schemes
+        let signatures: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|scheme| {
@@ -1628,7 +1633,7 @@ mod simplex_tests {
             .collect();
 
         let mut certificate = schemes[0]
-            .assemble_certificate(votes)
+            .assemble_certificate(signatures)
             .expect("assemble certificate");
         certificate.signatures.pop();
 

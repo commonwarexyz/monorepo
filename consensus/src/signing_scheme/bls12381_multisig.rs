@@ -3,7 +3,7 @@
 //! This module provides both the raw BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
-use crate::signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification};
+use crate::signing_scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -76,7 +76,11 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     }
 
     /// Signs a vote and returns it.
-    pub fn sign_vote<S, D>(&self, namespace: &[u8], context: S::Context<'_, D>) -> Option<Vote<S>>
+    pub fn sign_vote<S, D>(
+        &self,
+        namespace: &[u8],
+        context: S::Context<'_, D>,
+    ) -> Option<Signature<S>>
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
@@ -86,7 +90,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
         let (namespace, message) = context.namespace_and_message(namespace);
         let signature = sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
-        Some(Vote {
+        Some(Signature {
             signer: *index,
             signature,
         })
@@ -97,13 +101,13 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
         &self,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        vote: &Vote<S>,
+        signature: &Signature<S>,
     ) -> bool
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.value(vote.signer as usize) else {
+        let Some(public_key) = self.participants.value(signature.signer as usize) else {
             return false;
         };
 
@@ -112,7 +116,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
             public_key,
             Some(namespace.as_ref()),
             message.as_ref(),
-            &vote.signature,
+            &signature.signature,
         )
         .is_ok()
     }
@@ -123,32 +127,32 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
         _rng: &mut R,
         namespace: &[u8],
         context: S::Context<'_, D>,
-        votes: I,
-    ) -> VoteVerification<S>
+        signatures: I,
+    ) -> SignatureVerification<S>
     where
         S: Scheme<Signature = V::Signature>,
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut publics = Vec::new();
-        let mut signatures = Vec::new();
-        for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.value(vote.signer as usize) else {
-                invalid.insert(vote.signer);
+        let mut sigs = Vec::new();
+        for sig in signatures.into_iter() {
+            let Some(public_key) = self.participants.value(sig.signer as usize) else {
+                invalid.insert(sig.signer);
                 continue;
             };
 
             publics.push(*public_key);
-            signatures.push(vote.signature);
-            candidates.push(vote);
+            sigs.push(sig.signature);
+            candidates.push(sig);
         }
 
         // If there are no candidates to verify, return before doing any work.
         if candidates.is_empty() {
-            return VoteVerification::new(candidates, invalid.into_iter().collect());
+            return SignatureVerification::new(candidates, invalid.into_iter().collect());
         }
 
         // Verify the aggregate signature.
@@ -157,7 +161,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
             publics.iter(),
             Some(namespace.as_ref()),
             message.as_ref(),
-            &aggregate_signatures::<V, _>(signatures.iter()),
+            &aggregate_signatures::<V, _>(sigs.iter()),
         )
         .is_err()
         {
@@ -182,18 +186,18 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
             .collect();
         let invalid_signers: Vec<_> = invalid.into_iter().collect();
 
-        VoteVerification::new(verified, invalid_signers)
+        SignatureVerification::new(verified, invalid_signers)
     }
 
     /// Assembles a certificate from a collection of votes.
-    pub fn assemble_certificate<S, I>(&self, votes: I) -> Option<Certificate<V>>
+    pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<Certificate<V>>
     where
         S: Scheme<Signature = V::Signature>,
-        I: IntoIterator<Item = Vote<S>>,
+        I: IntoIterator<Item = Signature<S>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for Vote { signer, signature } in votes {
+        for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
@@ -397,7 +401,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                ) -> Option<$crate::signing_scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -405,9 +409,9 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    vote: &$crate::signing_scheme::Vote<Self>,
+                    signature: &$crate::signing_scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote(namespace, context, vote)
+                    self.raw.verify_vote(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -415,21 +419,21 @@ mod macros {
                     rng: &mut R,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    votes: I,
-                ) -> $crate::signing_scheme::VoteVerification<Self>
+                    signatures: I,
+                ) -> $crate::signing_scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes(rng, namespace, context, votes)
+                    self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
-                fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+                fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(votes)
+                    self.raw.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<

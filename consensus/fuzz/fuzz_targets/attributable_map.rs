@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_consensus::{
-    signing_scheme::Vote as Signature,
+    signing_scheme::Signature,
     simplex::{
         signing_scheme::ed25519,
         types::{AttributableMap, Nullify},

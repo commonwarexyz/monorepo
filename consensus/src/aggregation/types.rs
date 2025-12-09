@@ -2,7 +2,7 @@
 
 use crate::{
     aggregation::signing_scheme::AggregationScheme,
-    signing_scheme::{Context, Scheme, Vote},
+    signing_scheme::{Context, Scheme, Signature},
     types::Epoch,
 };
 use bytes::{Buf, BufMut};
@@ -139,7 +139,7 @@ pub struct Ack<S: Scheme, D: Digest> {
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
     /// Scheme-specific vote material
-    pub vote: Vote<S>,
+    pub signature: Signature<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
@@ -151,7 +151,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        scheme.verify_vote::<D>(namespace, &self.item, &self.vote)
+        scheme.verify_vote::<D>(namespace, &self.item, &self.signature)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -165,8 +165,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        let vote = scheme.sign_vote::<D>(namespace, &item)?;
-        Some(Self { item, epoch, vote })
+        let signature = scheme.sign_vote::<D>(namespace, &item)?;
+        Some(Self {
+            item,
+            epoch,
+            signature,
+        })
     }
 }
 
@@ -174,7 +178,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.epoch.write(writer);
-        self.vote.write(writer);
+        self.signature.write(writer);
     }
 }
 
@@ -184,14 +188,18 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let vote = Vote::read(reader)?;
-        Ok(Self { item, epoch, vote })
+        let signature = Signature::read(reader)?;
+        Ok(Self {
+            item,
+            epoch,
+            signature,
+        })
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.epoch.encode_size() + self.vote.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -245,10 +253,10 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
-        let votes = iter
+        let signatures = iter
             .filter(|ack| ack.item == item)
-            .map(|ack| ack.vote.clone());
-        let certificate = scheme.assemble_certificate(votes)?;
+            .map(|ack| ack.signature.clone());
+        let certificate = scheme.assemble_certificate(signatures)?;
 
         Some(Self { item, certificate })
     }

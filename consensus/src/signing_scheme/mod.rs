@@ -15,45 +15,44 @@ pub use crate::{
     impl_bls12381_multisig_scheme, impl_bls12381_threshold_scheme, impl_ed25519_scheme,
 };
 
-// TODO: rename to signature
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
-pub struct Vote<S: Scheme> {
+pub struct Signature<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
     /// Scheme-specific signature or share produced for the vote context.
     pub signature: S::Signature,
 }
 
-impl<S: Scheme> PartialEq for Vote<S> {
+impl<S: Scheme> PartialEq for Signature<S> {
     fn eq(&self, other: &Self) -> bool {
         self.signer == other.signer && self.signature == other.signature
     }
 }
 
-impl<S: Scheme> Eq for Vote<S> {}
+impl<S: Scheme> Eq for Signature<S> {}
 
-impl<S: Scheme> Hash for Vote<S> {
+impl<S: Scheme> Hash for Signature<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<S: Scheme> Write for Vote<S> {
+impl<S: Scheme> Write for Signature<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Scheme> EncodeSize for Vote<S> {
+impl<S: Scheme> EncodeSize for Signature<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Scheme> Read for Vote<S> {
+impl<S: Scheme> Read for Signature<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -64,18 +63,18 @@ impl<S: Scheme> Read for Vote<S> {
     }
 }
 
-// TODO: rename to SignatureVerification
-/// Result of verifying a batch of votes.
-pub struct VoteVerification<S: Scheme> {
-    /// Contains the votes accepted by the scheme.
-    pub verified: Vec<Vote<S>>,
+// FIXME: rename to SignatureVerification
+/// Result of verifying a batch of signatures.
+pub struct SignatureVerification<S: Scheme> {
+    /// Contains the signatures accepted by the scheme.
+    pub verified: Vec<Signature<S>>,
     /// Identifies the participant indices rejected during batch verification.
     pub invalid_signers: Vec<u32>,
 }
 
-impl<S: Scheme> VoteVerification<S> {
+impl<S: Scheme> SignatureVerification<S> {
     /// Creates a new `VoteVerification` result.
-    pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
+    pub fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
             invalid_signers,
@@ -127,14 +126,14 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         namespace: &[u8],
         context: Self::Context<'_, D>,
-    ) -> Option<Vote<Self>>;
+    ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
         context: Self::Context<'_, D>,
-        vote: &Vote<Self>,
+        signature: &Signature<Self>,
     ) -> bool;
 
     /// Batch-verifies votes and separates valid messages from the voter indices that failed
@@ -146,16 +145,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         _rng: &mut R,
         namespace: &[u8],
         context: Self::Context<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
+        signatures: I,
+    ) -> SignatureVerification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
-        let verified = votes.into_iter().filter_map(|vote| {
+        let verified = signatures.into_iter().filter_map(|vote| {
             if self.verify_vote(namespace, context.clone(), &vote) {
                 Some(vote)
             } else {
@@ -164,15 +163,15 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
             }
         });
 
-        VoteVerification::new(verified.collect(), invalid.into_iter().collect())
+        SignatureVerification::new(verified.collect(), invalid.into_iter().collect())
     }
 
     /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
     ///
     /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Vote<Self>>;
+        I: IntoIterator<Item = Signature<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(

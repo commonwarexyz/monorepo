@@ -505,10 +505,10 @@ impl<
 
         // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.vote.signer) {
+        if acks.contains_key(&ack.signature.signer) {
             return Ok(());
         }
-        acks.insert(ack.vote.signer, ack.clone());
+        acks.insert(ack.signature.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
         let count = acks
@@ -617,10 +617,10 @@ impl<
         // Validate sender matches the signer
         let scheme = self.scheme(ack.epoch)?;
         let participants = scheme.participants();
-        if ack.vote.signer as usize >= participants.len() {
+        if ack.signature.signer as usize >= participants.len() {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         }
-        if participants.get(ack.vote.signer as usize) != Some(sender) {
+        if participants.get(ack.signature.signer as usize) != Some(sender) {
             return Err(Error::PeerMismatch);
         }
 
@@ -643,7 +643,7 @@ impl<
             None => false,
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.vote.signer)),
+                .is_some_and(|acks| acks.contains_key(&ack.signature.signer)),
             Some(Pending::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
@@ -652,7 +652,7 @@ impl<
                 }
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.vote.signer))
+                    .is_some_and(|acks| acks.contains_key(&ack.signature.signer))
             }
         };
         if have_ack {
@@ -843,7 +843,7 @@ impl<
             let our_digest = if let Some(signer) = our_signer {
                 acks_group
                     .iter()
-                    .find(|ack| ack.epoch == self.epoch && ack.vote.signer == signer)
+                    .find(|ack| ack.epoch == self.epoch && ack.signature.signer == signer)
                     .map(|ack| ack.item.digest)
             } else {
                 None
@@ -860,7 +860,7 @@ impl<
                 epoch_map
                     .entry(ack.epoch)
                     .or_insert_with(BTreeMap::new)
-                    .insert(ack.vote.signer, ack);
+                    .insert(ack.signature.signer, ack);
             }
 
             // Insert as Verified if we have our own ack (meaning we verified the digest),

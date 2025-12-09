@@ -101,7 +101,7 @@ mod tests {
             &self,
             _namespace: &[u8],
             _context: Self::Context<'_, D>,
-        ) -> Option<crate::signing_scheme::Vote<Self>> {
+        ) -> Option<crate::signing_scheme::Signature<Self>> {
             None
         }
 
@@ -109,14 +109,14 @@ mod tests {
             &self,
             _namespace: &[u8],
             _context: Self::Context<'_, D>,
-            _vote: &crate::signing_scheme::Vote<Self>,
+            _signature: &crate::signing_scheme::Signature<Self>,
         ) -> bool {
             true
         }
 
-        fn assemble_certificate<I>(&self, _votes: I) -> Option<Self::Certificate>
+        fn assemble_certificate<I>(&self, _signatures: I) -> Option<Self::Certificate>
         where
-            I: IntoIterator<Item = crate::signing_scheme::Vote<Self>>,
+            I: IntoIterator<Item = crate::signing_scheme::Signature<Self>>,
         {
             None
         }
