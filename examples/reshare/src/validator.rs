@@ -649,7 +649,8 @@ mod test {
         }
 
         fn run(self) -> anyhow::Result<PlanResult> {
-            let expected_failures = self.failures.len() as u64;
+            // Multiply by total to ensure all participants report each failed epoch
+            let expected_failures = self.failures.len() as u64 * self.total as u64;
             let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
             info!(
                 failures = result.failures,
