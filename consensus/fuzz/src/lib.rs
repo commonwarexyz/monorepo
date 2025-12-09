@@ -32,7 +32,8 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const REQUIRED_CONTAINERS: u64 = 50;
+const MIN_REQUIRED_CONTAINERS: u64 = 10;
+const MAX_REQUIRED_CONTAINERS: u64 = 50;
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const CONFIGURATIONS: [(u32, u32, u32); 2] = [(3, 2, 1), (4, 3, 1)];
 const MAX_RAW_BYTES: usize = 4096;
@@ -53,12 +54,13 @@ where
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub seed: u64,
-    pub partition: Partition,
-    pub configuration: (u32, u32, u32),
     pub raw_bytes: Vec<u8>,
+    pub seed: u64,
+    pub containers: u64,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
+    pub configuration: (u32, u32, u32),
+    pub partition: Partition,
 }
 
 impl FuzzInput {
@@ -105,6 +107,7 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.arbitrary()?;
         let partition = u.arbitrary()?;
         let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
+        let containers = u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
 
         let mut raw_bytes = Vec::new();
         for _ in 0..MAX_RAW_BYTES {
@@ -124,6 +127,7 @@ impl Arbitrary<'_> for FuzzInput {
             partition,
             configuration,
             raw_bytes,
+            containers,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed(prng_seed)),
         })
@@ -132,6 +136,7 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
+    let containers = input.containers;
     let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -250,7 +255,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < REQUIRED_CONTAINERS {
+                    while latest.get() < containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));

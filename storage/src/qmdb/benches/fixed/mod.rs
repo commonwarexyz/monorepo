@@ -1,12 +1,16 @@
 //! Benchmarks of QMDB variants on fixed-size values.
+//!
+//! While this benchmark involves updating a database with fixed-size values, we also include the db
+//! variants capable of handling variable-size values to gauge the impact of the extra indirection
+//! they perform.
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::fixed::Any as OAny,
-            unordered::{fixed::Any as UAny, variable::Any as VariableAny},
+            ordered::{fixed::Any as OAny, variable::Any as OVAny},
+            unordered::{fixed::Any as UAny, variable::Any as UVAny},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
@@ -28,33 +32,36 @@ pub mod init;
 #[derive(Debug, Clone, Copy)]
 enum Variant {
     Store,
-    AnyUnordered,
-    AnyOrdered,
-    Variable, // unordered
-    CurrentUnordered,
-    CurrentOrdered,
+    AnyUnorderedFixed,
+    AnyOrderedFixed,
+    AnyUnorderedVariable,
+    AnyOrderedVariable,
+    CurrentUnorderedFixed,
+    CurrentOrderedFixed,
 }
 
 impl Variant {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Store => "store",
-            Self::AnyUnordered => "any::fixed::unordered",
-            Self::AnyOrdered => "any::fixed::ordered",
-            Self::Variable => "any::variable",
-            Self::CurrentUnordered => "current::unordered",
-            Self::CurrentOrdered => "current::ordered",
+            Self::AnyUnorderedFixed => "any::unordered::fixed",
+            Self::AnyOrderedFixed => "any::ordered::fixed",
+            Self::AnyUnorderedVariable => "any::unordered::variable",
+            Self::AnyOrderedVariable => "any::ordered::variable",
+            Self::CurrentUnorderedFixed => "current::unordered::fixed",
+            Self::CurrentOrderedFixed => "current::ordered::fixed",
         }
     }
 }
 
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 7] = [
     Variant::Store,
-    Variant::AnyUnordered,
-    Variant::AnyOrdered,
-    Variant::Variable,
-    Variant::CurrentUnordered,
-    Variant::CurrentOrdered,
+    Variant::AnyUnorderedFixed,
+    Variant::AnyOrderedFixed,
+    Variant::AnyUnorderedVariable,
+    Variant::AnyOrderedVariable,
+    Variant::CurrentUnorderedFixed,
+    Variant::CurrentOrderedFixed,
 ];
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
@@ -101,8 +108,10 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-type VariableAnyDb =
-    VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type UVAnyDb =
+    UVAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type OVAnyDb =
+    OVAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Configuration for any QMDB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -167,7 +176,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 }
 
 /// Get an unordered any QMDB instance.
-async fn get_unordered_any(ctx: Context) -> UAnyDb {
+async fn get_any_unordered_fixed(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -176,7 +185,7 @@ async fn get_unordered_any(ctx: Context) -> UAnyDb {
 }
 
 /// Get an ordered any QMDB instance.
-async fn get_ordered_any(ctx: Context) -> OAnyDb {
+async fn get_any_ordered_fixed(ctx: Context) -> OAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -185,7 +194,7 @@ async fn get_ordered_any(ctx: Context) -> OAnyDb {
 }
 
 /// Get an unordered current QMDB instance.
-async fn get_unordered_current(ctx: Context) -> UCurrentDb {
+async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -194,7 +203,7 @@ async fn get_unordered_current(ctx: Context) -> UCurrentDb {
 }
 
 /// Get an ordered current QMDB instance.
-async fn get_ordered_current(ctx: Context) -> OCurrentDb {
+async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -207,10 +216,16 @@ async fn get_store(ctx: Context) -> StoreDb {
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
-async fn get_variable_any(ctx: Context) -> VariableAnyDb {
+async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    VariableAny::init(ctx, variable_any_cfg).await.unwrap()
+    UVAny::init(ctx, variable_any_cfg).await.unwrap()
+}
+
+async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let variable_any_cfg = variable_any_cfg(pool);
+    OVAny::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

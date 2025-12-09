@@ -195,11 +195,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
-    /// Returns all tracked peers.
+    /// Returns all peers that are part of at least one peer set.
     pub fn tracked(&self) -> Set<C> {
         self.peers
-            .keys()
-            .cloned()
+            .iter()
+            .filter(|(_, r)| r.sets() > 0)
+            .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")
     }
