@@ -9,7 +9,6 @@ use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
     types::{Epoch, EpochDelta},
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
-    Reporter,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -144,7 +143,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg_chan: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -173,7 +172,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -220,9 +219,7 @@ where
             share: current_share.clone(),
             dealers: dealers.clone(),
         };
-        orchestrator
-            .report(orchestrator::Message::Enter(transition))
-            .await;
+        orchestrator.enter(transition).await;
 
         // Register the initial set of peers.
         //
@@ -276,15 +273,6 @@ where
                     let epoch = epoch(BLOCKS_PER_EPOCH, block.height);
                     let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
-                    // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 0 && !epoch.is_zero() {
-                        orchestrator
-                            .report(orchestrator::Message::Exit(
-                                epoch.previous().expect("checked to be non-zero above"),
-                            ))
-                            .await;
-                    }
-
                     // While not done in the example, an implementor could choose to mark a deal outcome as
                     // "sent" as to not re-include it in future blocks in the event of a dealer node's
                     // shutdown.
@@ -333,6 +321,12 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
+                        // Inform the orchestrator to exit the epoch that just finalized
+                        // its boundary block. The consensus engine for this epoch will
+                        // shut down, and any late validators can request the boundary
+                        // finalization directly via the orchestrator.
+                        orchestrator.exit(epoch).await;
+
                         let (next_dealers, next_public, next_share, success) =
                             match manager.finalize(epoch.get()).await {
                                 (
@@ -447,9 +441,7 @@ where
                             share: next_share.clone(),
                             dealers: next_dealers.clone(),
                         };
-                        orchestrator
-                            .report(orchestrator::Message::Enter(transition))
-                            .await;
+                        orchestrator.enter(transition).await;
 
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
@@ -483,12 +475,6 @@ where
         if is_dkg {
             // Close the mailbox to prevent accepting any new messages.
             drop(self.mailbox);
-
-            // Exit last consensus instance to avoid useless work while we wait for shutdown (we
-            // won't need to finalize further blocks after the DKG completes).
-            orchestrator
-                .report(orchestrator::Message::Exit(current_epoch))
-                .await;
 
             // Keep running until killed to keep the orchestrator mailbox alive, allowing
             // peers that may have gone offline to catch up.

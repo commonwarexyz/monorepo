@@ -29,7 +29,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_utils::sequence::U64;
+use commonware_utils::sequence::{Span, U64};
 use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
@@ -131,6 +131,8 @@ impl From<Epoch> for U64 {
     }
 }
 
+impl Span for Epoch {}
+
 /// A monotonically increasing counter within a single epoch.
 ///
 /// Views represent individual consensus rounds within an epoch. Each view corresponds to
@@ -230,6 +232,8 @@ impl From<View> for U64 {
         Self::from(view.get())
     }
 }
+
+impl Span for View {}
 
 /// A generic type representing offsets or durations for consensus types.
 ///
@@ -354,6 +358,8 @@ impl Display for Round {
         write!(f, "({}, {})", self.epoch, self.view)
     }
 }
+
+impl Span for Round {}
 
 /// An iterator over a range of views.
 ///
