@@ -631,7 +631,7 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and signature.
-    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: Signature<S>) -> Self {
+    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: Signature<S>) -> Self {
         Self {
             chunk,
             epoch,
@@ -1546,7 +1546,7 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = SingleSchemeProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a node with invalid signature
@@ -1616,7 +1616,7 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = SingleSchemeProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a parent with invalid threshold signature
@@ -1859,14 +1859,14 @@ mod tests {
 
         // Try to create a node with height 0 and a parent
         let public_key = sample_scheme(0).public_key();
-        let chunk = Chunk::new(public_key, 0, sample_digest(1));
+        let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = sample_scheme(0).sign(chunk_namespace.as_ref(), &message);
 
         // Create a parent with a dummy certificate (content doesn't matter for this test)
         let fixture = setup_bls_fixture::<V>(4);
-        let dummy_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
+        let dummy_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let dummy_epoch = Epoch::new(5);
         let ctx = AckContext {
             chunk: &dummy_chunk,

@@ -62,6 +62,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::{Digest, Sha256},
     };
+    use commonware_utils::TryFromIterator;
     use rand::SeedableRng;
 
     // Dummy context for testing
@@ -76,13 +77,13 @@ mod tests {
     // Dummy scheme for testing - just a placeholder
     #[derive(Clone, Debug)]
     struct DummyScheme {
-        participants: commonware_utils::set::Ordered<commonware_cryptography::ed25519::PublicKey>,
+        participants: commonware_utils::ordered::Set<commonware_cryptography::ed25519::PublicKey>,
     }
 
     impl Default for DummyScheme {
         fn default() -> Self {
             Self {
-                participants: commonware_utils::set::Ordered::from_iter(Vec::new()),
+                participants: commonware_utils::ordered::Set::try_from_iter(Vec::new()).unwrap(),
             }
         }
     }
@@ -93,7 +94,7 @@ mod tests {
         type Signature = ();
         type Certificate = ();
 
-        fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
             &self.participants
         }
 

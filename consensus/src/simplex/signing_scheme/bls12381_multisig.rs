@@ -44,7 +44,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::quorum_from_slice;
+    use commonware_utils::{quorum, quorum_from_slice};
     use rand::{
         rngs::{OsRng, StdRng},
         thread_rng, SeedableRng,
@@ -166,7 +166,7 @@ mod tests {
 
         let mut votes: Vec<_> = schemes
             .iter()
-            .take(quorum)
+            .take(quorum as usize)
             .map(|scheme| {
                 scheme
                     .sign_vote(
@@ -453,7 +453,7 @@ mod tests {
 
         let votes: Vec<_> = schemes
             .iter()
-            .take(quorum)
+            .take(quorum as usize)
             .map(|scheme| {
                 scheme
                     .sign_vote(

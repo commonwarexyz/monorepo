@@ -14,7 +14,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{quorum, set::OrderedAssociated};
+use commonware_utils::{ordered::BiMap, quorum, TryCollect};
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub struct Fixture<S> {
 pub fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
-) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
+) -> BiMap<ed25519::PublicKey, ed25519::PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
@@ -44,7 +44,8 @@ where
             let public_key = private_key.public_key();
             (public_key, private_key)
         })
-        .collect()
+        .try_collect()
+        .unwrap()
 }
 
 type EdScheme = ed_scheme::Scheme;
@@ -102,12 +103,13 @@ where
         .clone()
         .into_iter()
         .zip(bls_public)
-        .collect::<OrderedAssociated<_, _>>();
+        .try_collect::<BiMap<_, _>>()
+        .unwrap();
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
         .collect();
-    let verifier = bls12381_multisig::Scheme::verifier(signers.clone());
+    let verifier = bls12381_multisig::Scheme::verifier(signers);
 
     Fixture {
         participants: participants.into(),

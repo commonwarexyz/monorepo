@@ -412,7 +412,7 @@ mod tests {
             &[0, 1, 2],
         )
         .expect("Should produce certificate");
-        assert!(acks.add_certificate(&sequencer, height, epoch1, cert1.clone()));
+        assert!(acks.add_certificate(&sequencer, height, epoch1, cert1));
 
         let cert2 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch2, &[0, 1, 2])

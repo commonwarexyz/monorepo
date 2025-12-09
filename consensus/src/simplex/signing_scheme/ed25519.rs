@@ -35,7 +35,7 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode, Read};
     use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest, Hasher, Sha256};
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{ordered::Set, quorum_from_slice};
     use rand::{
         rngs::{OsRng, StdRng},
         thread_rng, SeedableRng,

@@ -16,7 +16,10 @@ mod tests {
         sha256::Sha256,
         Hasher as _, PrivateKeyExt as _, Signer as _,
     };
-    use commonware_utils::set::{Ordered, OrderedQuorum};
+    use commonware_utils::{
+        ordered::{Quorum, Set},
+        TryFromIterator,
+    };
     use rand::SeedableRng;
 
     #[test]
@@ -48,7 +51,7 @@ mod tests {
 
         // Sign with quorum-of-validators (each needs their own scheme instance)
         let quorum = Scheme::<EdPublicKey, MinPk>::new(
-            Ordered::from_iter(validators.clone()),
+            Set::try_from_iter(validators.clone()).unwrap(),
             &polynomial,
             shares[0].clone(),
         )
@@ -57,7 +60,7 @@ mod tests {
         let mut votes = Vec::new();
         for share in shares.iter().take(quorum) {
             let validator_scheme = Scheme::<EdPublicKey, MinPk>::new(
-                Ordered::from_iter(validators.clone()),
+                Set::try_from_iter(validators.clone()).unwrap(),
                 &polynomial,
                 share.clone(),
             );
@@ -71,7 +74,7 @@ mod tests {
 
         // Create a verifier scheme (without a local share, just for verification)
         let scheme = Scheme::<EdPublicKey, MinPk>::new(
-            Ordered::from_iter(validators),
+            Set::try_from_iter(validators).unwrap(),
             &polynomial,
             shares[0].clone(),
         );

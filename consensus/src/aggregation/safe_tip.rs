@@ -249,6 +249,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
+    use commonware_utils::TryCollect;
     use rstest::rstest;
 
     fn key(i: u64) -> PublicKey {
@@ -259,7 +260,8 @@ mod tests {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let validators = (1..=validator_count)
             .map(|i| key(i as u64))
-            .collect::<Set<_>>();
+            .try_collect::<Set<_>>()
+            .unwrap();
         safe_tip.init(&validators);
         (safe_tip, validators)
     }
@@ -289,15 +291,15 @@ mod tests {
         // Test init with empty validator set
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.init(&[].into());
+            safe_tip.init(&[].try_into().unwrap());
         }));
         assert!(result.is_err());
 
         // Test reconcile with size mismatch
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&[key(1), key(2), key(3), key(4)].into());
+        safe_tip.init(&[key(1), key(2), key(3), key(4)].try_into().unwrap());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.reconcile(&[key(1), key(2), key(3)].into());
+            safe_tip.reconcile(&[key(1), key(2), key(3)].try_into().unwrap());
         }));
         assert!(result.is_err());
 
@@ -338,7 +340,7 @@ mod tests {
     fn test_reconcile() {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let old_validators = &[key(1), key(2), key(3), key(4)];
-        safe_tip.init(&old_validators.into());
+        safe_tip.init(&old_validators.try_into().unwrap());
 
         safe_tip.update(key(1), 10);
         safe_tip.update(key(2), 20);
@@ -349,7 +351,7 @@ mod tests {
 
         // Reconcile with a new set of validators
         let new_validators = &[key(3), key(4), key(5), key(6)];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         assert_eq!(safe_tip.tips.len(), 4);
         assert!(safe_tip.tips.contains_key(&key(3)));
@@ -367,7 +369,7 @@ mod tests {
     fn test_reconcile_identical() {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let validators = &[key(1), key(2), key(3), key(4)];
-        safe_tip.init(&validators.into());
+        safe_tip.init(&validators.try_into().unwrap());
 
         // Set some initial tips
         safe_tip.update(key(1), 10);
@@ -380,7 +382,7 @@ mod tests {
         let initial_lo = safe_tip.lo.clone();
 
         // Reconcile with identical validator set - should be a no-op
-        safe_tip.reconcile(&validators.into());
+        safe_tip.reconcile(&validators.try_into().unwrap());
 
         // Verify nothing changed
         assert_eq!(safe_tip.get(), initial_safe_tip);
@@ -484,7 +486,7 @@ mod tests {
 
         // Remove validator with tip 10 (in lo heap), replace with new validator
         let new_validators = &[key(1), key(8), key(3), key(4), key(5), key(6), key(7)];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         assert_eq!(safe_tip.get(), 25); // Should remain the same
         assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0); // New validator starts at 0
@@ -498,7 +500,7 @@ mod tests {
 
         // Remove validator with tip 30 (in hi heap), replace with new validator
         let new_validators = &[key(1), key(2), key(3), key(4), key(5), key(8), key(7)];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // When a validator with tip 30 is removed and replaced with one at tip 0,
         // the max of lo heap should drop from 25 to 20
@@ -519,7 +521,7 @@ mod tests {
             key(8),
             validators[3].clone(),
         ];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0);
         // After removing validator with tip 30 and adding one with tip 0,
@@ -542,7 +544,7 @@ mod tests {
             validators[2].clone(),
             validators[3].clone(),
         ];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // Heaps should be unchanged since removing 0 -> 0 is a no-op
         assert_eq!(safe_tip.hi, initial_hi);
@@ -570,7 +572,7 @@ mod tests {
             validators[2].clone(),
             validators[3].clone(),
         ];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // The removed tip 5 should be replaced with 0, both in lo heap
         assert!(safe_tip.lo.contains_key(&0));
@@ -598,7 +600,7 @@ mod tests {
         // With n=7, f=2: hi has [10, 20], lo has [0, 0, 0, 0, 0]
         // Remove validator with tip 10 (in hi), max_lo is 0, so 0 <= 0 is true
         let new_validators = &[key(1), key(2), key(3), key(4), key(5), key(8), key(7)];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // Value should remain in hi heap as 0, since max_lo (0) <= new (0)
         assert!(safe_tip.hi.contains_key(&0) || safe_tip.hi.is_empty());
@@ -619,7 +621,7 @@ mod tests {
             validators[2].clone(),
             key(8),
         ];
-        safe_tip.reconcile(&new_validators.into());
+        safe_tip.reconcile(&new_validators.try_into().unwrap());
 
         // This should trigger Case 4: move from hi to lo with rebalancing
         // The 0 goes to lo, and max_lo (30) moves to hi

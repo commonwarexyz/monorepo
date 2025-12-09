@@ -74,7 +74,7 @@ pub struct SignatureVerification<S: Scheme> {
 
 impl<S: Scheme> SignatureVerification<S> {
     /// Creates a new `VoteVerification` result.
-    pub fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
+    pub const fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
             invalid_signers,

@@ -2581,7 +2581,7 @@ mod tests {
     }
 
     fn notarization_recover_insufficient_signatures<S: SimplexScheme<Sha256>>(schemes: &[S]) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32) as usize;
         assert!(quorum > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));

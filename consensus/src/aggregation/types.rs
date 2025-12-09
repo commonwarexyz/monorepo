@@ -372,8 +372,8 @@ mod tests {
         Hasher, PrivateKeyExt, Sha256, Signer,
     };
     use commonware_utils::{
-        quorum,
-        set::{Ordered, OrderedQuorum},
+        ordered::{BiMap, Quorum, Set},
+        quorum, TryCollect,
     };
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -385,7 +385,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
 
-        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+        let participants = private_keys
+            .iter()
+            .map(|p| p.public_key())
+            .try_collect::<Set<_>>()
+            .unwrap();
 
         private_keys
             .into_iter()
@@ -413,7 +417,8 @@ mod tests {
         let participants_with_bls = participants
             .into_iter()
             .zip(bls_publics)
-            .collect::<commonware_utils::set::OrderedAssociated<_, _>>();
+            .try_collect::<BiMap<_, _>>()
+            .unwrap();
 
         bls_keys
             .into_iter()
@@ -429,17 +434,16 @@ mod tests {
         let t = quorum(n);
 
         // Generate ed25519 keys for participant identities
-        let participants: Vec<_> = (0..n)
+        let participants = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
-            .collect();
+            .try_collect::<Set<_>>()
+            .unwrap();
 
         let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, t);
 
         shares
             .into_iter()
-            .map(|share| {
-                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
-            })
+            .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
             .collect()
     }
 
@@ -483,7 +487,7 @@ mod tests {
         assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
         // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(ack.clone());
+        let activity_ack = Activity::Ack(ack);
         let encoded_activity = activity_ack.encode();
         let restored_activity_ack: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_activity, &cfg).unwrap();
