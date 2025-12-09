@@ -514,16 +514,14 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
-    pub fn finalize(&mut self) -> Option<SignedDealerLog<V, C>> {
+    pub fn finalize(&mut self) {
         if self.finalized_log.is_some() {
-            return None;
+            return;
         }
         if let Some(dealer) = self.dealer.take() {
             let log = dealer.finalize();
-            self.finalized_log = Some(log.clone());
-            return Some(log);
+            self.finalized_log = Some(log);
         }
-        None
     }
 
     /// Returns a clone of the finalized log if it exists.

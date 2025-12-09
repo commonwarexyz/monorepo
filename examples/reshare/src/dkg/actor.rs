@@ -443,12 +443,7 @@ where
                         // The >= check handles restart after midpoint acknowledgment.
                         if relative_height >= mid_point {
                             if let Some(ref mut ds) = dealer_state {
-                                if ds.finalized_log().is_none() {
-                                    if let Some(log) = ds.finalize() {
-                                        info!(?epoch, "finalized dealer log for inclusion");
-                                        drop(log); // Log is stored in ds.finalized_log
-                                    }
-                                }
+                                ds.finalize();
                             }
                         }
 
