@@ -8,7 +8,7 @@
 
 use super::variant::Variant;
 use crate::bls12381::primitives::{
-    group::{self, Element, Scalar},
+    group::{self, Element, Point, Scalar},
     Error,
 };
 #[cfg(not(feature = "std"))]
@@ -417,6 +417,19 @@ impl<C: Element> EncodeSize for Poly<C> {
 /// Returns the public key of the polynomial (constant term).
 pub fn public<V: Variant>(public: &Public<V>) -> &V::Public {
     public.constant()
+}
+
+/// Evaluate a public polynomial at a given scalar, using an MSM.
+#[allow(dead_code)]
+pub(crate) fn eval_msm<V: Variant>(poly: &Public<V>, point: Scalar) -> V::Public {
+    let scalars = (0..poly.0.len())
+        .scan(Scalar::one(), |acc, _| {
+            let out = acc.clone();
+            acc.mul(&point);
+            Some(out)
+        })
+        .collect::<Vec<_>>();
+    <V::Public as Point>::msm(&poly.0, &scalars)
 }
 
 #[cfg(test)]
