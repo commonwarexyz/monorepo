@@ -286,7 +286,7 @@ where
                 .expect("should be able to create channel");
 
             // Prepare round info
-            let round_info = Info::new(
+            let round = Info::new(
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
@@ -300,7 +300,7 @@ where
                 storage.create_dealer(
                     epoch,
                     self.signer.clone(),
-                    round_info.clone(),
+                    round.clone(),
                     epoch_state.share.clone(),
                     epoch_state.rng_seed,
                 )
@@ -310,7 +310,7 @@ where
 
             // Initialize player state if we are a player
             let mut player_state: Option<Player<V, C>> = if am_player {
-                storage.create_player(epoch, self.signer.clone(), round_info.clone())
+                storage.create_player(epoch, self.signer.clone(), round.clone())
             } else {
                 None
             };
@@ -410,7 +410,7 @@ where
 
                         // Process dealer log from block if present
                         if let Some(log) = block.log {
-                            if let Some((dealer, dealer_log)) = log.check(&round_info) {
+                            if let Some((dealer, dealer_log)) = log.check(&round) {
                                 // If we see our dealing outcome in a finalized block,
                                 // make sure to take it, so that we don't post
                                 // it in subsequent blocks
@@ -469,7 +469,7 @@ where
                                     ),
                                 }
                             } else {
-                                match observe(round_info.clone(), logs, 1) {
+                                match observe(round.clone(), logs, 1) {
                                     Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,
