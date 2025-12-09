@@ -405,10 +405,18 @@ mod test {
         /// If true, start without an initial output (DKG mode).
         /// If false, start with a trusted dealer output (reshare mode).
         is_dkg: bool,
+        /// Minimum number of failures expected (for tests with lossy networks/crashes).
+        expected_failures: u64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct PlanResult {
+        state: String,
+        failures: u64,
     }
 
     impl Plan {
-        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<String>
+        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<PlanResult>
         where
             S: Scheme<PublicKey = PublicKey>,
             SchemeProvider<S, PrivateKey>:
@@ -451,6 +459,7 @@ mod test {
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
+            let mut failures = 0u64;
 
             // Set up crash ticker if needed
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
@@ -478,6 +487,7 @@ mod test {
                         let (epoch, output) = match update.update {
                             Update::Failure { epoch } => {
                                 info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
+                                failures += 1;
                                 (epoch, None)
                             }
                             Update::Success { epoch, output, .. } => {
@@ -527,7 +537,10 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= self.target {
-                                return Ok(ctx.auditor().state());
+                                return Ok(PlanResult {
+                                    state: ctx.auditor().state(),
+                                    failures,
+                                });
                             } else {
                                 current_epoch = current_epoch.next();
                             }
@@ -575,13 +588,26 @@ mod test {
             }
         }
 
-        fn run<S>(self) -> anyhow::Result<String>
+        fn run<S>(self) -> anyhow::Result<PlanResult>
         where
             S: Scheme<PublicKey = PublicKey>,
             SchemeProvider<S, PrivateKey>:
                 EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
-            Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))
+            let expected_failures = self.expected_failures;
+            let result = Runner::seeded(self.seed).start(|ctx| self.run_inner::<S>(ctx))?;
+            info!(
+                failures = result.failures,
+                expected_failures, "test completed"
+            );
+            if result.failures < expected_failures {
+                return Err(anyhow!(
+                    "expected at least {} failures, got {}",
+                    expected_failures,
+                    result.failures
+                ));
+            }
+            Ok(result)
         }
     }
 
@@ -600,6 +626,7 @@ mod test {
             target: 1,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -633,6 +660,7 @@ mod test {
             target: 1,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -655,6 +683,7 @@ mod test {
             target: 1,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -677,6 +706,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -699,6 +729,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -721,6 +752,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -743,6 +775,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -765,6 +798,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -787,6 +821,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -809,6 +844,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -831,6 +867,7 @@ mod test {
             target: 4,
             crash: None,
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -857,6 +894,7 @@ mod test {
                 count: 1,
             }),
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -883,6 +921,7 @@ mod test {
                 count: 1,
             }),
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -909,6 +948,7 @@ mod test {
                 count: 3,
             }),
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
@@ -935,6 +975,7 @@ mod test {
                 count: 3,
             }),
             is_dkg: false,
+            expected_failures: 0,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -957,6 +998,7 @@ mod test {
             target: 1,
             crash: None,
             is_dkg: true,
+            expected_failures: 0,
         }
         .run::<EdScheme>())
         {
