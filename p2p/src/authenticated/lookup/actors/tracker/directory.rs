@@ -195,7 +195,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
-    /// Returns all tracked peers.
+    /// Returns all peers that are part of at least one peer set.
     pub fn tracked(&self) -> Set<C> {
         self.peers
             .iter()
