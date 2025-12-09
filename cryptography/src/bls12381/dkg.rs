@@ -1059,7 +1059,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .into_iter()
             .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg)))
             .try_collect()
-            .map_err(|_| Error::DuplicatePlayers)?;
+            .expect("players are unique");
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
