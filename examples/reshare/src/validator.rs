@@ -160,7 +160,6 @@ mod test {
         dkg::{PostUpdate, Update},
     };
     use anyhow::anyhow;
-    use commonware_codec::{varint::UInt, ReadExt};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
@@ -173,7 +172,8 @@ mod test {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
-        Manager as _, Message, Receiver, Recipients, Sender,
+        utils::mux,
+        Manager as _, Message, Receiver,
     };
     use commonware_runtime::{
         deterministic::{self, Runner},
@@ -191,46 +191,14 @@ mod test {
         collections::{BTreeMap, HashSet},
         future::Future,
         pin::Pin,
-        sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::{debug, error, info};
 
-    type FailEpochs = Arc<Mutex<HashSet<u64>>>;
-
-    #[derive(Debug, Clone)]
-    struct FilteredSender<S> {
-        inner: S,
-        fail_epochs: FailEpochs,
-    }
-
-    impl<S: Sender> Sender for FilteredSender<S> {
-        type Error = S::Error;
-        type PublicKey = S::PublicKey;
-
-        async fn send(
-            &mut self,
-            recipients: Recipients<Self::PublicKey>,
-            message: bytes::Bytes,
-            priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            // Parse the epoch from the mux prefix (varint subchannel)
-            let mut reader = message.clone();
-            if let Ok(subchannel) = UInt::read(&mut reader) {
-                let epoch: u64 = subchannel.into();
-                if self.fail_epochs.lock().unwrap().contains(&epoch) {
-                    debug!(?epoch, "filtered sender dropping message");
-                    return Ok(vec![]);
-                }
-            }
-            self.inner.send(recipients, message, priority).await
-        }
-    }
-
     #[derive(Debug)]
     struct FilteredReceiver<R> {
         inner: R,
-        fail_epochs: FailEpochs,
+        fail_epochs: HashSet<u64>,
     }
 
     impl<R: Receiver> Receiver for FilteredReceiver<R> {
@@ -240,14 +208,10 @@ mod test {
         async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
             loop {
                 let (pk, bytes) = self.inner.recv().await?;
-                // Parse the epoch from the mux prefix (varint subchannel)
-                let mut reader = bytes.clone();
-                if let Ok(subchannel) = UInt::read(&mut reader) {
-                    let epoch: u64 = subchannel.into();
-                    if self.fail_epochs.lock().unwrap().contains(&epoch) {
-                        debug!(?epoch, "filtered receiver dropping message");
-                        continue;
-                    }
+                let (epoch, _) = mux::parse(bytes.clone()).expect("failed to parse mux message");
+                if self.fail_epochs.contains(&epoch) {
+                    debug!(?epoch, "filtered receiver dropping message");
+                    continue;
                 }
                 return Ok((pk, bytes));
             }
@@ -294,7 +258,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         is_dkg: bool,
-        fail_epochs: FailEpochs,
+        fail_epochs: HashSet<u64>,
     }
 
     impl Team {
@@ -322,7 +286,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 is_dkg: false,
-                fail_epochs: Arc::new(Mutex::new(HashSet::new())),
+                fail_epochs: HashSet::new(),
             }
         }
 
@@ -343,7 +307,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 is_dkg: true,
-                fail_epochs: Arc::new(Mutex::new(HashSet::new())),
+                fail_epochs: HashSet::new(),
             }
         }
 
@@ -373,10 +337,7 @@ mod test {
             let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
             let (dkg_sender, dkg_receiver) = control.register(DKG_CHANNEL).await.unwrap();
             let dkg = (
-                FilteredSender {
-                    inner: dkg_sender,
-                    fail_epochs: self.fail_epochs.clone(),
-                },
+                dkg_sender,
                 FilteredReceiver {
                     inner: dkg_receiver,
                     fail_epochs: self.fail_epochs.clone(),
@@ -544,7 +505,7 @@ mod test {
             } else {
                 Team::reshare(&mut ctx, self.total, &self.per_round)
             };
-            *team.fail_epochs.lock().unwrap() = self.fail_epochs.clone();
+            team.fail_epochs = self.fail_epochs.clone();
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
