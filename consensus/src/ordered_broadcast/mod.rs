@@ -61,8 +61,8 @@ mod tests {
             dkg,
             primitives::{
                 group::Share,
-                poly,
                 variant::{MinPk, MinSig, Variant},
+                Sharing,
             },
         },
         ed25519::{PrivateKey, PublicKey},
@@ -188,7 +188,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
-        polynomial: poly::Public<V>,
+        polynomial: Sharing<V>,
         sequencer_pks: &[PublicKey],
         validator_pks: &[PublicKey],
         validators: &[(PublicKey, PrivateKey, Share)],
@@ -217,7 +217,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                 namespace,
-                *poly::public::<V>(&polynomial),
+                *polynomial.public(),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -331,7 +331,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -378,7 +378,7 @@ mod tests {
         let num_validators: u32 = 4;
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
-            dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
+            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(num_validators));
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
@@ -496,7 +496,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Configure the network
@@ -565,7 +565,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -644,7 +644,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -694,7 +694,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Setup network
@@ -773,7 +773,7 @@ mod tests {
         runner.start(|mut context| async move {
             // Generate validator shares
             let (polynomial, shares) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
@@ -852,7 +852,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.public(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -898,7 +898,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.public(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -965,7 +965,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(

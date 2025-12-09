@@ -181,7 +181,7 @@
 //! ```
 //! use commonware_cryptography::bls12381::{
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
-//!     primitives::variant::MinSig,
+//!     primitives::{variant::MinSig, SharingMode},
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
@@ -208,10 +208,11 @@
 //! // Step 1: Create round info for initial DKG
 //! let info = Info::<MinSig, ed25519::PublicKey>::new(
 //!     b"application-namespace",
-//!     0,                    // round number
-//!     None,                 // no previous output (initial DKG)
-//!     dealer_set.clone(),   // dealers
-//!     player_set.clone(),   // players
+//!     0,                        // round number
+//!     None,                     // no previous output (initial DKG)
+//!     SharingMode::default(),   // sharing mode
+//!     dealer_set.clone(),       // dealers
+//!     player_set.clone(),       // players
 //! )?;
 //!
 //! // Step 2: Initialize players
@@ -285,6 +286,7 @@ use crate::{
         ops::msm_interpolate,
         poly::{self, new_with_constant, Eval, Poly, Public, Weight},
         variant::Variant,
+        Sharing, SharingMode,
     },
     transcript::{Summary, Transcript},
     Digest, PublicKey, Signer,
@@ -378,12 +380,12 @@ fn recover_public_with_weights<V: Variant>(
 pub struct Output<V: Variant, P> {
     summary: Summary,
     players: Set<P>,
-    public: Public<V>,
+    public: Sharing<V>,
 }
 
 impl<V: Variant, P: Ord> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
-        Some(self.public.evaluate(self.players.index(player)?).value)
+        self.public.partial_public(self.players.index(player)?).ok()
     }
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
@@ -394,7 +396,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// Get the public polynomial associated with this output.
     ///
     /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
-    pub const fn public(&self) -> &Public<V> {
+    pub const fn public(&self) -> &Sharing<V> {
         &self.public
     }
 
@@ -428,7 +430,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
         Ok(Self {
             summary: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            public: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_players))?,
+            public: Read::read_cfg(buf, &max_players)?,
         })
     }
 }
@@ -441,8 +443,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let summary = u.arbitrary()?;
-        let public: poly::Public<V> = u.arbitrary()?;
-        let num_players = public.degree();
+        let public: Sharing<V> = u.arbitrary()?;
+        let num_players = public.required();
         let players = Set::try_from(
             u.arbitrary_iter::<P>()?
                 .take(num_players as usize)
@@ -575,9 +577,14 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         namespace: &[u8],
         round: u64,
         previous: Option<Output<V, P>>,
+        mode: SharingMode,
         dealers: Set<P>,
         players: Set<P>,
     ) -> Result<Self, Error> {
+        if let Some(previous) = previous.as_ref() {
+            assert_eq!(previous.public.mode(), Default::default());
+        }
+        assert_eq!(mode, Default::default());
         let participant_range = 1..u32::MAX as usize;
         if !participant_range.contains(&dealers.len()) {
             return Err(Error::NumDealers(dealers.len()));
@@ -1325,7 +1332,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                 info.threshold(),
                 concurrency,
             );
-            if previous.public().constant() != public.constant() {
+            if previous.public().public() != public.constant() {
                 return Err(Error::DkgFailed);
             }
             (public, Some(weights))
@@ -1336,10 +1343,11 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             }
             (public, None)
         };
+        let n = info.players.len() as u32;
         let output = Output {
             summary: info.summary,
+            public: Sharing::new(Default::default(), NZU32!(n), public),
             players: info.players,
-            public,
         };
         Ok(Self { output, weights })
     }
@@ -1495,12 +1503,14 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
+    mode: SharingMode,
     players: Set<P>,
 ) -> DealResult<V, P> {
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
-    let t = quorum(players.len() as u32);
+    let n = players.len() as u32;
+    let t = quorum(n);
     let private = poly::new_from(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
@@ -1517,8 +1527,8 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         .expect("players are unique");
     let output = Output {
         summary: Summary::random(&mut rng),
+        public: Sharing::new(mode, NZU32!(n), Poly::commit(private)),
         players,
-        public: Poly::commit(private),
     };
     Ok((output, shares))
 }
@@ -1530,10 +1540,11 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant>(
     rng: impl CryptoRngCore,
+    mode: SharingMode,
     n: NonZeroU32,
-) -> (Poly<V::Public>, Vec<Share>) {
+) -> (Sharing<V>, Vec<Share>) {
     let players = (0..n.get()).try_collect().unwrap();
-    let (output, shares) = deal::<V, _>(rng, players).unwrap();
+    let (output, shares) = deal::<V, _>(rng, mode, players).unwrap();
     (output.public().clone(), shares.values().to_vec())
 }
 
@@ -1858,6 +1869,7 @@ mod test_plan {
                     &[],
                     i_round as u64,
                     previous_output.clone(),
+                    Default::default(),
                     dealer_set.clone(),
                     player_set.clone(),
                 )?;
@@ -2071,10 +2083,13 @@ mod test_plan {
                     );
 
                     // Verify share matches public polynomial
-                    let expected_public = observer_output.public.evaluate(share.index);
+                    let expected_public = observer_output
+                        .public
+                        .partial_public(share.index)
+                        .expect("share index should be valid");
                     let actual_public = share.public::<V>();
                     assert_eq!(
-                        expected_public.value, actual_public,
+                        expected_public, actual_public,
                         "Share should match public polynomial"
                     );
 
@@ -2082,7 +2097,7 @@ mod test_plan {
                 }
 
                 // Initialize or verify threshold public key
-                let current_public = *poly::public::<V>(observer_output.public());
+                let current_public = *observer_output.public().public();
                 match threshold_public_key {
                     None => threshold_public_key = Some(current_public),
                     Some(tpk) => {
@@ -2410,6 +2425,7 @@ mod test {
             &[],
             0,
             None,
+            Default::default(),
             vec![sk.public_key()].try_into().unwrap(),
             vec![sk.public_key()].try_into().unwrap(),
         )?;

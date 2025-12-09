@@ -5,8 +5,13 @@ use crate::bls12381::primitives::{
     Error,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
-use core::{cell::OnceCell, num::NonZeroU32};
+use alloc::{sync::Arc, vec, vec::Vec};
+use cfg_if::cfg_if;
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_utils::{quorum, NZU32};
+use core::num::NonZeroU32;
+#[cfg(feature = "std")]
+use std::sync::{Arc, OnceLock};
 
 /// Configures how participants are assigned shares of a secret.
 ///
@@ -38,15 +43,50 @@ impl SharingMode {
     }
 }
 
+impl FixedSize for SharingMode {
+    const SIZE: usize = 1;
+}
+
+impl Write for SharingMode {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        buf.put_u8(*self as u8);
+    }
+}
+
+impl Read for SharingMode {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag: u8 = ReadExt::read(buf)?;
+        match tag {
+            0 => Ok(Self::NonZeroCounter),
+            o => Err(commonware_codec::Error::InvalidEnum(o)),
+        }
+    }
+}
+
 /// Represents the public output of a polynomial secret sharing.
 ///
 /// This does not contain any secret information.
+#[derive(Clone, Debug)]
 pub struct Sharing<V: Variant> {
     mode: SharingMode,
     total: NonZeroU32,
-    poly: Public<V>,
-    evals: Vec<OnceCell<V::Public>>,
+    poly: Arc<Public<V>>,
+    #[cfg(feature = "std")]
+    evals: Arc<Vec<OnceLock<V::Public>>>,
 }
+
+impl<V: Variant> PartialEq for Sharing<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.total == other.total && self.poly == other.poly
+    }
+}
+
+impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
     #[allow(dead_code)]
@@ -54,9 +94,15 @@ impl<V: Variant> Sharing<V> {
         Self {
             mode,
             total,
-            poly,
-            evals: vec![OnceCell::new(); total.get() as usize],
+            poly: Arc::new(poly),
+            #[cfg(feature = "std")]
+            evals: Arc::new(vec![OnceLock::new(); total.get() as usize]),
         }
+    }
+
+    /// Get the mode used for this sharing.
+    pub(crate) const fn mode(&self) -> SharingMode {
+        self.mode
     }
 
     fn scalar(&self, i: u32) -> Option<Scalar> {
@@ -65,6 +111,11 @@ impl<V: Variant> Sharing<V> {
 
     fn all_scalars(&self) -> impl Iterator<Item = Scalar> {
         self.mode.all_scalars(self.total)
+    }
+
+    /// Return the number of participants required to recover the secret.
+    pub fn required(&self) -> u32 {
+        quorum(self.total.get())
     }
 
     /// Return the total number of participants in this sharing.
@@ -79,6 +130,7 @@ impl<V: Variant> Sharing<V> {
     ///
     /// The first time this method is called can be expensive, but subsequent
     /// calls are idempotent, and cheap.
+    #[cfg(feature = "std")]
     pub fn precompute_partial_publics(&self) {
         // NOTE: once we add more interpolation methods, this can be smarter.
         self.evals
@@ -93,18 +145,96 @@ impl<V: Variant> Sharing<V> {
     ///
     /// This will return `None` if the index is greater >= [`Self::total`].
     pub fn partial_public(&self, i: u32) -> Result<V::Public, Error> {
-        self.evals
-            .get(i as usize)
-            .map(|e| {
-                *e.get_or_init(|| eval_msm::<V>(&self.poly, self.scalar(i).expect("i < total")))
-            })
-            .ok_or(Error::InvalidIndex)
+        cfg_if! {
+            if #[cfg(feature = "std")] {
+                self.evals
+                    .get(i as usize)
+                    .map(|e| {
+                        *e.get_or_init(|| eval_msm::<V>(&self.poly, self.scalar(i).expect("i < total")))
+                    })
+                    .ok_or(Error::InvalidIndex)
+            } else {
+                Ok(eval_msm::<V>(&self.poly, self.scalar(i).ok_or(Error::InvalidIndex)?))
+            }
+        }
     }
 
     /// Get the group public key of this sharing.
     ///
     /// In other words, the public key associated with the shared secret.
-    pub fn public(&self) -> V::Public {
-        *self.poly.constant()
+    pub fn public(&self) -> &V::Public {
+        self.poly.constant()
+    }
+}
+
+impl<V: Variant> EncodeSize for Sharing<V> {
+    fn encode_size(&self) -> usize {
+        self.mode.encode_size() + self.total.get().encode_size() + self.poly.encode_size()
+    }
+}
+
+impl<V: Variant> Write for Sharing<V> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.mode.write(buf);
+        self.total.get().write(buf);
+        self.poly.write(buf);
+    }
+}
+
+impl<V: Variant> Read for Sharing<V> {
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let mode = ReadExt::read(buf)?;
+        // We bound total to the config, in order to prevent doing arbitrary
+        // computation if we precompute public keys.
+        let total = {
+            let out: u32 = ReadExt::read(buf)?;
+            if out == 0 || out > cfg.get() {
+                return Err(commonware_codec::Error::Invalid(
+                    "Sharing",
+                    "total not in range",
+                ));
+            }
+            // This will not panic, because we checked != 0 above.
+            NZU32!(out)
+        };
+        let poly = Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=*cfg))?;
+        Ok(Self::new(mode, total, poly))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+mod fuzz {
+    use super::*;
+    use crate::bls12381::primitives::poly::{new_from, Poly};
+    use arbitrary::Arbitrary;
+    use commonware_utils::NZU32;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    impl<'a> Arbitrary<'a> for SharingMode {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            match u.int_in_range(0u8..=0)? {
+                0 => Ok(Self::NonZeroCounter),
+                _ => Err(arbitrary::Error::IncorrectFormat),
+            }
+        }
+    }
+
+    impl<'a, V: Variant> Arbitrary<'a> for Sharing<V> {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let total: u32 = u.int_in_range(1..=100)?;
+            let mode: SharingMode = u.arbitrary()?;
+            let seed: u64 = u.arbitrary()?;
+            let poly = new_from(&mut StdRng::seed_from_u64(seed), quorum(total) - 1);
+            Ok(Self::new(
+                mode,
+                NZU32!(total),
+                Poly::<V::Public>::commit(poly),
+            ))
+        }
     }
 }

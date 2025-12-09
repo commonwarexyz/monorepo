@@ -6,12 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        ops,
-        poly::{self, PartialSignature},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant, Sharing},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::union;
@@ -587,7 +582,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// using the provided polynomial (which contains the BLS public polynomial).
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], polynomial: &poly::Public<V>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Sharing<V>) -> bool {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
         let message = Self::payload(&self.chunk, &self.epoch);
@@ -936,7 +931,6 @@ mod tests {
             primitives::{
                 group::Element,
                 ops::{partial_sign_message, threshold_signature_recover},
-                poly::{self, public},
                 variant::{MinPk, MinSig},
             },
         },
@@ -973,7 +967,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
@@ -999,7 +993,7 @@ mod tests {
         assert_eq!(parent, decoded);
 
         // Verify the signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = &polynomial.public();
         let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -1030,7 +1024,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -1069,7 +1063,7 @@ mod tests {
         assert_eq!(decoded2.parent, node2.parent);
 
         // Verify that the parent signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         let lock = Lock::<_, V, _>::new(parent_chunk, parent_epoch, parent_signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -1083,7 +1077,7 @@ mod tests {
     fn ack_encode_decode<V: Variant>() {
         let n = 4;
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1134,7 +1128,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let epoch = Epoch::new(5);
         // Generate partial signatures for the chunk
@@ -1151,7 +1145,7 @@ mod tests {
 
         // Create lock and verify it
         let lock = Lock::new(chunk.clone(), epoch, bls_signature);
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
@@ -1207,7 +1201,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Generate partial signatures for the chunk
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1231,7 +1225,7 @@ mod tests {
         assert_eq!(decoded.signature, lock.signature);
 
         // Verify the signature in the decoded lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(decoded.verify(NAMESPACE, identity));
     }
 
@@ -1247,8 +1241,8 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
-        let identity = public::<V>(&polynomial);
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         // Test genesis node (no parent)
         let node = Node::<PublicKey, V, Sha256Digest>::sign(
@@ -1302,7 +1296,7 @@ mod tests {
     fn ack_sign_verify<V: Variant>() {
         let n = 4;
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1325,7 +1319,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1348,7 +1342,7 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(lock.verify(NAMESPACE, identity));
     }
 
@@ -1362,8 +1356,8 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
-        let identity = poly::public::<V>(&polynomial);
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1426,7 +1420,8 @@ mod tests {
         // Generate a valid parent signature
         let n = 4;
         let t = quorum(n);
-        let (_, shares) = deal_anonymous::<MinSig>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+        let (_, shares) =
+            deal_anonymous::<MinSig>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = Epoch::new(5);
@@ -1466,8 +1461,9 @@ mod tests {
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let n = 4;
-        let (polynomial, _) = dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
-        let identity = poly::public::<V>(&polynomial);
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         // Create a valid chunk
         let chunk = Chunk::new(public_key, 0, sample_digest(1));
@@ -1508,7 +1504,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (commitment, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -1539,13 +1535,14 @@ mod tests {
         );
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&commitment);
+        let identity = &commitment.public();
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a parent with invalid threshold signature
-        let (_, wrong_shares) = dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), NZU32!(n));
+        let (_, wrong_shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
@@ -1581,7 +1578,7 @@ mod tests {
     fn ack_verify_invalid_signature<V: Variant>() {
         let n = 4;
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1612,10 +1609,10 @@ mod tests {
     fn ack_verify_wrong_validator<V: Variant>() {
         let n = 4;
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let (wrong_polynomial, _) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1642,7 +1639,7 @@ mod tests {
         let n = 4;
         let t = quorum(n);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1662,13 +1659,13 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk.clone(), epoch, signature);
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
 
         // Verification should succeed
         assert!(lock.verify(NAMESPACE, identity));
 
         let (wrong_polynomial, wrong_shares) =
-            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
@@ -1685,7 +1682,7 @@ mod tests {
         assert!(!wrong_lock.verify(NAMESPACE, identity));
 
         // But succeed with the matching wrong identity
-        let wrong_identity = poly::public::<V>(&wrong_polynomial);
+        let wrong_identity = &wrong_polynomial.public();
         assert!(wrong_lock.verify(NAMESPACE, wrong_identity));
     }
 
@@ -1741,7 +1738,8 @@ mod tests {
 
         // Create a parent with a random BLS signature (content doesn't matter for this test)
         let n = 4;
-        let (_, shares) = dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+        let (_, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let dummy_message = vec![0u8; 32];
         let dummy_sig = partial_sign_message::<V>(&shares[0], None, &dummy_message);

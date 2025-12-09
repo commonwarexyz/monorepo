@@ -34,13 +34,14 @@ impl Bench {
             .unwrap();
 
         let (output, shares) = if reshare {
-            let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.clone()).unwrap();
+            let (o, s) =
+                deal::<V, PublicKey>(&mut rng, Default::default(), dealers.clone()).unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(&[], 0, output, dealers, players).unwrap();
+        let info = Info::new(&[], 0, output, Default::default(), dealers, players).unwrap();
 
         // Create player state for every participant
         let mut player_states = private_keys

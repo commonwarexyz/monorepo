@@ -465,14 +465,15 @@ mod tests {
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
+        let (polynomial, shares) =
+            deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
 
         shares
             .into_iter()
             .map(|share| {
                 bls12381_threshold::Scheme::signer(
                     participants.clone().try_into().unwrap(),
-                    &polynomial,
+                    polynomial.clone(),
                     share,
                 )
                 .unwrap()

@@ -25,20 +25,18 @@ use commonware_cryptography::{
             group::Share,
             ops::{
                 aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
+                partial_verify_multiple_public_keys, threshold_signature_recover_pair,
                 verify_message,
             },
-            poly::{self, PartialSignature, Public},
+            poly::PartialSignature,
             variant::Variant,
+            Sharing,
         },
         tle,
     },
     Digest, PublicKey,
 };
-use commonware_utils::{
-    ordered::{BiMap, Quorum, Set},
-    TryCollect,
-};
+use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -54,17 +52,17 @@ use std::{
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
-        participants: BiMap<P, V::Public>,
-        /// Public identity of the committee (constant across reshares).
-        identity: V::Public,
+        participants: Set<P>,
+        /// The public polynomial, used for the group identity, and partial signatures.
+        polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
     },
     Verifier {
         /// Participants in the committee.
-        participants: BiMap<P, V::Public>,
-        /// Public identity of the committee (constant across reshares).
-        identity: V::Public,
+        participants: Set<P>,
+        /// The public polynomial, used for the group identity, and partial signatures.
+        polynomial: Sharing<V>,
     },
     CertificateVerifier {
         /// Public identity of the committee (constant across reshares).
@@ -84,34 +82,25 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Option<Self> {
-        let identity = *poly::public::<V>(polynomial);
+    pub fn signer(participants: Set<P>, polynomial: Sharing<V>, share: Share) -> Option<Self> {
         assert_eq!(
             polynomial.required(),
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );
-        let polynomial = polynomial.evaluate_all(participants.len() as u32);
-        let participants: BiMap<_, _> = participants
-            .into_iter()
-            .zip(polynomial)
-            .try_collect()
-            .expect("participants are unique");
-
-        let public_key = share.public::<V>();
-        let index = participants
-            .values()
-            .iter()
-            .position(|p| p == &public_key)?;
-        assert_eq!(
-            index as u32, share.index,
-            "share index must match participant index"
-        );
-        Some(Self::Signer {
-            participants,
-            identity,
-            share,
-        })
+        polynomial.precompute_partial_publics();
+        let partial_public = polynomial
+            .partial_public(share.index)
+            .expect("share index must match participant indices");
+        if partial_public == share.public::<V>() {
+            Some(Self::Signer {
+                participants,
+                polynomial,
+                share,
+            })
+        } else {
+            None
+        }
     }
 
     /// Produces a verifier that can authenticate votes but does not hold signing state.
@@ -122,23 +111,17 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(participants: Set<P>, polynomial: &Public<V>) -> Self {
-        let identity = *poly::public::<V>(polynomial);
+    pub fn verifier(participants: Set<P>, polynomial: Sharing<V>) -> Self {
         assert_eq!(
             polynomial.required(),
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );
-        let polynomial = polynomial.evaluate_all(participants.len() as u32);
-        let participants: BiMap<_, _> = participants
-            .into_iter()
-            .zip(polynomial)
-            .try_collect()
-            .expect("participants are unique");
+        polynomial.precompute_partial_publics();
 
         Self::Verifier {
             participants,
-            identity,
+            polynomial,
         }
     }
 
@@ -162,10 +145,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the public identity of the committee (constant across reshares).
-    pub const fn identity(&self) -> &V::Public {
+    pub fn identity(&self) -> &V::Public {
         match self {
-            Self::Signer { identity, .. } => identity,
-            Self::Verifier { identity, .. } => identity,
+            Self::Signer { polynomial, .. } => polynomial.public(),
+            Self::Verifier { polynomial, .. } => polynomial.public(),
             Self::CertificateVerifier { identity, .. } => identity,
         }
     }
@@ -179,10 +162,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
-    pub fn polynomial(&self) -> &[V::Public] {
+    pub const fn polynomial(&self) -> &Sharing<V> {
         match self {
-            Self::Signer { participants, .. } => participants.values(),
-            Self::Verifier { participants, .. } => participants.values(),
+            Self::Signer { polynomial, .. } => polynomial,
+            Self::Verifier { polynomial, .. } => polynomial,
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -476,7 +459,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         subject: Subject<'_, D>,
         signature: &types::Signature<Self>,
     ) -> bool {
-        let Some(evaluated) = self.polynomial().get(signature.signer as usize) else {
+        let Ok(evaluated) = self.polynomial().partial_public(signature.signer) else {
             return false;
         };
 
@@ -489,7 +472,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         ]);
 
         aggregate_verify_multiple_messages::<V, _>(
-            evaluated,
+            &evaluated,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
                 (Some(seed_namespace.as_ref()), seed_message.as_ref()),
@@ -531,7 +514,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
         let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
-        if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
+        if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(vote_namespace.as_ref()),
             vote_message.as_ref(),
@@ -543,7 +526,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
-        if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
+        if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(seed_namespace.as_ref()),
             seed_message.as_ref(),
@@ -745,27 +728,28 @@ mod tests {
     fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 4);
-        let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(4));
+        let (polynomial, mut shares) =
+            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = 999;
-        Scheme::<V>::signer(participants.keys().clone(), &polynomial, shares[0].clone());
+        Scheme::<V>::signer(participants.keys().clone(), polynomial, shares[0].clone());
     }
 
     #[test]
-    #[should_panic(expected = "share index must match participant index")]
+    #[should_panic(expected = "share index must match participant indices")]
     fn test_signer_shares_must_match_participant_indices_min_pk() {
         signer_shares_must_match_participant_indices::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "share index must match participant index")]
+    #[should_panic(expected = "share index must match participant indices")]
     fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, NZU32!(4));
-        Scheme::<V>::signer(participants.keys().clone(), &polynomial, shares[0].clone());
+        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+        Scheme::<V>::signer(participants.keys().clone(), polynomial, shares[0].clone());
     }
 
     #[test]
@@ -783,8 +767,8 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, _) = deal_anonymous::<V>(&mut rng, NZU32!(4));
-        Scheme::<V>::verifier(participants.keys().clone(), &polynomial);
+        let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+        Scheme::<V>::verifier(participants.keys().clone(), polynomial);
     }
 
     #[test]

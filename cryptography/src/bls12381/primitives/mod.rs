@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, SharingMode},
 //!     dkg,
 //! };
 //! use commonware_utils::NZU32;
@@ -23,7 +23,7 @@
 //! let (n, t) = (5, 4);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, NZU32!(n));
+//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, SharingMode::default(), NZU32!(n));
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
@@ -39,8 +39,8 @@
 //! let threshold_sig = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
 //!
 //! // Verify threshold signature
-//! let threshold_pub = public::<MinSig>(&commitment);
-//! verify_message::<MinSig>(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
+//! let threshold_pub = commitment.public();
+//! verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;

@@ -29,7 +29,8 @@ fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
                                 .try_collect()
                                 .unwrap();
                             let (output, shares) =
-                                deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
+                                deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                    .expect("deal should succeed");
                             let signatures = shares
                                 .values()
                                 .iter()
