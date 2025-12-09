@@ -1,0 +1,53 @@
+name: Free Disk Space
+runs:
+  using: composite
+  steps:
+    - name: Show disk free (before)
+      shell: bash
+      run: df -h || true
+
+    # Linux Cleanup
+    - name: Maximize build space (Linux)
+      if: runner.os == 'Linux'
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+      with:
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: true
+        swap-storage: true
+
+    # macOS Cleanup
+    - name: Cleanup (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        docker system prune -af || true
+        brew cleanup -s || true
+        rm -rf "$(brew --cache)" || true
+        # Remove large preinstalled SDKs and runtimes
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /usr/share/dotnet || true
+        sudo rm -rf /usr/local/.ghcup || true
+        sudo rm -rf ~/Library/Android/sdk || true
+        sudo rm -rf ~/Library/Caches || true
+
+    # Windows Cleanup
+    - name: Cleanup (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        docker system prune -af || $true
+        Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Android" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:ProgramFiles\dotnet" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "$env:USERPROFILE\.ghcup" -ErrorAction SilentlyContinue
+        echo "TEMP=D:\Temp" >> $env:GITHUB_ENV
+        echo "TMP=D:\Temp" >> $env:GITHUB_ENV
+        mkdir D:\Temp -ErrorAction SilentlyContinue
+
+    - name: Show disk free (after)
+      shell: bash
+      run: df -h || true
