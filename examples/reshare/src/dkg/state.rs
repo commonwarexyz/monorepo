@@ -4,17 +4,21 @@
 //! using append-only journals for crash recovery. In-memory BTreeMaps provide fast
 //! lookups while the journal ensures durability.
 
+use super::actor::Message;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
-use commonware_consensus::types::Epoch;
+use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
-        dkg::{DealerLog, DealerPrivMsg, DealerPubMsg, Output, PlayerAck},
+        dkg::{
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Output,
+            Player as CryptoPlayer, PlayerAck, SignedDealerLog,
+        },
         primitives::{group::Share, variant::Variant},
     },
     transcript::Summary,
-    PublicKey,
+    PublicKey, Signer,
 };
-use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
 use commonware_storage::journal::{
     contiguous::variable::{Config as CVConfig, Journal as CVJournal},
     segmented::variable::{Config as SVConfig, Journal as SVJournal},
@@ -33,14 +37,14 @@ const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
 /// Epoch-level DKG state persisted across restarts.
 #[derive(Clone)]
-pub struct DkgState<V: Variant, P: PublicKey> {
+pub struct Epoch<V: Variant, P: PublicKey> {
     pub round: u64,
     pub rng_seed: Summary,
     pub output: Option<Output<V, P>>,
     pub share: Option<Share>,
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for DkgState<V, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
             + self.rng_seed.encode_size()
@@ -49,7 +53,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for DkgState<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Write for DkgState<V, P> {
+impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.round.write(buf);
         self.rng_seed.write(buf);
@@ -58,7 +62,7 @@ impl<V: Variant, P: PublicKey> Write for DkgState<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for DkgState<V, P> {
+impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -75,7 +79,7 @@ impl<V: Variant, P: PublicKey> Read for DkgState<V, P> {
 }
 
 /// An event we want to record to replay later, if we crash.
-enum DkgEvent<V: Variant, P: PublicKey> {
+enum Event<V: Variant, P: PublicKey> {
     /// A dealer message we received and committed to ack (as a player).
     /// Once persisted, we will always generate the same ack for this dealer.
     Dealer(P, DealerPubMsg<V>, DealerPrivMsg),
@@ -85,7 +89,7 @@ enum DkgEvent<V: Variant, P: PublicKey> {
     Log(P, DealerLog<V, P>),
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for DkgEvent<V, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Dealer(x0, x1, x2) => x0.encode_size() + x1.encode_size() + x2.encode_size(),
@@ -95,7 +99,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for DkgEvent<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Write for DkgEvent<V, P> {
+impl<V: Variant, P: PublicKey> Write for Event<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Dealer(x0, x1, x2) => {
@@ -118,7 +122,7 @@ impl<V: Variant, P: PublicKey> Write for DkgEvent<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for DkgEvent<V, P> {
+impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -161,16 +165,16 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps journaled storage for epoch state and protocol messages,
 /// with in-memory BTreeMaps for fast lookups. The journal ensures
 /// durability while the maps provide O(log n) access.
-pub struct State<E: Storage + Metrics, V: Variant, P: PublicKey> {
-    states: CVJournal<E, DkgState<V, P>>,
-    msgs: SVJournal<E, DkgEvent<V, P>>,
+pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+    states: CVJournal<E, Epoch<V, P>>,
+    msgs: SVJournal<E, Event<V, P>>,
 
     // In-memory state
-    current_dkg_state: Option<(Epoch, DkgState<V, P>)>,
-    epoch_caches: BTreeMap<Epoch, EpochCache<V, P>>,
+    current_epoch: Option<(EpochNum, Epoch<V, P>)>,
+    epoch_caches: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
+impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     /// Initialize storage, creating partitions if needed.
     /// Replays journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
@@ -203,43 +207,43 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         .await
         .expect("should be able to init dkg_msgs journal");
 
-        // Replay dkg_states to get current state
-        let current_dkg_state = {
+        // Replay states to get current epoch
+        let current_epoch = {
             let size = states.size();
             if size == 0 {
                 None
             } else {
                 Some((
-                    Epoch::new(size - 1),
+                    EpochNum::new(size - 1),
                     states
                         .read(size - 1)
                         .await
-                        .expect("should be able to read dkg_state"),
+                        .expect("should be able to read epoch"),
                 ))
             }
         };
 
-        // Replay dkg_msgs to populate epoch caches
-        let mut epoch_caches = BTreeMap::<Epoch, EpochCache<V, P>>::new();
+        // Replay msgs to populate epoch caches
+        let mut epoch_caches = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
         {
             let replay = msgs
                 .replay(0, 0, READ_BUFFER)
                 .await
-                .expect("should be able to replay dkg_msgs");
+                .expect("should be able to replay msgs");
             futures::pin_mut!(replay);
 
             while let Some(result) = replay.next().await {
-                let (section, _, _, event) = result.expect("should be able to read dkg_msg");
-                let epoch = Epoch::new(section);
+                let (section, _, _, event) = result.expect("should be able to read msg");
+                let epoch = EpochNum::new(section);
                 let cache = epoch_caches.entry(epoch).or_default();
                 match event {
-                    DkgEvent::Dealer(dealer, pub_msg, priv_msg) => {
+                    Event::Dealer(dealer, pub_msg, priv_msg) => {
                         cache.dealer_msgs.insert(dealer, (pub_msg, priv_msg));
                     }
-                    DkgEvent::Player(player, ack) => {
+                    Event::Player(player, ack) => {
                         cache.player_acks.insert(player, ack);
                     }
-                    DkgEvent::Log(dealer, log) => {
+                    Event::Log(dealer, log) => {
                         cache.logs.insert(dealer, log);
                     }
                 }
@@ -249,13 +253,13 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         Self {
             states,
             msgs,
-            current_dkg_state,
+            current_epoch,
             epoch_caches,
         }
     }
 
     /// Returns all dealer messages received during the given epoch.
-    pub fn dealer_msgs(&self, epoch: Epoch) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> {
+    pub fn dealer_msgs(&self, epoch: EpochNum) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> {
         self.epoch_caches
             .get(&epoch)
             .map(|cache| {
@@ -269,7 +273,7 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     }
 
     /// Returns all player acknowledgments received during the given epoch.
-    pub fn player_acks(&self, epoch: Epoch) -> Vec<(P, PlayerAck<P>)> {
+    pub fn player_acks(&self, epoch: EpochNum) -> Vec<(P, PlayerAck<P>)> {
         self.epoch_caches
             .get(&epoch)
             .map(|cache| {
@@ -283,7 +287,7 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     }
 
     /// Returns all finalized dealer logs for the given epoch.
-    pub fn logs(&self, epoch: Epoch) -> BTreeMap<P, DealerLog<V, P>> {
+    pub fn logs(&self, epoch: EpochNum) -> BTreeMap<P, DealerLog<V, P>> {
         self.epoch_caches
             .get(&epoch)
             .map(|cache| cache.logs.clone())
@@ -291,28 +295,26 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     }
 
     /// Checks if a dealer has already submitted a log this epoch.
-    pub fn has_submitted_log(&self, epoch: Epoch, dealer: &P) -> bool {
+    pub fn has_submitted_log(&self, epoch: EpochNum, dealer: &P) -> bool {
         self.epoch_caches
             .get(&epoch)
             .map(|cache| cache.logs.contains_key(dealer))
             .unwrap_or(false)
     }
 
-    /// Returns the current epoch and DKG state, if initialized.
-    pub fn dkg_state(&self) -> Option<(Epoch, DkgState<V, P>)> {
-        self.current_dkg_state
-            .as_ref()
-            .map(|(e, s)| (*e, s.clone()))
+    /// Returns the current epoch state, if initialized.
+    pub fn epoch(&self) -> Option<(EpochNum, Epoch<V, P>)> {
+        self.current_epoch.as_ref().map(|(e, s)| (*e, s.clone()))
     }
 
-    fn get_or_create_cache(&mut self, epoch: Epoch) -> &mut EpochCache<V, P> {
+    fn get_or_create_cache(&mut self, epoch: EpochNum) -> &mut EpochCache<V, P> {
         self.epoch_caches.entry(epoch).or_default()
     }
 
     /// Persists a dealer message for crash recovery.
     pub async fn append_dealer_msg(
         &mut self,
-        epoch: Epoch,
+        epoch: EpochNum,
         dealer: P,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
@@ -322,14 +324,14 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
         self.msgs
             .append(
                 section,
-                DkgEvent::Dealer(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
+                Event::Dealer(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
-            .expect("should be able to write to dkg_msgs");
+            .expect("should be able to write to msgs");
         self.msgs
             .sync(section)
             .await
-            .expect("should be able to sync dkg_msgs");
+            .expect("should be able to sync msgs");
 
         // Update in-memory cache
         self.get_or_create_cache(epoch)
@@ -338,17 +340,17 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    pub async fn append_player_ack(&mut self, epoch: Epoch, player: P, ack: PlayerAck<P>) {
+    pub async fn append_player_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) {
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, DkgEvent::Player(player.clone(), ack.clone()))
+            .append(section, Event::Player(player.clone(), ack.clone()))
             .await
-            .expect("should be able to write to dkg_msgs");
+            .expect("should be able to write to msgs");
         self.msgs
             .sync(section)
             .await
-            .expect("should be able to sync dkg_msgs");
+            .expect("should be able to sync msgs");
 
         // Update in-memory cache
         self.get_or_create_cache(epoch)
@@ -357,53 +359,188 @@ impl<E: Storage + Metrics, V: Variant, P: PublicKey> State<E, V, P> {
     }
 
     /// Persists a finalized dealer log.
-    pub async fn append_log(&mut self, epoch: Epoch, dealer: P, log: DealerLog<V, P>) {
+    pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) {
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, DkgEvent::Log(dealer.clone(), log.clone()))
+            .append(section, Event::Log(dealer.clone(), log.clone()))
             .await
-            .expect("should be able to write to dkg_msgs");
+            .expect("should be able to write to msgs");
         self.msgs
             .sync(section)
             .await
-            .expect("should be able to sync dkg_msgs");
+            .expect("should be able to sync msgs");
 
         // Update in-memory cache
         self.get_or_create_cache(epoch).logs.insert(dealer, log);
     }
 
     /// Persists new epoch state, advancing to the next epoch.
-    pub async fn append_dkg_state(&mut self, state: DkgState<V, P>) {
+    pub async fn append_epoch(&mut self, state: Epoch<V, P>) {
         // Persist to journal
         self.states
             .append(state.clone())
             .await
-            .expect("should be able to write to dkg_state");
+            .expect("should be able to write to state");
         self.states
             .sync()
             .await
-            .expect("should be able to sync dkg_state");
+            .expect("should be able to sync state");
 
         // Update in-memory state first (clone before moving to journal)
         let size = self.states.size();
-        let epoch = Epoch::new(size - 1);
-        self.current_dkg_state = Some((epoch, state));
+        let epoch = EpochNum::new(size - 1);
+        self.current_epoch = Some((epoch, state));
     }
 
     /// Removes all data from epochs older than `min`.
-    pub async fn prune(&mut self, min: Epoch) {
+    pub async fn prune(&mut self, min: EpochNum) {
         let section = min.get();
         self.msgs
             .prune(section)
             .await
-            .expect("should be able to prune dkg_msgs");
+            .expect("should be able to prune msgs");
         self.states
             .prune(section)
             .await
-            .expect("should be able to prune dkg_states");
+            .expect("should be able to prune states");
 
         // Remove old epoch caches
         self.epoch_caches.retain(|&epoch, _| epoch >= min);
+    }
+}
+
+/// Internal state for a dealer in the current round.
+pub struct Dealer<V: Variant, C: Signer> {
+    dealer: Option<CryptoDealer<V, C>>,
+    pub_msg: DealerPubMsg<V>,
+    unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg>,
+    finalized_log: Option<SignedDealerLog<V, C>>,
+}
+
+impl<V: Variant, C: Signer> Dealer<V, C> {
+    pub const fn new(
+        dealer: Option<CryptoDealer<V, C>>,
+        pub_msg: DealerPubMsg<V>,
+        unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg>,
+    ) -> Self {
+        Self {
+            dealer,
+            pub_msg,
+            unsent_priv_msgs,
+            finalized_log: None,
+        }
+    }
+
+    pub const fn pub_msg(&self) -> &DealerPubMsg<V> {
+        &self.pub_msg
+    }
+
+    pub const fn unsent_priv_msgs(&self) -> &BTreeMap<C::PublicKey, DealerPrivMsg> {
+        &self.unsent_priv_msgs
+    }
+
+    /// Handle an incoming ack from a player.
+    /// Returns the ack if it was successfully processed (for persistence).
+    pub fn handle(
+        &mut self,
+        player: C::PublicKey,
+        ack: PlayerAck<C::PublicKey>,
+    ) -> Option<PlayerAck<C::PublicKey>> {
+        if !self.unsent_priv_msgs.contains_key(&player) {
+            return None;
+        }
+        if let Some(ref mut dealer) = self.dealer {
+            if dealer
+                .receive_player_ack(player.clone(), ack.clone())
+                .is_ok()
+            {
+                self.unsent_priv_msgs.remove(&player);
+                return Some(ack);
+            }
+        }
+        None
+    }
+
+    /// Finalize the dealer and produce a signed log for inclusion in a block.
+    pub fn finalize(&mut self) -> Option<SignedDealerLog<V, C>> {
+        if self.finalized_log.is_some() {
+            return None;
+        }
+        if let Some(dealer) = self.dealer.take() {
+            let log = dealer.finalize();
+            self.finalized_log = Some(log.clone());
+            return Some(log);
+        }
+        None
+    }
+
+    /// Returns a clone of the finalized log if it exists.
+    pub fn finalized_log(&self) -> Option<SignedDealerLog<V, C>> {
+        self.finalized_log.clone()
+    }
+
+    /// Takes and returns the finalized log, leaving None in its place.
+    pub const fn take_finalized_log(&mut self) -> Option<SignedDealerLog<V, C>> {
+        self.finalized_log.take()
+    }
+}
+
+/// Internal state for a player in the current round.
+pub struct Player<V: Variant, C: Signer> {
+    player: CryptoPlayer<V, C>,
+    /// Acks we've generated, keyed by dealer. Once we generate an ack for a dealer,
+    /// we will not generate a different one (to avoid conflicting votes).
+    acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
+    /// Dealers we've already persisted (and thus committed to acking).
+    committed_dealers: BTreeMap<C::PublicKey, bool>,
+}
+
+impl<V: Variant, C: Signer> Player<V, C> {
+    pub const fn new(player: CryptoPlayer<V, C>) -> Self {
+        Self {
+            player,
+            acks: BTreeMap::new(),
+            committed_dealers: BTreeMap::new(),
+        }
+    }
+
+    /// Handle an incoming dealer message (already persisted).
+    /// Returns an ack response message if one should be sent.
+    pub fn handle(
+        &mut self,
+        dealer: C::PublicKey,
+        pub_msg: DealerPubMsg<V>,
+        priv_msg: DealerPrivMsg,
+    ) -> Option<Message<V, C::PublicKey>> {
+        self.committed_dealers.insert(dealer.clone(), true);
+        // If we've already generated an ack, return it
+        if let Some(ack) = self.acks.get(&dealer) {
+            return Some(Message::Ack(ack.clone()));
+        }
+        // Otherwise generate the ack (deterministic based on the persisted message)
+        if let Some(ack) = self
+            .player
+            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+        {
+            self.acks.insert(dealer, ack.clone());
+            return Some(Message::Ack(ack));
+        }
+        None
+    }
+
+    /// Check if we've already committed to acking this dealer.
+    pub fn has_committed(&self, dealer: &C::PublicKey) -> bool {
+        self.committed_dealers.contains_key(dealer)
+    }
+
+    /// Finalize the player's participation in the DKG round.
+    pub fn finalize(
+        self,
+        logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
+        threshold: usize,
+    ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
+    {
+        self.player.finalize(logs, threshold)
     }
 }

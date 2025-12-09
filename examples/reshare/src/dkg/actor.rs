@@ -1,6 +1,6 @@
 use super::{
-    state::{DkgState, State},
-    Mailbox, Message, PostUpdate, Update, UpdateCallBack,
+    state::{Dealer, Epoch as EpochState, Player, Storage},
+    Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
     namespace,
@@ -18,8 +18,8 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            observe, Dealer, DealerPrivMsg, DealerPubMsg, Info, Output, Player, PlayerAck,
-            SignedDealerLog,
+            observe, Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Info, Output,
+            Player as CryptoPlayer, PlayerAck,
         },
         primitives::{group::Share, variant::Variant},
     },
@@ -28,7 +28,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
+};
 use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
@@ -39,19 +41,19 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, num::NonZeroU32};
 use tracing::{debug, info, warn};
 
-/// Rate limiter for DKG messages.
-type DkgRateLimiter<K, E> =
+/// Rate limiter for messages.
+type RateLimit<K, E> =
     RateLimiter<K, HashMapStateStore<K>, E, NoOpMiddleware<<E as GClock>::Instant>>;
 
 /// Wire message type for DKG protocol communication.
-pub enum DkgMessage<V: Variant, P: PublicKey> {
+pub enum Message<V: Variant, P: PublicKey> {
     /// A dealer message containing public and private components for a player.
     Dealer(DealerPubMsg<V>, DealerPrivMsg),
     /// A player acknowledgment sent back to a dealer.
     Ack(PlayerAck<P>),
 }
 
-impl<V: Variant, P: PublicKey> Write for DkgMessage<V, P> {
+impl<V: Variant, P: PublicKey> Write for Message<V, P> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::Dealer(pub_msg, priv_msg) => {
@@ -67,7 +69,7 @@ impl<V: Variant, P: PublicKey> Write for DkgMessage<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for DkgMessage<V, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
@@ -76,7 +78,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for DkgMessage<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for DkgMessage<V, P> {
+impl<V: Variant, P: PublicKey> Read for Message<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -91,7 +93,7 @@ impl<V: Variant, P: PublicKey> Read for DkgMessage<V, P> {
                 let ack = PlayerAck::read(reader)?;
                 Ok(Self::Ack(ack))
             }
-            _ => Err(CodecError::Invalid("dkg::DkgMessage", "Invalid type")),
+            _ => Err(CodecError::Invalid("dkg::Message", "Invalid type")),
         }
     }
 }
@@ -107,7 +109,7 @@ pub struct Config<C: Signer, P> {
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -115,16 +117,16 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: mpsc::Receiver<Message<H, C, V>>,
+    mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
-    rate_limiter: DkgRateLimiter<C::PublicKey, E>,
+    rate_limiter: RateLimit<C::PublicKey, E>,
     partition_prefix: String,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -182,20 +184,20 @@ where
         let is_dkg = output.is_none();
 
         // Initialize persistent state
-        let mut state = State::init(
+        let mut storage = Storage::init(
             self.context.with_label("storage"),
             &self.partition_prefix,
             max_read_size,
         )
         .await;
-        if state.dkg_state().is_none() {
-            let initial_state = DkgState {
+        if storage.epoch().is_none() {
+            let initial_state = EpochState {
                 round: 0,
                 rng_seed: Summary::random(&mut self.context),
                 output,
                 share,
             };
-            state.append_dkg_state(initial_state).await;
+            storage.append_epoch(initial_state).await;
         };
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -205,11 +207,11 @@ where
 
         'actor: loop {
             // Get latest epoch and state
-            let (epoch, dkg_state) = state.dkg_state().expect("dkg_state should be initialized");
+            let (epoch, epoch_state) = storage.epoch().expect("epoch should be initialized");
 
             // Prune everything older than the previous epoch
             if let Some(prev) = epoch.previous() {
-                state.prune(prev).await;
+                storage.prune(prev).await;
             }
 
             // Initialize dealer and player sets
@@ -222,9 +224,9 @@ where
             } else {
                 // In reshare mode, the initial dealer set must exactly match the players that
                 // hold shares from the prior output.
-                let dealers = self.peer_config.dealers(dkg_state.round);
-                let previous_players = dkg_state.output.as_ref().unwrap().players();
-                if dkg_state.round == 0 {
+                let dealers = self.peer_config.dealers(epoch_state.round);
+                let previous_players = epoch_state.output.as_ref().unwrap().players();
+                if epoch_state.round == 0 {
                     assert_eq!(
                         &dealers, previous_players,
                         "dealers for round 0 must equal previous output players"
@@ -235,14 +237,14 @@ where
                             .iter()
                             .all(|d| previous_players.position(d).is_some()),
                         "dealers for round {} must be drawn from previous output players",
-                        dkg_state.round
+                        epoch_state.round
                     );
                 }
 
                 (
                     dealers,
-                    self.peer_config.dealers(dkg_state.round + 1),
-                    self.peer_config.dealers(dkg_state.round + 2),
+                    self.peer_config.dealers(epoch_state.round + 1),
+                    self.peer_config.dealers(epoch_state.round + 2),
                 )
             };
 
@@ -264,14 +266,14 @@ where
 
             let self_pk = self.signer.public_key();
             let am_dealer =
-                dealers.position(&self_pk).is_some() && !state.has_submitted_log(epoch, &self_pk);
+                dealers.position(&self_pk).is_some() && !storage.has_submitted_log(epoch, &self_pk);
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
             let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                 epoch,
-                poly: dkg_state.output.as_ref().map(|o| o.public().clone()),
-                share: dkg_state.share.clone(),
+                poly: epoch_state.output.as_ref().map(|o| o.public().clone()),
+                share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
             orchestrator
@@ -287,29 +289,29 @@ where
             let round_info = Info::new(
                 namespace::APPLICATION,
                 epoch.get(),
-                dkg_state.output.clone(),
+                epoch_state.output.clone(),
                 dealers,
                 players.clone(),
             )
             .expect("round info configuration should be correct");
 
             // Initialize dealer state if we are a dealer
-            let mut dealer_state: Option<DealerState<V, C>> = if am_dealer {
-                let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
-                    Transcript::resume(dkg_state.rng_seed).noise(b"dealer-rng"),
+            let mut dealer_state: Option<Dealer<V, C>> = if am_dealer {
+                let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
+                    Transcript::resume(epoch_state.rng_seed).noise(b"dealer-rng"),
                     round_info.clone(),
                     self.signer.clone(),
-                    dkg_state.share.clone(),
+                    epoch_state.share.clone(),
                 )
                 .expect("should be able to create dealer");
 
                 // Replay stored acks
                 let mut unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg> =
                     priv_msgs.into_iter().collect();
-                let replay_acks = state.player_acks(epoch);
+                let replay_acks = storage.player_acks(epoch);
                 for (player, ack) in replay_acks {
                     if unsent_priv_msgs.contains_key(&player)
-                        && dealer
+                        && crypto_dealer
                             .receive_player_ack(player.clone(), ack.clone())
                             .is_ok()
                     {
@@ -318,25 +320,20 @@ where
                     }
                 }
 
-                Some(DealerState {
-                    dealer: Some(dealer),
-                    pub_msg,
-                    unsent_priv_msgs,
-                    finalized_log: None,
-                })
+                Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent_priv_msgs))
             } else {
                 None
             };
 
             // Initialize player state if we are a player
-            let mut player_state: Option<PlayerState<V, C>> = if am_player {
-                let player = Player::new(round_info.clone(), self.signer.clone())
+            let mut player_state: Option<Player<V, C>> = if am_player {
+                let crypto_player = CryptoPlayer::new(round_info.clone(), self.signer.clone())
                     .expect("should be able to create player");
-                let mut ps = PlayerState::new(player);
+                let mut ps = Player::new(crypto_player);
 
                 // Replay persisted dealer messages - these represent our commitments.
                 // We will regenerate the same acks from them.
-                let replay_msgs = state.dealer_msgs(epoch);
+                let replay_msgs = storage.dealer_msgs(epoch);
                 for (dealer, pub_msg, priv_msg) in replay_msgs {
                     ps.handle(dealer.clone(), pub_msg, priv_msg);
                     debug!(?epoch, ?dealer, "replayed committed dealer message");
@@ -359,7 +356,7 @@ where
                         match network_msg {
                             Ok((sender_pk, msg_bytes)) => {
                                 Self::handle_network_message(
-                                    &mut state,
+                                    &mut storage,
                                     epoch,
                                     max_read_size,
                                     sender_pk,
@@ -387,10 +384,8 @@ where
                 };
 
                 match mailbox_msg {
-                    Message::Act { response } => {
-                        let outcome = dealer_state
-                            .as_mut()
-                            .and_then(|ds| ds.finalized_log.clone());
+                    MailboxMessage::Act { response } => {
+                        let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized_log());
                         if outcome.is_some() {
                             info!("including reshare outcome in proposed block");
                         }
@@ -398,7 +393,7 @@ where
                             warn!("dkg actor could not send response to Act");
                         }
                     }
-                    Message::Finalized { block, response } => {
+                    MailboxMessage::Finalized { block, response } => {
                         let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
                         let relative_height =
                             relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
@@ -426,10 +421,10 @@ where
                                 // it in subsequent blocks
                                 if dealer == self_pk {
                                     if let Some(ref mut ds) = dealer_state {
-                                        ds.finalized_log.take();
+                                        ds.take_finalized_log();
                                     }
                                 }
-                                state.append_log(epoch, dealer, dealer_log).await;
+                                storage.append_log(epoch, dealer, dealer_log).await;
                             }
                         }
 
@@ -438,7 +433,7 @@ where
                             if let Some(ref mut ds) = dealer_state {
                                 Self::distribute_shares(
                                     &self_pk,
-                                    &mut state,
+                                    &mut storage,
                                     epoch,
                                     &self.rate_limiter,
                                     ds,
@@ -462,32 +457,32 @@ where
                         // Check if this is the last block in the epoch
                         if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_some() {
                             // Finalize the round before acknowledging
-                            let logs = state.logs(epoch);
+                            let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) = if let Some(ps) =
                                 player_state.take()
                             {
-                                match ps.player.finalize(logs, 1) {
+                                match ps.finalize(logs, 1) {
                                     Ok((new_output, new_share)) => (
                                         true,
-                                        dkg_state.round + 1,
+                                        epoch_state.round + 1,
                                         Some(new_output),
                                         Some(new_share),
                                     ),
                                     Err(_) => (
                                         false,
-                                        dkg_state.round,
-                                        dkg_state.output.clone(),
-                                        dkg_state.share.clone(),
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
                                     ),
                                 }
                             } else {
                                 match observe(round_info.clone(), logs, 1) {
-                                    Ok(output) => (true, dkg_state.round + 1, Some(output), None),
+                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,
-                                        dkg_state.round,
-                                        dkg_state.output.clone(),
-                                        dkg_state.share.clone(),
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
                                     ),
                                 }
                             };
@@ -498,8 +493,8 @@ where
                                 "finalized epoch's reshare; instructing reconfiguration after reshare.",
                             );
 
-                            state
-                                .append_dkg_state(DkgState {
+                            storage
+                                .append_epoch(EpochState {
                                     round: next_round,
                                     rng_seed: Summary::random(&mut self.context),
                                     output: next_output.clone(),
@@ -546,27 +541,27 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_network_message<S: Sender<PublicKey = C::PublicKey>>(
-        state: &mut State<ContextCell<E>, V, C::PublicKey>,
+        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
         max_read_size: NonZeroU32,
         sender_pk: C::PublicKey,
         msg_bytes: bytes::Bytes,
         round_info: &Info<V, C::PublicKey>,
-        dealer_state: Option<&mut DealerState<V, C>>,
-        player_state: Option<&mut PlayerState<V, C>>,
+        dealer_state: Option<&mut Dealer<V, C>>,
+        player_state: Option<&mut Player<V, C>>,
         network_sender: &mut S,
     ) {
-        let msg =
-            match DkgMessage::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(?epoch, ?sender_pk, ?e, "failed to parse DKG message");
-                    return;
-                }
-            };
+        let msg = match Message::<V, C::PublicKey>::read_cfg(&mut msg_bytes.clone(), &max_read_size)
+        {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
+                return;
+            }
+        };
 
         match msg {
-            DkgMessage::Dealer(pub_msg, priv_msg) => {
+            Message::Dealer(pub_msg, priv_msg) => {
                 let Some(ps) = player_state else {
                     return;
                 };
@@ -578,7 +573,7 @@ where
 
                 // If new, persist the dealer message first (this is our commitment)
                 if !ps.has_committed(&sender_pk) {
-                    state
+                    storage
                         .append_dealer_msg(
                             epoch,
                             sender_pk.clone(),
@@ -602,13 +597,15 @@ where
                     }
                 }
             }
-            DkgMessage::Ack(ack) => {
+            Message::Ack(ack) => {
                 let Some(ds) = dealer_state else {
                     return;
                 };
 
                 if let Some(ack) = ds.handle(sender_pk.clone(), ack) {
-                    state.append_player_ack(epoch, sender_pk.clone(), ack).await;
+                    storage
+                        .append_player_ack(epoch, sender_pk.clone(), ack)
+                        .await;
                     debug!(?epoch, player = ?sender_pk, "received and stored player ack");
                 }
             }
@@ -617,14 +614,14 @@ where
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        state: &mut State<ContextCell<E>, V, C::PublicKey>,
+        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
-        rate_limiter: &DkgRateLimiter<C::PublicKey, E>,
-        dealer_state: &mut DealerState<V, C>,
-        mut player_state: Option<&mut PlayerState<V, C>>,
+        rate_limiter: &RateLimit<C::PublicKey, E>,
+        dealer_state: &mut Dealer<V, C>,
+        mut player_state: Option<&mut Player<V, C>>,
         sender: &mut S,
     ) {
-        for (player, priv_msg) in dealer_state.unsent_priv_msgs.clone() {
+        for (player, priv_msg) in dealer_state.unsent_priv_msgs().clone() {
             // Rate limit sends
             if rate_limiter.check_key(&player).is_err() {
                 debug!(?epoch, ?player, "rate limited; skipping share send");
@@ -636,25 +633,25 @@ where
                 if let Some(ref mut ps) = player_state {
                     // If new, persist the dealer message first
                     if !ps.has_committed(self_pk) {
-                        state
+                        storage
                             .append_dealer_msg(
                                 epoch,
                                 self_pk.clone(),
-                                dealer_state.pub_msg.clone(),
+                                dealer_state.pub_msg().clone(),
                                 priv_msg.clone(),
                             )
                             .await;
                     }
 
                     // Handle as player and get response
-                    if let Some(DkgMessage::Ack(ack)) = ps.handle(
+                    if let Some(Message::Ack(ack)) = ps.handle(
                         self_pk.clone(),
-                        dealer_state.pub_msg.clone(),
+                        dealer_state.pub_msg().clone(),
                         priv_msg.clone(),
                     ) {
                         // Handle our own ack as dealer
                         if let Some(ack) = dealer_state.handle(self_pk.clone(), ack) {
-                            state.append_player_ack(epoch, self_pk.clone(), ack).await;
+                            storage.append_player_ack(epoch, self_pk.clone(), ack).await;
                             debug!(?epoch, "self-dealt and acked");
                         }
                     }
@@ -662,9 +659,9 @@ where
                 continue;
             }
 
-            // Send to remote player using DkgMessage
+            // Send to remote player
             let payload =
-                DkgMessage::<V, C::PublicKey>::Dealer(dealer_state.pub_msg.clone(), priv_msg)
+                Message::<V, C::PublicKey>::Dealer(dealer_state.pub_msg().clone(), priv_msg)
                     .encode()
                     .freeze();
             match sender
@@ -683,99 +680,5 @@ where
                 }
             }
         }
-    }
-}
-
-/// Internal state for a dealer in the current round.
-struct DealerState<V: Variant, C: Signer> {
-    dealer: Option<Dealer<V, C>>,
-    pub_msg: DealerPubMsg<V>,
-    unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized_log: Option<SignedDealerLog<V, C>>,
-}
-
-impl<V: Variant, C: Signer> DealerState<V, C> {
-    /// Handle an incoming ack from a player.
-    /// Returns the ack if it was successfully processed (for persistence).
-    fn handle(
-        &mut self,
-        player: C::PublicKey,
-        ack: PlayerAck<C::PublicKey>,
-    ) -> Option<PlayerAck<C::PublicKey>> {
-        if !self.unsent_priv_msgs.contains_key(&player) {
-            return None;
-        }
-        if let Some(ref mut dealer) = self.dealer {
-            if dealer
-                .receive_player_ack(player.clone(), ack.clone())
-                .is_ok()
-            {
-                self.unsent_priv_msgs.remove(&player);
-                return Some(ack);
-            }
-        }
-        None
-    }
-
-    /// Finalize the dealer and produce a signed log for inclusion in a block.
-    fn finalize(&mut self) -> Option<SignedDealerLog<V, C>> {
-        if self.finalized_log.is_some() {
-            return None;
-        }
-        if let Some(dealer) = self.dealer.take() {
-            let log = dealer.finalize();
-            self.finalized_log = Some(log.clone());
-            return Some(log);
-        }
-        None
-    }
-}
-
-/// Internal state for a player in the current round.
-struct PlayerState<V: Variant, C: Signer> {
-    player: Player<V, C>,
-    /// Acks we've generated, keyed by dealer. Once we generate an ack for a dealer,
-    /// we will not generate a different one (to avoid conflicting votes).
-    acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
-    /// Dealers we've already persisted (and thus committed to acking).
-    committed_dealers: BTreeMap<C::PublicKey, bool>,
-}
-
-impl<V: Variant, C: Signer> PlayerState<V, C> {
-    const fn new(player: Player<V, C>) -> Self {
-        Self {
-            player,
-            acks: BTreeMap::new(),
-            committed_dealers: BTreeMap::new(),
-        }
-    }
-
-    /// Handle an incoming dealer message (already persisted).
-    /// Returns an ack response message if one should be sent.
-    fn handle(
-        &mut self,
-        dealer: C::PublicKey,
-        pub_msg: DealerPubMsg<V>,
-        priv_msg: DealerPrivMsg,
-    ) -> Option<DkgMessage<V, C::PublicKey>> {
-        self.committed_dealers.insert(dealer.clone(), true);
-        // If we've already generated an ack, return it
-        if let Some(ack) = self.acks.get(&dealer) {
-            return Some(DkgMessage::Ack(ack.clone()));
-        }
-        // Otherwise generate the ack (deterministic based on the persisted message)
-        if let Some(ack) = self
-            .player
-            .dealer_message(dealer.clone(), pub_msg, priv_msg)
-        {
-            self.acks.insert(dealer, ack.clone());
-            return Some(DkgMessage::Ack(ack));
-        }
-        None
-    }
-
-    /// Check if we've already committed to acking this dealer.
-    fn has_committed(&self, dealer: &C::PublicKey) -> bool {
-        self.committed_dealers.contains_key(dealer)
     }
 }
