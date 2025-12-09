@@ -966,6 +966,8 @@ mod tests {
             // Receive subscription notification
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 1);
+            assert_eq!(new.len(), 1);
+            assert_eq!(all.len(), 1);
 
             // Self should NOT be in the new set
             assert!(
@@ -997,6 +999,8 @@ mod tests {
             // Receive subscription notification
             let (id, new, all) = subscription.next().await.unwrap();
             assert_eq!(id, 2);
+            assert_eq!(new.len(), 2);
+            assert_eq!(all.len(), 2);
 
             // Both peers should be in the new set
             assert!(
