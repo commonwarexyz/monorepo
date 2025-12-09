@@ -471,6 +471,7 @@ impl ZeroizeOnDrop for Scalar {}
 
 /// A share of a threshold signing key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -1340,5 +1341,17 @@ mod tests {
             Scalar::zero(),
             "Hash should not produce zero scalar"
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            G1 => 1024,
+            G2 => 1024,
+            Scalar => 1024,
+            Share => 1024
+        }
     }
 }

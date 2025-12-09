@@ -6,6 +6,42 @@ hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 n_cases = 1024
 hash = "9dc837e220a8de29ce0b370754c50a4e62f90e99665722fe6ed57198d0f05820"
 
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::G1"]
+n_cases = 1024
+hash = "b81d39bbbdd1fac4f36cd6aac64ef7d7332a79ab21bb01af379208a20d5d8e4a"
+
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::G2"]
+n_cases = 1024
+hash = "1e81a09421ff3d2114eacd9d91c0fbb8537635f6cd2f0b0ccf52ddcb36167acd"
+
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::Scalar"]
+n_cases = 1024
+hash = "2dfb28a5e24387ddda1d87dece440923435bc4738e9d9c704b3fe6ea757a090d"
+
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::Share"]
+n_cases = 1024
+hash = "3269b23c98b8c9f6630ccd0a20ce4149d256c5700ba38f278ff0465ae0d9544c"
+
+["commonware_cryptography::bls12381::primitives::poly::tests::arbitrary_tests::Eval<Scalar>"]
+n_cases = 1024
+hash = "3269b23c98b8c9f6630ccd0a20ce4149d256c5700ba38f278ff0465ae0d9544c"
+
+["commonware_cryptography::bls12381::primitives::poly::tests::arbitrary_tests::Poly<Scalar>"]
+n_cases = 1024
+hash = "3e47841217a0b8042e0381fdb1b537aff4bb24af55a49ef7c2c331784f78c5b9"
+
+["commonware_cryptography::bls12381::scheme::tests::conformance::PrivateKey"]
+n_cases = 1024
+hash = "f65debff3b28d1c97a58642c125137fa27c2d81b12ba7f48c63746d9185a2b1b"
+
+["commonware_cryptography::bls12381::scheme::tests::conformance::PublicKey"]
+n_cases = 1024
+hash = "1c7e5e0bf2c6df30be74e3769da451dbec5dd4f682c04a92658a376adc607032"
+
+["commonware_cryptography::bls12381::scheme::tests::conformance::Signature"]
+n_cases = 1024
+hash = "c5510098d3012546c7b1511ffc22683fd4a73819b8d61197530cbfcd79be16d4"
+
 ["commonware_cryptography::ed25519::scheme::tests::conformance::PrivateKey"]
 n_cases = 1024
 hash = "929838171771a8edb9f1ab4659035b928e17b218e862a39276fdeab33515277e"
@@ -17,6 +53,30 @@ hash = "977776541e0edf8c34822f4fefe6299d668a1cd43657b2a4b4dbb5f8ca36f6ed"
 ["commonware_cryptography::ed25519::scheme::tests::conformance::Signature"]
 n_cases = 1024
 hash = "068f1c5ed28f557da506f5bb3a802790777a429180545aaf09e9ff503d6ccf02"
+
+["commonware_cryptography::handshake::key_exchange::conformance::EphemeralPublicKey"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::lthash::tests::conformance::LtHash"]
+n_cases = 1024
+hash = "96393f9855d82105c67e92e845f11ea8a075511bcb9b403daee62a35574b6f8d"
+
+["commonware_cryptography::secp256r1::common::tests::conformance::PrivateKeyInner"]
+n_cases = 1024
+hash = "929838171771a8edb9f1ab4659035b928e17b218e862a39276fdeab33515277e"
+
+["commonware_cryptography::secp256r1::common::tests::conformance::PublicKeyInner"]
+n_cases = 1024
+hash = "5ae65341bf87d6392c4b512d423053bff0a6f5a60c710f6eb3fbba8b6a84930d"
+
+["commonware_cryptography::secp256r1::recoverable::tests::conformance::Signature"]
+n_cases = 1024
+hash = "f690616acff898e1ca0b5e43923709b8e46d30aae90faf135b424a03c55d32b5"
+
+["commonware_cryptography::secp256r1::standard::tests::conformance::Signature"]
+n_cases = 1024
+hash = "b77c35491bd5115cfa2f9a9e0d4f4e4f9f23b1675ead3c9a73160ef45b60cbfc"
 
 ["commonware_cryptography::sha256::tests::conformance::Digest"]
 n_cases = 1024
