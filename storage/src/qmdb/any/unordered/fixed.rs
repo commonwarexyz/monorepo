@@ -5,12 +5,11 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::{mem::Clean, Location},
     qmdb::{
-        any::{
-            init_fixed_authenticated_log,
-            unordered::{IndexedLog, Operation as OperationTrait},
-            FixedConfig as Config,
+        any::{init_fixed_authenticated_log, unordered::IndexedLog, FixedConfig as Config},
+        operation::{
+            fixed::Value,
+            operation::{Fixed, Operation},
         },
-        operation::fixed::{unordered::Operation, Value},
         Error,
     },
     translator::Translator,
@@ -19,24 +18,10 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
-    fn new_update(key: K, value: V) -> Self {
-        Self::Update(key, value)
-    }
-
-    fn new_delete(key: K) -> Self {
-        Self::Delete(key)
-    }
-
-    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
-    }
-}
-
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, K, V, Journal<E, Operation<K, V, Fixed>>, Index<T, Location>, H, Fixed, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -81,7 +66,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            operation::fixed::unordered::Operation,
+            operation::operation::Operation,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -151,17 +136,17 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest, Fixed>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
+                ops.push(Operation::new_delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value));
+                ops.push(Operation::new_update(key, value));
                 prev_key = key;
             }
         }
@@ -169,16 +154,16 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest, Fixed>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value) => {
+                Operation::Update(key, value, _) => {
                     db.update(key, value).await.unwrap();
                 }
-                Operation::Delete(key) => {
+                Operation::Delete(key, _) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(metadata, _) => {
+                Operation::CommitFloor(metadata, _, _) => {
                     db.commit(metadata).await.unwrap();
                 }
             }
@@ -725,7 +710,7 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
+                ops[0] = Operation::new_update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
@@ -737,7 +722,7 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(
+                ops.push(Operation::new_update(
                     Sha256::hash(b"key1"),
                     Sha256::hash(b"value1"),
                 ));

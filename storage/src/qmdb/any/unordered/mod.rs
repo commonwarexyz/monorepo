@@ -10,14 +10,19 @@ use crate::{
     qmdb::{
         any::{CleanAny, DirtyAny},
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Keyed},
+        operation::{
+            operation::{Encoding, Operation},
+            Committable, Keyed,
+        },
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper, Index,
     },
     AuthenticatedBitMap,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
@@ -27,30 +32,21 @@ pub mod fixed;
 pub mod sync;
 pub mod variable;
 
-type Key<T> = <T as Keyed>::Key;
-type Value<T> = <T as Keyed>::Value;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
-
-/// A trait implemented by the unordered Any db operation type.
-pub trait Operation: Committable + Keyed {
-    /// Return a new update operation variant.
-    fn new_update(key: Self::Key, value: Self::Value) -> Self;
-
-    /// Return a new delete operation variant.
-    fn new_delete(key: Self::Key) -> Self;
-
-    /// Return a new commit-floor operation variant.
-    fn new_commit_floor(metadata: Option<Self::Value>, loc: Location) -> Self;
-}
 
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Operation>,
+    K: Array,
+    V: Codec + Clone,
+    C: Contiguous<Item = Operation<K, V, Enc>>,
     I: Index,
     H: Hasher,
+    Enc: Encoding,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
-> {
+> where
+    Operation<K, V, Enc>: Codec,
+{
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
     ///
@@ -84,11 +80,16 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
+        Enc: Encoding,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, S>
+    > IndexedLog<E, K, V, C, I, H, Enc, S>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -108,9 +109,13 @@ impl<
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
             let last_commit = log.read(last_commit_loc).await?;
-            Ok(last_commit
-                .has_floor()
-                .expect("last commit should have a floor"))
+            let inactivity_floor = match last_commit {
+                Operation::CommitFloor(_, loc, _) => loc,
+                _ => {
+                    unreachable!("last commit is not a CommitFloor operation");
+                }
+            };
+            Ok(inactivity_floor)
         } else {
             Ok(Location::new_unchecked(0))
         }
@@ -124,17 +129,18 @@ impl<
     /// Returns the active operation for `key` with its location, or None if the key is not active.
     pub(crate) async fn get_key_op_loc(
         &self,
-        key: &Key<C::Item>,
-    ) -> Result<Option<(C::Item, Location)>, Error> {
+        key: &K,
+    ) -> Result<Option<(Operation<K, V, Enc>, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
             let op = self.log.read(loc).await?;
-            assert!(
-                op.is_update(),
-                "location does not reference update operation. loc={loc}"
-            );
-            if op.key().expect("update operation must have key") == key {
-                return Ok(Some((op, loc)));
+            match &op {
+                Operation::Update(k, _, _) => {
+                    if k == key {
+                        return Ok(Some((op, loc)));
+                    }
+                }
+                _ => unreachable!("location {loc} does not reference update operation"),
             }
         }
 
@@ -158,44 +164,50 @@ impl<
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(
-        &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        self.get_key_op_loc(key)
-            .await
-            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get_key_op_loc(key).await.map(|op| match op {
+            Some((op, _)) => match op {
+                Operation::Update(_, value, _) => Some(value),
+                _ => unreachable!("location does not reference update operation"),
+            },
+            None => None,
+        })
     }
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
 
         let op = self.log.read(last_commit).await?;
-        Ok(op.into_value())
+        match op {
+            Operation::CommitFloor(value, _, _) => Ok(value),
+            _ => unreachable!("last commit is not a CommitFloor operation"),
+        }
     }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
+        Enc: Encoding,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, S>
+    > IndexedLog<E, K, V, C, I, H, Enc, S>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
-    pub(crate) async fn delete_key(
-        &mut self,
-        key: Key<C::Item>,
-    ) -> Result<Option<Location>, Error> {
+    pub(crate) async fn delete_key(&mut self, key: K) -> Result<Option<Location>, Error> {
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
             return Ok(None);
         };
-        self.log.append(C::Item::new_delete(key)).await?;
+        self.log.append(Operation::new_delete(key)).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
@@ -204,15 +216,11 @@ impl<
 
     /// Appends the provided update to the log, returning the old location of the key if
     /// it was previously assigned some value, and None otherwise.
-    pub(crate) async fn update_key(
-        &mut self,
-        key: Key<C::Item>,
-        value: Value<C::Item>,
-    ) -> Result<Option<Location>, Error> {
+    pub(crate) async fn update_key(&mut self, key: K, value: V) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
         let res = self.update_loc(&key, new_loc).await?;
 
-        self.log.append(C::Item::new_update(key, value)).await?;
+        self.log.append(Operation::new_update(key, value)).await?;
         if res.is_some() {
             self.steps += 1;
         } else {
@@ -223,17 +231,13 @@ impl<
     }
 
     /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key(
-        &mut self,
-        key: Key<C::Item>,
-        value: Value<C::Item>,
-    ) -> Result<bool, Error> {
+    pub(crate) async fn create_key(&mut self, key: K, value: V) -> Result<bool, Error> {
         let new_loc = self.op_count();
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
         }
 
-        self.log.append(C::Item::new_update(key, value)).await?;
+        self.log.append(Operation::new_update(key, value)).await?;
         self.active_keys += 1;
 
         Ok(true)
@@ -243,7 +247,7 @@ impl<
     /// of the key if any was found.
     pub(crate) async fn update_loc(
         &mut self,
-        key: &Key<C::Item>,
+        key: &K,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
@@ -251,39 +255,36 @@ impl<
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
-    pub async fn update(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<(), Error> {
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         self.update_key(key, value).await.map(|_| ())
     }
 
     /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
     /// created, false if it already existed.
-    pub async fn create(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<bool, Error> {
+    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         self.create_key(key, value).await
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
+    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         Ok(self.delete_key(key).await?.is_some())
     }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -403,10 +404,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: PersistableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -474,13 +480,18 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
+    pub fn into_dirty(self) -> IndexedLog<E, K, V, C, I, H, Enc, Dirty> {
         IndexedLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -494,10 +505,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -522,13 +538,18 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H, Dirty>
+        Enc: Encoding,
+    > IndexedLog<E, K, V, C, I, H, Enc, Dirty>
+where
+    Operation<K, V, Enc>: Codec,
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, C, I, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> IndexedLog<E, K, V, C, I, H, Enc, Clean<H::Digest>> {
         IndexedLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -542,10 +563,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: PersistableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::store::StorePersistable for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
@@ -558,10 +584,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
@@ -570,14 +601,19 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::CleanStore for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::qmdb::store::CleanStore for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     type Digest = H::Digest;
     type Operation = C::Item;
-    type Dirty = IndexedLog<E, C, I, H, Dirty>;
+    type Dirty = IndexedLog<E, K, V, C, I, H, Enc, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
@@ -614,11 +650,16 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > LogStore for IndexedLog<E, C, I, H, S>
+        Enc: Encoding,
+    > LogStore for IndexedLog<E, K, V, C, I, H, Enc, S>
+where
+    Operation<K, V, Enc>: Codec,
 {
     type Value = <C::Item as Keyed>::Value;
 
@@ -641,13 +682,18 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::store::Store for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
-    type Key = Key<C::Item>;
-    type Value = Value<C::Item>;
+    type Key = K;
+    type Value = V;
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
@@ -657,10 +703,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::store::StoreMut for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -669,10 +720,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > crate::store::StoreDeletable for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -681,14 +737,19 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: Contiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::DirtyStore for IndexedLog<E, C, I, H, Dirty>
+        Enc: Encoding,
+    > crate::qmdb::store::DirtyStore for IndexedLog<E, K, V, C, I, H, Enc, Dirty>
+where
+    Operation<K, V, Enc>: Codec,
 {
     type Digest = H::Digest;
     type Operation = C::Item;
-    type Clean = IndexedLog<E, C, I, H>;
+    type Clean = IndexedLog<E, K, V, C, I, H, Enc>;
 
     async fn merkleize(self) -> Result<Self::Clean, Error> {
         Ok(self.merkleize())
@@ -697,12 +758,17 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: PersistableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, C, I, H>
+        Enc: Encoding,
+    > CleanAny for IndexedLog<E, K, V, C, I, H, Enc>
+where
+    Operation<K, V, Enc>: Codec,
 {
-    type Key = <C::Item as Keyed>::Key;
+    type Key = K;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
         self.get(key).await
@@ -731,12 +797,17 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        K: Array,
+        V: Codec + Clone,
+        C: MutableContiguous<Item = Operation<K, V, Enc>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, C, I, H, Dirty>
+        Enc: Encoding,
+    > DirtyAny for IndexedLog<E, K, V, C, I, H, Enc, Dirty>
+where
+    Operation<K, V, Enc>: Codec,
 {
-    type Key = <C::Item as Keyed>::Key;
+    type Key = K;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
         self.get(key).await
@@ -755,16 +826,20 @@ impl<
     }
 }
 
-impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
+impl<E, K, V, C, I, H, Enc> Batchable for IndexedLog<E, K, V, C, I, H, Enc>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    K: Array,
+    V: Codec + Clone,
+    C: MutableContiguous<Item = Operation<K, V, Enc>>,
     I: Index<Value = Location>,
     H: Hasher,
+    Enc: Encoding,
+    Operation<K, V, Enc>: Codec,
 {
     async fn write_batch(
         &mut self,
-        iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
+        iter: impl Iterator<Item = (K, Option<V>)>,
     ) -> Result<(), Error> {
         // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
         let mut updates = BTreeMap::new();
@@ -792,11 +867,11 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(C::Item::new_update(key.clone(), value))
+                    .append(Operation::new_update(key.clone(), value))
                     .await?;
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(C::Item::new_delete(key.clone())).await?;
+                self.log.append(Operation::new_delete(key.clone())).await?;
                 self.active_keys -= 1;
             }
             self.steps += 1;
@@ -808,7 +883,7 @@ where
                 continue; // attempt to delete a non-existent key
             };
             self.snapshot.insert(&key, self.op_count());
-            self.log.append(C::Item::new_update(key, value)).await?;
+            self.log.append(Operation::new_update(key, value)).await?;
             self.active_keys += 1;
         }
 

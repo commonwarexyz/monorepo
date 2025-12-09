@@ -6,7 +6,10 @@ use crate::{
     qmdb::{
         self,
         any::unordered::fixed::Any,
-        operation::fixed::{unordered::Operation, Value},
+        operation::{
+            fixed::Value,
+            operation::{Fixed, Operation},
+        },
     },
     translator::Translator,
 };
@@ -29,8 +32,8 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = Operation<K, V>;
-    type Journal = fixed::Journal<E, Operation<K, V>>;
+    type Op = Operation<K, V, Fixed>;
+    type Journal = fixed::Journal<E, Operation<K, V, Fixed>>;
     type Hasher = H;
     type Config = qmdb::any::FixedConfig<T>;
     type Digest = H::Digest;
@@ -271,7 +274,7 @@ mod tests {
                 },
                 Any,
             },
-            operation::{fixed::unordered::Operation, Keyed as _},
+            operation::{operation::Operation, Keyed as _},
             store::CleanStore as _,
             sync::{
                 self,
@@ -344,17 +347,17 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Operation::Update(key, _, _) => {
                         if let Some((op, loc)) = target_db.get_key_op_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Operation::Delete(key) => {
+                    Operation::Delete(key, _) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    Operation::CommitFloor(_, _) => {
+                    Operation::CommitFloor(_, _, _) => {
                         // Ignore
                     }
                 }
@@ -403,7 +406,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Operation::new_update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -1297,7 +1300,7 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
+            let log = fixed::Journal::<Context, Operation<Digest, Digest, Fixed>>::init(
                 context.clone(),
                 fixed::Config {
                     partition: "sync_basic_log".into(),
@@ -1424,10 +1427,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(key, value, _) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Delete(key) = op {
+                } else if let Operation::Delete(key, _) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1519,10 +1522,10 @@ mod tests {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Operation::Update(key, value) = op {
+                    if let Operation::Update(key, value, _) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Operation::Delete(key) = op {
+                    } else if let Operation::Delete(key, _) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1626,10 +1629,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(key, value, _) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Delete(key) = op {
+                } else if let Operation::Delete(key, _) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }

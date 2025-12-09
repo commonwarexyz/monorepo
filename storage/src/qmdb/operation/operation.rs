@@ -2,7 +2,9 @@
 
 use crate::{
     mmr::Location,
-    qmdb::operation::{self, fixed::Value, Committable, Keyed},
+    qmdb::operation::{
+        self, fixed::Value as FixedValue, variable::Value as VariableValue, Committable, Keyed,
+    },
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -13,18 +15,20 @@ use commonware_utils::{hex, Array};
 use core::fmt::Display;
 use std::marker::PhantomData;
 
+pub use sealed::Encoding;
+
 mod sealed {
     /// Type state representing whether an operation has fixed or variable size.
     pub trait Encoding: Clone {}
 }
 
 /// Type state representing a fixed size operation.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fixed;
 impl sealed::Encoding for Fixed {}
 
 /// Type state representing a variable size operation.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Variable;
 impl sealed::Encoding for Variable {}
 
@@ -42,7 +46,21 @@ pub enum Operation<K: Array, V: Codec + Clone, E: sealed::Encoding> {
     CommitFloor(Option<V>, Location, PhantomData<E>),
 }
 
-impl<K: Array + Ord, V: Value> Operation<K, V, Fixed> {
+impl<K: Array + Ord, V: Codec + Clone, E: sealed::Encoding> Operation<K, V, E> {
+    pub const fn new_delete(key: K) -> Self {
+        Self::Delete(key, PhantomData)
+    }
+
+    pub const fn new_update(key: K, value: V) -> Self {
+        Self::Update(key, value, PhantomData)
+    }
+
+    pub const fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
+        Self::CommitFloor(metadata, location, PhantomData)
+    }
+}
+
+impl<K: Array + Ord, V: FixedValue> Operation<K, V, Fixed> {
     // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
 
@@ -53,7 +71,7 @@ impl<K: Array + Ord, V: Value> Operation<K, V, Fixed> {
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<K: Array + Ord, V: Value> CodecFixedSize for Operation<K, V, Fixed> {
+impl<K: Array + Ord, V: FixedValue> CodecFixedSize for Operation<K, V, Fixed> {
     // Make sure operation array is large enough to hold the maximum of all ops.
     const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
         Self::UPDATE_OP_SIZE
@@ -62,7 +80,7 @@ impl<K: Array + Ord, V: Value> CodecFixedSize for Operation<K, V, Fixed> {
     };
 }
 
-impl<K: Array, V: Value> EncodeSize for Operation<K, V, Variable> {
+impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V, Variable> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Delete(_, _) => K::SIZE,
@@ -72,9 +90,9 @@ impl<K: Array, V: Value> EncodeSize for Operation<K, V, Variable> {
     }
 }
 
-impl<K: Array, V: Value, E: sealed::Encoding> Keyed for Operation<K, V, E>
+impl<K: Array, V: Codec + Clone, E: sealed::Encoding> Keyed for Operation<K, V, E>
 where
-    Operation<K, V, E>: Codec,
+    Self: Codec,
 {
     type Key = K;
     type Value = V;
@@ -119,13 +137,13 @@ where
     }
 }
 
-impl<K: Array, V: Value, E: sealed::Encoding> Committable for Operation<K, V, E> {
+impl<K: Array, V: Codec + Clone, E: sealed::Encoding> Committable for Operation<K, V, E> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _, _))
     }
 }
 
-impl<K: Array, V: Value> Write for Operation<K, V, Fixed> {
+impl<K: Array, V: FixedValue> Write for Operation<K, V, Fixed> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k, _) => {
@@ -157,7 +175,7 @@ impl<K: Array, V: Value> Write for Operation<K, V, Fixed> {
     }
 }
 
-impl<K: Array, V: Value> Write for Operation<K, V, Variable> {
+impl<K: Array, V: VariableValue> Write for Operation<K, V, Variable> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k, _) => {
@@ -178,7 +196,7 @@ impl<K: Array, V: Value> Write for Operation<K, V, Variable> {
     }
 }
 
-impl<K: Array, V: Value> Read for Operation<K, V, Fixed> {
+impl<K: Array, V: FixedValue> Read for Operation<K, V, Fixed> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -220,7 +238,7 @@ impl<K: Array, V: Value> Read for Operation<K, V, Fixed> {
     }
 }
 
-impl<K: Array, V: Value> Read for Operation<K, V, Variable> {
+impl<K: Array, V: VariableValue> Read for Operation<K, V, Variable> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -250,7 +268,7 @@ impl<K: Array, V: Value> Read for Operation<K, V, Variable> {
     }
 }
 
-impl<K: Array, V: Value, E: sealed::Encoding> Display for Operation<K, V, E> {
+impl<K: Array, V: Codec + Clone, E: sealed::Encoding> Display for Operation<K, V, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Delete(key, _) => write!(f, "[key:{key} <deleted>]"),

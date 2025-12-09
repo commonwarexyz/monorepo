@@ -12,12 +12,10 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{
-            unordered::{IndexedLog, Operation as OperationTrait},
-            VariableConfig,
-        },
+        any::{unordered::IndexedLog, VariableConfig},
         operation::{
-            variable::{unordered::Operation, Value},
+            operation::{Operation, Variable},
+            variable::Value,
             Committable as _,
         },
         Error,
@@ -29,24 +27,10 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
-    fn new_update(key: K, value: V) -> Self {
-        Self::Update(key, value)
-    }
-
-    fn new_delete(key: K) -> Self {
-        Self::Delete(key)
-    }
-
-    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
-    }
-}
-
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, K, V, Journal<E, Operation<K, V, Variable>>, Index<T, Location>, H, Variable, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -55,7 +39,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
+        cfg: VariableConfig<T, <Operation<K, V, Variable> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         let mmr_config = MmrConfig {
             journal_partition: cfg.mmr_journal_partition,
@@ -79,7 +63,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
             context.with_label("log"),
             mmr_config,
             journal_config,
-            Operation::<K, V>::is_commit,
+            Operation::<K, V, Variable>::is_commit,
         )
         .await?;
 

@@ -8,7 +8,7 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{unordered::fixed::Any, FixedConfig as Config},
-        operation,
+        operation::{self, operation::Fixed},
         store::CleanStore,
     },
 };
@@ -19,7 +19,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::fixed::unordered::Operation<Key, Value>;
+pub type Operation = operation::operation::Operation<Key, Value, Fixed>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
@@ -59,15 +59,15 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            operations.push(Operation::new_update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
+                operations.push(Operation::new_commit_floor(None, Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(None, Location::from(count)));
+        operations.push(Operation::new_commit_floor(None, Location::from(count)));
         operations
     }
 
@@ -77,13 +77,13 @@ where
     ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
-                Operation::Update(key, value) => {
+                Operation::Update(key, value, _) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key) => {
+                Operation::Delete(key, _) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(metadata, _) => {
+                Operation::CommitFloor(metadata, _, _) => {
                     database.commit(metadata).await?;
                 }
             }
@@ -135,7 +135,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(_, loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc, _) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");
