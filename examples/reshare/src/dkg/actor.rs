@@ -189,13 +189,13 @@ where
         let is_dkg = output.is_none();
 
         // Initialize persistent state
-        let state = State::init(
+        let mut state = State::init(
             self.context.with_label("storage"),
             &self.partition_prefix,
             max_read_size,
         )
         .await;
-        if state.dkg_state().await.is_none() {
+        if state.dkg_state().is_none() {
             let initial_state = DkgState {
                 round: 0,
                 rng_seed: Summary::random(&mut self.context),
@@ -213,7 +213,6 @@ where
         'actor: loop {
             let (epoch, dkg_state) = state
                 .dkg_state()
-                .await
                 .expect("dkg_state should be initialized");
 
             // Prune everything older than the previous epoch
@@ -273,7 +272,7 @@ where
 
             let self_pk = self.signer.public_key();
             let am_dealer = dealers.position(&self_pk).is_some()
-                && !state.has_submitted_log(epoch, &self_pk).await;
+                && !state.has_submitted_log(epoch, &self_pk);
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
@@ -324,7 +323,7 @@ where
                 // Replay stored acks
                 let mut unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg> =
                     priv_msgs.into_iter().collect();
-                let replay_acks = state.player_acks(epoch).await;
+                let replay_acks = state.player_acks(epoch);
                 for (player, ack) in replay_acks {
                     if unsent_priv_msgs.contains_key(&player)
                         && dealer
@@ -354,7 +353,7 @@ where
 
                 // Replay persisted dealer messages - these represent our commitments.
                 // We will regenerate the same acks from them.
-                let replay_msgs = state.dealer_msgs(epoch).await;
+                let replay_msgs = state.dealer_msgs(epoch);
                 for (dealer, pub_msg, priv_msg) in replay_msgs {
                     ps.handle(dealer.clone(), pub_msg, priv_msg);
                     debug!(?epoch, ?dealer, "replayed committed dealer message");
@@ -377,7 +376,7 @@ where
                         match network_msg {
                             Ok((sender_pk, msg_bytes)) => {
                                 Self::handle_network_message(
-                                    &state,
+                                    &mut state,
                                     epoch,
                                     max_read_size,
                                     sender_pk,
@@ -449,7 +448,7 @@ where
                             if let Some(ref mut ds) = dealer_state {
                                 Self::distribute_shares(
                                     &self_pk,
-                                    &state,
+                                    &mut state,
                                     epoch,
                                     &rate_limiter,
                                     ds,
@@ -480,7 +479,7 @@ where
             }
 
             // Finalize the round
-            let logs = state.logs(epoch).await;
+            let logs = state.logs(epoch);
             let (success, next_round, next_output, next_share) = if let Some(ps) = player_state {
                 match ps.player.finalize(logs, 1) {
                     Ok((new_output, new_share)) => {
@@ -551,7 +550,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_network_message<S: Sender<PublicKey = C::PublicKey>>(
-        state: &State<ContextCell<E>, V, C::PublicKey>,
+        state: &mut State<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
         max_read_size: NonZeroU32,
         sender_pk: C::PublicKey,
@@ -623,7 +622,7 @@ where
     #[allow(clippy::type_complexity)]
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        state: &State<ContextCell<E>, V, C::PublicKey>,
+        state: &mut State<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
         rate_limiter: &RateLimiter<
             C::PublicKey,
