@@ -592,7 +592,7 @@ where
         mut player_state: Option<&mut Player<V, C>>,
         sender: &mut S,
     ) {
-        for (player, priv_msg) in dealer_state.unsent_priv_msgs().clone() {
+        for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
             // Rate limit sends
             if rate_limiter.check_key(&player).is_err() {
                 debug!(?epoch, ?player, "rate limited; skipping share send");
@@ -602,8 +602,6 @@ where
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
-                    let pub_msg = dealer_state.pub_msg().clone();
-
                     // Handle as player
                     let ack = match ps.handle(self_pk.clone(), pub_msg.clone(), priv_msg.clone()) {
                         PlayerResponse::New(Message::Ack(ack)) => {
@@ -627,10 +625,9 @@ where
             }
 
             // Send to remote player
-            let payload =
-                Message::<V, C::PublicKey>::Dealer(dealer_state.pub_msg().clone(), priv_msg)
-                    .encode()
-                    .freeze();
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
+                .encode()
+                .freeze();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await

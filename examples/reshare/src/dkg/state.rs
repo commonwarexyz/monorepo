@@ -491,14 +491,6 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         }
     }
 
-    pub const fn pub_msg(&self) -> &DealerPubMsg<V> {
-        &self.pub_msg
-    }
-
-    pub const fn unsent_priv_msgs(&self) -> &BTreeMap<C::PublicKey, DealerPrivMsg> {
-        &self.unsent_priv_msgs
-    }
-
     /// Handle an incoming ack from a player.
     /// Returns the ack if it was successfully processed (for persistence).
     pub fn handle(
@@ -542,6 +534,18 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     /// Takes and returns the finalized log, leaving None in its place.
     pub const fn take_finalized_log(&mut self) -> Option<SignedDealerLog<V, C>> {
         self.finalized_log.take()
+    }
+
+    /// Returns shares to distribute to players.
+    ///
+    /// Returns an iterator of (player, pub_msg, priv_msg) tuples for each player
+    /// that hasn't yet acknowledged their share.
+    pub fn shares_to_distribute(
+        &self,
+    ) -> impl Iterator<Item = (C::PublicKey, DealerPubMsg<V>, DealerPrivMsg)> + '_ {
+        self.unsent_priv_msgs
+            .iter()
+            .map(|(player, priv_msg)| (player.clone(), self.pub_msg.clone(), priv_msg.clone()))
     }
 }
 
