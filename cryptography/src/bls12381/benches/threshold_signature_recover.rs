@@ -24,8 +24,8 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                         .map(|i| PrivateKey::from_seed(i as u64).public_key())
                         .try_collect()
                         .unwrap();
-                    let (_, shares) =
-                        deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
+                    let (_, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
+                        .expect("deal should succeed");
                     shares
                         .values()
                         .iter()

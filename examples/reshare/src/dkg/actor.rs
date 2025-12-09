@@ -277,6 +277,7 @@ where
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
+                Default::default(),
                 dealers,
                 players.clone(),
             )

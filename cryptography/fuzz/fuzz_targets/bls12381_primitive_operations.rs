@@ -844,8 +844,7 @@ fn fuzz(op: FuzzOperation) {
             let mut encoded = Vec::new();
             share.write(&mut encoded);
             if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
-                assert_eq!(share.index, decoded.index);
-                assert_eq!(share.private, decoded.private);
+                assert_eq!(share, decoded);
             }
         }
     }

@@ -17,7 +17,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly, variant::Variant},
+    bls12381::primitives::{group, variant::Variant, Sharing},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
@@ -72,7 +72,7 @@ pub struct Engine<
         Index = Epoch,
         PublicKey = C::PublicKey,
         Identity = V::Public,
-        Polynomial = poly::Public<V>,
+        Polynomial = Sharing<V>,
         Share = group::Share,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
@@ -220,7 +220,7 @@ impl<
             Index = Epoch,
             PublicKey = C::PublicKey,
             Identity = V::Public,
-            Polynomial = poly::Public<V>,
+            Polynomial = Sharing<V>,
             Share = group::Share,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,

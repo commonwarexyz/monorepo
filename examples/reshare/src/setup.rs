@@ -196,6 +196,7 @@ fn generate_identities(
     } else {
         let (output, shares) = deal(
             OsRng,
+            Default::default(),
             all_participants
                 .iter()
                 .take(num_participants_per_epoch as usize)

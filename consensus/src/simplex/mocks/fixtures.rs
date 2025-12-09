@@ -118,16 +118,18 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let (output, shares) = deal::<V, _>(rng, participants.clone()).expect("deal should succeed");
+    let (output, shares) =
+        deal::<V, _>(rng, Default::default(), participants.clone()).expect("deal should succeed");
 
     let schemes = shares
         .into_iter()
         .map(|(_, share)| {
-            bls12381_threshold::Scheme::signer(participants.clone(), output.public(), share)
+            bls12381_threshold::Scheme::signer(participants.clone(), output.public().clone(), share)
                 .unwrap()
         })
         .collect();
-    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), output.public());
+    let verifier =
+        bls12381_threshold::Scheme::verifier(participants.clone(), output.public().clone());
 
     Fixture {
         participants: participants.into(),

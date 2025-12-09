@@ -2485,14 +2485,15 @@ mod tests {
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
 
         shares
             .into_iter()
             .map(|share| {
                 bls12381_threshold::Scheme::signer(
                     participants.clone().try_into().unwrap(),
-                    &polynomial,
+                    polynomial.clone(),
                     share,
                 )
                 .unwrap()
@@ -2511,8 +2512,9 @@ mod tests {
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
 
-        let (polynomial, _) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
-        bls12381_threshold::Scheme::verifier(participants.try_into().unwrap(), &polynomial)
+        let (polynomial, _) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+        bls12381_threshold::Scheme::verifier(participants.try_into().unwrap(), polynomial)
     }
 
     fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
