@@ -46,6 +46,7 @@
 pub mod group;
 pub mod ops;
 pub mod poly;
+mod sharing;
 pub mod variant;
 
 use thiserror::Error;
@@ -66,3 +67,5 @@ pub enum Error {
     #[error("evaluation index is invalid")]
     InvalidIndex,
 }
+
+pub use sharing::{Sharing, SharingMode};
