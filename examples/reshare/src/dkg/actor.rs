@@ -421,6 +421,13 @@ where
                             relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
                         let mid_point = BLOCKS_PER_EPOCH / 2;
 
+                        // Skip blocks from previous epochs (can happen on restart if we
+                        // persisted state but crashed before acknowledging)
+                        if block_epoch < epoch {
+                            response.acknowledge();
+                            continue;
+                        }
+
                         // Inform the orchestrator of the epoch exit after first finalization
                         if relative_height == 0 {
                             if let Some(prev) = block_epoch.previous() {
@@ -469,80 +476,91 @@ where
                             }
                         }
 
-                        epoch_done =
-                            is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_some();
+                        // Check if this is the last block in the epoch
+                        if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_some() {
+                            // Finalize the round before acknowledging
+                            let logs = state.logs(epoch);
+                            let (success, next_round, next_output, next_share) =
+                                if let Some(ps) = player_state.take() {
+                                    match ps.player.finalize(logs, 1) {
+                                        Ok((new_output, new_share)) => (
+                                            true,
+                                            dkg_state.round + 1,
+                                            Some(new_output),
+                                            Some(new_share),
+                                        ),
+                                        Err(_) => (
+                                            false,
+                                            dkg_state.round,
+                                            dkg_state.output.clone(),
+                                            dkg_state.share.clone(),
+                                        ),
+                                    }
+                                } else {
+                                    match observe(round_info.clone(), logs, 1) {
+                                        Ok(output) => {
+                                            (true, dkg_state.round + 1, Some(output), None)
+                                        }
+                                        Err(_) => (
+                                            false,
+                                            dkg_state.round,
+                                            dkg_state.output.clone(),
+                                            dkg_state.share.clone(),
+                                        ),
+                                    }
+                                };
 
-                        // Acknowledge block processing
-                        response.acknowledge();
+                            if !success {
+                                self.failed_rounds.inc();
+                            }
+
+                            info!(
+                                success,
+                                ?epoch,
+                                "finalized epoch's reshare; instructing reconfiguration after reshare.",
+                            );
+
+                            state
+                                .append_dkg_state(DkgState {
+                                    round: next_round,
+                                    rng_seed: Summary::random(&mut self.context),
+                                    output: next_output.clone(),
+                                    share: next_share.clone(),
+                                })
+                                .await;
+
+                            // Acknowledge block processing before callback
+                            response.acknowledge();
+
+                            let update = if success {
+                                Update::Success {
+                                    epoch,
+                                    output: next_output.expect("success => output exists"),
+                                    share: next_share.clone(),
+                                }
+                            } else {
+                                Update::Failure { epoch }
+                            };
+                            if let PostUpdate::Stop = update_cb.on_update(update).await {
+                                // Close the mailbox to prevent accepting any new messages
+                                drop(self.mailbox);
+                                // Exit last consensus instance to avoid useless work while we wait for shutdown
+                                orchestrator
+                                    .report(orchestrator::Message::Exit(epoch))
+                                    .await;
+                                // Keep running until killed to keep the orchestrator mailbox alive
+                                info!("DKG complete; waiting for shutdown.");
+                                futures::future::pending::<()>().await;
+                                break 'actor;
+                            }
+
+                            epoch_done = true;
+                        } else {
+                            // Acknowledge block processing
+                            response.acknowledge();
+                        }
                     }
                 }
-            }
-
-            // Finalize the round
-            let logs = state.logs(epoch);
-            let (success, next_round, next_output, next_share) = if let Some(ps) = player_state {
-                match ps.player.finalize(logs, 1) {
-                    Ok((new_output, new_share)) => {
-                        (true, dkg_state.round + 1, Some(new_output), Some(new_share))
-                    }
-                    Err(_) => (
-                        false,
-                        dkg_state.round,
-                        dkg_state.output.clone(),
-                        dkg_state.share.clone(),
-                    ),
-                }
-            } else {
-                match observe(round_info, logs, 1) {
-                    Ok(output) => (true, dkg_state.round + 1, Some(output), None),
-                    Err(_) => (
-                        false,
-                        dkg_state.round,
-                        dkg_state.output.clone(),
-                        dkg_state.share.clone(),
-                    ),
-                }
-            };
-
-            if !success {
-                self.failed_rounds.inc();
-            }
-
-            info!(
-                success,
-                ?epoch,
-                "finalized epoch's reshare; instructing reconfiguration after reshare.",
-            );
-
-            state
-                .append_dkg_state(DkgState {
-                    round: next_round,
-                    rng_seed: Summary::random(&mut self.context),
-                    output: next_output.clone(),
-                    share: next_share.clone(),
-                })
-                .await;
-
-            let update = if success {
-                Update::Success {
-                    epoch,
-                    output: next_output.expect("success => output exists"),
-                    share: next_share.clone(),
-                }
-            } else {
-                Update::Failure { epoch }
-            };
-            if let PostUpdate::Stop = update_cb.on_update(update).await {
-                // Close the mailbox to prevent accepting any new messages
-                drop(self.mailbox);
-                // Exit last consensus instance to avoid useless work while we wait for shutdown
-                orchestrator
-                    .report(orchestrator::Message::Exit(epoch))
-                    .await;
-                // Keep running until killed to keep the orchestrator mailbox alive
-                info!("DKG complete; waiting for shutdown.");
-                futures::future::pending::<()>().await;
-                break 'actor;
             }
         }
         info!("exiting DKG actor");
