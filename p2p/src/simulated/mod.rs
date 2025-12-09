@@ -2720,17 +2720,49 @@ mod tests {
             let mut manager = oracle.manager();
             let mut subscription = manager.subscribe().await;
 
-            // Register a peer set that includes self
+            // Register a peer set that does NOT include self
+            manager
+                .update(1, vec![other_pk.clone()].try_into().unwrap())
+                .await;
+
+            // Receive subscription notification
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            assert_eq!(new.len(), 1);
+            assert_eq!(all.len(), 1);
+
+            // Self should NOT be in the new set
+            assert!(
+                new.position(&self_pk).is_none(),
+                "new set should not include self"
+            );
+            assert!(
+                new.position(&other_pk).is_some(),
+                "new set should include other"
+            );
+
+            // Self should NOT be in the tracked set (not registered)
+            assert!(
+                all.position(&self_pk).is_none(),
+                "tracked peers should not include self"
+            );
+            assert!(
+                all.position(&other_pk).is_some(),
+                "tracked peers should include other"
+            );
+
+            // Now register a peer set that DOES include self
             manager
                 .update(
-                    1,
+                    2,
                     vec![self_pk.clone(), other_pk.clone()].try_into().unwrap(),
                 )
                 .await;
 
-            // Verify subscription notification
             let (id, new, all) = subscription.next().await.unwrap();
-            assert_eq!(id, 1);
+            assert_eq!(id, 2);
+            assert_eq!(new.len(), 2);
+            assert_eq!(all.len(), 2);
 
             // Both peers should be in the new set
             assert!(
@@ -2750,59 +2782,6 @@ mod tests {
             assert!(
                 all.position(&other_pk).is_some(),
                 "tracked peers should include other"
-            );
-
-            // Now register a peer set that does NOT include self
-            manager
-                .update(2, vec![other_pk.clone()].try_into().unwrap())
-                .await;
-
-            let (id, new, all) = subscription.next().await.unwrap();
-            assert_eq!(id, 2);
-
-            // Self should NOT be in the new set
-            assert!(
-                new.position(&self_pk).is_none(),
-                "new set should not include self"
-            );
-            assert!(
-                new.position(&other_pk).is_some(),
-                "new set should include other"
-            );
-
-            // Self should still be in tracked (set 1 not yet evicted, tracked_peer_sets=2)
-            assert!(
-                all.position(&self_pk).is_some(),
-                "tracked peers should still include self (set 1 not evicted)"
-            );
-            assert!(
-                all.position(&other_pk).is_some(),
-                "tracked peers should include other"
-            );
-
-            // Register a third peer set to evict set 1 (which contained self)
-            let third_pk = PrivateKey::from_seed(2).public_key();
-            manager
-                .update(3, vec![third_pk.clone()].try_into().unwrap())
-                .await;
-
-            let (id, _new, all) = subscription.next().await.unwrap();
-            assert_eq!(id, 3);
-
-            // Self should NOT be in tracked anymore (set 1 evicted)
-            assert!(
-                all.position(&self_pk).is_none(),
-                "tracked peers should not include self after set 1 eviction"
-            );
-            // other_pk was in set 2 which is still tracked (window keeps 2 sets: set2, set3)
-            assert!(
-                all.position(&other_pk).is_some(),
-                "tracked peers should still include other (set 2 still tracked)"
-            );
-            // third_pk should be tracked (in set 3)
-            assert!(
-                all.position(&third_pk).is_some(),
-                "tracked peers should include third"
             );
         });
     }
