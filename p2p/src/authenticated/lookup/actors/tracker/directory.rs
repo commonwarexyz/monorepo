@@ -129,7 +129,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    let new_ip = entry.update(*addr);
+                    let _new_ip = entry.update(*addr);
                     entry
                 }
                 Entry::Vacant(entry) => {
