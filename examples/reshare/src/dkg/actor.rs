@@ -235,6 +235,26 @@ where
                 )
             };
 
+            // In reshare mode, the initial dealer set must exactly match the players that
+            // hold shares from the prior output.
+            if !is_dkg {
+                if let Some(ref output) = dkg_state.output {
+                    let prev_players = output.players();
+                    if dkg_state.round == 0 {
+                        assert_eq!(
+                            &dealers, prev_players,
+                            "dealers for round 0 must equal previous output players"
+                        );
+                    } else {
+                        assert!(
+                            dealers.iter().all(|d| prev_players.position(d).is_some()),
+                            "dealers for round {} must be drawn from previous output players",
+                            dkg_state.round
+                        );
+                    }
+                }
+            }
+
             // Any given peer set includes:
             // - Dealers and players for the active epoch
             // - Players for the next epoch
