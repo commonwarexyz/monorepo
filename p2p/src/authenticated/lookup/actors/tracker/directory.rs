@@ -17,7 +17,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -130,9 +130,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     let new_ip = entry.update(*addr);
-                    if new_ip {
-                        info!(?peer, ip = ?addr.ip(), "added new IP for peer");
-                    }
                     entry
                 }
                 Entry::Vacant(entry) => {
