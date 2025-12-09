@@ -192,7 +192,9 @@ fn generate_identities(
             peer_signers
                 .iter()
                 .take(num_participants_per_epoch as usize)
-                .map(|s| s.public_key()),
+                .map(|s| s.public_key())
+                .try_collect()
+                .unwrap(),
         )
         .expect("deal failed: should have sufficient players");
         (Some(output), shares)

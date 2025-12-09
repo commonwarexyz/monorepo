@@ -30,7 +30,7 @@ impl Bench {
         let dealers = Set::from_iter_dedup(private_keys.iter().map(|sk| sk.public_key()));
 
         let (output, shares) = if previous {
-            let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.iter().cloned()).unwrap();
+            let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.clone()).unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)

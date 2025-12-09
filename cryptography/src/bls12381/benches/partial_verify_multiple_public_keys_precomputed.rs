@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -24,11 +24,12 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                     b.iter_batched(
                         || {
                             let mut rng = StdRng::seed_from_u64(0);
-                            let (output, shares) = deal::<MinSig, _>(
-                                &mut rng,
-                                (0..n).map(|i| PrivateKey::from_seed(i as u64).public_key()),
-                            )
-                            .expect("deal should succeed");
+                            let players = (0..n)
+                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                .try_collect()
+                                .unwrap();
+                            let (output, shares) =
+                                deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
                             let polynomial = output.public().evaluate_all(n);
                             let signatures = shares
                                 .values()
