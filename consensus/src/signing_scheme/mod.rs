@@ -63,7 +63,6 @@ impl<S: Scheme> Read for Signature<S> {
     }
 }
 
-// FIXME: rename to SignatureVerification
 /// Result of verifying a batch of signatures.
 pub struct SignatureVerification<S: Scheme> {
     /// Contains the signatures accepted by the scheme.
