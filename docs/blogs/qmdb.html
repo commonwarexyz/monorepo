@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > QMDB All The Things</title>
+    <meta name="description" content="Over the last year, we've developed a family of append-only, authenticated databases (ADB) inspired by LayerZero's novel Quick Merkle Database (QMDB). Today, we are excited to announce that this family of databases will now be known as QMDB and that we are collaborating with LayerZero to productionize QMDB in the Commonware Library.">
+    <meta name="author" content="Patrick O'Grady">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/qmdb.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/qmdb.png" />
+    <meta property="og:title" content="QMDB All The Things" />
+    <meta property="og:description" content="Over the last year, we've developed a family of append-only, authenticated databases (ADB) inspired by LayerZero's novel Quick Merkle Database (QMDB). Today, we are excited to announce that this family of databases will now be known as QMDB and that we are collaborating with LayerZero to productionize QMDB in the Commonware Library." />
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:published_time" content="2025-12-10T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-12-10T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/qmdb.html" />
+    <meta property="twitter:title" content="QMDB All The Things" />
+    <meta property="twitter:description" content="Over the last year, we've developed a family of append-only, authenticated databases (ADB) inspired by LayerZero's novel Quick Merkle Database (QMDB). Today, we are excited to announce that this family of databases will now be known as QMDB and that we are collaborating with LayerZero to productionize QMDB in the Commonware Library." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/qmdb.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@_patrickogrady" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>QMDB All The Things</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">December 10, 2025</div>
+        </div>
+        <p>Over the last year, we've developed a family of append-only, authenticated databases (ADB) inspired by LayerZero's novel <a href="https://arxiv.org/abs/2501.05262">Quick Merkle Database (QMDB)</a>. Today, we are excited to announce that this family of databases will now be known as QMDB and that we are collaborating with LayerZero to productionize QMDB in the Commonware Library.</p>
+        <p>When I first learned about QMDB, <a href="https://x.com/_patrickogrady/status/1879202544846799351">I was blown away</a>. Through my work on <a href="https://hackmd.io/@patrickogrady/vryx-poc#Introducing-Vilmo-Verifiable-State-Transitions-and-Sync-without-Merklization">Vilmo</a>, I had already concluded that append-only databases were the path to a new factor of throughput but had yet to figure out how to add efficient authentication (the ability to prove some key exists in some root at some time, or doesn't). I found a way to enable “state sync” but was gave up on an efficient lite client.</p>
+        <div class="image-container">
+            <img src="/imgs/vilmo.png" alt="Vilmo rotating log">
+            <div class="image-caption">Figure 1: Vilmo provides state sync through a fixed set of rotating WALs. Once a node has the last k rotations, they have the current state.</div>
+        </div>
+        <p>With QMDB, <a href="https://www.youtube.com/watch?v=ozu5suhWK70">researchers at LayerZero found an (elegant) solution</a> to authentication by layering a Merkle Mountain Range (MMR) over a log of key updates. By linking keys in lexicographic order, this log can generate exclusion proofs (provide an inclusion proof of the keys before and after). Because the root spans the entire log, proofs for any key can be verified against the current root. Merklization can be performed with little memory and no disk access because new operations exclusively modify the right side of the tree.</p>
+        <div class="image-container">
+            <img src="/imgs/qmdb.png" alt="QMDB builds a MMR over a log of key updates">
+            <div class="image-caption">Figure 2: Over an ever-growing log of linked key operations, QMDB builds a Merkle Mountain Range (MMR).</div>
+        </div>
+        <p>QMDB can “do it all” (inclusion and exclusion proofs over both current and historical state). At Commonware, however, we found a number of applications that didn't need to. Rather than requiring all applications to support all proof types, we opted to instead build our own family of MMR-over-log databases (ADB) with granular control over proof support. <a href="/blogs/adb-any.html">The simplest database you need</a>, for example, only supports inclusion proofs!</p>
+        <p>This family of databases, however, never diverged far from QMDB. We found coherent ways to break apart QMDB and introduced support for state sync but never departed from the core MMR-over-log abstraction (we couldn't find a way to do better). After discussion with LayerZero, we both determined that instead of building our own versions of QMDB that we should direct our work towards a single implementation that we could both optimize. We're excited to share that single point of focus will be our family of authenticated databases, now renamed to QMDB. And yes, it is licensed as MIT/Apache-2.</p>
+        <p>Learn more about QMDB and its industry-leading performance on <a href="https://arxiv.org/abs/2501.05262">arXiv</a>. Play around with the rapidly maturing implementation of QMDB in the <a href="https://github.com/commonwarexyz/monorepo/tree/main/storage/src/qmdb">Commonware Library</a>.</p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+</body>
+
+</html>
