@@ -121,7 +121,7 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::<K, V>::Update(info.key, info.value);
+        let element = Operation::Update(info.key, info.value);
         verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
             Self::grafting_height(),
@@ -367,7 +367,7 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
-        let commit_op = Operation::<K, V>::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
 
         self.any.apply_commit_op(commit_op).await?;
 

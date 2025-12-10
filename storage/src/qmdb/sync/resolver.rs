@@ -7,7 +7,7 @@ use crate::{
         operation::{
             fixed::Value as FixedValue,
             variable::{immutable::Operation as ImmutableOp, Value as VariableValue},
-            FixedOperation as Operation,
+            FixedOperation,
         },
         store::CleanStore as _,
     },
@@ -72,7 +72,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Operation<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -104,7 +104,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Operation<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -207,7 +207,7 @@ pub(crate) mod tests {
         V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = Operation<K, V>;
+        type Op = FixedOperation<K, V>;
         type Error = qmdb::Error;
 
         async fn get_operations(

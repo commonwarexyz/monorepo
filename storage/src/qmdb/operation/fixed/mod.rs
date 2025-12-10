@@ -28,14 +28,15 @@ mod tests {
     use crate::{
         mmr::Location,
         qmdb::operation::{
-            fixed::ordered::Operation as FixedOrdered, operation, KeyData, Keyed as _, Ordered as _,
+            fixed::ordered::Operation as FixedOrdered, FixedOperation, KeyData, Keyed as _,
+            Ordered as _,
         },
     };
     use commonware_codec::{DecodeExt, Encode, FixedSize as _};
     use commonware_utils::{hex, sequence::U64};
     use std::marker::PhantomData;
 
-    type FixedUnordered<K, V> = operation::Operation<K, V, operation::Fixed>;
+    type FixedUnordered<K, V> = FixedOperation<K, V>;
 
     #[test]
     fn test_operation_to_key() {
