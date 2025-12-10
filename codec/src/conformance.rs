@@ -124,18 +124,6 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     result
 }
 
-/// Decode a hex string into bytes.
-pub fn hex_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    if !s.len().is_multiple_of(2) {
-        return Err("hex string has odd length");
-    }
-
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "invalid hex character"))
-        .collect()
-}
-
 /// Size of the random buffer used for generating arbitrary values.
 ///
 /// This should be large enough to generate complex nested types.
@@ -404,23 +392,6 @@ mod tests {
         assert_eq!(hex_encode(&[0x00]), "00");
         assert_eq!(hex_encode(&[0xff]), "ff");
         assert_eq!(hex_encode(&[0x12, 0x34, 0xab, 0xcd]), "1234abcd");
-    }
-
-    #[test]
-    fn test_hex_decode() {
-        assert_eq!(hex_decode("").unwrap(), vec![]);
-        assert_eq!(hex_decode("00").unwrap(), vec![0x00]);
-        assert_eq!(hex_decode("ff").unwrap(), vec![0xff]);
-        assert_eq!(
-            hex_decode("1234abcd").unwrap(),
-            vec![0x12, 0x34, 0xab, 0xcd]
-        );
-        assert_eq!(
-            hex_decode("1234ABCD").unwrap(),
-            vec![0x12, 0x34, 0xab, 0xcd]
-        );
-        assert!(hex_decode("0").is_err()); // odd length
-        assert!(hex_decode("gg").is_err()); // invalid char
     }
 
     #[test]
