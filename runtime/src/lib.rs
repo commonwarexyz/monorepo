@@ -443,11 +443,16 @@ pub trait Stream: Sync + Send + 'static {
 
 /// Interface to interact with storage.
 ///
-///
 /// To support storage implementations that enable concurrent reads and
 /// writes, blobs are responsible for maintaining synchronization.
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
+///
+/// # Partition Names
+///
+/// Partition names must be non-empty and contain only ASCII alphanumeric
+/// characters, dashes (`-`), or underscores (`_`). Names containing other
+/// characters (e.g., `/`, `.`, spaces) will return an error.
 pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;

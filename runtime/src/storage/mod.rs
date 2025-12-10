@@ -391,7 +391,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        // Valid partition names should succeed
+        // Valid partition names should not return PartitionNameInvalid
         for valid in [
             "partition",
             "my_partition",
@@ -400,16 +400,50 @@ pub(crate) mod tests {
             "A1",
         ] {
             assert!(
-                storage.open(valid, b"blob").await.is_ok(),
-                "Valid partition name '{valid}' should be accepted"
+                !matches!(
+                    storage.open(valid, b"blob").await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by open"
+            );
+            assert!(
+                !matches!(
+                    storage.remove(valid, None).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by remove"
+            );
+            assert!(
+                !matches!(
+                    storage.scan(valid).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by scan"
             );
         }
 
-        // Invalid partition names should fail
-        for invalid in ["my/partition", "my.partition", "my partition", "../escape"] {
+        // Invalid partition names should return PartitionNameInvalid
+        for invalid in ["my/partition", "my.partition", "my partition", "../escape", ""] {
             assert!(
-                storage.open(invalid, b"blob").await.is_err(),
-                "Invalid partition name '{invalid}' should be rejected"
+                matches!(
+                    storage.open(invalid, b"blob").await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by open"
+            );
+            assert!(
+                matches!(
+                    storage.remove(invalid, None).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by remove"
+            );
+            assert!(
+                matches!(
+                    storage.scan(invalid).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by scan"
             );
         }
     }
