@@ -295,7 +295,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     }
 
     /// Checks if a dealer has already submitted a log this epoch.
-    pub fn has_submitted_log(&self, epoch: EpochNum, dealer: &P) -> bool {
+    pub fn has_log(&self, epoch: EpochNum, dealer: &P) -> bool {
         self.epochs
             .get(&epoch)
             .map(|cache| cache.logs.contains_key(dealer))
@@ -450,10 +450,12 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         share: Option<Share>,
         rng_seed: Summary,
     ) -> Option<Dealer<V, C>> {
-        if self.has_submitted_log(epoch, &signer.public_key()) {
+        // If we've already observed our log in a finalized block, there is nothing more to do!
+        if self.has_log(epoch, &signer.public_key()) {
             return None;
         }
 
+        // Start a new dealer
         let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
             Transcript::resume(rng_seed).noise(b"dealer-rng"),
             round_info,
