@@ -390,7 +390,7 @@ where
                             let relative_height =
                                 relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
                             let mid_point = BLOCKS_PER_EPOCH / 2;
-                            info!(%block_epoch, relative_height, "finalized block");
+                            info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
                             // persisted state but crashed before acknowledging)
