@@ -296,24 +296,22 @@ where
             .expect("round info configuration should be correct");
 
             // Initialize dealer state if we are a dealer (factory handles log submission check)
-            let mut dealer_state: Option<Dealer<V, C>> = if am_dealer {
-                storage.create_dealer(
-                    epoch,
-                    self.signer.clone(),
-                    round.clone(),
-                    epoch_state.share.clone(),
-                    epoch_state.rng_seed,
-                )
-            } else {
-                None
-            };
+            let mut dealer_state: Option<Dealer<V, C>> = am_dealer
+                .then(|| {
+                    storage.create_dealer(
+                        epoch,
+                        self.signer.clone(),
+                        round.clone(),
+                        epoch_state.share.clone(),
+                        epoch_state.rng_seed,
+                    )
+                })
+                .flatten();
 
             // Initialize player state if we are a player
-            let mut player_state: Option<Player<V, C>> = if am_player {
-                storage.create_player(epoch, self.signer.clone(), round.clone())
-            } else {
-                None
-            };
+            let mut player_state: Option<Player<V, C>> = am_player
+                .then(|| storage.create_player(epoch, self.signer.clone(), round.clone()))
+                .flatten();
 
             select_loop! {
                 self.context,
