@@ -577,10 +577,14 @@ mod tests {
 
         // Zero runtime values panic
         let zero_usize: usize = 0;
+        let zero_u8: u8 = 0;
+        let zero_u16: u16 = 0;
         let zero_u32: u32 = 0;
         let zero_u64: u64 = 0;
 
         assert!(std::panic::catch_unwind(|| NZUsize!(zero_usize)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU8!(zero_u8)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU16!(zero_u16)).is_err());
         assert!(std::panic::catch_unwind(|| NZU32!(zero_u32)).is_err());
         assert!(std::panic::catch_unwind(|| NZU64!(zero_u64)).is_err());
 
