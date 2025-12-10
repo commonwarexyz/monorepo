@@ -1,5 +1,5 @@
 use super::{
-    state::{Dealer, Epoch as EpochState, Player, PlayerResponse, Storage},
+    state::{Dealer, Epoch as EpochState, Player, Storage},
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
@@ -346,8 +346,8 @@ where
                                                     priv_msg,
                                                 )
                                                 .await;
-                                            if let PlayerResponse::Ack(msg) = response {
-                                                let payload = msg.encode().freeze();
+                                            if let Some(ack) = response {
+                                                let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
                                                 if let Err(e) = round_sender
                                                     .send(Recipients::One(sender_pk.clone()), payload, true)
                                                     .await
@@ -382,7 +382,7 @@ where
 
                 match mailbox_msg {
                     MailboxMessage::Act { response } => {
-                        let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized_log());
+                        let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
                         if outcome.is_some() {
                             info!("including reshare outcome in proposed block");
                         }
@@ -418,7 +418,7 @@ where
                                 // it in subsequent blocks
                                 if dealer == self_pk {
                                     if let Some(ref mut ds) = dealer_state {
-                                        ds.take_finalized_log();
+                                        ds.take_finalized();
                                     }
                                 }
                                 storage.append_log(epoch, dealer, dealer_log).await;
@@ -559,17 +559,14 @@ where
                         .handle(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
                     {
-                        PlayerResponse::Ack(Message::Ack(ack)) => ack,
+                        Some(ack) => ack,
                         _ => continue,
                     };
 
                     // Handle our own ack as dealer
-                    if dealer_state
+                    dealer_state
                         .handle(storage, epoch, self_pk.clone(), ack)
-                        .await
-                    {
-                        debug!(?epoch, "self-dealt and acked");
-                    }
+                        .await;
                 }
                 continue;
             }
