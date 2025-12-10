@@ -265,7 +265,6 @@ mod test {
         output: Option<Output<MinSig, PublicKey>>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
-        is_dkg: bool,
         failures: HashSet<u64>,
     }
 
@@ -293,7 +292,6 @@ mod test {
                 output: Some(output),
                 participants,
                 handles: Default::default(),
-                is_dkg: false,
                 failures: HashSet::new(),
             }
         }
@@ -314,7 +312,6 @@ mod test {
                 output: None,
                 participants,
                 handles: Default::default(),
-                is_dkg: true,
                 failures: HashSet::new(),
             }
         }
@@ -407,7 +404,7 @@ mod test {
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) {
-            if self.is_dkg {
+            if self.output.is_none() {
                 self.start_one_inner::<EdScheme>(ctx, oracle, updates, pk)
                     .await;
             } else {
