@@ -4,7 +4,8 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use futures::channel::oneshot;
+use futures::{channel::oneshot, lock::Mutex};
+use std::sync::Arc;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]
@@ -25,8 +26,10 @@ pub enum Message<P: PublicKey> {
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
-    /// Get a list of currently connected peers.
-    Connected { response: oneshot::Sender<Vec<P>> },
+    /// Fetch a shared view of the peers tracked by the router.
+    Peers {
+        response: oneshot::Sender<Arc<Mutex<Vec<P>>>>,
+    },
 }
 
 impl<P: PublicKey> Mailbox<Message<P>> {
@@ -87,13 +90,10 @@ impl<P: PublicKey> Messenger<P> {
         receiver.await.unwrap()
     }
 
-    /// Gets a list of currently connected peers.
-    pub async fn connected(&mut self) -> Vec<P> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Connected { response: sender })
-            .await
-            .unwrap();
+    /// Returns a shared view of the peers tracked by the router.
+    pub async fn peers(&mut self) -> Arc<Mutex<Vec<P>>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender.send(Message::Peers { response }).await.unwrap();
         receiver.await.unwrap()
     }
 }

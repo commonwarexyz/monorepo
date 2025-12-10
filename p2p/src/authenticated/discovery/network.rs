@@ -111,7 +111,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
     #[allow(clippy::type_complexity)]
-    pub fn register(
+    pub async fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
@@ -124,7 +124,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             .cfg
             .rate_limit_outbound
             .then(|| self.context.with_label(&format!("channel_{channel}")));
-        self.channels.register(channel, rate, backlog, clock)
+        self.channels.register(channel, rate, backlog, clock).await
     }
 
     /// Starts the network.

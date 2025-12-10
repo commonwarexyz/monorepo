@@ -206,21 +206,27 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (vote_sender, vote_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (certificate_sender, certificate_receiver) = network.register(
-            1,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (resolver_sender, resolver_receiver) = network.register(
-            2,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
+        let (vote_sender, vote_receiver) = network
+            .register(
+                0,
+                Quota::per_second(NZU32!(10)),
+                256, // 256 messages in flight
+            )
+            .await;
+        let (certificate_sender, certificate_receiver) = network
+            .register(
+                1,
+                Quota::per_second(NZU32!(10)),
+                256, // 256 messages in flight
+            )
+            .await;
+        let (resolver_sender, resolver_receiver) = network
+            .register(
+                2,
+                Quota::per_second(NZU32!(10)),
+                256, // 256 messages in flight
+            )
+            .await;
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);

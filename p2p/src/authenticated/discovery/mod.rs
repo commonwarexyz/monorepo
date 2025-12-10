@@ -319,8 +319,9 @@ mod tests {
                 .await;
 
             // Register basic application
-            let (mut sender, mut receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            let (mut sender, mut receiver) = network
+                .register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG)
+                .await;
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -595,8 +596,9 @@ mod tests {
                     .await;
 
                 // Register basic application
-                let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+                let (mut sender, mut receiver) = network
+                    .register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG)
+                    .await;
 
                 // Wait to connect to all peers, and then send messages to everyone
                 network.start();
@@ -673,8 +675,9 @@ mod tests {
             oracle.update(0, addresses.clone()).await;
 
             // Register basic application
-            let (mut sender, _) =
-                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+            let (mut sender, _) = network
+                .register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG)
+                .await;
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -725,8 +728,9 @@ mod tests {
             oracle0
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
-            let (mut sender0, _receiver0) =
-                network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+            let (mut sender0, _receiver0) = network0
+                .register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG)
+                .await;
             network0.start();
 
             // Create network for peer 1
@@ -741,8 +745,9 @@ mod tests {
             oracle1
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
-            let (_sender1, _receiver1) =
-                network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+            let (_sender1, _receiver1) = network1
+                .register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG)
+                .await;
             network1.start();
 
             // Send first message, which should be allowed and consume the quota.
@@ -907,8 +912,9 @@ mod tests {
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;
 
-                let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                let (mut sender, mut receiver) = network
+                    .register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG)
+                    .await;
                 network.start();
 
                 peer_context.with_label("agent").spawn({

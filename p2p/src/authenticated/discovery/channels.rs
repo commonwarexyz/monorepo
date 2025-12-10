@@ -15,24 +15,27 @@ pub struct Sender<P: PublicKey, C: GClock> {
     max_size: usize,
     messenger: Messenger<P>,
     rate_limiter: Option<Arc<Mutex<RateLimiter<P, C>>>>,
+    peers: Arc<Mutex<Vec<P>>>,
 }
 
 impl<P: PublicKey, C: GClock> Sender<P, C> {
-    pub(super) fn new(
+    pub(super) async fn init(
         channel: Channel,
         max_size: usize,
-        messenger: Messenger<P>,
+        mut messenger: Messenger<P>,
         per_peer_quota: Option<(C, Quota)>,
     ) -> Self {
         let rate_limiter = per_peer_quota.map(|(clock, quota)| {
             let inner = RateLimiter::hashmap_with_clock(quota, clock);
             Arc::new(Mutex::new(inner))
         });
+        let peers = messenger.peers().await;
         Self {
             channel,
             max_size,
             messenger,
             rate_limiter,
+            peers,
         }
     }
 }
@@ -87,7 +90,7 @@ where
         let peers: Vec<Self::PublicKey> = match recipients {
             Recipients::One(peer) => vec![peer],
             Recipients::Some(peers) => peers,
-            Recipients::All => self.messenger.connected().await,
+            Recipients::All => self.peers.lock().await.clone(),
         };
 
         // Filter peers by rate limit, consuming rate tokens only for allowed peers
@@ -179,7 +182,7 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
-    pub fn register<C: GClock>(
+    pub async fn register<C: GClock>(
         &mut self,
         channel: Channel,
         rate: governor::Quota,
@@ -191,12 +194,13 @@ impl<P: PublicKey> Channels<P> {
             panic!("duplicate channel registration: {channel}");
         }
         (
-            Sender::new(
+            Sender::init(
                 channel,
                 self.max_size,
                 self.messenger.clone(),
                 outbound_rate_limit_clock.map(|clock| (clock, rate)),
-            ),
+            )
+            .await,
             Receiver::new(receiver),
         )
     }

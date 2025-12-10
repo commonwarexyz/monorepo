@@ -177,11 +177,13 @@ fn main() {
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;
-        let (chat_sender, chat_receiver) = network.register(
-            handler::CHANNEL,
-            Quota::per_second(NZU32!(128)),
-            MAX_MESSAGE_BACKLOG,
-        );
+        let (chat_sender, chat_receiver) = network
+            .register(
+                handler::CHANNEL,
+                Quota::per_second(NZU32!(128)),
+                MAX_MESSAGE_BACKLOG,
+            )
+            .await;
 
         // Start network
         let network_handler = network.start();

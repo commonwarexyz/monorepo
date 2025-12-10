@@ -15,9 +15,9 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, lock::Mutex, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
@@ -26,6 +26,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
+    active_connections: Arc<Mutex<Vec<P>>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -51,6 +52,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 context: ContextCell::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
+                active_connections: Arc::new(Mutex::new(Vec::new())),
                 messages_dropped,
             },
             control_sender.clone(),
@@ -115,12 +117,16 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         channels,
                     } => {
                         debug!(?peer, "peer ready");
-                        self.connections.insert(peer, relay);
+                        self.connections.insert(peer.clone(), relay);
                         let _ = channels.send(routing.clone());
+
+                        self.active_connections.lock().await.push(peer);
                     }
                     Message::Release { peer } => {
                         debug!(?peer, "peer released");
                         self.connections.remove(&peer);
+
+                        self.active_connections.lock().await.retain(|p| p != &peer);
                     }
                     Message::Content {
                         recipients,
@@ -170,9 +176,8 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         // Communicate success back to sender (if still alive)
                         let _ = success.send(sent);
                     }
-                    Message::Connected { response } => {
-                        let peers = self.connections.keys().cloned().collect();
-                        let _ = response.send(peers);
+                    Message::Peers { response } => {
+                        let _ = response.send(self.active_connections.clone());
                     }
                 }
             }
