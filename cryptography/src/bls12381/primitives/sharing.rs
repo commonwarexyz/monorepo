@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum SharingMode {
+    // TODO: Add a mode for sub O(N^2) interpolation
     #[default]
     NonZeroCounter = 0,
 }
