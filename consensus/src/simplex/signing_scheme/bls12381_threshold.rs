@@ -79,13 +79,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
-    /// If the provided share does not match the polynomial evaluation at its index,
-    /// the instance will act as a verifier (unable to sign votes).
+    /// Returns `None` if the share's public key does not match any participant.
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn new(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Self {
+    pub fn signer(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Option<Self> {
         let identity = *poly::public::<V>(polynomial);
         assert_eq!(
             polynomial.required(),
@@ -100,22 +99,19 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .expect("participants are unique");
 
         let public_key = share.public::<V>();
-        if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
-            assert_eq!(
-                index as u32, share.index,
-                "share index must match participant index"
-            );
-            Self::Signer {
-                participants,
-                identity,
-                share,
-            }
-        } else {
-            Self::Verifier {
-                participants,
-                identity,
-            }
-        }
+        let index = participants
+            .values()
+            .iter()
+            .position(|p| p == &public_key)?;
+        assert_eq!(
+            index as u32, share.index,
+            "share index must match participant index"
+        );
+        Some(Self::Signer {
+            participants,
+            identity,
+            share,
+        })
     }
 
     /// Produces a verifier that can authenticate votes but does not hold signing state.
@@ -725,7 +721,7 @@ mod tests {
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(4));
         shares[0].index = 999;
-        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+        Scheme::<V>::signer(participants.keys().clone(), &polynomial, shares[0].clone());
     }
 
     #[test]
@@ -743,7 +739,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, shares) = deal_anonymous::<V>(&mut rng, NZU32!(4));
-        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+        Scheme::<V>::signer(participants.keys().clone(), &polynomial, shares[0].clone());
     }
 
     #[test]

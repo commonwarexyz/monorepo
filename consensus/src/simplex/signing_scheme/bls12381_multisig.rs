@@ -45,20 +45,20 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// signing and verification.
     ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: BiMap<P, V::Public>, private_key: Private) -> Self {
+    /// Returns `None` if the provided private key does not match any consensus key
+    /// in the committee.
+    pub fn signer(participants: BiMap<P, V::Public>, private_key: Private) -> Option<Self> {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
             .position(|p| p == &public_key)
-            .map(|index| (index as u32, private_key));
+            .map(|index| (index as u32, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes and certificates.

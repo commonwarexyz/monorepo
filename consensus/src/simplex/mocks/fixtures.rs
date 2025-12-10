@@ -54,7 +54,7 @@ where
 
     let schemes = ed25519_associated
         .into_iter()
-        .map(|(_, sk)| ed_scheme::Scheme::new(participants.clone(), sk))
+        .map(|(_, sk)| ed_scheme::Scheme::signer(participants.clone(), sk).unwrap())
         .collect();
     let verifier = ed_scheme::Scheme::verifier(participants.clone());
 
@@ -93,7 +93,7 @@ where
         .expect("ed25519 public keys are unique");
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::signer(signers.clone(), sk).unwrap())
         .collect();
     let verifier = bls12381_multisig::Scheme::verifier(signers);
 
@@ -123,7 +123,8 @@ where
     let schemes = shares
         .into_iter()
         .map(|(_, share)| {
-            bls12381_threshold::Scheme::new(participants.clone(), output.public(), share)
+            bls12381_threshold::Scheme::signer(participants.clone(), output.public(), share)
+                .unwrap()
         })
         .collect();
     let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), output.public());
