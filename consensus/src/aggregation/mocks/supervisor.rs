@@ -1,9 +1,6 @@
 use crate::{types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops::evaluate_all,
-        primitives::{group::Share, poly, variant::Variant},
-    },
+    bls12381::primitives::{group::Share, poly, variant::Variant},
     PublicKey,
 };
 use std::collections::HashMap;
@@ -47,7 +44,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         // Evaluate the polynomial
         let identity = *poly::public::<V>(&polynomial);
         assert_eq!(identity, self.identity);
-        let polynomial = evaluate_all::<V>(&polynomial, validators.len() as u32);
+        let polynomial = polynomial.evaluate_all(validators.len() as u32);
 
         // Store artifacts
         self.shares.insert(epoch, share);

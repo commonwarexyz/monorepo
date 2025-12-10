@@ -438,15 +438,12 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops::{self},
-            primitives::variant::MinSig,
-        },
+        bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{ordered::Set, quorum, quorum_from_slice, TryCollect};
+    use commonware_utils::{ordered::Set, quorum_from_slice, TryCollect, NZU32};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -464,13 +461,11 @@ mod tests {
         seed: u64,
     ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, MinSig>> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let t = quorum(n);
-
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let (polynomial, shares) = deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
 
         shares
             .into_iter()
