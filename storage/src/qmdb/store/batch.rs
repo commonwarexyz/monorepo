@@ -239,6 +239,7 @@ pub mod tests {
         test_delete_unchecked(new_db).await?;
         test_write_batch_from_to_empty(new_db).await?;
         test_write_batch(new_db).await?;
+        test_delete_all_but_one(new_db).await?;
         Ok(())
     }
 
@@ -346,6 +347,68 @@ pub mod tests {
         assert_eq!(batch.get(&key).await?, None);
 
         db.destroy().await?;
+        Ok(())
+    }
+
+    /// Create an empty db, write a small # of keys, then delete all but one using a batch delete
+    /// that also includes a delete_unchecked of an inactive key.
+    async fn test_delete_all_but_one<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable + StorePersistable,
+        D::Key: TestKey,
+        D::Value: TestValue,
+    {
+        let mut db = new_db().await;
+        // Create 10 keys and commit them.
+        for i in 0..10 {
+            assert!(
+                db.create(D::Key::from_seed(i), D::Value::from_seed(i))
+                    .await?
+            );
+        }
+        db.commit().await?;
+
+        // Delete all but the last using a batch.
+        let mut batch = db.start_batch();
+        for i in 0..9 {
+            batch.delete(D::Key::from_seed(i)).await?;
+        }
+        // Try to delete an inactive key.
+        batch.delete_unchecked(D::Key::from_seed(100)).await?;
+        db.write_batch(batch.into_iter()).await?;
+        db.commit().await?;
+
+        // Confirm output is as expected.
+        for i in 0..9 {
+            assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
+        }
+        assert_eq!(
+            Store::get(&db, &D::Key::from_seed(9)).await?,
+            Some(D::Value::from_seed(9))
+        );
+
+        // Update keys again including the deleted one.
+        let mut batch = db.start_batch();
+        for i in 0..10 {
+            batch
+                .update(D::Key::from_seed(i), D::Value::from_seed(i + 100))
+                .await?;
+        }
+        db.write_batch(batch.into_iter()).await?;
+        db.commit().await?;
+
+        // Confirm output is as expected.
+        for i in 0..10 {
+            assert_eq!(
+                Store::get(&db, &D::Key::from_seed(i)).await?,
+                Some(D::Value::from_seed(i + 100))
+            );
+        }
+
+        db.destroy().await?;
+
         Ok(())
     }
 
