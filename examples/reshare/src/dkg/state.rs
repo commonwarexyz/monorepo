@@ -459,9 +459,9 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             CryptoPlayer::new(round_info, signer).expect("should be able to create player");
         let mut player = Player::new(crypto_player);
 
-        // Replay persisted dealer messages (these will all be Cached responses)
+        // Replay persisted dealer messages
         for (dealer, pub_msg, priv_msg) in self.dealer_msgs(epoch) {
-            let _ = player.handle(dealer.clone(), pub_msg, priv_msg);
+            player.replay(dealer.clone(), pub_msg, priv_msg);
             debug!(?epoch, ?dealer, "replayed committed dealer message");
         }
 
@@ -492,14 +492,18 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 
     /// Handle an incoming ack from a player.
-    /// Returns the ack if it was successfully processed (for persistence).
-    pub fn handle(
+    ///
+    /// If the ack is valid and new, persists it to storage.
+    /// Returns true if the ack was successfully processed.
+    pub async fn handle<E: RuntimeStorage + Metrics>(
         &mut self,
+        storage: &mut Storage<E, V, C::PublicKey>,
+        epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> Option<PlayerAck<C::PublicKey>> {
+    ) -> bool {
         if !self.unsent_priv_msgs.contains_key(&player) {
-            return None;
+            return false;
         }
         if let Some(ref mut dealer) = self.dealer {
             if dealer
@@ -507,10 +511,11 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
                 .is_ok()
             {
                 self.unsent_priv_msgs.remove(&player);
-                return Some(ack);
+                storage.append_player_ack(epoch, player, ack).await;
+                return true;
             }
         }
-        None
+        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
@@ -549,10 +554,8 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
 /// Result of handling a dealer message.
 pub enum PlayerResponse<V: Variant, P: PublicKey> {
-    /// New dealer message, ack generated. Caller should persist the dealer message.
-    New(Message<V, P>),
-    /// Already seen this dealer, returning cached ack.
-    Cached(Message<V, P>),
+    /// Ack generated (either new or cached).
+    Ack(Message<V, P>),
     /// Invalid dealer message, no ack generated.
     Invalid,
 }
@@ -574,26 +577,45 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Handle an incoming dealer message.
-    /// Returns whether this is a new commitment (should be persisted) or cached.
-    pub fn handle(
+    ///
+    /// If this is a new valid dealer message, persists it to storage before returning.
+    pub async fn handle<E: RuntimeStorage + Metrics>(
         &mut self,
+        storage: &mut Storage<E, V, C::PublicKey>,
+        epoch: EpochNum,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
     ) -> PlayerResponse<V, C::PublicKey> {
         // If we've already generated an ack, return the cached version
         if let Some(ack) = self.acks.get(&dealer) {
-            return PlayerResponse::Cached(Message::Ack(ack.clone()));
+            return PlayerResponse::Ack(Message::Ack(ack.clone()));
         }
         // Otherwise generate a new ack
+        if let Some(ack) =
+            self.player
+                .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+        {
+            storage
+                .append_dealer_msg(epoch, dealer.clone(), pub_msg, priv_msg)
+                .await;
+            self.acks.insert(dealer, ack.clone());
+            return PlayerResponse::Ack(Message::Ack(ack));
+        }
+        PlayerResponse::Invalid
+    }
+
+    /// Replay an already-persisted dealer message (updates in-memory state only).
+    fn replay(&mut self, dealer: C::PublicKey, pub_msg: DealerPubMsg<V>, priv_msg: DealerPrivMsg) {
+        if self.acks.contains_key(&dealer) {
+            return;
+        }
         if let Some(ack) = self
             .player
             .dealer_message(dealer.clone(), pub_msg, priv_msg)
         {
-            self.acks.insert(dealer, ack.clone());
-            return PlayerResponse::New(Message::Ack(ack));
+            self.acks.insert(dealer, ack);
         }
-        PlayerResponse::Invalid
     }
 
     /// Finalize the player's participation in the DKG round.

@@ -338,26 +338,29 @@ where
                                 match msg {
                                     Message::Dealer(pub_msg, priv_msg) => {
                                         if let Some(ref mut ps) = player_state {
-                                            Self::handle_dealer_message(
-                                                &mut storage,
-                                                epoch,
-                                                sender_pk,
-                                                pub_msg,
-                                                priv_msg,
-                                                ps,
-                                                &mut round_sender,
-                                            ).await;
+                                            let response = ps
+                                                .handle(
+                                                    &mut storage,
+                                                    epoch,
+                                                    sender_pk.clone(),
+                                                    pub_msg,
+                                                    priv_msg,
+                                                )
+                                                .await;
+                                            if let PlayerResponse::Ack(msg) = response {
+                                                let payload = msg.encode().freeze();
+                                                if let Err(e) = round_sender
+                                                    .send(Recipients::One(sender_pk.clone()), payload, true)
+                                                    .await
+                                                {
+                                                    warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                                                }
+                                            }
                                         }
                                     }
                                     Message::Ack(ack) => {
                                         if let Some(ref mut ds) = dealer_state {
-                                            Self::handle_ack_message(
-                                                &mut storage,
-                                                epoch,
-                                                sender_pk,
-                                                ack,
-                                                ds,
-                                            ).await;
+                                            ds.handle(&mut storage, epoch, sender_pk, ack).await;
                                         }
                                     }
                                 }
@@ -530,54 +533,6 @@ where
         info!("exiting DKG actor");
     }
 
-    async fn handle_dealer_message<S: Sender<PublicKey = C::PublicKey>>(
-        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
-        epoch: Epoch,
-        sender_pk: C::PublicKey,
-        pub_msg: DealerPubMsg<V>,
-        priv_msg: DealerPrivMsg,
-        player_state: &mut Player<V, C>,
-        network_sender: &mut S,
-    ) {
-        let response =
-            match player_state.handle(sender_pk.clone(), pub_msg.clone(), priv_msg.clone()) {
-                PlayerResponse::New(msg) => {
-                    storage
-                        .append_dealer_msg(epoch, sender_pk.clone(), pub_msg, priv_msg)
-                        .await;
-                    debug!(?epoch, dealer = ?sender_pk, "persisted dealer message");
-                    msg
-                }
-                PlayerResponse::Cached(msg) => msg,
-                PlayerResponse::Invalid => return,
-            };
-
-        let payload = response.encode().freeze();
-        if let Err(e) = network_sender
-            .send(Recipients::One(sender_pk.clone()), payload, true)
-            .await
-        {
-            warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
-        } else {
-            debug!(?epoch, dealer = ?sender_pk, "sent ack");
-        }
-    }
-
-    async fn handle_ack_message(
-        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
-        epoch: Epoch,
-        sender_pk: C::PublicKey,
-        ack: PlayerAck<C::PublicKey>,
-        dealer_state: &mut Dealer<V, C>,
-    ) {
-        if let Some(ack) = dealer_state.handle(sender_pk.clone(), ack) {
-            storage
-                .append_player_ack(epoch, sender_pk.clone(), ack)
-                .await;
-            debug!(?epoch, player = ?sender_pk, "received and stored player ack");
-        }
-    }
-
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
         storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
@@ -598,21 +553,19 @@ where
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
-                    let ack = match ps.handle(self_pk.clone(), pub_msg.clone(), priv_msg.clone()) {
-                        PlayerResponse::New(Message::Ack(ack)) => {
-                            // New commitment - persist the dealer message
-                            storage
-                                .append_dealer_msg(epoch, self_pk.clone(), pub_msg, priv_msg)
-                                .await;
-                            ack
-                        }
-                        PlayerResponse::Cached(Message::Ack(ack)) => ack,
+                    let ack = match ps
+                        .handle(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .await
+                    {
+                        PlayerResponse::Ack(Message::Ack(ack)) => ack,
                         _ => continue,
                     };
 
                     // Handle our own ack as dealer
-                    if let Some(ack) = dealer_state.handle(self_pk.clone(), ack) {
-                        storage.append_player_ack(epoch, self_pk.clone(), ack).await;
+                    if dealer_state
+                        .handle(storage, epoch, self_pk.clone(), ack)
+                        .await
+                    {
                         debug!(?epoch, "self-dealt and acked");
                     }
                 }
