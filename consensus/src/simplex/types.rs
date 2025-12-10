@@ -2145,11 +2145,12 @@ mod tests {
         shares
             .into_iter()
             .map(|share| {
-                bls12381_threshold::Scheme::new(
+                bls12381_threshold::Scheme::signer(
                     participants.clone().try_into().unwrap(),
                     &polynomial,
                     share,
                 )
+                .unwrap()
             })
             .collect()
     }
@@ -2181,7 +2182,7 @@ mod tests {
 
         private_keys
             .into_iter()
-            .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
+            .map(|sk| ed25519::Scheme::signer(participants.clone(), sk).unwrap())
             .collect()
     }
 

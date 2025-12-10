@@ -36,17 +36,20 @@ impl Scheme {
     ///
     /// Participants use the same key for both identity and consensus.
     ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: Set<ed25519::PublicKey>, private_key: ed25519::PrivateKey) -> Self {
+    /// Returns `None` if the provided private key does not match any participant
+    /// in the committee.
+    pub fn signer(
+        participants: Set<ed25519::PublicKey>,
+        private_key: ed25519::PrivateKey,
+    ) -> Option<Self> {
         let signer = participants
             .position(&private_key.public_key())
-            .map(|index| (index as u32, private_key));
+            .map(|index| (index as u32, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
