@@ -177,11 +177,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes peer proposal verification after the automaton returns.
-    pub fn verified(&mut self) -> bool {
+    ///
+    /// Returns `true` if the slot was updated, `false` if we already broadcast nullify
+    /// or the slot was in an invalid state (e.g., we received a certificate for a
+    /// conflicting proposal).
+    pub fn verified(&mut self, valid: bool) -> bool {
         if self.broadcast_nullify {
             return false;
         }
-        if !self.proposal.mark_verified() {
+        if !self.proposal.mark_verified(valid) {
             // If we receive a certificate for some proposal, we ignore our verification.
             return false;
         }
@@ -384,11 +388,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Even if we've already seen a notarization, we still broadcast our notarize vote
         // in case it is useful (in the worst case it lets others observe we are alive).
 
-        // If we don't have a verified proposal, return None.
+        // If we don't have a valid verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
-        if self.proposal.status() != ProposalStatus::Verified {
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification failed.
+        if self.proposal.status() != (ProposalStatus::Verified { valid: true }) {
             return None;
         }
         self.broadcast_notarize = true;
@@ -411,11 +415,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        // If we don't have a verified proposal, return None.
+        // If we don't have a valid verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
-        if self.proposal.status() != ProposalStatus::Verified {
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification failed.
+        if self.proposal.status() != (ProposalStatus::Verified { valid: true }) {
             return None;
         }
         self.broadcast_finalize = true;
@@ -504,7 +508,7 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
-        assert!(round.verified());
+        assert!(round.verified(true));
 
         // Attempt to vote
         assert_eq!(round.construct_notarize(), Some(&proposal_a));
@@ -557,7 +561,7 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
-        assert!(round.verified());
+        assert!(round.verified(true));
 
         // Attempt to vote
         assert_eq!(round.construct_notarize(), Some(&proposal_a));

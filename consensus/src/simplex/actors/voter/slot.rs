@@ -8,7 +8,9 @@ pub enum Status {
     #[default]
     None,
     Unverified,
-    Verified,
+    Verified {
+        valid: bool,
+    },
     Equivocated,
 }
 
@@ -85,7 +87,7 @@ where
 
         // Otherwise, we record the proposal and flip the build/verify flags.
         self.proposal = Some(proposal);
-        self.status = Status::Verified;
+        self.status = Status::Verified { valid: true };
         self.requested_build = true;
         self.requested_verify = true;
     }
@@ -98,11 +100,11 @@ where
         true
     }
 
-    pub fn mark_verified(&mut self) -> bool {
+    pub fn mark_verified(&mut self, valid: bool) -> bool {
         if self.status != Status::Unverified {
             return false;
         }
-        self.status = Status::Verified;
+        self.status = Status::Verified { valid };
         true
     }
 
@@ -116,7 +118,7 @@ where
             None => {
                 self.proposal = Some(proposal.clone());
                 self.status = if recovered {
-                    Status::Verified
+                    Status::Verified { valid: true }
                 } else {
                     Status::Unverified
                 };
@@ -124,7 +126,7 @@ where
             }
             Some(existing) if existing == proposal => {
                 if recovered {
-                    self.status = Status::Verified;
+                    self.status = Status::Verified { valid: true };
                 }
                 Change::Unchanged
             }
@@ -185,7 +187,7 @@ mod tests {
             Some(stored) => assert_eq!(stored, &proposal),
             None => panic!("proposal missing after recording"),
         }
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
     }
@@ -199,7 +201,7 @@ mod tests {
         slot.built(proposal.clone());
 
         assert_eq!(slot.proposal(), Some(&proposal));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
     }
@@ -214,7 +216,7 @@ mod tests {
         slot.built(proposal.clone());
 
         assert!(!slot.should_build());
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
         assert_eq!(slot.proposal(), Some(&proposal));
     }
 
@@ -226,7 +228,7 @@ mod tests {
 
         assert!(matches!(slot.update(&proposal, false), Change::New));
         assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
     }
 
     #[test]
@@ -262,14 +264,14 @@ mod tests {
 
         // Compromised node produces a certificate before our local propose returns.
         assert!(matches!(slot.update(&compromised, true), Change::New));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
         assert_eq!(slot.proposal(), Some(&compromised));
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
         slot.built(honest);
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Verified { valid: true });
         assert_eq!(slot.proposal(), Some(&compromised));
     }
 
@@ -295,7 +297,7 @@ mod tests {
         }
         assert_eq!(slot.status(), Status::Equivocated);
         // Verifier completion arriving afterwards must be ignored.
-        assert!(!slot.mark_verified());
+        assert!(!slot.mark_verified(true));
         assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
     }
 
