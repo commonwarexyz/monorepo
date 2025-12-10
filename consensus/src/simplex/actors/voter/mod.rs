@@ -61,7 +61,6 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
-    use bytes::Bytes;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -2053,9 +2052,9 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
 
-            // Initialize voter actor (use participant[1] so we're NOT the leader for view 1)
-            let signing = schemes[1].clone();
-            let me = participants[1].clone();
+            // Use participant[0] as the voter
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -2119,81 +2118,93 @@ mod tests {
                 certificate_sender,
             );
 
-            // Wait for batcher to be notified
+            // Wait for initial batcher update
             let message = batcher_receiver.next().await.unwrap();
             match message {
-                batcher::Message::Update {
-                    current,
-                    finalized,
-                    active,
-                    ..
-                } => {
-                    assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
-                    active.send(true).unwrap();
-                }
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                 _ => panic!("expected Update message"),
             }
 
-            // Advance to view 2 with a finalization so the parent payload is available and timeouts
-            // are not expired by the initial `expire_round` call.
-            let view1 = View::new(1);
-            let view2 = View::new(2);
-            let proposal_v1 = Proposal::new(
-                Round::new(Epoch::new(333), view1),
+            // Advance views until we find one where we're NOT the leader (so we verify
+            // rather than propose). Keep track of the previous view's proposal for parent.
+            let mut current_view = View::new(1);
+            let mut prev_proposal = Proposal::new(
+                Round::new(Epoch::new(333), current_view),
                 View::zero(),
-                Sha256::hash(b"v1"),
+                Sha256::hash(b"v0"),
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_v1, quorum);
-            mailbox
-                .resolved(Certificate::Finalization(finalization))
-                .await;
 
-            // Wait for the view 2 update and confirm we are not the leader (so we verify).
-            let leader = loop {
-                match batcher_receiver.next().await.unwrap() {
-                    batcher::Message::Update {
-                        current,
-                        leader,
-                        finalized,
-                        active,
-                        ..
-                    } => {
-                        active.send(true).unwrap();
-                        if current == view2 {
-                            assert_ne!(leader, 1);
-                            assert_eq!(finalized, view1);
-                            break participants[leader as usize].clone();
+            let (target_view, leader) = loop {
+                // Send finalization to advance to next view
+                let (_, finalization) =
+                    build_finalization(&schemes, &namespace, &prev_proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                // Wait for the view update
+                let (new_view, leader) = loop {
+                    match batcher_receiver.next().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } => {
+                            active.send(true).unwrap();
+                            if current > current_view {
+                                break (current, leader);
+                            }
                         }
+                        batcher::Message::Constructed(_) => {}
                     }
-                    batcher::Message::Constructed(Vote::Nullify(_)) => {
-                        // Ignore startup nullify from the expired initial view.
-                    }
-                    batcher::Message::Constructed(_) => {}
+                };
+
+                current_view = new_view;
+
+                // Check if we're NOT the leader for this view
+                if leader != 0 {
+                    break (current_view, participants[leader as usize].clone());
                 }
+
+                // We're the leader, advance to next view
+                prev_proposal = Proposal::new(
+                    Round::new(Epoch::new(333), current_view),
+                    current_view.previous().unwrap(),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
             };
 
-            // Send a proposal for view 2 (where we are a verifier).
-            let proposal_v2 = Proposal::new(
-                Round::new(Epoch::new(333), view2),
-                view1,
-                Sha256::hash(b"v2"),
+            // Create proposal for the target view (where we are a verifier)
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
             );
-            // Broadcast the payload contents so verification can complete (the automaton waits for
-            // the contents via the relay).
-            let contents = (proposal_v2.round, proposal_v1.payload, 0u64).encode();
-            relay
-                .broadcast(&leader, (proposal_v2.payload, Bytes::from(contents)))
-                .await;
-            mailbox.proposal(proposal_v2).await;
 
-            // Wait for nullify vote for view 2. Since timeouts are 10s, receiving it within 1s
-            // proves it came from verification failure, not timeout.
+            // Broadcast the payload contents so verification can complete (the automaton waits
+            // for the contents via the relay).
+            let parent_payload = Sha256::hash(
+                target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice(),
+            );
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents.into()))
+                .await;
+            mailbox.proposal(proposal).await;
+
+            // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
+            // within 1s proves it came from verification failure, not timeout.
             loop {
                 select! {
                     msg = batcher_receiver.next() => {
                         match msg.unwrap() {
-                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == view2 => {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
                                 break;
                             }
                             batcher::Message::Update { active, .. } => active.send(true).unwrap(),
@@ -2201,7 +2212,7 @@ mod tests {
                         }
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
-                        panic!("expected nullify for view 2 within 1s (timeouts are 10s)");
+                        panic!("expected nullify for view {} within 1s (timeouts are 10s)", target_view);
                     },
                 }
             }
