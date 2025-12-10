@@ -1165,7 +1165,10 @@ dependencies = [
  "futures",
  "governor",
  "libfuzzer-sys",
+ "proptest",
  "rand 0.8.5",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

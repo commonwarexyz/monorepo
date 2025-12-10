@@ -1,31 +1,36 @@
 pub mod disrupter;
 pub mod invariants;
+pub mod simplex;
 pub mod types;
 pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
+    simplex::Simplex,
     utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
-use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
         mocks::{application, fixtures::Fixture, relay, reporter},
-        signing_scheme::Scheme as SimplexScheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+// Re-export simplex implementations for fuzz targets
+pub use simplex::{
+    SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
+    SimplexBls12381MultisigMinSig, SimplexEd25519,
+};
 use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
 
 pub const EPOCH: u64 = 333;
@@ -43,14 +48,6 @@ const EXPECTED_PANICS: [&str; 3] = [
     "invalid parent (in payload):",
     "invalid round (in payload)",
 ];
-
-pub trait Simplex: 'static
-where
-    <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
-{
-    type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
-}
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
@@ -283,10 +280,13 @@ fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
 }
 
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
+    let seed = input.seed;
+    println!("Running fuzz test with seed: {}", seed);
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
             if !is_expected_panic(&payload) {
+                println!("Panicked with seed: {}", seed);
                 panic::resume_unwind(payload);
             }
         }
