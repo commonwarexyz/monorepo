@@ -321,7 +321,7 @@ where
                     break 'actor;
                 },
                 // Process incoming network messages
-                network_msg = round_receiver.recv().fuse() => {
+                network_msg = round_receiver.recv() => {
                     match network_msg {
                         Ok((sender_pk, msg_bytes)) => {
                             let msg = match Message::<V, C::PublicKey>::read_cfg(
