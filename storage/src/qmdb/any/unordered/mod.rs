@@ -1,7 +1,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, Dirty, State},
@@ -46,7 +46,7 @@ pub trait Operation: Committable + Keyed {
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: Contiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -84,7 +84,7 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
@@ -151,6 +151,41 @@ impl<
         self.log.pruning_boundary()
     }
 
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub const fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(
+        &self,
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        self.get_key_op_loc(key)
+            .await
+            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, C, I, H, S>
+{
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
     pub(crate) async fn delete_key(
@@ -212,32 +247,6 @@ impl<
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(
-        &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        self.get_key_op_loc(key)
-            .await
-            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
-    }
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let op = self.log.read(last_commit).await?;
-        Ok(op.into_value())
     }
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
@@ -451,6 +460,45 @@ impl<
         self.log.sync().await.map_err(Into::into)
     }
 
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
+        self.log.close().await.map_err(Into::into)
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await.map_err(Into::into)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H>
+{
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
+        IndexedLog {
+            log: self.log.into_dirty(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H>
+{
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -470,34 +518,11 @@ impl<
 
         Ok(())
     }
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await.map_err(Into::into)
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
-    }
-
-    /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
-        IndexedLog {
-            log: self.log.into_dirty(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
-            snapshot: self.snapshot,
-            steps: self.steps,
-            active_keys: self.active_keys,
-        }
-    }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > IndexedLog<E, C, I, H, Dirty>
@@ -533,7 +558,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H>
@@ -545,7 +570,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::CleanStore for IndexedLog<E, C, I, H>
@@ -589,7 +614,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
@@ -616,7 +641,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::store::Store for IndexedLog<E, C, I, H>
@@ -632,7 +657,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::store::StoreMut for IndexedLog<E, C, I, H>
@@ -644,7 +669,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
@@ -656,7 +681,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::DirtyStore for IndexedLog<E, C, I, H, Dirty>
@@ -706,7 +731,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > DirtyAny for IndexedLog<E, C, I, H, Dirty>
@@ -733,7 +758,7 @@ impl<
 impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Operation>,
+    C: MutableContiguous<Item: Operation>,
     I: Index<Value = Location>,
     H: Hasher,
 {

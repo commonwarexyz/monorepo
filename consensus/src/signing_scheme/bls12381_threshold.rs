@@ -10,18 +10,15 @@
 
 use crate::signing_scheme::{Context, Scheme, Signature, SignatureVerification};
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops,
-        primitives::{
-            group::Share,
-            ops::{
-                aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover,
-                verify_message,
-            },
-            poly::{self, PartialSignature, Public},
-            variant::Variant,
+    bls12381::primitives::{
+        group::Share,
+        ops::{
+            aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+            partial_verify_multiple_public_keys_precomputed, threshold_signature_recover,
+            verify_message,
         },
+        poly::{self, PartialSignature, Public},
+        variant::Variant,
     },
     Digest, PublicKey,
 };
@@ -74,7 +71,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
@@ -110,7 +107,7 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Set<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)

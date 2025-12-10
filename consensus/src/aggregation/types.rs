@@ -362,7 +362,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg,
             primitives::{
                 group::Private as BlsPrivate,
                 variant::{MinPk, MinSig, Variant},
@@ -373,7 +373,7 @@ mod tests {
     };
     use commonware_utils::{
         ordered::{BiMap, Quorum, Set},
-        quorum, TryCollect,
+        TryCollect, NZU32,
     };
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -431,7 +431,6 @@ mod tests {
         seed: u64,
     ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, V>> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let t = quorum(n);
 
         // Generate ed25519 keys for participant identities
         let participants = (0..n)
@@ -439,7 +438,7 @@ mod tests {
             .try_collect::<Set<_>>()
             .unwrap();
 
-        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, t);
+        let (polynomial, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(n));
 
         shares
             .into_iter()

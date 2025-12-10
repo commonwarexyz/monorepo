@@ -3,12 +3,12 @@
 use crate::simplex::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
+        dkg::deal,
         primitives::{group, variant::Variant},
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{ordered::BiMap, quorum, TryCollect};
+use commonware_utils::{ordered::BiMap, TryCollect};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -118,14 +118,15 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let t = quorum(n);
-    let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
+    let (output, shares) = deal::<V, _>(rng, participants.clone()).expect("deal should succeed");
 
     let schemes = shares
         .into_iter()
-        .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
+        .map(|(_, share)| {
+            bls12381_threshold::Scheme::new(participants.clone(), output.public(), share)
+        })
         .collect();
-    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), &polynomial);
+    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), output.public());
 
     Fixture {
         participants: participants.into(),

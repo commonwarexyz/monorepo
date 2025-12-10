@@ -11,14 +11,14 @@ mod tests {
         ordered_broadcast::types::AckContext, signing_scheme::Scheme as SchemeTrait, types::Epoch,
     };
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::variant::MinPk},
+        bls12381::{dkg, primitives::variant::MinPk},
         ed25519::{PrivateKey, PublicKey as EdPublicKey},
         sha256::Sha256,
         Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_utils::{
         ordered::{Quorum, Set},
-        TryFromIterator,
+        TryFromIterator, NZU32,
     };
     use rand::SeedableRng;
 
@@ -31,9 +31,8 @@ mod tests {
             .map(|_| PrivateKey::from_rng(&mut rng).public_key())
             .collect();
 
-        // Create BLS threshold setup (3-of-5)
-        let quorum = 3;
-        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut rng, None, 5, quorum);
+        // Create BLS threshold setup (4-of-5)
+        let (polynomial, shares) = dkg::deal_anonymous::<MinPk>(&mut rng, NZU32!(5));
 
         // Create a chunk to sign
         let chunk = super::super::super::types::Chunk::new(

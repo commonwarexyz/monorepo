@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
+        dkg,
         primitives::{group, variant::Variant},
     },
     ed25519, PrivateKeyExt, Signer,
@@ -156,14 +156,17 @@ where
     let associated_vec: Vec<_> = ed25519_associated.into_iter().collect();
     let private_keys: Vec<_> = associated_vec.iter().map(|(_, sk)| sk.clone()).collect();
 
-    let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
+    let (output, shares) =
+        dkg::deal::<V, _>(rng, participants.clone()).expect("deal should succeed");
 
     let schemes: Vec<_> = shares
         .into_iter()
-        .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
+        .map(|(_, share)| {
+            bls12381_threshold::Scheme::new(participants.clone(), output.public(), share)
+        })
         .collect();
 
-    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), &polynomial);
+    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), output.public());
 
     Fixture {
         participants: participants.into(),

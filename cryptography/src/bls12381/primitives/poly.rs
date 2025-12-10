@@ -20,8 +20,6 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
 };
 use core::{hash::Hash, iter, num::NonZeroU32};
-#[cfg(feature = "std")]
-use rand::rngs::OsRng;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
@@ -78,21 +76,11 @@ impl<C: Element> EncodeSize for Eval<C> {
 // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
 pub struct Poly<C>(Vec<C>);
 
-/// Returns a new scalar polynomial of the given degree where each coefficients is
-/// sampled at random using kernel randomness.
-///
-/// In the context of secret sharing, the threshold is the degree + 1.
-#[cfg(feature = "std")]
-pub fn new(degree: u32) -> Poly<Scalar> {
-    // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
-    new_from(degree, &mut OsRng)
-}
-
 // Returns a new scalar polynomial of the given degree where each coefficient is
 // sampled at random from the provided RNG.
 ///
 /// In the context of secret sharing, the threshold is the degree + 1.
-pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
+pub fn new_from<R: CryptoRngCore>(rng: &mut R, degree: u32) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
     let coeffs = (0..=degree).map(|_| Scalar::from_rand(rng));
     Poly::from_iter(coeffs)
@@ -291,6 +279,15 @@ impl<C: Element> Poly<C> {
         Eval { value, index }
     }
 
+    /// Evaluates the polynomial at `n` indices.
+    pub fn evaluate_all(&self, n: u32) -> Vec<C> {
+        let mut evals = Vec::with_capacity(n as usize);
+        for index in 0..n {
+            evals.push(self.evaluate(index).value);
+        }
+        evals
+    }
+
     /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
     /// and precomputed Barycentric Weights.
     ///
@@ -408,20 +405,20 @@ pub mod tests {
     #[test]
     fn poly_degree() {
         let s = 5;
-        let p = new(s);
+        let p = new_from(&mut ChaCha8Rng::seed_from_u64(0), s);
         assert_eq!(p.degree(), s);
     }
 
     #[test]
     fn add_zero() {
-        let p1 = new(3);
+        let p1 = new_from(&mut ChaCha8Rng::seed_from_u64(0), 3);
         let p2 = Poly::<Scalar>::zero();
         let mut res = p1.clone();
         res.add(&p2);
         assert_eq!(res, p1);
 
         let p1 = Poly::<Scalar>::zero();
-        let p2 = new(3);
+        let p2 = new_from(&mut ChaCha8Rng::seed_from_u64(0), 3);
         let mut res = p1;
         res.add(&p2);
         assert_eq!(res, p2);
@@ -431,7 +428,7 @@ pub mod tests {
     fn interpolation_insufficient_shares() {
         let degree = 4;
         let threshold = degree + 1;
-        let poly = new(degree);
+        let poly = new_from(&mut ChaCha8Rng::seed_from_u64(0), degree);
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
@@ -441,13 +438,13 @@ pub mod tests {
     #[test]
     fn evaluate_with_overflow() {
         let degree = 4;
-        let poly = new(degree);
+        let poly = new_from(&mut ChaCha8Rng::seed_from_u64(0), degree);
         poly.evaluate(u32::MAX);
     }
 
     #[test]
     fn commit() {
-        let secret = new(5);
+        let secret = new_from(&mut ChaCha8Rng::seed_from_u64(0), 5);
         let coeffs = secret.0.clone();
         let commitment = coeffs
             .iter()
@@ -473,8 +470,8 @@ pub mod tests {
     fn addition() {
         for deg1 in 0..100u32 {
             for deg2 in 0..100u32 {
-                let p1 = new(deg1);
-                let p2 = new(deg2);
+                let p1 = new_from(&mut ChaCha8Rng::seed_from_u64(0), deg1);
+                let p2 = new_from(&mut ChaCha8Rng::seed_from_u64(0), deg2);
                 let mut res = p1.clone();
                 res.add(&p2);
 
@@ -503,7 +500,7 @@ pub mod tests {
     fn interpolation() {
         for degree in 0..100u32 {
             for num_evals in 0..100u32 {
-                let poly = new(degree);
+                let poly = new_from(&mut ChaCha8Rng::seed_from_u64(0), degree);
                 let expected = poly.0[0].clone();
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
@@ -530,7 +527,7 @@ pub mod tests {
             for idx in 0..100_u32 {
                 let x = Scalar::from_index(idx);
 
-                let p1 = new(d);
+                let p1 = new_from(&mut ChaCha8Rng::seed_from_u64(0), d);
                 let evaluation = p1.evaluate(idx).value;
 
                 let coeffs = p1.0;
@@ -554,7 +551,7 @@ pub mod tests {
 
     #[test]
     fn test_codec() {
-        let original = new(5);
+        let original = new_from(&mut ChaCha8Rng::seed_from_u64(0), 5);
         let encoded = original.encode();
         let decoded = Poly::<Scalar>::decode_cfg(
             encoded,
