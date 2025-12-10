@@ -52,8 +52,8 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-parallel = [ "blake3/rayon", "rayon" ]
 default = [ "std" ]
+parallel = [ "blake3/rayon", "rayon" ]
 fuzz = [ "dep:anyhow", "dep:arbitrary" ]
 arbitrary = [ "dep:arbitrary", "dep:commonware-macros" ]
 std = [

@@ -298,4 +298,5 @@ jobs:
       run: |
         just test -p commonware-codec --features conformance --profile codec_conformance && \
         just test -p commonware-consensus --features arbitrary --profile codec_conformance && \
+        just test -p commonware-cryptography --features arbitrary --profile codec_conformance && \
         git diff --exit-code

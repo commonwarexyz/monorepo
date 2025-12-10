@@ -66,6 +66,10 @@ hash = "d819f32b44cd21e9bb6068259f3c452b7e4c6f7eeaf21ae8802c390b4c6c2e82"
 n_cases = 1024
 hash = "a44b692a3c4915598acbb7d0b3809155dce548a772ef7567df6d4b6d4f5cb282"
 
+["commonware_consensus::simplex::signing_scheme::utils::tests::conformance::Signers"]
+n_cases = 1024
+hash = "2c7045a95788910821f549a1818a95f719c00b372e08fa7eccce9f8bdecfe272"
+
 ["commonware_consensus::simplex::types::tests::conformance::Activity<Scheme, Sha256Digest>"]
 n_cases = 1024
 hash = "06a8d1008d8cae72b519e563527034f3b3edceb58e2770343f428db9050d1ebe"

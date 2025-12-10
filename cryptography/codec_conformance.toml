@@ -6,6 +6,38 @@ hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 n_cases = 1024
 hash = "9dc837e220a8de29ce0b370754c50a4e62f90e99665722fe6ed57198d0f05820"
 
+["commonware_cryptography::bls12381::dkg::test::conformance::AckOrReveal<ed25519::PublicKey>"]
+n_cases = 1024
+hash = "4a84533b68beee793182352bcd3d30c99e6ba4d6beb045edda1d8ee2a980f04a"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::DealerLog<MinPk, ed25519::PublicKey>"]
+n_cases = 1024
+hash = "779d63bcd841d87efc8a8d69a0255d2d13570d3601be7b150e8676600cd58466"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::DealerPrivMsg"]
+n_cases = 1024
+hash = "2dfb28a5e24387ddda1d87dece440923435bc4738e9d9c704b3fe6ea757a090d"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::DealerPubMsg<MinPk>"]
+n_cases = 1024
+hash = "ddd7d0c52e62b280bcdf7658a8b03c2f9013b002b677a46def01d5f339ceae92"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::DealerResult<ed25519::PublicKey>"]
+n_cases = 1024
+hash = "a2c4e2d5675815fdd3bb0305f8e778ceaae726a99a7bce4424bbcbe45924d924"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::Output<MinPk, ed25519::PublicKey>"]
+n_cases = 1024
+hash = "710fdcf4edaeb14374364444286fcd2b7a93344d9ccf044cfb9797e52bd761d3"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::PlayerAck<ed25519::PublicKey>"]
+n_cases = 1024
+hash = "068f1c5ed28f557da506f5bb3a802790777a429180545aaf09e9ff503d6ccf02"
+
+["commonware_cryptography::bls12381::dkg::test::conformance::SignedDealerLog<MinPk, ed25519::PrivateKey>"]
+n_cases = 1024
+hash = "44e467887497de08f8e21b5aefbbef011140bef1c2ea385796151854e20eb805"
+
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::G1"]
 n_cases = 1024
 hash = "b81d39bbbdd1fac4f36cd6aac64ef7d7332a79ab21bb01af379208a20d5d8e4a"
@@ -42,6 +74,10 @@ hash = "1c7e5e0bf2c6df30be74e3769da451dbec5dd4f682c04a92658a376adc607032"
 n_cases = 1024
 hash = "c5510098d3012546c7b1511ffc22683fd4a73819b8d61197530cbfcd79be16d4"
 
+["commonware_cryptography::bls12381::tle::tests::conformance::Ciphertext<MinPk>"]
+n_cases = 1024
+hash = "5e5438a473d4463d07660475b8c19a93be5e438f5fd0776b198e31d14407fbd9"
+
 ["commonware_cryptography::ed25519::scheme::tests::conformance::PrivateKey"]
 n_cases = 1024
 hash = "929838171771a8edb9f1ab4659035b928e17b218e862a39276fdeab33515277e"
@@ -57,6 +93,18 @@ hash = "068f1c5ed28f557da506f5bb3a802790777a429180545aaf09e9ff503d6ccf02"
 ["commonware_cryptography::handshake::key_exchange::conformance::EphemeralPublicKey"]
 n_cases = 1024
 hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::handshake::test::conformance::Ack"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography::handshake::test::conformance::Syn<crate::ed25519::Signature>"]
+n_cases = 1024
+hash = "4bfd08ac6cc8bb5cc9efb9325bcc6199357b0be578f6e36e8de6afa14a3cc2af"
+
+["commonware_cryptography::handshake::test::conformance::SynAck<crate::ed25519::Signature>"]
+n_cases = 1024
+hash = "6946cd1593a786c6a148e698e66575d8a9cd5c0381e1bae05da28541b46d60d0"
 
 ["commonware_cryptography::lthash::tests::conformance::LtHash"]
 n_cases = 1024

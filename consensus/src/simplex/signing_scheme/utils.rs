@@ -142,4 +142,13 @@ mod tests {
         // Less participants than expected succeeds (upper bound).
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Signers => 1024,
+        }
+    }
 }
