@@ -639,7 +639,7 @@ mod tests {
             journaled::{Config as MmrConfig, Mmr},
             Location,
         },
-        qmdb::operation::{operation, Committable},
+        qmdb::operation::{Committable, FixedOperation},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
@@ -653,7 +653,7 @@ mod tests {
     use futures::StreamExt as _;
     use std::marker::PhantomData;
 
-    type Operation<K, V> = operation::Operation<K, V, operation::Fixed>;
+    type Operation<K, V> = FixedOperation<K, V>;
 
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;

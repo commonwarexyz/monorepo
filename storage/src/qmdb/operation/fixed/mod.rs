@@ -279,7 +279,7 @@ mod tests {
     fn test_operation_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
-        let update_op = FixedUnordered::new_update(key, value);
+        let update_op = FixedUnordered::Update(key, value);
 
         let encoded = update_op.encode();
         assert_eq!(encoded.len(), FixedUnordered::<U64, U64>::SIZE);

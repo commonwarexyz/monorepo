@@ -8,18 +8,17 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{unordered::fixed::Any, FixedConfig as Config},
-        operation::{self, operation::Fixed},
+        operation::FixedOperation,
         store::CleanStore,
     },
 };
 use commonware_utils::{NZUsize, NZU64};
-use std::{future::Future, num::NonZeroU64};
+use std::{future::Future, marker::PhantomData, num::NonZeroU64};
 
 /// Database type alias.
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
-/// Operation type alias.
-pub type Operation = operation::operation::Operation<Key, Value, Fixed>;
+pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
@@ -59,15 +58,23 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::new_update(key, value));
+            operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::new_commit_floor(None, Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(
+                    None,
+                    Location::from(i + 1),
+                    PhantomData,
+                ));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::new_commit_floor(None, Location::from(count)));
+        operations.push(Operation::CommitFloor(
+            None,
+            Location::from(count),
+            PhantomData,
+        ));
         operations
     }
 
@@ -77,10 +84,10 @@ where
     ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
-                Operation::Update(key, value, _) => {
+                Operation::Update(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key, _) => {
+                Operation::Delete(key) => {
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _, _) => {

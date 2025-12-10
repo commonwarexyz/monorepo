@@ -92,7 +92,9 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{self, operation::Variable, variable::Value, Committable as _, Keyed as _},
+        operation::{
+            variable::Value, Committable as _, Keyed as _, VariableOperation as Operation,
+        },
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -102,15 +104,16 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{future::Future, ops::Range};
-use std::{marker::PhantomData, num::{NonZeroU64, NonZeroUsize}};
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::debug;
 
 mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 pub use batch::{Batch, Batchable, Getter};
-
-type Operation<K, V> = operation::operation::Operation<K, V, Variable>;
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]

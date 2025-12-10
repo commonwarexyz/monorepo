@@ -6,10 +6,7 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{init_fixed_authenticated_log, unordered::IndexedLog, FixedConfig as Config},
-        operation::{
-            fixed::Value,
-            operation::{Fixed, Operation},
-        },
+        operation::{fixed::Value, Fixed, FixedOperation as Operation},
         Error,
     },
     translator::Translator,
@@ -21,7 +18,7 @@ use commonware_utils::Array;
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, K, V, Journal<E, Operation<K, V, Fixed>>, Index<T, Location>, H, Fixed, S>;
+    IndexedLog<E, K, V, Journal<E, Operation<K, V>>, Index<T, Location>, H, Fixed, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -66,7 +63,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            operation::operation::Operation,
+            operation::FixedOperation as Operation,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -136,7 +133,7 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest, Fixed>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -154,7 +151,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest, Fixed>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(key, value) => {

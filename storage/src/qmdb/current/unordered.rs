@@ -12,11 +12,7 @@ use crate::{
     qmdb::{
         any::{unordered::fixed::Any, CleanAny, DirtyAny},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{
-            fixed::Value,
-            operation::{Fixed, Operation},
-            Keyed as _,
-        },
+        operation::{fixed::Value, FixedOperation as Operation, Keyed as _},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -125,8 +121,8 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::<K, V, Fixed>::Update(info.key, info.value);
-        verify_key_value_proof::<H, Operation<K, V, Fixed>, N>(
+        let element = Operation::<K, V>::Update(info.key, info.value);
+        verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
             Self::grafting_height(),
             proof,
@@ -143,7 +139,7 @@ impl<
         hasher: &mut StandardHasher<H>,
         proof: &Proof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<K, V, Fixed>],
+        ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -247,7 +243,7 @@ impl<
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, Fixed>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
         super::range_proof(
             hasher,
             &self.status,
@@ -308,7 +304,7 @@ impl<
         &self,
         hasher: &mut H,
         loc: Location,
-    ) -> Result<(Proof<H::Digest>, Operation<K, V, Fixed>, Location, [u8; N]), Error> {
+    ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
         if !loc.is_valid() {
             return Err(crate::mmr::Error::LocationOverflow(loc).into());
         }
@@ -371,7 +367,7 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
-        let commit_op = Operation::<K, V, Fixed>::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
+        let commit_op = Operation::<K, V>::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
 
         self.any.apply_commit_op(commit_op).await?;
 
@@ -637,7 +633,7 @@ impl<
     > CleanStore for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, Fixed>;
+    type Operation = Operation<K, V>;
     type Dirty = Current<E, K, V, H, T, N, Dirty>;
 
     fn root(&self) -> Self::Digest {
@@ -688,7 +684,7 @@ impl<
     > DirtyStore for Current<E, K, V, H, T, N, Dirty>
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, Fixed>;
+    type Operation = Operation<K, V>;
     type Clean = Current<E, K, V, H, T, N, Clean<DigestOf<H>>>;
 
     async fn merkleize(self) -> Result<Self::Clean, Error> {

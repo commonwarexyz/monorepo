@@ -6,10 +6,7 @@ use crate::{
     qmdb::{
         self,
         any::unordered::fixed::Any,
-        operation::{
-            fixed::Value,
-            operation::{Fixed, Operation},
-        },
+        operation::{fixed::Value, FixedOperation as Operation},
     },
     translator::Translator,
 };
@@ -32,8 +29,8 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = Operation<K, V, Fixed>;
-    type Journal = fixed::Journal<E, Operation<K, V, Fixed>>;
+    type Op = Operation<K, V>;
+    type Journal = fixed::Journal<E, Operation<K, V>>;
     type Hasher = H;
     type Config = qmdb::any::FixedConfig<T>;
     type Digest = H::Digest;
@@ -274,7 +271,7 @@ mod tests {
                 },
                 Any,
             },
-            operation::{operation::Operation, Keyed as _},
+            operation::{FixedOperation as Operation, Keyed as _},
             store::CleanStore as _,
             sync::{
                 self,
@@ -1300,7 +1297,7 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = fixed::Journal::<Context, Operation<Digest, Digest, Fixed>>::init(
+            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
                 fixed::Config {
                     partition: "sync_basic_log".into(),
