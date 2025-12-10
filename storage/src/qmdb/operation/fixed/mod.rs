@@ -33,6 +33,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Encode, FixedSize as _};
     use commonware_utils::{hex, sequence::U64};
+    use std::marker::PhantomData;
 
     type FixedUnordered<K, V> = operation::Operation<K, V, operation::Fixed>;
 
@@ -41,14 +42,14 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedUnordered::new_update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&key, update_op.key().unwrap());
 
-        let delete_op = FixedUnordered::<U64, U64>::new_delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
         let commit_op =
-            FixedUnordered::<U64, U64>::new_commit_floor(None, Location::new_unchecked(42));
+            FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.key());
 
         let update_op = FixedOrdered::Update(KeyData {
@@ -70,19 +71,20 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedUnordered::new_update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&value, update_op.value().unwrap());
 
-        let delete_op = FixedUnordered::<U64, U64>::new_delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
 
         let commit_op =
-            FixedUnordered::<U64, U64>::new_commit_floor(None, Location::new_unchecked(42));
+            FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.value());
 
-        let commit_op = FixedUnordered::<U64, U64>::new_commit_floor(
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(
             Some(value.clone()),
             Location::new_unchecked(42),
+            PhantomData,
         );
         assert_eq!(Some(&value), commit_op.value());
 
@@ -109,19 +111,20 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedUnordered::new_update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(value, update_op.into_value().unwrap());
 
-        let delete_op = FixedUnordered::<U64, U64>::new_delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.into_value());
 
         let commit_op =
-            FixedUnordered::<U64, U64>::new_commit_floor(None, Location::new_unchecked(42));
+            FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.into_value());
 
-        let commit_op = FixedUnordered::<U64, U64>::new_commit_floor(
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(
             Some(value.clone()),
             Location::new_unchecked(42),
+            PhantomData,
         );
         assert_eq!(Some(value.clone()), commit_op.into_value());
 
@@ -148,7 +151,7 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedUnordered::new_update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&key, update_op.key().unwrap());
         assert_eq!(&value, update_op.value().unwrap());
 
@@ -159,14 +162,14 @@ mod tests {
         assert!(update_op.has_floor().is_none());
 
         let key2 = U64::new(42);
-        let delete_op = FixedUnordered::<U64, U64>::new_delete(key2.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
         let from = FixedUnordered::<U64, U64>::decode(delete_op.encode()).unwrap();
         assert_eq!(&key2, from.key().unwrap());
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
         let commit_op =
-            FixedUnordered::<U64, U64>::new_commit_floor(None, Location::new_unchecked(42));
+            FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         let from = FixedUnordered::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
         assert!(
@@ -174,9 +177,10 @@ mod tests {
         );
         assert_eq!(commit_op, from);
 
-        let commit_op = FixedUnordered::<U64, U64>::new_commit_floor(
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(
             Some(value.clone()),
             Location::new_unchecked(42),
+            PhantomData,
         );
         let from = FixedUnordered::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(Some(&value), from.value());
@@ -211,26 +215,27 @@ mod tests {
     fn test_operation_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = FixedUnordered::new_update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(
             format!("{update_op}"),
             format!("[key:{key} value:{}]", hex(&value.encode()))
         );
 
         let key2 = U64::new(42);
-        let delete_op = FixedUnordered::<U64, U64>::new_delete(key2.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
 
         let commit_op =
-            FixedUnordered::<U64, U64>::new_commit_floor(None, Location::new_unchecked(42));
+            FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(
             format!("{commit_op}"),
             "[commit with inactivity floor: Location(42)]"
         );
 
-        let commit_op_with_metadata = FixedUnordered::<U64, U64>::new_commit_floor(
+        let commit_op_with_metadata = FixedUnordered::<U64, U64>::CommitFloor(
             Some(U64::new(1234)),
             Location::new_unchecked(42),
+            PhantomData,
         );
         assert_eq!(
             format!("{commit_op_with_metadata}"),

@@ -25,7 +25,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::debug;
 
 pub mod fixed;
@@ -135,7 +135,7 @@ where
         for &loc in iter {
             let op = self.log.read(loc).await?;
             match &op {
-                Operation::Update(k, _, _) => {
+                Operation::Update(k, _) => {
                     if k == key {
                         return Ok(Some((op, loc)));
                     }
@@ -167,7 +167,7 @@ where
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.get_key_op_loc(key).await.map(|op| match op {
             Some((op, _)) => match op {
-                Operation::Update(_, value, _) => Some(value),
+                Operation::Update(_, value) => Some(value),
                 _ => unreachable!("location does not reference update operation"),
             },
             None => None,
@@ -207,7 +207,7 @@ where
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
             return Ok(None);
         };
-        self.log.append(Operation::new_delete(key)).await?;
+        self.log.append(Operation::Delete(key)).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
@@ -220,7 +220,7 @@ where
         let new_loc = self.op_count();
         let res = self.update_loc(&key, new_loc).await?;
 
-        self.log.append(Operation::new_update(key, value)).await?;
+        self.log.append(Operation::Update(key, value)).await?;
         if res.is_some() {
             self.steps += 1;
         } else {
@@ -237,7 +237,7 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::new_update(key, value)).await?;
+        self.log.append(Operation::Update(key, value)).await?;
         self.active_keys += 1;
 
         Ok(true)
@@ -455,8 +455,12 @@ where
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
-            .await?;
+        self.apply_commit_op(C::Item::CommitFloor(
+            metadata,
+            inactivity_floor_loc,
+            PhantomData,
+        ))
+        .await?;
 
         Ok(start_loc..self.op_count())
     }
@@ -867,11 +871,11 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(Operation::new_update(key.clone(), value))
+                    .append(Operation::Update(key.clone(), value))
                     .await?;
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(Operation::new_delete(key.clone())).await?;
+                self.log.append(Operation::Delete(key.clone())).await?;
                 self.active_keys -= 1;
             }
             self.steps += 1;
@@ -883,7 +887,7 @@ where
                 continue; // attempt to delete a non-existent key
             };
             self.snapshot.insert(&key, self.op_count());
-            self.log.append(Operation::new_update(key, value)).await?;
+            self.log.append(Operation::Update(key, value)).await?;
             self.active_keys += 1;
         }
 

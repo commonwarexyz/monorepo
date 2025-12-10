@@ -651,6 +651,7 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt as _;
+    use std::marker::PhantomData;
 
     type Operation<K, V> = operation::Operation<K, V, operation::Fixed>;
 
@@ -700,7 +701,7 @@ mod tests {
 
     /// Create a test operation with predictable values based on index.
     fn create_operation(index: u8) -> Operation<Digest, Digest> {
-        Operation::new_update(Sha256::fill(index), Sha256::fill(index.wrapping_add(1)))
+        Operation::Update(Sha256::fill(index), Sha256::fill(index.wrapping_add(1)))
     }
 
     /// Create an authenticated journal with N committed operations.
@@ -803,7 +804,7 @@ mod tests {
             }
 
             // Add commit operation to journal only (making journal ahead)
-            let commit_op = Operation::new_commit_floor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0), PhantomData);
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -833,7 +834,7 @@ mod tests {
             }
 
             // Add commit
-            let commit_op = Operation::new_commit_floor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0), PhantomData);
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -893,9 +894,10 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(0),
+                        PhantomData,
                     ))
                     .await
                     .unwrap();
@@ -925,17 +927,19 @@ mod tests {
                 // Add multiple commits
                 journal.append(create_operation(0)).await.unwrap();
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(0),
+                        PhantomData,
                     ))
                     .await
                     .unwrap(); // pos 1
                 journal.append(create_operation(2)).await.unwrap();
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(1),
+                        PhantomData,
                     ))
                     .await
                     .unwrap(); // pos 3
@@ -987,9 +991,10 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(0),
+                        PhantomData,
                     ))
                     .await
                     .unwrap(); // pos 10
@@ -1031,9 +1036,10 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(0),
+                        PhantomData,
                     ))
                     .await
                     .unwrap(); // pos 5
@@ -1093,9 +1099,10 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::new_commit_floor(
+                    .append(Operation::CommitFloor(
                         None,
                         Location::new_unchecked(0),
+                        PhantomData,
                     ))
                     .await
                     .unwrap(); // pos 5
@@ -1208,9 +1215,10 @@ mod tests {
 
             // Add commit and prune
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1278,9 +1286,10 @@ mod tests {
 
             // Add commit operation to commit the operations
             let commit_loc = journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(0),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1328,9 +1337,10 @@ mod tests {
 
             // Add commit at position 50
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1351,9 +1361,10 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "prune_boundary", 100).await;
 
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1379,9 +1390,10 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "prune_count", 100).await;
 
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1413,9 +1425,10 @@ mod tests {
             // Test after pruning
             let mut journal = create_journal_with_ops(context, "oldest", 100).await;
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1449,9 +1462,10 @@ mod tests {
             // Test after pruning
             let mut journal = create_journal_with_ops(context, "boundary", 100).await;
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(50),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1472,9 +1486,10 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "mmr_boundary", 50).await;
 
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(25),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();
@@ -1680,9 +1695,10 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "proof_pruned", 50).await;
 
             journal
-                .append(Operation::new_commit_floor(
+                .append(Operation::CommitFloor(
                     None,
                     Location::new_unchecked(25),
+                    PhantomData,
                 ))
                 .await
                 .unwrap();

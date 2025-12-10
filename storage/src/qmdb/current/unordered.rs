@@ -28,7 +28,7 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
-use std::num::NonZeroU64;
+use std::{marker::PhantomData, num::NonZeroU64};
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -125,7 +125,7 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::<K, V, Fixed>::new_update(info.key, info.value);
+        let element = Operation::<K, V, Fixed>::Update(info.key, info.value);
         verify_key_value_proof::<H, Operation<K, V, Fixed>, N>(
             hasher,
             Self::grafting_height(),
@@ -371,7 +371,7 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
-        let commit_op = Operation::<K, V, Fixed>::new_commit_floor(metadata, inactivity_floor_loc);
+        let commit_op = Operation::<K, V, Fixed>::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
 
         self.any.apply_commit_op(commit_op).await?;
 

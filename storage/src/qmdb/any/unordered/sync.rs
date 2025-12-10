@@ -347,13 +347,13 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _, _) => {
+                    Operation::Update(key, _) => {
                         if let Some((op, loc)) = target_db.get_key_op_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Operation::Delete(key, _) => {
+                    Operation::Delete(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -406,7 +406,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::new_update(key, value));
+                new_ops.push(Operation::Update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -1427,10 +1427,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value, _) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Delete(key, _) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1522,10 +1522,10 @@ mod tests {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Operation::Update(key, value, _) = op {
+                    if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Operation::Delete(key, _) = op {
+                    } else if let Operation::Delete(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1629,10 +1629,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value, _) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Delete(key, _) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }

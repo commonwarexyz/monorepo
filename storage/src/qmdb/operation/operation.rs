@@ -32,32 +32,21 @@ impl sealed::Encoding for Fixed {}
 pub struct Variable;
 impl sealed::Encoding for Variable {}
 
+pub type FixedOperation<K, V> = Operation<K, V, Fixed>;
+pub type VariableOperation<K, V> = Operation<K, V, Variable>;
+
 /// An operation applied to an authenticated database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: Codec + Clone, E: sealed::Encoding> {
     /// Indicates the key no longer has a value.
-    Delete(K, PhantomData<E>),
+    Delete(K),
 
     /// Indicates the key now has the wrapped value.
-    Update(K, V, PhantomData<E>),
+    Update(K, V),
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
     CommitFloor(Option<V>, Location, PhantomData<E>),
-}
-
-impl<K: Array + Ord, V: Codec + Clone, E: sealed::Encoding> Operation<K, V, E> {
-    pub const fn new_delete(key: K) -> Self {
-        Self::Delete(key, PhantomData)
-    }
-
-    pub const fn new_update(key: K, value: V) -> Self {
-        Self::Update(key, value, PhantomData)
-    }
-
-    pub const fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location, PhantomData)
-    }
 }
 
 impl<K: Array + Ord, V: FixedValue> Operation<K, V, Fixed> {
@@ -83,8 +72,8 @@ impl<K: Array + Ord, V: FixedValue> CodecFixedSize for Operation<K, V, Fixed> {
 impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V, Variable> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Delete(_, _) => K::SIZE,
-            Self::Update(_, v, _) => K::SIZE + v.encode_size(),
+            Self::Delete(_) => K::SIZE,
+            Self::Update(_, v) => K::SIZE + v.encode_size(),
             Self::CommitFloor(v, floor_loc, _) => v.encode_size() + UInt(**floor_loc).encode_size(),
         }
     }
@@ -99,18 +88,18 @@ where
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
-            Self::Delete(key, _) => Some(key),
-            Self::Update(key, _, _) => Some(key),
+            Self::Delete(key) => Some(key),
+            Self::Update(key, _) => Some(key),
             Self::CommitFloor(_, _, _) => None,
         }
     }
 
     fn is_delete(&self) -> bool {
-        matches!(self, Self::Delete(_, _))
+        matches!(self, Self::Delete(_))
     }
 
     fn is_update(&self) -> bool {
-        matches!(self, Self::Update(_, _, _))
+        matches!(self, Self::Update(_, _))
     }
 
     fn has_floor(&self) -> Option<Location> {
@@ -122,16 +111,16 @@ where
 
     fn value(&self) -> Option<&Self::Value> {
         match self {
-            Self::Delete(_, _) => None,
-            Self::Update(_, value, _) => Some(value),
+            Self::Delete(_) => None,
+            Self::Update(_, value) => Some(value),
             Self::CommitFloor(metadata, _, _) => metadata.as_ref(),
         }
     }
 
     fn into_value(self) -> Option<Self::Value> {
         match self {
-            Self::Delete(_, _) => None,
-            Self::Update(_, value, _) => Some(value),
+            Self::Delete(_) => None,
+            Self::Update(_, value) => Some(value),
             Self::CommitFloor(metadata, _, _) => metadata,
         }
     }
@@ -146,13 +135,13 @@ impl<K: Array, V: Codec + Clone, E: sealed::Encoding> Committable for Operation<
 impl<K: Array, V: FixedValue> Write for Operation<K, V, Fixed> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
-            Self::Delete(k, _) => {
+            Self::Delete(k) => {
                 operation::DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
-            Self::Update(k, v, _) => {
+            Self::Update(k, v) => {
                 operation::UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
@@ -178,11 +167,11 @@ impl<K: Array, V: FixedValue> Write for Operation<K, V, Fixed> {
 impl<K: Array, V: VariableValue> Write for Operation<K, V, Variable> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
-            Self::Delete(k, _) => {
+            Self::Delete(k) => {
                 operation::DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
-            Self::Update(k, v, _) => {
+            Self::Update(k, v) => {
                 operation::UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
@@ -207,12 +196,12 @@ impl<K: Array, V: FixedValue> Read for Operation<K, V, Fixed> {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-                Ok(Self::Update(key, value, PhantomData))
+                Ok(Self::Update(key, value))
             }
             operation::DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
-                Ok(Self::Delete(key, PhantomData))
+                Ok(Self::Delete(key))
             }
             operation::COMMIT_FLOOR_CONTEXT => {
                 let is_some = bool::read(buf)?;
@@ -245,12 +234,12 @@ impl<K: Array, V: VariableValue> Read for Operation<K, V, Variable> {
         match u8::read(buf)? {
             operation::DELETE_CONTEXT => {
                 let key = K::read(buf)?;
-                Ok(Self::Delete(key, PhantomData))
+                Ok(Self::Delete(key))
             }
             operation::UPDATE_CONTEXT => {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
-                Ok(Self::Update(key, value, PhantomData))
+                Ok(Self::Update(key, value))
             }
             operation::COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
@@ -271,8 +260,8 @@ impl<K: Array, V: VariableValue> Read for Operation<K, V, Variable> {
 impl<K: Array, V: Codec + Clone, E: sealed::Encoding> Display for Operation<K, V, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Delete(key, _) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(key, value, _) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Self::CommitFloor(metadata, loc, _) => {
                 if let Some(metadata) = metadata {
                     write!(

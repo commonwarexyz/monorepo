@@ -102,7 +102,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{future::Future, ops::Range};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{marker::PhantomData, num::{NonZeroU64, NonZeroUsize}};
 use tracing::debug;
 
 mod batch;
@@ -350,7 +350,7 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v, _) = self.get_op(loc).await? else {
+            let Operation::Update(k, v) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -426,7 +426,7 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::new_update(key, value)).await?;
+        self.log.append(Operation::Update(key, value)).await?;
 
         Ok(())
     }
@@ -441,7 +441,7 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::new_update(key, value)).await?;
+        self.log.append(Operation::Update(key, value)).await?;
 
         Ok(true)
     }
@@ -455,7 +455,7 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::new_delete(key)).await?;
+        self.log.append(Operation::Delete(key)).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
@@ -494,7 +494,7 @@ where
         // Apply the commit operation with the new inactivity floor.
         let loc = self.inactivity_floor_loc;
         self.log
-            .append(Operation::new_commit_floor(metadata, loc))
+            .append(Operation::CommitFloor(metadata, loc, PhantomData))
             .await?;
 
         // Commit the log to ensure this commit is durable.
