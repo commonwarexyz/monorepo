@@ -35,8 +35,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tracing-subscriber.workspace = true
 rstest.workspace = true
+tracing-subscriber.workspace = true
 
 [lib]
 bench = false
