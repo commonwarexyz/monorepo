@@ -89,6 +89,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -176,16 +178,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
-    # The ubuntu runner normally has ~20GB of available disk space, which
-    # is insufficient for building the entire workspace. To allow the full
-    # build to complete, we clear out unnecessary pre-installed packages
-    # and toolchains.
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-      with:
-        large-packages: false
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -256,6 +252,7 @@ jobs:
       run: ./.github/scripts/check_no_std.sh
 
   lint-toml:
+    name: Lint Cargo.toml files
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -269,3 +266,19 @@ jobs:
       uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
+
+  zepter:
+    name: Feature Propagation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          submodules: true
+      - name: Install zepter
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+        with:
+          tool: zepter@1.85.0
+      - name: Format features
+        run: zepter format features
+      - name: Lint feature propagation
+        run: zepter run check

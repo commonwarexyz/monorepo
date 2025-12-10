@@ -50,6 +50,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
       with:

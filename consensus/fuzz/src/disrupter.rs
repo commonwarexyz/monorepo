@@ -1,5 +1,5 @@
 use crate::{types::Message, FuzzInput, EPOCH};
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
@@ -37,7 +37,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     participants: Set<PublicKey>,
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
-    view: u64,
+    last_vote: u64,
     last_finalized: u64,
     last_nullified: u64,
     last_notarized: u64,
@@ -56,7 +56,7 @@ where
         fuzz_input: FuzzInput,
     ) -> Self {
         Self {
-            view: 0,
+            last_vote: 0,
             last_finalized: 0,
             last_nullified: 0,
             last_notarized: 0,
@@ -70,41 +70,49 @@ where
     }
 
     fn mutation(&mut self) -> Mutation {
-        let buf = self.fuzz_input.random_byte();
-        Mutation::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Mutation::All)
+        match self.fuzz_input.random_byte() % 4 {
+            0 => Mutation::Payload,
+            1 => Mutation::View,
+            2 => Mutation::Parent,
+            _ => Mutation::All,
+        }
     }
 
     fn message(&mut self) -> Message {
-        let buf = self.fuzz_input.random_byte();
-        Message::arbitrary(&mut Unstructured::new(&[buf])).unwrap_or(Message::Random)
+        match self.fuzz_input.random_byte() % 4 {
+            0 => Message::Notarize,
+            1 => Message::Finalize,
+            2 => Message::Nullify,
+            _ => Message::Random,
+        }
     }
 
     fn random_view(&mut self, current: u64) -> u64 {
-        let lf = self.last_finalized;
-        let lnz = self.last_notarized;
-        let lnf = self.last_nullified;
+        let last_finalized = self.last_finalized;
+        let last_notarized = self.last_notarized;
+        let last_nullified = self.last_nullified;
 
         match self.fuzz_input.random_byte() % 7 {
             // Too old (pre-finalized) - should be filtered
             0 => {
-                if lf == 0 {
-                    0
+                if last_finalized == 0 {
+                    last_finalized
                 } else {
-                    self.fuzz_input.random_u64() % lf
+                    self.fuzz_input.random_u64() % last_finalized
                 }
             }
             // Active past: [last_finalized, current_view]
             1 => {
-                if current <= lf {
-                    lf
+                if current <= last_finalized {
+                    last_finalized
                 } else {
-                    lf + (self.fuzz_input.random_u64() % (current - lf + 1))
+                    last_finalized + (self.fuzz_input.random_u64() % (current - last_finalized + 1))
                 }
             }
             // Active band: [last_finalized, min(last_notarized, current_view)]
             2 => {
-                let hi = lnz.min(current).max(lf);
-                lf + (self.fuzz_input.random_u64() % (hi - lf + 1))
+                let hi = last_notarized.min(current).max(last_finalized);
+                last_finalized + (self.fuzz_input.random_u64() % (hi - last_finalized + 1))
             }
             // Near future: [current_view+1, current_view+4]
             3 => current + 1 + (self.fuzz_input.random_byte() as u64 % 4),
@@ -112,7 +120,7 @@ where
             4 => current.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
             // Nullification-based future: start after max(current_view, last_nullified)
             5 => {
-                let base = current.max(lnf);
+                let base = current.max(last_nullified);
                 base.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 10))
             }
             // Pure random
@@ -206,14 +214,14 @@ where
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
             return;
         };
+        self.last_vote = vote.view().get();
         match vote {
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
-                    let mutation = self.mutation();
-                    let proposal = self.mutate_proposal(&notarize.proposal, mutation);
+                    let proposal = self.mutate_proposal(&notarize.proposal);
                     if let Some(v) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Notarize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
@@ -225,8 +233,7 @@ where
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
-                    let mutation = self.mutation();
-                    let proposal = self.mutate_proposal(&finalize.proposal, mutation);
+                    let proposal = self.mutate_proposal(&finalize.proposal);
                     if let Some(v) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Finalize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
@@ -238,7 +245,7 @@ where
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
-                    let v = self.random_view(self.view);
+                    let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
                     if let Some(v) =
                         Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
@@ -258,38 +265,20 @@ where
                 .await;
         }
 
-        let cfg = Default::default();
+        let cfg = self.scheme.certificate_codec_config();
         let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &cfg) else {
             return;
         };
 
         match cert {
             Certificate::Notarization(n) => {
-                let v = n.view().get();
-                if v > self.view {
-                    self.view = v;
-                }
-                if v > self.last_notarized {
-                    self.last_notarized = v;
-                }
+                self.last_notarized = n.view().get();
             }
             Certificate::Nullification(n) => {
-                let v = n.view().get();
-                if v > self.view {
-                    self.view = v;
-                }
-                if v > self.last_nullified {
-                    self.last_nullified = v;
-                }
+                self.last_nullified = n.view().get();
             }
             Certificate::Finalization(f) => {
-                let v = f.view().get();
-                if v > self.view {
-                    self.view = v;
-                }
-                if v > self.last_finalized {
-                    self.last_finalized = v;
-                }
+                self.last_finalized = f.view().get();
             }
         }
 
@@ -300,19 +289,18 @@ where
         }
     }
 
-    fn mutate_proposal(
-        &mut self,
-        original: &Proposal<Sha256Digest>,
-        mutation: Mutation,
-    ) -> Proposal<Sha256Digest> {
-        match mutation {
+    fn mutate_proposal(&mut self, original: &Proposal<Sha256Digest>) -> Proposal<Sha256Digest> {
+        match self.mutation() {
             Mutation::Payload => Proposal::new(
                 Round::new(original.epoch(), original.view()),
                 original.parent,
                 self.payload(),
             ),
             Mutation::View => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view(self.view))),
+                Round::new(
+                    original.epoch(),
+                    View::new(self.random_view(original.view().get())),
+                ),
                 original.parent,
                 original.payload,
             ),
@@ -322,7 +310,10 @@ where
                 original.payload,
             ),
             Mutation::All => Proposal::new(
-                Round::new(original.epoch(), View::new(self.random_view(self.view))),
+                Round::new(
+                    original.epoch(),
+                    View::new(self.random_view(original.view().get())),
+                ),
                 View::new(self.parent()),
                 self.payload(),
             ),
@@ -331,7 +322,10 @@ where
 
     async fn send_random(&mut self, sender: &mut impl Sender) {
         let proposal = Proposal::new(
-            Round::new(Epoch::new(EPOCH), View::new(self.random_view(self.view))),
+            Round::new(
+                Epoch::new(EPOCH),
+                View::new(self.random_view(self.last_vote)),
+            ),
             View::new(self.parent()),
             self.payload(),
         );
@@ -356,7 +350,10 @@ where
                 }
             }
             Message::Nullify => {
-                let round = Round::new(Epoch::new(EPOCH), View::new(self.view));
+                let round = Round::new(
+                    Epoch::new(EPOCH),
+                    View::new(self.random_view(self.last_vote)),
+                );
                 if let Some(vote) =
                     Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
                 {

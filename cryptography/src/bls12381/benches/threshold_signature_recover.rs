@@ -1,8 +1,12 @@
-use commonware_cryptography::bls12381::{
-    dkg,
-    primitives::{self, variant::MinSig},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::deal,
+        primitives::{self, variant::MinSig},
+    },
+    ed25519::PrivateKey,
+    PrivateKeyExt, Signer,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
@@ -16,8 +20,14 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
-                    let (_, shares) = dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+                    let players = (0..n)
+                        .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                        .try_collect()
+                        .unwrap();
+                    let (_, shares) =
+                        deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
                     shares
+                        .values()
                         .iter()
                         .map(|s| {
                             primitives::ops::partial_sign_message::<MinSig>(s, Some(namespace), msg)
