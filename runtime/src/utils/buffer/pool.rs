@@ -495,6 +495,7 @@ mod tests {
             // Use the minimum page size to force the page index to reach u64::MAX and trigger the
             // overflow guard.
             let pool_ref = PoolRef::new(NZUsize!(1), NZUsize!(2));
+
             // Caching across the maximum page should stop before overflow and report the remainder.
             let remaining = pool_ref.cache(0, &[1, 2], u64::MAX).await;
             assert_eq!(remaining, 1);
