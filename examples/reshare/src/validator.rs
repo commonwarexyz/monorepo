@@ -435,10 +435,14 @@ mod test {
         }
     }
 
+    /// Configuration for simulating participant crashes during a test.
     #[derive(Clone)]
     struct Crash {
+        /// How often to trigger crashes.
         frequency: Duration,
+        /// How long crashed participants stay offline before restarting.
         downtime: Duration,
+        /// Number of participants to crash each time.
         count: usize,
     }
 
@@ -451,13 +455,20 @@ mod test {
         Reshare(u64),
     }
 
+    /// Test plan configuration for running DKG/reshare simulations.
     #[derive(Clone)]
     struct Plan {
+        /// Random seed for deterministic execution.
         seed: u64,
+        /// Total number of participants in the network.
         total: u32,
+        /// Number of participants per round (cycles through the list).
         per_round: Vec<u32>,
+        /// Network link configuration (latency, jitter, packet loss).
         link: Link,
+        /// Whether to run in DKG or reshare mode.
         mode: Mode,
+        /// Optional crash simulation configuration.
         crash: Option<Crash>,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
         failures: HashSet<u64>,
