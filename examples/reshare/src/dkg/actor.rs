@@ -362,8 +362,9 @@ where
                                 }
                             }
                         }
-                        Err(_) => {
+                        Err(err) => {
                             // Network closed
+                            warn!(?err, "network closed");
                             break 'actor;
                         }
                     }
