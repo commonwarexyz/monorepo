@@ -326,23 +326,51 @@ impl<T: Read> Read for NonEmptyVec<T> {
 
 /// Creates a [`NonEmptyVec`] containing the given elements.
 ///
-/// This macro will fail to compile if no elements are provided.
+/// Supports three forms:
+/// - `non_empty_vec![a, b, c]` - creates a vec with the listed elements
+/// - `non_empty_vec![elem; N]` - creates a vec with `N` copies of `elem` (const)
+/// - `non_empty_vec![elem; @n]` - creates a vec with `n` copies of `elem` (runtime)
+///
+/// For the const repeat form (`elem; N`), `N` must be a const expression.
+/// The macro will fail to compile if `N` is 0 or not const.
+///
+/// For the runtime repeat form (`elem; @n`), `n` must be a [`NonZeroUsize`].
 ///
 /// # Examples
 ///
 /// ```
-/// use commonware_utils::non_empty_vec;
+/// use commonware_utils::{non_empty_vec, NZUsize};
 ///
 /// let v = non_empty_vec![1, 2, 3];
 /// assert_eq!(v.len().get(), 3);
 /// assert_eq!(v.first(), &1);
 /// assert_eq!(v.last(), &3);
 ///
-/// // This would fail to compile:
+/// // Const repeat (compile-time checked)
+/// let v = non_empty_vec![42; 5];
+/// assert_eq!(v.len().get(), 5);
+/// assert!(v.iter().all(|&x| x == 42));
+///
+/// // Runtime repeat with NonZeroUsize
+/// let n = NZUsize!(3);
+/// let v = non_empty_vec![42; @n];
+/// assert_eq!(v.len().get(), 3);
+///
+/// // These would fail to compile:
 /// // let empty = non_empty_vec![];
+/// // let zero = non_empty_vec![42; 0];
 /// ```
 #[macro_export]
 macro_rules! non_empty_vec {
+    ($elem:expr; @$n:expr) => {{
+        let n: core::num::NonZeroUsize = $n;
+        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; n.get()])
+    }};
+    ($elem:expr; $n:expr) => {{
+        const N: usize = $n;
+        const _: () = assert!(N > 0, "count must be greater than 0");
+        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; N])
+    }};
     ($first:expr $(, $rest:expr)* $(,)?) => {
         $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$first $(, $rest)*])
     };
@@ -374,6 +402,22 @@ mod tests {
         // Trailing comma support
         let v = non_empty_vec![1, 2, 3,];
         assert_eq!(v.len().get(), 3);
+
+        // Const repeat syntax
+        let v = non_empty_vec![42; 5];
+        assert_eq!(v.len().get(), 5);
+        assert!(v.iter().all(|&x| x == 42));
+
+        let v = non_empty_vec![0; 1];
+        assert_eq!(v.len().get(), 1);
+        assert_eq!(v.first(), &0);
+
+        // Runtime repeat syntax with NonZeroUsize
+        use core::num::NonZeroUsize;
+        let n = NonZeroUsize::new(4).unwrap();
+        let v = non_empty_vec![7; @n];
+        assert_eq!(v.len().get(), 4);
+        assert!(v.iter().all(|&x| x == 7));
     }
 
     #[test]
