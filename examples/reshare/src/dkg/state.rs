@@ -3,6 +3,13 @@
 //! Stores epoch state and per-epoch messages (dealer broadcasts, player acks, logs)
 //! using append-only journals for crash recovery. In-memory BTreeMaps provide fast
 //! lookups while the journal ensures durability.
+//!
+//! # Warning
+//!
+//! This module persists private key material (specifically `Share` in the `Epoch` struct)
+//! to disk. In a production environment:
+//! - This key material should be stored securely (e.g., encrypted at rest)
+//! - Old shares should be securely deleted after successful resharing
 
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
@@ -311,6 +318,18 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         self.epochs.entry(epoch).or_default()
     }
 
+    /// Checks if a key exists in an epoch's cache using the provided accessor.
+    fn has_cached<K: Ord, T>(
+        &self,
+        epoch: EpochNum,
+        get_map: impl Fn(&EpochCache<V, P>) -> &BTreeMap<K, T>,
+        key: &K,
+    ) -> bool {
+        self.epochs
+            .get(&epoch)
+            .is_some_and(|cache| get_map(cache).contains_key(key))
+    }
+
     /// Persists a dealer message for crash recovery.
     /// Returns false if the dealing was already stored.
     pub async fn append_dealing(
@@ -321,11 +340,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         priv_msg: DealerPrivMsg,
     ) -> bool {
         // Check if already stored
-        if self
-            .epochs
-            .get(&epoch)
-            .is_some_and(|cache| cache.dealings.contains_key(&dealer))
-        {
+        if self.has_cached(epoch, |c| &c.dealings, &dealer) {
             return false;
         }
 
@@ -354,11 +369,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     /// Returns false if the ack was already stored.
     pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) -> bool {
         // Check if already stored
-        if self
-            .epochs
-            .get(&epoch)
-            .is_some_and(|cache| cache.acks.contains_key(&player))
-        {
+        if self.has_cached(epoch, |c| &c.acks, &player) {
             return false;
         }
 
@@ -382,11 +393,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     /// Returns false if the log was already stored.
     pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) -> bool {
         // Check if already stored
-        if self
-            .epochs
-            .get(&epoch)
-            .is_some_and(|cache| cache.logs.contains_key(&dealer))
-        {
+        if self.has_cached(epoch, |c| &c.logs, &dealer) {
             return false;
         }
 
