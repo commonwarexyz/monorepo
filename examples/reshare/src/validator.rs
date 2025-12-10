@@ -486,10 +486,7 @@ mod test {
                 Mode::Dkg => (true, 1),
                 Mode::Reshare(target) => (false, target),
             };
-            info!(
-                "starting test with {} participants, is_dkg={}, target={}",
-                self.total, is_dkg, target
-            );
+            info!(participants = self.total, is_dkg, target, "starting test");
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
@@ -501,10 +498,8 @@ mod test {
             );
 
             // Start network first to ensure a background task is running
-            debug!("starting network actor");
             network.start();
 
-            debug!("creating team with {} participants", self.total);
             let mut team = if is_dkg {
                 Team::dkg(self.total, &self.per_round)
             } else {
@@ -514,19 +509,15 @@ mod test {
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-
-            debug!("starting team actors and connecting");
             team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
                 .await;
 
-            debug!("waiting for updates");
+            // Set up crash ticker if needed
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
-
-            // Set up crash ticker if needed
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(crash) = &self.crash {
                 let frequency = crash.frequency;
@@ -542,7 +533,6 @@ mod test {
             }
 
             let mut success_target_reached_epoch = None;
-
             loop {
                 select! {
                     update = updates_out.next() => {
