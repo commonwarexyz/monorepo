@@ -239,7 +239,7 @@ pub mod tests {
         test_delete_unchecked(new_db).await?;
         test_write_batch_from_to_empty(new_db).await?;
         test_write_batch(new_db).await?;
-        test_delete_all_but_one(new_db).await?;
+        test_update_delete_update(new_db).await?;
         Ok(())
     }
 
@@ -350,9 +350,9 @@ pub mod tests {
         Ok(())
     }
 
-    /// Create an empty db, write a small # of keys, then delete all but one using a batch delete
-    /// that also includes a delete_unchecked of an inactive key.
-    async fn test_delete_all_but_one<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    /// Create an empty db, write a small # of keys, then delete half, then update them again. Also
+    /// includes a delete_unchecked of an inactive key.
+    async fn test_update_delete_update<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
@@ -361,8 +361,8 @@ pub mod tests {
         D::Value: TestValue,
     {
         let mut db = new_db().await;
-        // Create 10 keys and commit them.
-        for i in 0..10 {
+        // Create 100 keys and commit them.
+        for i in 0..100 {
             assert!(
                 db.create(D::Key::from_seed(i), D::Value::from_seed(i))
                     .await?
@@ -370,40 +370,57 @@ pub mod tests {
         }
         db.commit().await?;
 
-        // Delete all but the last using a batch.
+        // Delete half of the keys.
         let mut batch = db.start_batch();
-        for i in 0..9 {
+        for i in 0..50 {
             batch.delete(D::Key::from_seed(i)).await?;
         }
         // Try to delete an inactive key.
-        batch.delete_unchecked(D::Key::from_seed(100)).await?;
+        batch.delete_unchecked(D::Key::from_seed(255)).await?;
+
+        // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
         db.commit().await?;
-
-        // Confirm output is as expected.
-        for i in 0..9 {
+        for i in 0..50 {
             assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
         }
-        assert_eq!(
-            Store::get(&db, &D::Key::from_seed(9)).await?,
-            Some(D::Value::from_seed(9))
-        );
+        for i in 50..100 {
+            assert_eq!(
+                Store::get(&db, &D::Key::from_seed(i)).await?,
+                Some(D::Value::from_seed(i))
+            );
+        }
 
-        // Update keys again including the deleted one.
+        // Update half the keys, create 50 new ones.
         let mut batch = db.start_batch();
-        for i in 0..10 {
+        for i in 50..100 {
             batch
                 .update(D::Key::from_seed(i), D::Value::from_seed(i + 100))
                 .await?;
         }
+        for i in 100..150 {
+            batch
+                .create(D::Key::from_seed(i), D::Value::from_seed(i))
+                .await?;
+        }
+
+        // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
         db.commit().await?;
 
-        // Confirm output is as expected.
-        for i in 0..10 {
+        for i in 0..50 {
+            assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
+        }
+        for i in 50..100 {
             assert_eq!(
                 Store::get(&db, &D::Key::from_seed(i)).await?,
                 Some(D::Value::from_seed(i + 100))
+            );
+        }
+        for i in 100..150 {
+            assert_eq!(
+                Store::get(&db, &D::Key::from_seed(i)).await?,
+                Some(D::Value::from_seed(i))
             );
         }
 

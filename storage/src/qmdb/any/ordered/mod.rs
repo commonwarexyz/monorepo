@@ -1148,19 +1148,15 @@ where
         for (op, old_loc) in (results.into_iter()).zip(locations) {
             let key = op.key().expect("updates should have a key").clone();
             let key_data = op.into_key_data().expect("updates should have key data");
+            possible_previous.insert(key.clone(), (key_data.value, old_loc));
+            possible_next.insert(key_data.next_key);
 
             let Some(update) = mutations.remove(&key) else {
                 // Due to translated key collisions, we may look up keys that aren't in the
-                // mutations set. Any colliding key could potentially be a previous key of some new
-                // or deleted key.
-                possible_previous.insert(key, (key_data.value, old_loc));
+                // mutations set. Note that these could still end up next or previous keys to other
+                // keys in the batch, so they are still added to these sets above.
                 continue;
             };
-
-            // We retain next_key values of updated keys because we'll need access to them when we
-            // write their new values to the log. We also need to retain them for deleted keys in
-            // order to link it with whatever key will end up preceeding it.
-            possible_next.insert(key_data.next_key.clone());
 
             if let Some(value) = update {
                 // This is an update of an existing key.
@@ -1177,9 +1173,6 @@ where
                 self.active_keys -= 1;
                 self.steps += 1;
             }
-
-            // Any key could collide with some other key, so we must record each as a "possible previous".
-            possible_previous.insert(key, (key_data.value, old_loc));
         }
 
         // Any key remaining in `mutations` must be a new key so move it to the created map.
