@@ -161,7 +161,7 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
-        
+
         #[test_group("slow")]
         #[test]
         fn property_test_ed25519_connected(input in fuzz_input_strategy(PROPERTY_CONTAINERS)) {
