@@ -312,10 +312,12 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Retain only the keys that satisfy the predicate.
     pub fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
+        // Retain only keys that satisfy the predicate
         let old_len = self.map.len();
         self.map.retain(|k, v| f(k, v));
         let new_len = self.map.len();
 
+        // If the number of keys has changed, mark the key order as changed
         if new_len != old_len {
             self.key_order_changed = self.next_version;
             let _ = self.keys.try_set(self.map.len());
