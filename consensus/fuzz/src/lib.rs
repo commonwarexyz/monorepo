@@ -288,7 +288,6 @@ fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
 
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
     let seed = input.seed;
-    println!("Running fuzz test with seed: {}", seed);
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
