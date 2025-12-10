@@ -1157,17 +1157,17 @@ where
                 continue;
             };
 
+            // We retain next_key values of updated keys because we'll need access to them when we
+            // write their new values to the log. We also need to retain them for deleted keys in
+            // order to link it with whatever key will end up preceeding it.
+            possible_next.insert(key_data.next_key.clone());
+
             if let Some(value) = update {
                 // This is an update of an existing key.
                 updated.insert(key.clone(), (value, old_loc));
-                possible_next.insert(key_data.next_key.clone());
             } else {
                 // This is a delete of an existing key.
                 deleted.push(key.clone());
-
-                // The next_key of a deleted key will need to be the next_key of some other remaining key, unless it too
-                // ends up deleted.
-                possible_next.insert(key_data.next_key.clone());
 
                 // Update the log and snapshot.
                 delete_known_loc(&mut self.snapshot, &key, old_loc);
