@@ -186,15 +186,20 @@ fn generate_identities(
 
     // Generate consensus key
     let threshold = quorum(num_participants_per_epoch);
+    let all_participants: Set<PublicKey> = peer_signers
+        .iter()
+        .map(|s| s.public_key())
+        .try_collect()
+        .unwrap();
     let (output, shares) = if is_dkg {
         (None, Map::try_from([]).unwrap())
     } else {
         let (output, shares) = deal(
             OsRng,
-            peer_signers
+            all_participants
                 .iter()
                 .take(num_participants_per_epoch as usize)
-                .map(|s| s.public_key())
+                .cloned()
                 .try_collect()
                 .unwrap(),
         )
