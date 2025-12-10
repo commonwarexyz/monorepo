@@ -219,7 +219,7 @@ where
                 (
                     self.peer_config.participants.clone(),
                     self.peer_config.dealers(0),
-                    Set::try_from([]).unwrap(),
+                    Set::<C::PublicKey>::default(),
                 )
             } else {
                 // In reshare mode, the initial dealer set must exactly match the players that

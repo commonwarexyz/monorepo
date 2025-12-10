@@ -192,7 +192,7 @@ fn generate_identities(
         .try_collect()
         .unwrap();
     let (output, shares) = if is_dkg {
-        (None, Map::try_from([]).unwrap())
+        (None, Map::default())
     } else {
         let (output, shares) = deal(
             OsRng,
