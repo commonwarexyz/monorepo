@@ -267,7 +267,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            BloomFilter => 1024,
+            BloomFilter,
         }
     }
 }

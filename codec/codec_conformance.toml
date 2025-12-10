@@ -1,135 +1,135 @@
 ["commonware_codec::types::btree_map::tests::conformance::BTreeMap<u32, u32>"]
-n_cases = 1024
-hash = "50faddad1116de4876604ce756fded13f10468fa1ab3da6dc6510cfcb5c48ff4"
+n_cases = 65536
+hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
 ["commonware_codec::types::btree_set::tests::conformance::BTreeSet<u8>"]
-n_cases = 1024
-hash = "f2de124e52a4df6f7d0cebdd1135e1afd5b70d4ecc339d8be9deb20b213455bf"
+n_cases = 65536
+hash = "7160fdb6ba4817a5d266a9cf9e6ff3433887aabb1c6f2b713e2befa05959ae8c"
 
 ["commonware_codec::types::bytes::tests::conformance::Bytes"]
-n_cases = 1024
-hash = "fdd4c85d5e7d598fc52a95403b81d92dd7816dd8c93d0a7330014a2e71c27e59"
+n_cases = 65536
+hash = "7f034c22d0f258e8bf599ba629b66476a608566941eace272901021013b5b72c"
 
 ["commonware_codec::types::hash_map::tests::conformance::HashMap<u32, u32>"]
-n_cases = 1024
-hash = "50faddad1116de4876604ce756fded13f10468fa1ab3da6dc6510cfcb5c48ff4"
+n_cases = 65536
+hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
 ["commonware_codec::types::hash_set::tests::conformance::HashSet<u32>"]
-n_cases = 1024
-hash = "18fd2f3e052208b254639e83e8d6cd6f8e0106dfc46b048b5bbf8128d98b430b"
+n_cases = 65536
+hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
 
 ["commonware_codec::types::net::test::conformance::Ipv4Addr"]
-n_cases = 1024
-hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+n_cases = 65536
+hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
 ["commonware_codec::types::net::test::conformance::Ipv6Addr"]
-n_cases = 1024
-hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+n_cases = 65536
+hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
 ["commonware_codec::types::net::test::conformance::SocketAddr"]
-n_cases = 1024
-hash = "df17643dc192ebd573579445dbfdc656e4892977e976c386a1eeb29ca573f484"
+n_cases = 65536
+hash = "6894dbe4156b39696419a5cc84f7a4e9940dd9d6697cffebe58fffba14c85e96"
 
 ["commonware_codec::types::net::test::conformance::SocketAddrV4"]
-n_cases = 1024
-hash = "d8b220e0a72164fd7ab432382e2caa9b55d29936fe50e721a2ef349bd48781ab"
+n_cases = 65536
+hash = "30198593b8f0d278a49a0b1c1ee0556235933604e560cd2d44aeb8e3d32daeed"
 
 ["commonware_codec::types::net::test::conformance::SocketAddrV6"]
-n_cases = 1024
-hash = "6903da75416ba669f6cacb645863dbac9ee99514f6e33c8836c0d142bc8bb8d1"
+n_cases = 65536
+hash = "47690f612a06889add1b8c3e908aef0a7acfc6ab7f9f1382017ae91a8ef843dc"
 
 ["commonware_codec::types::primitives::tests::conformance::()"]
-n_cases = 1024
-hash = "9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47"
+n_cases = 65536
+hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
 
 ["commonware_codec::types::primitives::tests::conformance::Option<u64>"]
-n_cases = 1024
-hash = "ac91aab3d31a9d58d9c31f288560fb9692c1285994afd06240597b3af6bee94a"
+n_cases = 65536
+hash = "56298a7f298dfae99947dbdb5691aea48e3a183733d93964b53de858d448ecd2"
 
 ["commonware_codec::types::primitives::tests::conformance::[u8; 32]"]
-n_cases = 1024
-hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+n_cases = 65536
+hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
 ["commonware_codec::types::primitives::tests::conformance::bool"]
-n_cases = 1024
-hash = "198713cff6a8fc4143ad7d76abc9cefbc4a83da1788db166c9e27e2840d027a5"
+n_cases = 65536
+hash = "c5bcd1910d08e48db3680f38884d5ba0e86836ea68edb1d4fb4aac4f9ecbd063"
 
 ["commonware_codec::types::primitives::tests::conformance::f32"]
-n_cases = 1024
-hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+n_cases = 65536
+hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
 ["commonware_codec::types::primitives::tests::conformance::f64"]
-n_cases = 1024
-hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
 ["commonware_codec::types::primitives::tests::conformance::i128"]
-n_cases = 1024
-hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+n_cases = 65536
+hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
 ["commonware_codec::types::primitives::tests::conformance::i16"]
-n_cases = 1024
-hash = "72a03c0af64a719dc2d631f62dd89eb3598d89e83d5b9a8d5e2063f89f4dddf9"
+n_cases = 65536
+hash = "4a04a9bff6d8af290367a97f234f03769ad97aabeeca361b68c0e9822bf82ccb"
 
 ["commonware_codec::types::primitives::tests::conformance::i32"]
-n_cases = 1024
-hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+n_cases = 65536
+hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
 ["commonware_codec::types::primitives::tests::conformance::i64"]
-n_cases = 1024
-hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
 ["commonware_codec::types::primitives::tests::conformance::i8"]
-n_cases = 1024
-hash = "9d268d53456ebe649d11612abd902fe35ac0fee91ad8ffbd461699437a89d511"
+n_cases = 65536
+hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
 ["commonware_codec::types::primitives::tests::conformance::u128"]
-n_cases = 1024
-hash = "334c91a0a280977f6f9804eaaa8abbd8454bc5ac8240842f33482405ea371f62"
+n_cases = 65536
+hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
 ["commonware_codec::types::primitives::tests::conformance::u16"]
-n_cases = 1024
-hash = "72a03c0af64a719dc2d631f62dd89eb3598d89e83d5b9a8d5e2063f89f4dddf9"
+n_cases = 65536
+hash = "4a04a9bff6d8af290367a97f234f03769ad97aabeeca361b68c0e9822bf82ccb"
 
 ["commonware_codec::types::primitives::tests::conformance::u32"]
-n_cases = 1024
-hash = "631bdedc7971ec2e0a241cb7778417552e609f1e59c979ef42fcdc692cf3ed34"
+n_cases = 65536
+hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
 ["commonware_codec::types::primitives::tests::conformance::u64"]
-n_cases = 1024
-hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
 ["commonware_codec::types::primitives::tests::conformance::u8"]
-n_cases = 1024
-hash = "9d268d53456ebe649d11612abd902fe35ac0fee91ad8ffbd461699437a89d511"
+n_cases = 65536
+hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
 ["commonware_codec::types::tuple::tests::conformance::(u32, u32)"]
-n_cases = 1024
-hash = "49bb8d8e9ac244f12e95b4482687ab507c9ee97391d5afdeca8fda25e602bd9b"
+n_cases = 65536
+hash = "9f3fbde186c4164d91b0b3cabba62b5bdbcb6113a2c8dd836dccb730f116066e"
 
 ["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32)"]
-n_cases = 1024
-hash = "4bebea29c2ebb927cf66d44cb6aacab3e979ca1face178bcbe5f2896f0f266f3"
+n_cases = 65536
+hash = "41068be34f5a7e4271763103477b34cb2e04c00004061383cf4f057c09417046"
 
 ["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32)"]
-n_cases = 1024
-hash = "016f7acec4791710636f82b846e87ad9b0ad89789e82c300cc0d402ecb94154b"
+n_cases = 65536
+hash = "cc5c7bc39d9dc4605d1ad63548dcb23e42cec0becb847563f7b5454f3c355961"
 
 ["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32)"]
-n_cases = 1024
-hash = "f23042be1c6572852a173fdba41662241604c2c98d4d271ac787e1bd71f8f09a"
+n_cases = 65536
+hash = "001a3dc913afa87be11bd4f4bdd98cf8571a89d19548af5efcfa9290f4f3773d"
 
 ["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32, u32)"]
-n_cases = 1024
-hash = "c402750ddf30a844610002a45736a43ae6b91edbfc61bad5909f6f8052525fe5"
+n_cases = 65536
+hash = "c0d2818d6db2e34cc531ab8f161eaf7109163c65c533927aa37b0483ab0ddf31"
 
 ["commonware_codec::types::vec::tests::conformance::Vec<u16>"]
-n_cases = 1024
-hash = "675f7187132dd4de4e68a2aebcdb6737ff54f7539571fd8ff2efe4bc56054229"
+n_cases = 65536
+hash = "1b3fceee1effb6a3d71edbb3cc2ad69b318b2edec7eb0e1d6822211959abdb50"
 
 ["commonware_codec::types::vec::tests::conformance::Vec<u32>"]
-n_cases = 1024
-hash = "06ac8dd33cb08c890be9ba3fe9b82c15badc845608587c3505cd9e6a69709d70"
+n_cases = 65536
+hash = "dcb27e675ccce4ba82dd6979036b04198235bec00d3cefbc8e25a639ab4a162e"
 
 ["commonware_codec::types::vec::tests::conformance::Vec<u8>"]
-n_cases = 1024
-hash = "1331d8e7b269e960f14b2e4aa27a44bc6375ac1d00096b814a49f7a3c9cb8409"
+n_cases = 65536
+hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"

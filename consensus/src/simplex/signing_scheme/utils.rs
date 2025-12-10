@@ -148,7 +148,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Signers => 1024,
+            Signers,
         }
     }
 }

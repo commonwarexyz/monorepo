@@ -238,7 +238,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Digest => 1024,
+            Digest,
         }
     }
 }

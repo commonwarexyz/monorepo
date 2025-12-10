@@ -862,8 +862,8 @@ pub(crate) mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            PublicKeyInner => 1024,
-            PrivateKeyInner => 1024,
+            PublicKeyInner,
+            PrivateKeyInner,
         }
     }
 }

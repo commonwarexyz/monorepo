@@ -358,7 +358,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            LtHash => 1024,
+            LtHash,
         }
     }
 }

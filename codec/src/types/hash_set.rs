@@ -333,7 +333,7 @@ mod tests {
         use super::*;
 
         crate::conformance_tests! {
-            HashSet<u32> => 1024
+            HashSet<u32>
         }
     }
 }

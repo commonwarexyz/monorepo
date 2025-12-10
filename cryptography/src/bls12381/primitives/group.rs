@@ -1348,10 +1348,10 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            G1 => 1024,
-            G2 => 1024,
-            Scalar => 1024,
-            Share => 1024
+            G1,
+            G2,
+            Scalar,
+            Share
         }
     }
 }

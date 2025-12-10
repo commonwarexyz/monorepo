@@ -523,7 +523,8 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            MyType => 1024,
+            MyType, // default # of cases
+            MyType2 => 1024, // custom # of cases
         }
     }
 }

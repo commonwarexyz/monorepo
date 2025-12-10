@@ -2448,14 +2448,14 @@ mod test {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Output<MinPk, ed25519::PublicKey> => 1024,
-            DealerPubMsg<MinPk> => 1024,
-            DealerPrivMsg => 1024,
-            PlayerAck<ed25519::PublicKey> => 1024,
-            AckOrReveal<ed25519::PublicKey> => 1024,
-            DealerResult<ed25519::PublicKey> => 1024,
-            DealerLog<MinPk, ed25519::PublicKey> => 1024,
-            SignedDealerLog<MinPk, ed25519::PrivateKey> => 1024,
+            Output<MinPk, ed25519::PublicKey>,
+            DealerPubMsg<MinPk>,
+            DealerPrivMsg,
+            PlayerAck<ed25519::PublicKey>,
+            AckOrReveal<ed25519::PublicKey>,
+            DealerResult<ed25519::PublicKey>,
+            DealerLog<MinPk, ed25519::PublicKey>,
+            SignedDealerLog<MinPk, ed25519::PrivateKey>,
         }
     }
 }

@@ -88,11 +88,11 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         crate::conformance_tests! {
-            (u32, u32) => 1024,
-            (u32, u32, u32) => 1024,
-            (u32, u32, u32, u32) => 1024,
-            (u32, u32, u32, u32, u32) => 1024,
-            (u32, u32, u32, u32, u32, u32) => 1024,
+            (u32, u32),
+            (u32, u32, u32),
+            (u32, u32, u32, u32),
+            (u32, u32, u32, u32, u32),
+            (u32, u32, u32, u32, u32, u32),
         }
     }
 }

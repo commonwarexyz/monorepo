@@ -1150,9 +1150,9 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            PublicKey => 1024,
-            PrivateKey => 1024,
-            Signature => 1024,
+            PublicKey,
+            PrivateKey,
+            Signature,
         }
     }
 }

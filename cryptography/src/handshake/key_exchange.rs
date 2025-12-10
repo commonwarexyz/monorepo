@@ -94,6 +94,6 @@ mod conformance {
     use super::*;
 
     commonware_codec::conformance_tests! {
-        EphemeralPublicKey => 1024,
+        EphemeralPublicKey,
     }
 }

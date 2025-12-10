@@ -439,9 +439,9 @@ mod test {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Syn<crate::ed25519::Signature> => 1024,
-            SynAck<crate::ed25519::Signature> => 1024,
-            Ack => 1024,
+            Syn<crate::ed25519::Signature>,
+            SynAck<crate::ed25519::Signature>,
+            Ack,
         }
     }
 }

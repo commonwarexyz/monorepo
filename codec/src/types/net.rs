@@ -325,11 +325,11 @@ mod test {
         use super::*;
 
         crate::conformance_tests! {
-            Ipv4Addr => 1024,
-            Ipv6Addr => 1024,
-            SocketAddrV4 => 1024,
-            SocketAddrV6 => 1024,
-            SocketAddr => 1024,
+            Ipv4Addr,
+            Ipv6Addr,
+            SocketAddrV4,
+            SocketAddrV6,
+            SocketAddr,
         }
     }
 }

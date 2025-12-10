@@ -621,7 +621,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Ciphertext<MinPk> => 1024,
+            Ciphertext<MinPk>,
         }
     }
 }

@@ -562,7 +562,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Signature => 1024,
+            Signature,
         }
     }
 }

@@ -401,7 +401,7 @@ mod tests {
         use super::*;
 
         crate::conformance_tests! {
-            HashMap<u32, u32> => 1024,
+            HashMap<u32, u32>,
         }
     }
 }

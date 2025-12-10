@@ -266,7 +266,7 @@ mod tests {
         use super::*;
 
         crate::conformance_tests! {
-            BTreeMap<u32, u32> => 1024,
+            BTreeMap<u32, u32>,
         }
     }
 }

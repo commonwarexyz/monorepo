@@ -1794,13 +1794,13 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Chunk<PublicKey, Sha256Digest> => 1024,
-            Parent<MinPk, Sha256Digest> => 1024,
-            Node<PublicKey, MinPk, Sha256Digest> => 1024,
-            Ack<PublicKey, MinPk, Sha256Digest> => 1024,
-            Activity<PublicKey, MinPk, Sha256Digest> => 1024,
-            Proposal<PublicKey, Sha256Digest> => 1024,
-            Lock<PublicKey, MinPk, Sha256Digest> => 1024,
+            Chunk<PublicKey, Sha256Digest>,
+            Parent<MinPk, Sha256Digest>,
+            Node<PublicKey, MinPk, Sha256Digest>,
+            Ack<PublicKey, MinPk, Sha256Digest>,
+            Activity<PublicKey, MinPk, Sha256Digest>,
+            Proposal<PublicKey, Sha256Digest>,
+            Lock<PublicKey, MinPk, Sha256Digest>,
         }
     }
 }

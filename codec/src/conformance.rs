@@ -27,8 +27,8 @@
 //!
 //! ```ignore
 //! conformance_tests! {
-//!     Vec<u8> => 100,
-//!     Vec<u16> => 100,
+//!     Vec<u8>,            // Uses default (65536 cases)
+//!     Vec<u16> => 100,    // Explicit case count
 //! }
 //! ```
 //!
@@ -330,6 +330,9 @@ where
         .expect("failed to write conformance file");
 }
 
+/// Default number of test cases when not explicitly specified.
+pub const DEFAULT_N_CASES: usize = 65536;
+
 /// Define conformance tests for codec types.
 ///
 /// This macro generates test functions that verify encodings match expected
@@ -339,8 +342,8 @@ where
 ///
 /// ```ignore
 /// conformance_tests! {
-///     Vec<u8> => 100,
-///     Vec<u16> => 100,
+///     Vec<u8>,                       // Uses default (65536 cases)
+///     Vec<u16> => 100,               // Explicit case count
 ///     BTreeMap<u32, String> => 100,
 /// }
 /// ```
@@ -357,11 +360,8 @@ where
 /// ```
 #[macro_export]
 macro_rules! conformance_tests {
-    // Base case: no more types
-    ([$($counter:tt)*]) => {};
-
-    // Recursive case: generate test, add one to counter, recurse
-    ([$($counter:tt)*] $type:ty => $n_cases:expr $(, $rest_type:ty => $rest_n:expr)*) => {
+    // Helper to emit a single test
+    (@emit [$($counter:tt)*] $type:ty, $n_cases:expr) => {
         $crate::paste::paste! {
             #[commonware_macros::test_group("codec_conformance")]
             #[test]
@@ -373,12 +373,36 @@ macro_rules! conformance_tests {
                 );
             }
         }
-        $crate::conformance_tests!([$($counter)* x] $($rest_type => $rest_n),*);
+    };
+
+    // Base case: nothing left
+    (@internal [$($counter:tt)*]) => {};
+
+    // Case: Type => n_cases, rest...
+    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr, $($rest:tt)*) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
+        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
+    };
+
+    // Case: Type => n_cases (no trailing comma, last item)
+    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
+    };
+
+    // Case: Type, rest...
+    (@internal [$($counter:tt)*] $type:ty, $($rest:tt)*) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_N_CASES);
+        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
+    };
+
+    // Case: Type (no trailing comma, last item with default)
+    (@internal [$($counter:tt)*] $type:ty) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_N_CASES);
     };
 
     // Entrypoint
-    ($($type:ty => $n_cases:expr),+ $(,)?) => {
-        $crate::conformance_tests!([] $($type => $n_cases),+);
+    ($($input:tt)*) => {
+        $crate::conformance_tests!(@internal [] $($input)*);
     };
 }
 

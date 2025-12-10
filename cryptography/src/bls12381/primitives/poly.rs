@@ -601,8 +601,8 @@ pub mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Eval<Scalar> => 1024,
-            Poly<Scalar> => 1024,
+            Eval<Scalar>,
+            Poly<Scalar>,
         }
     }
 }

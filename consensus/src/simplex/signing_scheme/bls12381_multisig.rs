@@ -1128,7 +1128,7 @@ mod tests {
         use super::*;
 
         commonware_codec::conformance_tests! {
-            Certificate<MinSig> => 1024,
+            Certificate<MinSig>,
         }
     }
 }
