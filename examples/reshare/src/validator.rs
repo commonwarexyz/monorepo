@@ -173,7 +173,7 @@ mod test {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::mux,
-        Manager as _, Message, Receiver,
+        Message, Receiver,
     };
     use commonware_runtime::{
         deterministic::{self, Runner},
@@ -415,13 +415,7 @@ mod test {
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
         ) {
-            // First register all participants with oracle
-            let mut manager = oracle.manager();
-            manager
-                .update(0, self.participants.keys().cloned().try_collect().unwrap())
-                .await;
-
-            // Now add links between all participants
+            // Add links between all participants
             for v1 in self.participants.keys() {
                 for v2 in self.participants.keys() {
                     if v1 == v2 {
