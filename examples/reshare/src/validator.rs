@@ -221,7 +221,7 @@ mod test {
     struct TeamUpdate {
         pk: PublicKey,
         update: Update<MinSig, PublicKey>,
-        cb_in: oneshot::Sender<PostUpdate>,
+        callback: oneshot::Sender<PostUpdate>,
     }
 
     struct UpdateHandler {
@@ -243,11 +243,19 @@ mod test {
             let mut sender = self.sender.clone();
             let pk = self.pk.clone();
             Box::pin(async move {
-                let (cb_in, cb_out) = oneshot::channel();
-                if sender.send(TeamUpdate { pk, update, cb_in }).await.is_err() {
+                let (callback_sender, callback_receiver) = oneshot::channel();
+                if sender
+                    .send(TeamUpdate {
+                        pk,
+                        update,
+                        callback: callback_sender,
+                    })
+                    .await
+                    .is_err()
+                {
                     return PostUpdate::Stop;
                 };
-                cb_out.await.unwrap_or(PostUpdate::Stop)
+                callback_receiver.await.unwrap_or(PostUpdate::Stop)
             })
         }
     }
@@ -257,7 +265,6 @@ mod test {
         output: Option<Output<MinSig, PublicKey>>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
-        is_dkg: bool,
         failures: HashSet<u64>,
     }
 
@@ -285,7 +292,6 @@ mod test {
                 output: Some(output),
                 participants,
                 handles: Default::default(),
-                is_dkg: false,
                 failures: HashSet::new(),
             }
         }
@@ -306,12 +312,11 @@ mod test {
                 output: None,
                 participants,
                 handles: Default::default(),
-                is_dkg: true,
                 failures: HashSet::new(),
             }
         }
 
-        async fn start_one_inner<S>(
+        async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
@@ -392,22 +397,6 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
-        async fn start_one(
-            &mut self,
-            ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
-            updates: mpsc::Sender<TeamUpdate>,
-            pk: PublicKey,
-        ) {
-            if self.is_dkg {
-                self.start_one_inner::<EdScheme>(ctx, oracle, updates, pk)
-                    .await;
-            } else {
-                self.start_one_inner::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
-                    .await;
-            }
-        }
-
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
@@ -428,17 +417,32 @@ mod test {
                 }
             }
 
+            // Start all participants (even if not active at first)
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                self.start_one(ctx, oracle, updates.clone(), pk.clone())
+                if self.output.is_none() {
+                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
+                        .await;
+                } else {
+                    self.start_one::<ThresholdScheme<MinSig>>(
+                        ctx,
+                        oracle,
+                        updates.clone(),
+                        pk.clone(),
+                    )
                     .await;
+                }
             }
         }
     }
 
+    /// Configuration for simulating participant crashes during a test.
     #[derive(Clone)]
     struct Crash {
+        /// How often to trigger crashes.
         frequency: Duration,
+        /// How long crashed participants stay offline before restarting.
         downtime: Duration,
+        /// Number of participants to crash each time.
         count: usize,
     }
 
@@ -451,13 +455,20 @@ mod test {
         Reshare(u64),
     }
 
+    /// Test plan configuration for running DKG/reshare simulations.
     #[derive(Clone)]
     struct Plan {
+        /// Random seed for deterministic execution.
         seed: u64,
+        /// Total number of participants in the network.
         total: u32,
+        /// Number of participants per round (cycles through the list).
         per_round: Vec<u32>,
+        /// Network link configuration (latency, jitter, packet loss).
         link: Link,
+        /// Whether to run in DKG or reshare mode.
         mode: Mode,
+        /// Optional crash simulation configuration.
         crash: Option<Crash>,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
         failures: HashSet<u64>,
@@ -475,10 +486,7 @@ mod test {
                 Mode::Dkg => (true, 1),
                 Mode::Reshare(target) => (false, target),
             };
-            info!(
-                "starting test with {} participants, is_dkg={}, target={}",
-                self.total, is_dkg, target
-            );
+            info!(participants = self.total, is_dkg, target, "starting test");
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
@@ -490,10 +498,8 @@ mod test {
             );
 
             // Start network first to ensure a background task is running
-            debug!("starting network actor");
             network.start();
 
-            debug!("creating team with {} participants", self.total);
             let mut team = if is_dkg {
                 Team::dkg(self.total, &self.per_round)
             } else {
@@ -503,19 +509,15 @@ mod test {
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-
-            debug!("starting team actors and connecting");
             team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
                 .await;
 
-            debug!("waiting for updates");
+            // Set up crash ticker if needed
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
-
-            // Set up crash ticker if needed
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(crash) = &self.crash {
                 let frequency = crash.frequency;
@@ -531,7 +533,6 @@ mod test {
             }
 
             let mut success_target_reached_epoch = None;
-
             loop {
                 select! {
                     update = updates_out.next() => {
@@ -582,7 +583,7 @@ mod test {
                             PostUpdate::Continue
                         };
                         if update
-                            .cb_in
+                            .callback
                             .send(post_update)
                             .is_err() {
                                 error!("update callback closed unexpectedly");
@@ -606,7 +607,11 @@ mod test {
                         };
 
                         info!(pk = ?pk, "restarting participant");
-                        team.start_one(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        if team.output.is_none() {
+                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        } else {
+                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        }
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired

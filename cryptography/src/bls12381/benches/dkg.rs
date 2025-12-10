@@ -21,7 +21,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(mut rng: impl CryptoRngCore, previous: bool, n: u32) -> Self {
+    fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
             .map(|_| PrivateKey::from_rng(&mut rng))
             .collect::<Vec<_>>();
@@ -33,13 +33,12 @@ impl Bench {
             .try_collect::<Set<_>>()
             .unwrap();
 
-        let (output, shares) = if previous {
+        let (output, shares) = if reshare {
             let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.clone()).unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
         };
-
         let players = dealers.clone();
         let info = Info::new(&[], 0, output, dealers, players).unwrap();
 
@@ -109,8 +108,8 @@ cfg_if::cfg_if! {
     }
 }
 
-fn benchmark_dkg(c: &mut Criterion, previous: bool) {
-    let suffix = if previous {
+fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
+    let suffix = if reshare {
         "_reshare_recovery"
     } else {
         "_recovery"
@@ -118,7 +117,7 @@ fn benchmark_dkg(c: &mut Criterion, previous: bool) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
         let t = quorum(n);
-        let bench = Bench::new(&mut rng, previous, n);
+        let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
             c.bench_function(
                 &format!(

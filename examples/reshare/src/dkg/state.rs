@@ -4,7 +4,6 @@
 //! using append-only journals for crash recovery. In-memory BTreeMaps provide fast
 //! lookups while the journal ensures durability.
 
-use super::actor::Message;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
@@ -83,9 +82,9 @@ impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
 enum Event<V: Variant, P: PublicKey> {
     /// A dealer message we received and committed to ack (as a player).
     /// Once persisted, we will always generate the same ack for this dealer.
-    Dealer(P, DealerPubMsg<V>, DealerPrivMsg),
+    Dealing(P, DealerPubMsg<V>, DealerPrivMsg),
     /// A player ack we received (as a dealer).
-    Player(P, PlayerAck<P>),
+    Ack(P, PlayerAck<P>),
     /// A finalized dealer log.
     Log(P, DealerLog<V, P>),
 }
@@ -93,8 +92,8 @@ enum Event<V: Variant, P: PublicKey> {
 impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Dealer(x0, x1, x2) => x0.encode_size() + x1.encode_size() + x2.encode_size(),
-            Self::Player(x0, x1) => x0.encode_size() + x1.encode_size(),
+            Self::Dealing(x0, x1, x2) => x0.encode_size() + x1.encode_size() + x2.encode_size(),
+            Self::Ack(x0, x1) => x0.encode_size() + x1.encode_size(),
             Self::Log(x0, x1) => x0.encode_size() + x1.encode_size(),
         }
     }
@@ -103,13 +102,13 @@ impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
 impl<V: Variant, P: PublicKey> Write for Event<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
-            Self::Dealer(x0, x1, x2) => {
+            Self::Dealing(x0, x1, x2) => {
                 0u8.write(buf);
                 x0.write(buf);
                 x1.write(buf);
                 x2.write(buf);
             }
-            Self::Player(x0, x1) => {
+            Self::Ack(x0, x1) => {
                 1u8.write(buf);
                 x0.write(buf);
                 x1.write(buf);
@@ -132,12 +131,12 @@ impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Self::Dealer(
+            0 => Ok(Self::Dealing(
                 ReadExt::read(buf)?,
                 Read::read_cfg(buf, cfg)?,
                 ReadExt::read(buf)?,
             )),
-            1 => Ok(Self::Player(ReadExt::read(buf)?, ReadExt::read(buf)?)),
+            1 => Ok(Self::Ack(ReadExt::read(buf)?, ReadExt::read(buf)?)),
             2 => Ok(Self::Log(ReadExt::read(buf)?, Read::read_cfg(buf, cfg)?)),
             other => Err(commonware_codec::Error::InvalidEnum(other)),
         }
@@ -146,16 +145,16 @@ impl<V: Variant, P: PublicKey> Read for Event<V, P> {
 
 /// In-memory cache for a single epoch's DKG messages.
 struct EpochCache<V: Variant, P: PublicKey> {
-    dealer_msgs: BTreeMap<P, (DealerPubMsg<V>, DealerPrivMsg)>,
-    player_acks: BTreeMap<P, PlayerAck<P>>,
+    dealings: BTreeMap<P, (DealerPubMsg<V>, DealerPrivMsg)>,
+    acks: BTreeMap<P, PlayerAck<P>>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 }
 
 impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
     fn default() -> Self {
         Self {
-            dealer_msgs: BTreeMap::new(),
-            player_acks: BTreeMap::new(),
+            dealings: BTreeMap::new(),
+            acks: BTreeMap::new(),
             logs: BTreeMap::new(),
         }
     }
@@ -171,8 +170,8 @@ pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     msgs: SVJournal<E, Event<V, P>>,
 
     // In-memory state
-    current_epoch: Option<(EpochNum, Epoch<V, P>)>,
-    epoch_caches: BTreeMap<EpochNum, EpochCache<V, P>>,
+    current: Option<(EpochNum, Epoch<V, P>)>,
+    epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
 impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
@@ -184,7 +183,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         let states = CVJournal::init(
             context.with_label("states"),
             CVConfig {
-                partition: format!("{partition_prefix}_dkg_states"),
+                partition: format!("{partition_prefix}_states"),
                 compression: None,
                 codec_config: max_read_size,
                 buffer_pool: buffer_pool.clone(),
@@ -198,7 +197,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         let msgs = SVJournal::init(
             context.with_label("msgs"),
             SVConfig {
-                partition: format!("{partition_prefix}_dkg_msgs"),
+                partition: format!("{partition_prefix}_msgs"),
                 compression: None,
                 codec_config: max_read_size,
                 buffer_pool,
@@ -209,7 +208,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         .expect("should be able to init dkg_msgs journal");
 
         // Replay states to get current epoch
-        let current_epoch = {
+        let current = {
             let size = states.size();
             if size == 0 {
                 None
@@ -225,7 +224,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         };
 
         // Replay msgs to populate epoch caches
-        let mut epoch_caches = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
+        let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
         {
             let replay = msgs
                 .replay(0, 0, READ_BUFFER)
@@ -236,13 +235,13 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             while let Some(result) = replay.next().await {
                 let (section, _, _, event) = result.expect("should be able to read msg");
                 let epoch = EpochNum::new(section);
-                let cache = epoch_caches.entry(epoch).or_default();
+                let cache = epochs.entry(epoch).or_default();
                 match event {
-                    Event::Dealer(dealer, pub_msg, priv_msg) => {
-                        cache.dealer_msgs.insert(dealer, (pub_msg, priv_msg));
+                    Event::Dealing(dealer, pub_msg, priv_msg) => {
+                        cache.dealings.insert(dealer, (pub_msg, priv_msg));
                     }
-                    Event::Player(player, ack) => {
-                        cache.player_acks.insert(player, ack);
+                    Event::Ack(player, ack) => {
+                        cache.acks.insert(player, ack);
                     }
                     Event::Log(dealer, log) => {
                         cache.logs.insert(dealer, log);
@@ -254,18 +253,18 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         Self {
             states,
             msgs,
-            current_epoch,
-            epoch_caches,
+            current,
+            epochs,
         }
     }
 
     /// Returns all dealer messages received during the given epoch.
-    pub fn dealer_msgs(&self, epoch: EpochNum) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> {
-        self.epoch_caches
+    pub fn dealings(&self, epoch: EpochNum) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> {
+        self.epochs
             .get(&epoch)
             .map(|cache| {
                 cache
-                    .dealer_msgs
+                    .dealings
                     .iter()
                     .map(|(k, (v1, v2))| (k.clone(), v1.clone(), v2.clone()))
                     .collect()
@@ -274,12 +273,12 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     }
 
     /// Returns all player acknowledgments received during the given epoch.
-    pub fn player_acks(&self, epoch: EpochNum) -> Vec<(P, PlayerAck<P>)> {
-        self.epoch_caches
+    pub fn acks(&self, epoch: EpochNum) -> Vec<(P, PlayerAck<P>)> {
+        self.epochs
             .get(&epoch)
             .map(|cache| {
                 cache
-                    .player_acks
+                    .acks
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
@@ -289,7 +288,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
     /// Returns all finalized dealer logs for the given epoch.
     pub fn logs(&self, epoch: EpochNum) -> BTreeMap<P, DealerLog<V, P>> {
-        self.epoch_caches
+        self.epochs
             .get(&epoch)
             .map(|cache| cache.logs.clone())
             .unwrap_or_default()
@@ -297,7 +296,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
     /// Checks if a dealer has already submitted a log this epoch.
     pub fn has_submitted_log(&self, epoch: EpochNum, dealer: &P) -> bool {
-        self.epoch_caches
+        self.epochs
             .get(&epoch)
             .map(|cache| cache.logs.contains_key(dealer))
             .unwrap_or(false)
@@ -305,15 +304,15 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
     /// Returns the current epoch state, if initialized.
     pub fn epoch(&self) -> Option<(EpochNum, Epoch<V, P>)> {
-        self.current_epoch.as_ref().map(|(e, s)| (*e, s.clone()))
+        self.current.as_ref().map(|(e, s)| (*e, s.clone()))
     }
 
-    fn get_or_create_cache(&mut self, epoch: EpochNum) -> &mut EpochCache<V, P> {
-        self.epoch_caches.entry(epoch).or_default()
+    fn get_or_create_epoch(&mut self, epoch: EpochNum) -> &mut EpochCache<V, P> {
+        self.epochs.entry(epoch).or_default()
     }
 
     /// Persists a dealer message for crash recovery.
-    pub async fn append_dealer_msg(
+    pub async fn append_dealing(
         &mut self,
         epoch: EpochNum,
         dealer: P,
@@ -325,7 +324,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         self.msgs
             .append(
                 section,
-                Event::Dealer(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
+                Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
             .expect("should be able to write to msgs");
@@ -335,17 +334,17 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             .expect("should be able to sync msgs");
 
         // Update in-memory cache
-        self.get_or_create_cache(epoch)
-            .dealer_msgs
+        self.get_or_create_epoch(epoch)
+            .dealings
             .insert(dealer, (pub_msg, priv_msg));
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    pub async fn append_player_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) {
+    pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) {
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, Event::Player(player.clone(), ack.clone()))
+            .append(section, Event::Ack(player.clone(), ack.clone()))
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -354,9 +353,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             .expect("should be able to sync msgs");
 
         // Update in-memory cache
-        self.get_or_create_cache(epoch)
-            .player_acks
-            .insert(player, ack);
+        self.get_or_create_epoch(epoch).acks.insert(player, ack);
     }
 
     /// Persists a finalized dealer log.
@@ -373,7 +370,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             .expect("should be able to sync msgs");
 
         // Update in-memory cache
-        self.get_or_create_cache(epoch).logs.insert(dealer, log);
+        self.get_or_create_epoch(epoch).logs.insert(dealer, log);
     }
 
     /// Persists new epoch state, advancing to the next epoch.
@@ -391,7 +388,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         // Update in-memory state first (clone before moving to journal)
         let size = self.states.size();
         let epoch = EpochNum::new(size - 1);
-        self.current_epoch = Some((epoch, state));
+        self.current = Some((epoch, state));
     }
 
     /// Removes all data from epochs older than `min`.
@@ -407,7 +404,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             .expect("should be able to prune states");
 
         // Remove old epoch caches
-        self.epoch_caches.retain(|&epoch, _| epoch >= min);
+        self.epochs.retain(|&epoch, _| epoch >= min);
     }
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
@@ -434,7 +431,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
         // Replay stored acks
         let mut unsent: BTreeMap<P, DealerPrivMsg> = priv_msgs.into_iter().collect();
-        for (player, ack) in self.player_acks(epoch) {
+        for (player, ack) in self.acks(epoch) {
             if unsent.contains_key(&player)
                 && crypto_dealer
                     .receive_player_ack(player.clone(), ack)
@@ -459,9 +456,9 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
             CryptoPlayer::new(round_info, signer).expect("should be able to create player");
         let mut player = Player::new(crypto_player);
 
-        // Replay persisted dealer messages (these will all be Cached responses)
-        for (dealer, pub_msg, priv_msg) in self.dealer_msgs(epoch) {
-            let _ = player.handle(dealer.clone(), pub_msg, priv_msg);
+        // Replay persisted dealer messages
+        for (dealer, pub_msg, priv_msg) in self.dealings(epoch) {
+            player.replay(dealer.clone(), pub_msg, priv_msg);
             debug!(?epoch, ?dealer, "replayed committed dealer message");
         }
 
@@ -473,65 +470,71 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     pub_msg: DealerPubMsg<V>,
-    unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized_log: Option<SignedDealerLog<V, C>>,
+    unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
+    finalized: Option<SignedDealerLog<V, C>>,
 }
 
 impl<V: Variant, C: Signer> Dealer<V, C> {
     pub const fn new(
         dealer: Option<CryptoDealer<V, C>>,
         pub_msg: DealerPubMsg<V>,
-        unsent_priv_msgs: BTreeMap<C::PublicKey, DealerPrivMsg>,
+        unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
     ) -> Self {
         Self {
             dealer,
             pub_msg,
-            unsent_priv_msgs,
-            finalized_log: None,
+            unsent,
+            finalized: None,
         }
     }
 
     /// Handle an incoming ack from a player.
-    /// Returns the ack if it was successfully processed (for persistence).
-    pub fn handle(
+    ///
+    /// If the ack is valid and new, persists it to storage.
+    /// Returns true if the ack was successfully processed.
+    pub async fn handle<E: RuntimeStorage + Metrics>(
         &mut self,
+        storage: &mut Storage<E, V, C::PublicKey>,
+        epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> Option<PlayerAck<C::PublicKey>> {
-        if !self.unsent_priv_msgs.contains_key(&player) {
-            return None;
+    ) {
+        if !self.unsent.contains_key(&player) {
+            return;
         }
         if let Some(ref mut dealer) = self.dealer {
             if dealer
                 .receive_player_ack(player.clone(), ack.clone())
                 .is_ok()
             {
-                self.unsent_priv_msgs.remove(&player);
-                return Some(ack);
+                self.unsent.remove(&player);
+                storage.append_ack(epoch, player, ack).await;
             }
         }
-        None
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
     pub fn finalize(&mut self) {
-        if self.finalized_log.is_some() {
+        if self.finalized.is_some() {
             return;
         }
+
+        // Even after the finalized_log is taken, we won't attempt to finalize again
+        // because the dealer will be None.
         if let Some(dealer) = self.dealer.take() {
             let log = dealer.finalize();
-            self.finalized_log = Some(log);
+            self.finalized = Some(log);
         }
     }
 
     /// Returns a clone of the finalized log if it exists.
-    pub fn finalized_log(&self) -> Option<SignedDealerLog<V, C>> {
-        self.finalized_log.clone()
+    pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
+        self.finalized.clone()
     }
 
     /// Takes and returns the finalized log, leaving None in its place.
-    pub const fn take_finalized_log(&mut self) -> Option<SignedDealerLog<V, C>> {
-        self.finalized_log.take()
+    pub const fn take_finalized(&mut self) -> Option<SignedDealerLog<V, C>> {
+        self.finalized.take()
     }
 
     /// Returns shares to distribute to players.
@@ -541,20 +544,10 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     pub fn shares_to_distribute(
         &self,
     ) -> impl Iterator<Item = (C::PublicKey, DealerPubMsg<V>, DealerPrivMsg)> + '_ {
-        self.unsent_priv_msgs
+        self.unsent
             .iter()
             .map(|(player, priv_msg)| (player.clone(), self.pub_msg.clone(), priv_msg.clone()))
     }
-}
-
-/// Result of handling a dealer message.
-pub enum PlayerResponse<V: Variant, P: PublicKey> {
-    /// New dealer message, ack generated. Caller should persist the dealer message.
-    New(Message<V, P>),
-    /// Already seen this dealer, returning cached ack.
-    Cached(Message<V, P>),
-    /// Invalid dealer message, no ack generated.
-    Invalid,
 }
 
 /// Internal state for a player in the current round.
@@ -574,26 +567,46 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Handle an incoming dealer message.
-    /// Returns whether this is a new commitment (should be persisted) or cached.
-    pub fn handle(
+    ///
+    /// If this is a new valid dealer message, persists it to storage before returning.
+    pub async fn handle<E: RuntimeStorage + Metrics>(
         &mut self,
+        storage: &mut Storage<E, V, C::PublicKey>,
+        epoch: EpochNum,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> PlayerResponse<V, C::PublicKey> {
+    ) -> Option<PlayerAck<C::PublicKey>> {
         // If we've already generated an ack, return the cached version
         if let Some(ack) = self.acks.get(&dealer) {
-            return PlayerResponse::Cached(Message::Ack(ack.clone()));
+            return Some(ack.clone());
         }
+
         // Otherwise generate a new ack
+        if let Some(ack) =
+            self.player
+                .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+        {
+            storage
+                .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
+                .await;
+            self.acks.insert(dealer, ack.clone());
+            return Some(ack);
+        }
+        None
+    }
+
+    /// Replay an already-persisted dealer message (updates in-memory state only).
+    fn replay(&mut self, dealer: C::PublicKey, pub_msg: DealerPubMsg<V>, priv_msg: DealerPrivMsg) {
+        if self.acks.contains_key(&dealer) {
+            return;
+        }
         if let Some(ack) = self
             .player
             .dealer_message(dealer.clone(), pub_msg, priv_msg)
         {
-            self.acks.insert(dealer, ack.clone());
-            return PlayerResponse::New(Message::Ack(ack));
+            self.acks.insert(dealer, ack);
         }
-        PlayerResponse::Invalid
     }
 
     /// Finalize the player's participation in the DKG round.
