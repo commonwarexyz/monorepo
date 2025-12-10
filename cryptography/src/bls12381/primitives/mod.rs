@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, SharingMode},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, Mode},
 //!     dkg,
 //! };
 //! use commonware_utils::NZU32;
@@ -23,7 +23,7 @@
 //! let (n, t) = (5, 4);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, SharingMode::default(), NZU32!(n));
+//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), NZU32!(n));
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
@@ -68,4 +68,4 @@ pub enum Error {
     InvalidIndex,
 }
 
-pub use sharing::{Sharing, SharingMode};
+pub use sharing::{Mode, Sharing};

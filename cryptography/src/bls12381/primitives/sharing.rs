@@ -19,13 +19,13 @@ use std::sync::{Arc, OnceLock};
 /// are assigned to participant identities.
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
-pub enum SharingMode {
+pub enum Mode {
     // TODO: Add a mode for sub O(N^2) interpolation
     #[default]
     NonZeroCounter = 0,
 }
 
-impl SharingMode {
+impl Mode {
     /// Compute the scalar for one participant.
     ///
     /// This will return `None` only if `i >= total`.
@@ -44,17 +44,17 @@ impl SharingMode {
     }
 }
 
-impl FixedSize for SharingMode {
+impl FixedSize for Mode {
     const SIZE: usize = 1;
 }
 
-impl Write for SharingMode {
+impl Write for Mode {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         buf.put_u8(*self as u8);
     }
 }
 
-impl Read for SharingMode {
+impl Read for Mode {
     type Cfg = ();
 
     fn read_cfg(
@@ -74,7 +74,7 @@ impl Read for SharingMode {
 /// This does not contain any secret information.
 #[derive(Clone, Debug)]
 pub struct Sharing<V: Variant> {
-    mode: SharingMode,
+    mode: Mode,
     total: NonZeroU32,
     poly: Arc<Public<V>>,
     #[cfg(feature = "std")]
@@ -90,7 +90,7 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
-    pub(crate) fn new(mode: SharingMode, total: NonZeroU32, poly: Public<V>) -> Self {
+    pub(crate) fn new(mode: Mode, total: NonZeroU32, poly: Public<V>) -> Self {
         Self {
             mode,
             total,
@@ -101,7 +101,7 @@ impl<V: Variant> Sharing<V> {
     }
 
     /// Get the mode used for this sharing.
-    pub(crate) const fn mode(&self) -> SharingMode {
+    pub(crate) const fn mode(&self) -> Mode {
         self.mode
     }
 
@@ -215,7 +215,7 @@ mod fuzz {
     use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
 
-    impl<'a> Arbitrary<'a> for SharingMode {
+    impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             match u.int_in_range(0u8..=0)? {
                 0 => Ok(Self::NonZeroCounter),
@@ -227,7 +227,7 @@ mod fuzz {
     impl<'a, V: Variant> Arbitrary<'a> for Sharing<V> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             let total: u32 = u.int_in_range(1..=100)?;
-            let mode: SharingMode = u.arbitrary()?;
+            let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
             let poly = new_from(&mut StdRng::seed_from_u64(seed), quorum(total) - 1);
             Ok(Self::new(
