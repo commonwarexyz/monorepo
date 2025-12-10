@@ -1073,14 +1073,18 @@ mod tests {
             metadata.put(U64::new(0x3000), b"value6".to_vec());
 
             // Test iterating over all keys
-            let all_keys: Vec<_> = metadata.keys(None).cloned().collect();
+            let all_keys: Vec<_> = metadata.keys().cloned().collect();
             assert_eq!(all_keys.len(), 6);
             assert!(all_keys.contains(&U64::new(0x1000)));
             assert!(all_keys.contains(&U64::new(0x3000)));
 
             // Test iterating with prefix 0x10
             let prefix = hex!("0x00000000000010");
-            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            let prefix_keys: Vec<_> = metadata
+                .keys()
+                .filter(|k| k.as_ref().starts_with(&prefix))
+                .cloned()
+                .collect();
             assert_eq!(prefix_keys.len(), 3);
             assert!(prefix_keys.contains(&U64::new(0x1000)));
             assert!(prefix_keys.contains(&U64::new(0x1001)));
@@ -1089,14 +1093,22 @@ mod tests {
 
             // Test iterating with prefix 0x20
             let prefix = hex!("0x00000000000020");
-            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            let prefix_keys: Vec<_> = metadata
+                .keys()
+                .filter(|k| k.as_ref().starts_with(&prefix))
+                .cloned()
+                .collect();
             assert_eq!(prefix_keys.len(), 2);
             assert!(prefix_keys.contains(&U64::new(0x2000)));
             assert!(prefix_keys.contains(&U64::new(0x2001)));
 
             // Test with non-matching prefix
             let prefix = hex!("0x00000000000040");
-            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            let prefix_keys: Vec<_> = metadata
+                .keys()
+                .filter(|k| k.as_ref().starts_with(&prefix))
+                .cloned()
+                .collect();
             assert_eq!(prefix_keys.len(), 0);
 
             metadata.destroy().await.unwrap();
@@ -1104,7 +1116,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_remove_prefix() {
+    fn test_retain() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1131,7 +1143,7 @@ mod tests {
 
             // Remove keys with prefix 0x10
             let prefix = hex!("0x00000000000010");
-            metadata.remove_prefix(&prefix);
+            metadata.retain(|k, _| !k.as_ref().starts_with(&prefix));
 
             // Check metrics after removal
             let buffer = context.encode();
@@ -1159,16 +1171,15 @@ mod tests {
             // Verify keys are still removed after restart
             assert!(metadata.get(&U64::new(0x1000)).is_none());
             assert!(metadata.get(&U64::new(0x2000)).is_some());
-            assert_eq!(metadata.keys(None).count(), 3);
+            assert_eq!(metadata.keys().count(), 3);
 
             // Remove non-existing prefix
             let prefix = hex!("0x00000000000040");
-            metadata.remove_prefix(&prefix);
+            metadata.retain(|k, _| !k.as_ref().starts_with(&prefix));
 
             // Remove all remaining keys
-            let prefix = vec![]; // Empty prefix matches all
-            metadata.remove_prefix(&prefix);
-            assert_eq!(metadata.keys(None).count(), 0);
+            metadata.retain(|_, _| false);
+            assert_eq!(metadata.keys().count(), 0);
 
             metadata.destroy().await.unwrap();
         });

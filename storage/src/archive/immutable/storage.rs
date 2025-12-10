@@ -142,7 +142,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Collect sections
-        let sections = metadata.keys(Some(&[ORDINAL_PREFIX])).collect::<Vec<_>>();
+        let sections = metadata
+            .keys()
+            .filter(|k| k.prefix() == ORDINAL_PREFIX)
+            .collect::<Vec<_>>();
         let mut section_bits = BTreeMap::new();
         for section in sections {
             // Get record
