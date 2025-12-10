@@ -315,8 +315,7 @@ where
                 None
             };
 
-            let mut epoch_done = false;
-            while !epoch_done {
+            loop {
                 let mailbox_msg = select! {
                     _ = self.context.stopped() => {
                         break 'actor;
@@ -450,13 +449,17 @@ where
                             }
                         }
 
-                        // Check if this is the last block in the epoch
-                        if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_some() {
-                            // Finalize the round before acknowledging
-                            let logs = storage.logs(epoch);
-                            let (success, next_round, next_output, next_share) = if let Some(ps) =
-                                player_state.take()
-                            {
+                        // Continue if not the last block in the epoch
+                        if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                            // Acknowledge block processing
+                            response.acknowledge();
+                            continue;
+                        }
+
+                        // Finalize the round before acknowledging
+                        let logs = storage.logs(epoch);
+                        let (success, next_round, next_output, next_share) =
+                            if let Some(ps) = player_state.take() {
                                 match ps.finalize(logs, 1) {
                                     Ok((new_output, new_share)) => (
                                         true,
@@ -482,50 +485,49 @@ where
                                     ),
                                 }
                             };
-                            if success {
-                                info!(?epoch, "epoch succeeded");
-                            } else {
-                                warn!(?epoch, "epoch failed");
-                            }
-                            storage
-                                .append_epoch(EpochState {
-                                    round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
-                                    output: next_output.clone(),
-                                    share: next_share.clone(),
-                                })
-                                .await;
-
-                            // Acknowledge block processing before callback
-                            response.acknowledge();
-
-                            let update = if success {
-                                Update::Success {
-                                    epoch,
-                                    output: next_output.expect("success => output exists"),
-                                    share: next_share.clone(),
-                                }
-                            } else {
-                                Update::Failure { epoch }
-                            };
-                            if let PostUpdate::Stop = callback.on_update(update).await {
-                                // Close the mailbox to prevent accepting any new messages
-                                drop(self.mailbox);
-                                // Exit last consensus instance to avoid useless work while we wait for shutdown
-                                orchestrator
-                                    .report(orchestrator::Message::Exit(epoch))
-                                    .await;
-                                // Keep running until killed to keep the orchestrator mailbox alive
-                                info!("DKG complete; waiting for shutdown.");
-                                futures::future::pending::<()>().await;
-                                break 'actor;
-                            }
-
-                            epoch_done = true;
+                        if success {
+                            info!(?epoch, "epoch succeeded");
                         } else {
-                            // Acknowledge block processing
-                            response.acknowledge();
+                            warn!(?epoch, "epoch failed");
                         }
+                        storage
+                            .append_epoch(EpochState {
+                                round: next_round,
+                                rng_seed: Summary::random(&mut self.context),
+                                output: next_output.clone(),
+                                share: next_share.clone(),
+                            })
+                            .await;
+
+                        // Acknowledge block processing before callback
+                        response.acknowledge();
+
+                        // Send the callback.
+                        let update = if success {
+                            Update::Success {
+                                epoch,
+                                output: next_output.expect("success => output exists"),
+                                share: next_share.clone(),
+                            }
+                        } else {
+                            Update::Failure { epoch }
+                        };
+
+                        // If the update is stop, wait forever.
+                        if let PostUpdate::Stop = callback.on_update(update).await {
+                            // Close the mailbox to prevent accepting any new messages
+                            drop(self.mailbox);
+                            // Exit last consensus instance to avoid useless work while we wait for shutdown
+                            orchestrator
+                                .report(orchestrator::Message::Exit(epoch))
+                                .await;
+                            // Keep running until killed to keep the orchestrator mailbox alive
+                            info!("DKG complete; waiting for shutdown.");
+                            futures::future::pending::<()>().await;
+                            break 'actor;
+                        }
+
+                        break;
                     }
                 }
             }
