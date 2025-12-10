@@ -7,7 +7,7 @@ use commonware_cryptography::bls12381::primitives::{
     poly::{Eval, Poly, Weight},
     variant::{MinPk, MinSig},
 };
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::non_empty_vec;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -343,12 +343,11 @@ fn fuzz(op: FuzzOperation) {
                 let public_poly = match public.first() {
                     Some((_idx, _)) => {
                         let degree = public.len() as u32 - 1;
-                        let coeffs = vec![
-                            arbitrary_g1(&mut Unstructured::new(&[]))
-                                .unwrap_or(G1::one());
-                            (degree + 1) as usize
+                        let coeffs = non_empty_vec![
+                            arbitrary_g1(&mut Unstructured::new(&[])).unwrap_or(G1::one());
+                            NZUsize!((degree + 1) as usize)
                         ];
-                        Poly::from(NonEmptyVec::try_from(coeffs).unwrap())
+                        Poly::from(coeffs)
                     }
                     None => return,
                 };
@@ -378,12 +377,11 @@ fn fuzz(op: FuzzOperation) {
                 let public_poly = match public.first() {
                     Some((_idx, _)) => {
                         let degree = public.len() as u32 - 1;
-                        let coeffs = vec![
-                            arbitrary_g2(&mut Unstructured::new(&[]))
-                                .unwrap_or(G2::one());
-                            (degree + 1) as usize
+                        let coeffs = non_empty_vec![
+                            arbitrary_g2(&mut Unstructured::new(&[])).unwrap_or(G2::one());
+                            NZUsize!((degree + 1) as usize)
                         ];
-                        Poly::from(NonEmptyVec::try_from(coeffs).unwrap())
+                        Poly::from(coeffs)
                     }
                     None => return,
                 };
@@ -491,7 +489,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
                 let _ = threshold_signature_recover_multiple::<MinPk, _>(
                     threshold,
-                    NonEmptyVec::try_from(groups_refs).unwrap(),
+                    groups_refs,
                     concurrency,
                 );
             }
@@ -509,7 +507,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
                 let _ = threshold_signature_recover_multiple::<MinSig, _>(
                     threshold,
-                    NonEmptyVec::try_from(groups_refs).unwrap(),
+                    groups_refs,
                     concurrency,
                 );
             }

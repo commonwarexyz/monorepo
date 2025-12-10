@@ -10,7 +10,7 @@ use commonware_cryptography::bls12381::primitives::{
     poly::{Eval, Poly},
     variant::{MinPk, MinSig, Variant},
 };
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone)]
@@ -761,8 +761,8 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::PolyNew { degree } => {
             // Skip random polynomial generation that requires RNG
-            let coeffs = vec![Scalar::zero(); (degree + 1) as usize];
-            let _ = Poly::from(NonEmptyVec::try_from(coeffs).unwrap());
+            let coeffs = non_empty_vec![Scalar::zero(); NZUsize!((degree + 1) as usize)];
+            let _ = Poly::from(coeffs);
         }
 
         FuzzOperation::PolyEvaluate { poly, index } => {
