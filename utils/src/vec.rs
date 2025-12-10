@@ -355,44 +355,59 @@ impl<T: Read> Read for NonEmptyVec<T> {
 
 /// Creates a [`NonEmptyVec`] containing the given elements.
 ///
-/// Supports four forms:
-/// - `non_empty_vec![a, b, c]` - creates a vec with the listed elements
-/// - `non_empty_vec![elem; N]` - creates a vec with `N` copies of `elem` (const)
-/// - `non_empty_vec![elem; NZUsize!(N)]` - creates a vec with `N` copies (via macro)
-/// - `non_empty_vec![elem; @n]` - creates a vec with `n` copies of `elem` (runtime)
+/// # Forms
 ///
-/// For the const repeat form (`elem; N`), `N` must be a const expression.
-/// The macro will fail to compile if `N` is 0 or not const.
+/// | Syntax | Count type | Guarantee |
+/// |--------|------------|-----------|
+/// | `non_empty_vec![a, b, c]` | - | Compile-time (at least one element required) |
+/// | `non_empty_vec![elem; N]` | const `usize` | Compile-time (N must be const and > 0) |
+/// | `non_empty_vec![elem; NZUsize!(N)]` | [`NZUsize!`] | Runtime (panics if N == 0) |
+/// | `non_empty_vec![elem; @n]` | [`NonZeroUsize`] | Type-safe (n is already non-zero) |
 ///
-/// For the runtime repeat form (`elem; @n`), `n` must be a [`NonZeroUsize`].
+/// The `@` marker is required for runtime [`NonZeroUsize`] values to distinguish
+/// them from const `usize` values, since declarative macros cannot inspect types.
+///
+/// [`NZUsize!`]: crate::NZUsize
 ///
 /// # Examples
 ///
 /// ```
 /// use commonware_utils::{non_empty_vec, NZUsize};
 ///
+/// // List form
 /// let v = non_empty_vec![1, 2, 3];
 /// assert_eq!(v.len().get(), 3);
-/// assert_eq!(v.first(), &1);
-/// assert_eq!(v.last(), &3);
 ///
-/// // Const repeat (compile-time checked)
+/// // Const repeat: N must be a const expression > 0
 /// let v = non_empty_vec![42; 5];
 /// assert_eq!(v.len().get(), 5);
-/// assert!(v.iter().all(|&x| x == 42));
 ///
-/// // NZUsize! macro form
+/// // NZUsize! form: convenient for inline literals
 /// let v = non_empty_vec![42; NZUsize!(3)];
 /// assert_eq!(v.len().get(), 3);
 ///
-/// // Runtime repeat with NonZeroUsize variable
+/// // Runtime form: use @ with any NonZeroUsize expression
 /// let n = NZUsize!(2);
 /// let v = non_empty_vec![42; @n];
 /// assert_eq!(v.len().get(), 2);
+/// ```
 ///
-/// // These would fail to compile:
-/// // let empty = non_empty_vec![];
-/// // let zero = non_empty_vec![42; 0];
+/// # Compile Errors
+///
+/// ```compile_fail
+/// use commonware_utils::non_empty_vec;
+/// let empty = non_empty_vec![]; // error: no elements
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::non_empty_vec;
+/// let zero = non_empty_vec![42; 0]; // error: count is 0
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::non_empty_vec;
+/// let n: usize = 5;
+/// let v = non_empty_vec![42; n]; // error: n is not const (use @n with NonZeroUsize)
 /// ```
 #[macro_export]
 macro_rules! non_empty_vec {
