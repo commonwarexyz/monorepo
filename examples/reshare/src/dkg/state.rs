@@ -312,13 +312,23 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     }
 
     /// Persists a dealer message for crash recovery.
+    /// Returns false if the dealing was already stored.
     pub async fn append_dealing(
         &mut self,
         epoch: EpochNum,
         dealer: P,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) {
+    ) -> bool {
+        // Check if already stored
+        if self
+            .epochs
+            .get(&epoch)
+            .is_some_and(|cache| cache.dealings.contains_key(&dealer))
+        {
+            return false;
+        }
+
         // Persist to journal
         let section = epoch.get();
         self.msgs
@@ -337,10 +347,21 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         self.get_or_create_epoch(epoch)
             .dealings
             .insert(dealer, (pub_msg, priv_msg));
+        true
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) {
+    /// Returns false if the ack was already stored.
+    pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) -> bool {
+        // Check if already stored
+        if self
+            .epochs
+            .get(&epoch)
+            .is_some_and(|cache| cache.acks.contains_key(&player))
+        {
+            return false;
+        }
+
         // Persist to journal
         let section = epoch.get();
         self.msgs
@@ -354,10 +375,21 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).acks.insert(player, ack);
+        true
     }
 
     /// Persists a finalized dealer log.
-    pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) {
+    /// Returns false if the log was already stored.
+    pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) -> bool {
+        // Check if already stored
+        if self
+            .epochs
+            .get(&epoch)
+            .is_some_and(|cache| cache.logs.contains_key(&dealer))
+        {
+            return false;
+        }
+
         // Persist to journal
         let section = epoch.get();
         self.msgs
@@ -371,6 +403,7 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).logs.insert(dealer, log);
+        true
     }
 
     /// Persists new epoch state, advancing to the next epoch.
