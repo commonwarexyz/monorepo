@@ -237,9 +237,11 @@ impl PoolRef {
     /// didn't fill a whole page. `offset` must be page aligned.
     ///
     /// If the next page index would overflow `u64`, caching stops and the uncached bytes are
-    /// returned. This can only occur with 1-byte pages: for page_size >= 2, the maximum starting
-    /// page (`u64::MAX / page_size`) plus maximum cacheable pages (`usize::MAX / page_size`) never
-    /// exceeds `u64::MAX`.
+    /// returned. This can only occur with 1-byte pages on 64-bit architectures. On 32-bit
+    /// architectures it cannot occur because the buffer length is bounded by `usize::MAX` (2^32-1),
+    /// so even starting at page `u64::MAX` with 1-byte pages, at most 2^32-1 pages can be cached.
+    /// On 64-bit architectures with page_size >= 2, the maximum starting page (`u64::MAX / 2`)
+    /// plus maximum cacheable pages (`usize::MAX / 2`) equals `u64::MAX - 1`.
     ///
     /// # Panics
     ///
