@@ -2088,7 +2088,7 @@ mod tests {
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
-                // Use a long timeouts to prove nullify comes immediately, not from timeout
+                // Use long timeouts to prove nullify comes immediately, not from timeout
                 leader_timeout: Duration::from_secs(10),
                 notarization_timeout: Duration::from_secs(10),
                 nullify_retry: Duration::from_secs(10),
