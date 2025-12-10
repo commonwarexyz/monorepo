@@ -89,7 +89,6 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
-    #[allow(dead_code)]
     pub(crate) fn new(mode: SharingMode, total: NonZeroU32, poly: Public<V>) -> Self {
         Self {
             mode,
