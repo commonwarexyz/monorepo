@@ -1178,7 +1178,7 @@ mod tests {
             metadata.retain(|k, _| !k.as_ref().starts_with(&prefix));
 
             // Remove all remaining keys
-            metadata.retain(|k, _| false);
+            metadata.retain(|_, _| false);
             assert_eq!(metadata.keys().count(), 0);
 
             metadata.destroy().await.unwrap();
