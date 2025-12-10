@@ -1570,4 +1570,48 @@ mod test {
             test_ordered_any_update_collision_edge_case(db).await;
         });
     }
+
+    /// Builds a db with two colliding keys, and creates a new one between them using a batch
+    /// update.
+    #[test_traced("WARN")]
+    fn test_ordered_any_update_batch_create_between_collisions() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_variable_db(context.clone()).await;
+
+            // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
+            // collisions.
+            let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
+            let key2 = FixedBytes::from([0xFFu8, 0xFFu8, 6u8, 6u8]);
+            let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
+            let val = Sha256::fill(1u8);
+
+            db.update(key1.clone(), val).await.unwrap();
+            db.update(key3.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+            assert!(db.get(&key2).await.unwrap().is_none());
+            assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+            // Batch-insert the middle key.
+            let mut batch = db.start_batch();
+            batch.update(key2.clone(), val).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&key1).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, key2);
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key3);
+            let span3 = db.get_span(&key3).await.unwrap().unwrap();
+            assert_eq!(span3.1.next_key, key1);
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
