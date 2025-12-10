@@ -326,9 +326,10 @@ impl<T: Read> Read for NonEmptyVec<T> {
 
 /// Creates a [`NonEmptyVec`] containing the given elements.
 ///
-/// Supports three forms:
+/// Supports four forms:
 /// - `non_empty_vec![a, b, c]` - creates a vec with the listed elements
 /// - `non_empty_vec![elem; N]` - creates a vec with `N` copies of `elem` (const)
+/// - `non_empty_vec![elem; NZUsize!(N)]` - creates a vec with `N` copies (via macro)
 /// - `non_empty_vec![elem; @n]` - creates a vec with `n` copies of `elem` (runtime)
 ///
 /// For the const repeat form (`elem; N`), `N` must be a const expression.
@@ -351,10 +352,14 @@ impl<T: Read> Read for NonEmptyVec<T> {
 /// assert_eq!(v.len().get(), 5);
 /// assert!(v.iter().all(|&x| x == 42));
 ///
-/// // Runtime repeat with NonZeroUsize
-/// let n = NZUsize!(3);
-/// let v = non_empty_vec![42; @n];
+/// // NZUsize! macro form
+/// let v = non_empty_vec![42; NZUsize!(3)];
 /// assert_eq!(v.len().get(), 3);
+///
+/// // Runtime repeat with NonZeroUsize variable
+/// let n = NZUsize!(2);
+/// let v = non_empty_vec![42; @n];
+/// assert_eq!(v.len().get(), 2);
 ///
 /// // These would fail to compile:
 /// // let empty = non_empty_vec![];
@@ -362,6 +367,9 @@ impl<T: Read> Read for NonEmptyVec<T> {
 /// ```
 #[macro_export]
 macro_rules! non_empty_vec {
+    ($elem:expr; NZUsize!($n:expr)) => {{
+        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; $crate::NZUsize!($n).get()])
+    }};
     ($elem:expr; @$n:expr) => {{
         let n: core::num::NonZeroUsize = $n;
         $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; n.get()])
@@ -412,7 +420,12 @@ mod tests {
         assert_eq!(v.len().get(), 1);
         assert_eq!(v.first(), &0);
 
-        // Runtime repeat syntax with NonZeroUsize
+        // NZUsize! macro form
+        let v = non_empty_vec![99; NZUsize!(3)];
+        assert_eq!(v.len().get(), 3);
+        assert!(v.iter().all(|&x| x == 99));
+
+        // Runtime repeat syntax with NonZeroUsize variable
         use core::num::NonZeroUsize;
         let n = NonZeroUsize::new(4).unwrap();
         let v = non_empty_vec![7; @n];
