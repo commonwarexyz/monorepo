@@ -181,7 +181,7 @@
 //! ```
 //! use commonware_cryptography::bls12381::{
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
-//!     primitives::{variant::MinSig, SharingMode},
+//!     primitives::{variant::MinSig, Mode},
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
@@ -210,7 +210,7 @@
 //!     b"application-namespace",
 //!     0,                        // round number
 //!     None,                     // no previous output (initial DKG)
-//!     SharingMode::default(),   // sharing mode
+//!     Mode::default(),   // sharing mode
 //!     dealer_set.clone(),       // dealers
 //!     player_set.clone(),       // players
 //! )?;
@@ -286,7 +286,7 @@ use crate::{
         ops::msm_interpolate,
         poly::{self, new_with_constant, Eval, Poly, Public, Weight},
         variant::Variant,
-        Sharing, SharingMode,
+        Mode, Sharing,
     },
     transcript::{Summary, Transcript},
     Digest, PublicKey, Signer,
@@ -577,7 +577,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         namespace: &[u8],
         round: u64,
         previous: Option<Output<V, P>>,
-        mode: SharingMode,
+        mode: Mode,
         dealers: Set<P>,
         players: Set<P>,
     ) -> Result<Self, Error> {
@@ -1503,7 +1503,7 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
-    mode: SharingMode,
+    mode: Mode,
     players: Set<P>,
 ) -> DealResult<V, P> {
     if players.is_empty() {
@@ -1540,7 +1540,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant>(
     rng: impl CryptoRngCore,
-    mode: SharingMode,
+    mode: Mode,
     n: NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
     let players = (0..n.get()).try_collect().unwrap();
