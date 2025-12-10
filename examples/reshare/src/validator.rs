@@ -316,7 +316,7 @@ mod test {
             }
         }
 
-        async fn start_one_inner<S>(
+        async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
@@ -397,22 +397,6 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
-        async fn start_one(
-            &mut self,
-            ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
-            updates: mpsc::Sender<TeamUpdate>,
-            pk: PublicKey,
-        ) {
-            if self.output.is_none() {
-                self.start_one_inner::<EdScheme>(ctx, oracle, updates, pk)
-                    .await;
-            } else {
-                self.start_one_inner::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
-                    .await;
-            }
-        }
-
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
@@ -433,9 +417,20 @@ mod test {
                 }
             }
 
+            // Start all participants (even if not active at first)
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                self.start_one(ctx, oracle, updates.clone(), pk.clone())
+                if self.output.is_none() {
+                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
+                        .await;
+                } else {
+                    self.start_one::<ThresholdScheme<MinSig>>(
+                        ctx,
+                        oracle,
+                        updates.clone(),
+                        pk.clone(),
+                    )
                     .await;
+                }
             }
         }
     }
@@ -622,7 +617,11 @@ mod test {
                         };
 
                         info!(pk = ?pk, "restarting participant");
-                        team.start_one(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        if team.output.is_none() {
+                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        } else {
+                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                        }
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired
