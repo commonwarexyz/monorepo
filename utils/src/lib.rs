@@ -191,47 +191,71 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
 }
 
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
+/// For literal values, validation occurs at compile time. For expressions, validation
+/// occurs at runtime.
 #[macro_export]
 macro_rules! NZUsize {
+    ($val:literal) => {
+        const { core::num::NonZeroUsize::new($val).expect("value must be non-zero") }
+    };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroUsize::new($val).expect("value must be non-zero")
     };
 }
 
 /// A macro to create a `NonZeroU8` from a value, panicking if the value is zero.
+/// For literal values, validation occurs at compile time. For expressions, validation
+/// occurs at runtime.
 #[macro_export]
 macro_rules! NZU8 {
+    ($val:literal) => {
+        const { core::num::NonZeroU8::new($val).expect("value must be non-zero") }
+    };
     ($val:expr) => {
+        // This will panic at runtime if $val is zero.
         core::num::NonZeroU8::new($val).expect("value must be non-zero")
     };
 }
 
 /// A macro to create a `NonZeroU16` from a value, panicking if the value is zero.
+/// For literal values, validation occurs at compile time. For expressions, validation
+/// occurs at runtime.
 #[macro_export]
 macro_rules! NZU16 {
+    ($val:literal) => {
+        const { core::num::NonZeroU16::new($val).expect("value must be non-zero") }
+    };
     ($val:expr) => {
+        // This will panic at runtime if $val is zero.
         core::num::NonZeroU16::new($val).expect("value must be non-zero")
     };
 }
 
 /// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
+/// For literal values, validation occurs at compile time. For expressions, validation
+/// occurs at runtime.
 #[macro_export]
 macro_rules! NZU32 {
+    ($val:literal) => {
+        const { core::num::NonZeroU32::new($val).expect("value must be non-zero") }
+    };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroU32::new($val).expect("value must be non-zero")
     };
 }
 
 /// A macro to create a `NonZeroU64` from a value, panicking if the value is zero.
+/// For literal values, validation occurs at compile time. For expressions, validation
+/// occurs at runtime.
 #[macro_export]
 macro_rules! NZU64 {
+    ($val:literal) => {
+        const { core::num::NonZeroU64::new($val).expect("value must be non-zero") }
+    };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
 }
@@ -519,17 +543,53 @@ mod tests {
     }
 
     #[test]
-    fn test_non_zero_macros() {
-        // Test case 0: zero value
-        assert!(std::panic::catch_unwind(|| NZUsize!(0)).is_err());
-        assert!(std::panic::catch_unwind(|| NZU32!(0)).is_err());
-        assert!(std::panic::catch_unwind(|| NZU64!(0)).is_err());
-        assert!(std::panic::catch_unwind(|| NZDuration!(Duration::ZERO)).is_err());
-
-        // Test case 1: non-zero value
+    fn test_non_zero_macros_compile_time() {
+        // Literal values are validated at compile time.
+        // NZU32!(0) would be a compile error.
         assert_eq!(NZUsize!(1).get(), 1);
-        assert_eq!(NZU32!(2).get(), 2);
-        assert_eq!(NZU64!(3).get(), 3);
+        assert_eq!(NZU8!(2).get(), 2);
+        assert_eq!(NZU16!(3).get(), 3);
+        assert_eq!(NZU32!(4).get(), 4);
+        assert_eq!(NZU64!(5).get(), 5);
+
+        // Literals can be used in const contexts
+        const _: core::num::NonZeroUsize = NZUsize!(1);
+        const _: core::num::NonZeroU8 = NZU8!(2);
+        const _: core::num::NonZeroU16 = NZU16!(3);
+        const _: core::num::NonZeroU32 = NZU32!(4);
+        const _: core::num::NonZeroU64 = NZU64!(5);
+    }
+
+    #[test]
+    fn test_non_zero_macros_runtime() {
+        // Runtime variables are validated at runtime
+        let one_usize: usize = 1;
+        let two_u8: u8 = 2;
+        let three_u16: u16 = 3;
+        let four_u32: u32 = 4;
+        let five_u64: u64 = 5;
+
+        assert_eq!(NZUsize!(one_usize).get(), 1);
+        assert_eq!(NZU8!(two_u8).get(), 2);
+        assert_eq!(NZU16!(three_u16).get(), 3);
+        assert_eq!(NZU32!(four_u32).get(), 4);
+        assert_eq!(NZU64!(five_u64).get(), 5);
+
+        // Zero runtime values panic
+        let zero_usize: usize = 0;
+        let zero_u8: u8 = 0;
+        let zero_u16: u16 = 0;
+        let zero_u32: u32 = 0;
+        let zero_u64: u64 = 0;
+
+        assert!(std::panic::catch_unwind(|| NZUsize!(zero_usize)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU8!(zero_u8)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU16!(zero_u16)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU32!(zero_u32)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU64!(zero_u64)).is_err());
+
+        // NZDuration is runtime-only since Duration has no literal syntax
+        assert!(std::panic::catch_unwind(|| NZDuration!(Duration::ZERO)).is_err());
         assert_eq!(
             NZDuration!(Duration::from_secs(1)).get(),
             Duration::from_secs(1)
