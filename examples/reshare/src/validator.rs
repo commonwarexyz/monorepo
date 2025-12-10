@@ -221,7 +221,7 @@ mod test {
     struct TeamUpdate {
         pk: PublicKey,
         update: Update<MinSig, PublicKey>,
-        cb_in: oneshot::Sender<PostUpdate>,
+        callback: oneshot::Sender<PostUpdate>,
     }
 
     struct UpdateHandler {
@@ -243,11 +243,19 @@ mod test {
             let mut sender = self.sender.clone();
             let pk = self.pk.clone();
             Box::pin(async move {
-                let (cb_in, cb_out) = oneshot::channel();
-                if sender.send(TeamUpdate { pk, update, cb_in }).await.is_err() {
+                let (callback_sender, callback_receiver) = oneshot::channel();
+                if sender
+                    .send(TeamUpdate {
+                        pk,
+                        update,
+                        callback: callback_sender,
+                    })
+                    .await
+                    .is_err()
+                {
                     return PostUpdate::Stop;
                 };
-                cb_out.await.unwrap_or(PostUpdate::Stop)
+                callback_receiver.await.unwrap_or(PostUpdate::Stop)
             })
         }
     }
@@ -593,7 +601,7 @@ mod test {
                             PostUpdate::Continue
                         };
                         if update
-                            .cb_in
+                            .callback
                             .send(post_update)
                             .is_err() {
                                 error!("update callback closed unexpectedly");
