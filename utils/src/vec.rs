@@ -155,6 +155,35 @@ impl<T> NonEmptyVec<T> {
         }
     }
 
+    /// Provides mutable access to the underlying vector via a closure.
+    ///
+    /// This is an escape hatch for operations not directly exposed by `NonEmptyVec`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the closure leaves the vector empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::non_empty_vec;
+    ///
+    /// let mut v = non_empty_vec![3, 1, 2];
+    /// v.mutate(|vec| vec.sort());
+    /// assert_eq!(v.first(), &1);
+    /// ```
+    pub fn mutate<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Vec<T>) -> R,
+    {
+        let result = f(&mut self.0);
+        assert!(
+            !self.0.is_empty(),
+            "NonEmptyVec::mutate: closure left vector empty"
+        );
+        result
+    }
+
     /// Consumes the [`NonEmptyVec`] and returns the underlying [`Vec`].
     pub fn into_vec(self) -> Vec<T> {
         self.0
@@ -576,6 +605,28 @@ mod tests {
         // Cannot remove the last element
         assert_eq!(v.remove(0), None);
         assert_eq!(&*v, &[3]);
+    }
+
+    #[test]
+    fn test_mutate() {
+        let mut v = non_empty_vec![3, 1, 2, 1];
+        v.mutate(|vec| {
+            vec.sort();
+            vec.dedup();
+        });
+        assert_eq!(&*v, &[1, 2, 3]);
+
+        // Test that return value is propagated
+        let mut v = non_empty_vec![1, 2, 3];
+        let sum: i32 = v.mutate(|vec| vec.iter().sum());
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "closure left vector empty")]
+    fn test_mutate_panics_on_empty() {
+        let mut v = non_empty_vec![1];
+        v.mutate(|vec| vec.clear());
     }
 
     #[test]
