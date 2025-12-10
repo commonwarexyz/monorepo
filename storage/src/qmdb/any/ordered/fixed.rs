@@ -14,10 +14,7 @@ use crate::{
             ordered::{IndexedLog, Operation as OperationTrait},
             FixedConfig as Config,
         },
-        operation::{
-            fixed::{ordered::Operation, Value},
-            KeyData,
-        },
+        operation::{fixed::Value, FixedOrderedOperation as Operation, KeyData},
         Error,
     },
     translator::Translator,
@@ -25,6 +22,7 @@ use crate::{
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use std::marker::PhantomData;
 
 impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V, next_key: K) -> Self {
@@ -40,7 +38,7 @@ impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
     }
 
     fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
+        Self::CommitFloor(metadata, location, PhantomData)
     }
 }
 
@@ -191,7 +189,7 @@ mod test {
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(metadata, _) => {
+                Operation::CommitFloor(metadata, _, _) => {
                     db.commit(metadata).await.unwrap();
                 }
             }

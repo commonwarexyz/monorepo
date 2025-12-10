@@ -11,10 +11,7 @@ use crate::{
     qmdb::{
         any::{ordered::fixed::Any, CleanAny, DirtyAny},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{
-            fixed::{ordered::Operation, Value},
-            Committable as _, KeyData, Keyed,
-        },
+        operation::{fixed::Value, Committable as _, FixedOrderedOperation as Operation, KeyData, Keyed},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -26,7 +23,7 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
-use std::num::NonZeroU64;
+use std::{marker::PhantomData, num::NonZeroU64};
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -203,7 +200,7 @@ impl<
             ExclusionProofInfo::Commit((loc, metadata, chunk)) => {
                 // Handle the case where the proof shows the db is empty, hence any key is proven
                 // excluded.
-                let op = Operation::<K, V>::CommitFloor(metadata, loc);
+                let op = Operation::<K, V>::CommitFloor(metadata, loc, PhantomData);
                 (loc, chunk, op)
             }
             ExclusionProofInfo::DbEmpty => {
@@ -539,7 +536,7 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc, PhantomData);
 
         self.any.apply_commit_op(commit_op).await?;
 

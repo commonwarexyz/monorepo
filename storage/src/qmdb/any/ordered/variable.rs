@@ -17,10 +17,7 @@ use crate::{
             ordered::{IndexedLog, Operation as OperationTrait},
             VariableConfig,
         },
-        operation::{
-            variable::{ordered::Operation, Value},
-            Committable as _, KeyData,
-        },
+        operation::{variable::Value, Committable as _, KeyData, VariableOrderedOperation as Operation},
         Error,
     },
     translator::Translator,
@@ -29,6 +26,7 @@ use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use std::marker::PhantomData;
 
 impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V, next_key: K) -> Self {
@@ -44,7 +42,7 @@ impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
     }
 
     fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
+        Self::CommitFloor(metadata, location, PhantomData)
     }
 }
 

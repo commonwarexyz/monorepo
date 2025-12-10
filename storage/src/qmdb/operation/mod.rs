@@ -13,6 +13,11 @@ use thiserror::Error;
 pub mod fixed;
 mod unordered;
 pub use unordered::{Encoding, Fixed, FixedOperation, Operation, Variable, VariableOperation};
+mod ordered;
+pub use ordered::{
+    FixedOperation as FixedOrderedOperation, Operation as OrderedOperation,
+    VariableOperation as VariableOrderedOperation,
+};
 pub mod variable;
 
 // Context byte prefixes for identifying the operation type.
