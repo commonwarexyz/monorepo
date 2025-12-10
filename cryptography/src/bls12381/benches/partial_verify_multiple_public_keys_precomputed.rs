@@ -1,8 +1,12 @@
-use commonware_cryptography::bls12381::{
-    dkg::{self, ops::evaluate_all},
-    primitives::{self, variant::MinSig},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::deal,
+        primitives::{self, variant::MinSig},
+    },
+    ed25519::PrivateKey,
+    PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -20,10 +24,15 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                     b.iter_batched(
                         || {
                             let mut rng = StdRng::seed_from_u64(0);
-                            let (polynomial, shares) =
-                                dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-                            let polynomial = evaluate_all::<MinSig>(&polynomial, n);
+                            let players = (0..n)
+                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                .try_collect()
+                                .unwrap();
+                            let (output, shares) =
+                                deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
+                            let polynomial = output.public().evaluate_all(n);
                             let signatures = shares
+                                .values()
                                 .iter()
                                 .enumerate()
                                 .map(|(idx, s)| {
@@ -42,7 +51,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 .collect::<Vec<_>>();
                             (rng, polynomial, signatures)
                         },
-                        |(mut rng, polynomial, mut signatures)| {
+                        |(mut rng, polynomial, mut signatures): (_, _, Vec<_>)| {
                             // Shuffle faults
                             if invalid > 0 {
                                 signatures.shuffle(&mut rng);

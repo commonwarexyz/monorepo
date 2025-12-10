@@ -1,20 +1,23 @@
 //! Local network setup.
-
-use commonware_codec::{Decode, Encode, RangeCfg};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
-        primitives::{
-            group::Share,
-            poly::{self, Public},
-            variant::MinSig,
-        },
+        dkg::{deal, Output},
+        primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum, NZU32};
-use rand::{rngs::OsRng, seq::IteratorRandom};
+use commonware_utils::{
+    from_hex, hex,
+    ordered::{Map, Set},
+    quorum, TryCollect, NZU32,
+};
+use rand::{
+    rngs::{OsRng, StdRng},
+    seq::IteratorRandom,
+    SeedableRng,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -32,8 +35,8 @@ pub struct ParticipantConfig {
     /// The bootstrapper node identities.
     #[serde(with = "serde_peer_map")]
     pub bootstrappers: HashMap<PublicKey, SocketAddr>,
-    /// The group polynomial, as a hex-encoded string.
-    pub polynomial: Option<String>,
+    /// The output (containing public information) as a hex string.
+    pub output: Option<String>,
     /// The validator's ed25519 signing key.
     ///
     /// Used for P2P, and in the DKG bootstrap phase, for consensus message signing.
@@ -46,11 +49,14 @@ pub struct ParticipantConfig {
 
 impl ParticipantConfig {
     /// Get the polynomial commitment for the DKG.
-    pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
-        self.polynomial.as_ref().map(|raw| {
+    pub fn output(&self, max_participants_per_round: u32) -> Option<Output<MinSig, PublicKey>> {
+        self.output.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
-            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &RangeCfg::exact(NZU32!(threshold)))
-                .expect("failed to decode polynomial")
+            Output::<MinSig, PublicKey>::decode_cfg(
+                &mut bytes.as_slice(),
+                &NZU32!(max_participants_per_round),
+            )
+            .expect("failed to decode polynomial")
         })
     }
 
@@ -68,20 +74,56 @@ impl ParticipantConfig {
 
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerConfig {
-    /// The number of participants per epoch.
-    pub num_participants_per_epoch: u32,
+pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
+    /// The number of participants per round.
+    ///
+    /// This is a vec which cycles through different numbers in each round.
+    ///
+    /// This MUST be non-empty.
+    ///
+    /// E.g. `vec![3, 4]` will start with 3 participants, then use 4, then use
+    /// 3, etc.
+    pub num_participants_per_round: Vec<u32>,
     /// All active peer public keys.
-    #[serde(with = "serde_hex_vec")]
-    pub active: Vec<PublicKey>,
-    /// All inactive peer public keys.
-    #[serde(with = "serde_hex_vec")]
-    pub inactive: Vec<PublicKey>,
+    #[serde(with = "serde_hex_ordered")]
+    pub participants: Set<P>,
 }
 
-impl PeerConfig {
-    pub fn threshold(&self) -> u32 {
-        quorum(self.num_participants_per_epoch)
+impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
+    /// Returns the maximum number of participants per round.
+    pub fn max_participants_per_round(&self) -> u32 {
+        self.num_participants_per_round
+            .iter()
+            .copied()
+            .max()
+            .expect("num_participants_per_round must not be empty")
+    }
+
+    /// Returns the number of participants in the given round.
+    pub fn num_participants_in_round(&self, round: u64) -> u32 {
+        self.num_participants_per_round
+            [(round % self.num_participants_per_round.len() as u64) as usize]
+    }
+
+    /// Pick the dealers for a particular round.
+    ///
+    /// The first round will use the first [`Self::num_participants_in_round`] players
+    /// as the dealers.
+    ///
+    /// Subsequent rounds will their corresponding [`Self::num_participants_in_round`], and
+    /// so on.
+    pub fn dealers(&self, round: u64) -> Set<P> {
+        let p_iter = self.participants.iter().cloned();
+        let to_choose = self.num_participants_in_round(round) as usize;
+        if round == 0 {
+            return p_iter.take(to_choose).try_collect().unwrap();
+        }
+        let mut rng = StdRng::seed_from_u64(round);
+        p_iter
+            .choose_multiple(&mut rng, to_choose)
+            .into_iter()
+            .try_collect()
+            .unwrap()
     }
 }
 
@@ -92,7 +134,7 @@ pub fn run(args: super::SetupArgs) {
         return;
     }
 
-    fs::create_dir_all(&args.datadir).unwrap();
+    fs::create_dir_all(&args.datadir).expect("failed to create data directory");
 
     let (polynomial, identities) = generate_identities(
         args.with_dkg,
@@ -133,42 +175,52 @@ fn generate_identities(
     is_dkg: bool,
     num_peers: u32,
     num_participants_per_epoch: u32,
-) -> (Option<Public<MinSig>>, Vec<(PrivateKey, Option<Share>)>) {
-    // Generate consensus key
-    let threshold = quorum(num_participants_per_epoch);
-    let (polynomial, shares) = if is_dkg {
-        (None, Vec::new())
-    } else {
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(
-            &mut OsRng,
-            None,
-            num_participants_per_epoch,
-            threshold,
-        );
-        info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
-        (Some(polynomial), shares)
-    };
-
-    // Assign shares to peers (those not participating in the first epoch get no share.)
-    let mut shares = shares.into_iter().map(Some).collect::<Vec<_>>();
-    shares.resize(num_peers as usize, None);
-
+) -> (
+    Option<Output<MinSig, PublicKey>>,
+    Vec<(PrivateKey, Option<Share>)>,
+) {
     // Generate p2p private keys
-    let mut peer_signers = (0..num_peers)
+    let peer_signers = (0..num_peers)
         .map(|_| PrivateKey::from_rng(&mut OsRng))
         .collect::<Vec<_>>();
-    peer_signers.sort_by_key(|signer| signer.public_key());
 
-    let identities = peer_signers.into_iter().zip(shares).collect::<Vec<_>>();
-
+    // Generate consensus key
+    let threshold = quorum(num_participants_per_epoch);
+    let all_participants: Set<PublicKey> = peer_signers
+        .iter()
+        .map(|s| s.public_key())
+        .try_collect()
+        .unwrap();
+    let (output, shares) = if is_dkg {
+        (None, Map::default())
+    } else {
+        let (output, shares) = deal(
+            OsRng,
+            all_participants
+                .iter()
+                .take(num_participants_per_epoch as usize)
+                .cloned()
+                .try_collect()
+                .unwrap(),
+        )
+        .expect("deal failed: should have sufficient players");
+        (Some(output), shares)
+    };
     info!(num_peers, threshold, "generated participant identities");
-    (polynomial, identities)
+    let identities = peer_signers
+        .into_iter()
+        .map(|s| {
+            let share = shares.get_value(&s.public_key()).cloned();
+            (s, share)
+        })
+        .collect::<Vec<_>>();
+    (output, identities)
 }
 
 /// Generates all [ParticipantConfig] files from the provided identities.
 fn generate_configs(
     args: &super::SetupArgs,
-    polynomial: Option<&Public<MinSig>>,
+    output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
     let bootstrappers = identities
@@ -190,49 +242,30 @@ fn generate_configs(
         let participant_config = ParticipantConfig {
             port: args.base_port + index as u16,
             bootstrappers: bootstrappers.clone(),
-            polynomial: polynomial.map(|polynomial| hex(polynomial.encode().as_ref())),
+            output: output.map(|o| hex(o.encode().as_ref())),
             signing_key: signer.clone(),
             share: share.clone(),
         };
-        let config_file = File::create(&config_path).unwrap();
-        serde_json::to_writer_pretty(config_file, &participant_config).unwrap();
+        let config_file =
+            File::create(&config_path).expect("failed to create participant config file");
+        serde_json::to_writer_pretty(config_file, &participant_config)
+            .expect("failed to serialize participant config");
 
         configs.push(config_path);
     }
     info!("wrote participant configurations");
 
-    let peers = if args.with_dkg {
-        PeerConfig {
-            num_participants_per_epoch: args.num_participants_per_epoch,
-            active: identities
-                .iter()
-                .map(|(signer, _)| signer.public_key())
-                .take(args.num_participants_per_epoch as usize)
-                .collect(),
-            inactive: identities
-                .iter()
-                .map(|(signer, _)| signer.public_key())
-                .skip(args.num_participants_per_epoch as usize)
-                .take((args.num_peers - args.num_participants_per_epoch) as usize)
-                .collect(),
-        }
-    } else {
-        PeerConfig {
-            num_participants_per_epoch: args.num_participants_per_epoch,
-            active: identities
-                .iter()
-                .filter(|(_, share)| share.is_some())
-                .map(|(signer, _)| signer.public_key())
-                .collect(),
-            inactive: identities
-                .iter()
-                .filter(|(_, share)| share.is_none())
-                .map(|(signer, _)| signer.public_key())
-                .collect(),
-        }
+    let peers = PeerConfig {
+        num_participants_per_round: vec![args.num_participants_per_epoch],
+        participants: identities
+            .iter()
+            .map(|(signer, _)| signer.public_key())
+            .try_collect()
+            .unwrap(),
     };
-    let peers_file = File::create(args.datadir.join("peers.json")).unwrap();
-    serde_json::to_writer_pretty(peers_file, &peers).unwrap();
+    let peers_file =
+        File::create(args.datadir.join("peers.json")).expect("failed to create peers config file");
+    serde_json::to_writer_pretty(peers_file, &peers).expect("failed to serialize peers config");
     info!("wrote peers map");
 
     configs
@@ -274,7 +307,7 @@ mod serde_hex {
     }
 }
 
-mod serde_hex_vec {
+mod serde_hex_ordered {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_utils::from_hex;
@@ -284,7 +317,7 @@ mod serde_hex_vec {
         Deserializer, Serializer,
     };
 
-    pub fn serialize<T, S>(value: &[T], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<T, S>(value: &Set<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Encode,
         S: Serializer,
@@ -293,18 +326,18 @@ mod serde_hex_vec {
         serializer.collect_seq(value.iter().map(|v| hex(&v.encode())))
     }
 
-    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Set<T>, D::Error>
     where
-        T: DecodeExt<()>,
+        T: Ord + DecodeExt<()>,
         D: Deserializer<'de>,
     {
         struct HexVecVisitor<T>(std::marker::PhantomData<T>);
 
         impl<'de, T> Visitor<'de> for HexVecVisitor<T>
         where
-            T: DecodeExt<()>,
+            T: Ord + DecodeExt<()>,
         {
-            type Value = Vec<T>;
+            type Value = Set<T>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a sequence of hex-encoded values")
@@ -322,7 +355,7 @@ mod serde_hex_vec {
 
                     out.push(T::decode(&mut bytes.as_ref()).map_err(serde::de::Error::custom)?);
                 }
-                Ok(out)
+                Set::try_from(out).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
             }
         }
 

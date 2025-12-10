@@ -149,7 +149,8 @@ impl<
             .expect("update operation must have key data"))
     }
 
-    /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
+    /// Finds and returns the location and KeyData for the lexicographically-last key produced by
+    /// `iter`, skipping over locations that are beyond the log's range.
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
@@ -157,6 +158,12 @@ impl<
         #[allow(clippy::type_complexity)]
         let mut last_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
         for &loc in iter {
+            if loc >= self.op_count() {
+                // Don't try to look up operations that don't yet exist in the log. This can happen
+                // when there are translated key conflicts between a created key and its
+                // previous-key.
+                continue;
+            }
             let data = Self::get_update_op(&self.log, loc).await?;
             if let Some(ref other_key) = last_key {
                 if data.key > other_key.1.key {
@@ -335,7 +342,8 @@ impl<
             return Ok(UpdateLocResult::NotExists(prev_key));
         }
 
-        // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
+        // Unusual case where there is no previous key, in which case we cycle around to the
+        // greatest key.
         let iter = self.snapshot.last_translated_key();
         let last_key = self.last_key_in_iter(iter).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
@@ -358,7 +366,6 @@ impl<
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
-        let keys = self.active_keys;
         #[allow(clippy::type_complexity)]
         let mut best_prev_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
         {
@@ -398,32 +405,16 @@ impl<
                 }
             }
 
-            if keys != 1 || best_prev_key.is_some() {
-                // For the special case handled below around the snapshot having only one translated
-                // key, avoid inserting the key into the snapshot here otherwise we'll confuse the
-                // subsequent search for the best_prev_key.
-                cursor.insert(next_loc);
-                callback(None);
-            }
-        }
-
-        if keys == 1 && best_prev_key.is_none() {
-            // In this special case, our key precedes all keys in the snapshot, thus we need to
-            // "cycle around" to the very last key. But this key must share the same translated
-            // key since there's only one.
-            let iter = self.snapshot.get(key);
-            best_prev_key = self.last_key_in_iter(iter).await?;
-            assert!(
-                best_prev_key.is_some(),
-                "best_prev_key should have been found"
-            );
-            self.snapshot.insert(key, next_loc);
+            // If we get here, a new key is being created. Insert its location into the snapshot.
+            cursor.insert(next_loc);
             callback(None);
         }
 
+        // Update `next_key` for the previous key to point to the newly created key.
         let Some((loc, prev_key_data)) = best_prev_key else {
-            // The previous key was not found, meaning it does not share the same translated key.
-            // This should be the common case when collisions are rare.
+            // The previous key has not yet been found, meaning it does not share the same
+            // translated key, or it precedes all other keys in the ordering requiring we link
+            // it to the last key instead.
             return self
                 .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
                 .await;
@@ -1113,13 +1104,14 @@ mod test {
         deterministic::{Context, Runner},
         Runner as _,
     };
+    use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
+    type FixedDb = fixed::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap, Clean<Digest>>;
+    type VariableDb = variable::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Clean<Digest>>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_fixed_db(context: Context) -> FixedDb {
@@ -1140,7 +1132,7 @@ mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     {
         let mut hasher = Standard::<Sha256>::new();
         assert_eq!(db.op_count(), 0);
@@ -1153,7 +1145,7 @@ mod test {
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
-        let d1 = Sha256::fill(1u8);
+        let d1 = FixedBytes::from([1u8; 4]);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
         let mut db = db.into_dirty();
@@ -1210,12 +1202,12 @@ mod test {
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
-        let key1 = Sha256::fill(1u8);
-        let key2 = Sha256::fill(2u8);
+        let key1 = FixedBytes::from([1u8; 4]);
+        let key2 = FixedBytes::from([2u8; 4]);
         let val1 = Sha256::fill(3u8);
         let val2 = Sha256::fill(4u8);
 
@@ -1223,23 +1215,23 @@ mod test {
         assert!(db.get(&key2).await.unwrap().is_none());
 
         let mut db = db.into_dirty();
-        assert!(db.create(key1, val1).await.unwrap());
+        assert!(db.create(key1.clone(), val1).await.unwrap());
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        assert!(db.create(key2, val2).await.unwrap());
+        assert!(db.create(key2.clone(), val2).await.unwrap());
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
-        db.delete(key1).await.unwrap();
+        db.delete(key1.clone()).await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.update(key1, new_val).await.unwrap();
+        db.update(key1.clone(), new_val).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.update(key2, new_val).await.unwrap();
+        db.update(key2.clone(), new_val).await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
@@ -1250,12 +1242,12 @@ mod test {
         let mut db = db.into_dirty();
 
         // Make sure create won't modify active keys.
-        assert!(!db.create(key1, val1).await.unwrap());
+        assert!(!db.create(key1.clone(), val1).await.unwrap());
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
         // Delete all keys.
-        assert!(db.delete(key1).await.unwrap());
-        assert!(db.delete(key2).await.unwrap());
+        assert!(db.delete(key1.clone()).await.unwrap());
+        assert!(db.delete(key2.clone()).await.unwrap());
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
@@ -1266,14 +1258,14 @@ mod test {
         // Multiple deletions of the same key should be a no-op.
         let prev_op_count = db.op_count();
         let mut db = db.into_dirty();
-        assert!(!db.delete(key1).await.unwrap());
+        assert!(!db.delete(key1.clone()).await.unwrap());
         assert_eq!(db.op_count(), prev_op_count);
         let db = db.merkleize().await.unwrap();
         assert_eq!(db.root(), root);
         let mut db = db.into_dirty();
 
         // Deletions of non-existent keys should be a no-op.
-        let key3 = Sha256::fill(6u8);
+        let key3 = FixedBytes::from([6u8; 4]);
         assert!(!db.delete(key3).await.unwrap());
         assert_eq!(db.op_count(), prev_op_count);
 
@@ -1288,11 +1280,11 @@ mod test {
         let mut db = db.into_dirty();
 
         // Re-activate the keys by updating them.
-        db.update(key1, val1).await.unwrap();
-        db.update(key2, val2).await.unwrap();
-        db.delete(key1).await.unwrap();
-        db.update(key2, val1).await.unwrap();
-        db.update(key1, val2).await.unwrap();
+        db.update(key1.clone(), val1).await.unwrap();
+        db.update(key2.clone(), val2).await.unwrap();
+        db.delete(key1.clone()).await.unwrap();
+        db.update(key2.clone(), val1).await.unwrap();
+        db.update(key1.clone(), val2).await.unwrap();
 
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
@@ -1334,6 +1326,51 @@ mod test {
         executor.start(|context| async move {
             let db = open_variable_db(context.clone()).await;
             test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+
+    /// Builds a db with colliding keys to make sure the "cycle around when there are translated
+    /// key collisions" edge case is exercised.
+    async fn test_ordered_any_update_collision_edge_case<D>(db: D)
+    where
+        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    {
+        // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
+        // collisions.
+        let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
+        let key2 = FixedBytes::from([0xFFu8, 0xFFu8, 6u8, 6u8]);
+        // Our last must precede the others to trigger previous-key cycle around.
+        let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 0u8, 0u8]);
+        let val = Sha256::fill(1u8);
+
+        let mut db = db.into_dirty();
+        db.update(key1.clone(), val).await.unwrap();
+        db.update(key2.clone(), val).await.unwrap();
+        db.update(key3.clone(), val).await.unwrap();
+
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
+        assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+        let db = db.merkleize().await.unwrap();
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_update_collision_edge_case_fixed() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_update_collision_edge_case(db).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_update_collision_edge_case_variable() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_variable_db(context.clone()).await;
+            test_ordered_any_update_collision_edge_case(db).await;
         });
     }
 }

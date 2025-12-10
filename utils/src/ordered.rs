@@ -44,6 +44,12 @@ impl<T: fmt::Debug> fmt::Debug for Set<T> {
     }
 }
 
+impl<T> Default for Set<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
 impl<T: Ord> Set<T> {
     /// Creates a new [`Set`] from an iterator, removing duplicates.
     ///
@@ -303,6 +309,15 @@ impl<K: Ord, V> Map<K, V> {
         Self {
             keys: Set(keys),
             values,
+        }
+    }
+}
+
+impl<K, V> Default for Map<K, V> {
+    fn default() -> Self {
+        Self {
+            keys: Set::default(),
+            values: Vec::new(),
         }
     }
 }
@@ -571,6 +586,14 @@ impl<K, V> DoubleEndedIterator for MapIntoIter<K, V> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BiMap<K, V> {
     inner: Map<K, V>,
+}
+
+impl<K, V> Default for BiMap<K, V> {
+    fn default() -> Self {
+        Self {
+            inner: Map::default(),
+        }
+    }
 }
 
 impl<K, V> BiMap<K, V> {

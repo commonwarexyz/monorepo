@@ -1,62 +1,112 @@
-use super::{Mailbox, Message};
+use super::{
+    state::{Dealer, Epoch as EpochState, Player, Storage},
+    Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
+};
 use crate::{
-    dkg::{manager::RoundResult, DealOutcome, DkgManager},
+    namespace,
     orchestrator::{self, EpochTransition},
-    setup::ParticipantConfig,
+    setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::{Epoch, EpochDelta},
-    utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
+    types::Epoch,
+    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{player::Output, types::Ack},
-        primitives::{group::Share, poly::Public, variant::Variant},
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
+        primitives::{group::Share, variant::Variant},
     },
-    Hasher, Signer,
+    transcript::Summary,
+    Digest as _, Hasher, PublicKey, Signer,
 };
-use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::metadata::Metadata;
-use commonware_utils::{
-    fixed_bytes, hex,
-    ordered::Set,
-    quorum,
-    sequence::{FixedBytes, U64},
-    Acknowledgement, TryCollect, NZU32,
+use commonware_macros::select_loop;
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
+use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
-use prometheus_client::metrics::counter::Counter;
-use rand::{
-    rngs::StdRng,
-    seq::{IteratorRandom, SliceRandom},
-    SeedableRng,
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
+    RateLimiter,
 };
 use rand_core::CryptoRngCore;
-use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
-use tracing::info;
+use std::num::NonZeroU32;
+use tracing::{debug, info, warn};
 
-const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
+/// Rate limiter for messages.
+type RateLimit<K, E> =
+    RateLimiter<K, HashMapStateStore<K>, E, NoOpMiddleware<<E as GClock>::Instant>>;
 
-pub struct Config<C, P> {
+/// Wire message type for DKG protocol communication.
+pub enum Message<V: Variant, P: PublicKey> {
+    /// A dealer message containing public and private components for a player.
+    Dealer(DealerPubMsg<V>, DealerPrivMsg),
+    /// A player acknowledgment sent back to a dealer.
+    Ack(PlayerAck<P>),
+}
+
+impl<V: Variant, P: PublicKey> Write for Message<V, P> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Self::Dealer(pub_msg, priv_msg) => {
+                0u8.write(writer);
+                pub_msg.write(writer);
+                priv_msg.write(writer);
+            }
+            Self::Ack(ack) => {
+                1u8.write(writer);
+                ack.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
+            Self::Ack(ack) => ack.encode_size(),
+        }
+    }
+}
+
+impl<V: Variant, P: PublicKey> Read for Message<V, P> {
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let tag = u8::read(reader)?;
+        match tag {
+            0 => {
+                let pub_msg = DealerPubMsg::read_cfg(reader, cfg)?;
+                let priv_msg = DealerPrivMsg::read(reader)?;
+                Ok(Self::Dealer(pub_msg, priv_msg))
+            }
+            1 => {
+                let ack = PlayerAck::read(reader)?;
+                Ok(Self::Ack(ack))
+            }
+            _ => Err(CodecError::Invalid("dkg::Message", "Invalid type")),
+        }
+    }
+}
+
+pub struct Config<C: Signer, P> {
     pub manager: P,
-    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
-    pub namespace: Vec<u8>,
     pub signer: C,
-    pub num_participants_per_epoch: u32,
     pub mailbox_size: usize,
-    pub rate_limit: Quota,
-
     pub partition_prefix: String,
+    pub peer_config: PeerConfig<C::PublicKey>,
+    pub rate_limit: Quota,
 }
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -64,20 +114,16 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    participant_config: Option<(PathBuf, ParticipantConfig)>,
-    namespace: Vec<u8>,
-    mailbox: mpsc::Receiver<Message<H, C, V>>,
+    mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
     signer: C,
-    num_participants_per_epoch: u32,
-    rate_limit: Quota,
-    round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
-    epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, EpochState<V>>,
-    failed_rounds: Counter,
+    peer_config: PeerConfig<C::PublicKey>,
+    rate_limiter: RateLimit<C::PublicKey, E>,
+    partition_prefix: String,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -85,53 +131,18 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
-        let context = ContextCell::new(context);
-
-        // Initialize a metadata store for epoch and round information.
-        //
-        // **Both of these metadata stores persist private key material to disk. In a production
-        // environment, this key material should both be stored securely and deleted permanently
-        // after use.**
-        let epoch_metadata = Metadata::init(
-            context.with_label("epoch_metadata"),
-            commonware_storage::metadata::Config {
-                partition: format!("{}_current_epoch", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch),
-            },
-        )
-        .await
-        .expect("failed to initialize epoch metadata");
-        let round_metadata = Metadata::init(
-            context.with_label("round_metadata"),
-            commonware_storage::metadata::Config {
-                partition: format!("{}_dkg_rounds", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch),
-            },
-        )
-        .await
-        .expect("failed to initialize dkg round metadata");
-
-        let failed_rounds = Counter::default();
-        context.register(
-            "failed_rounds",
-            "Number of failed DKG/reshare rounds",
-            failed_rounds.clone(),
-        );
-
+        let rate_limiter =
+            RateLimiter::hashmap_with_clock(config.rate_limit, context.with_label("rate_limiter"));
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 manager: config.manager,
-                participant_config: config.participant_config,
-                namespace: config.namespace,
                 mailbox,
                 signer: config.signer,
-                num_participants_per_epoch: config.num_participants_per_epoch,
-                rate_limit: config.rate_limit,
-                round_metadata,
-                epoch_metadata,
-                failed_rounds,
+                peer_config: config.peer_config,
+                rate_limiter,
+                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
@@ -140,551 +151,441 @@ where
     /// Start the DKG actor.
     pub fn start(
         mut self,
-        initial_public: Option<Public<V>>,
-        initial_share: Option<Share>,
-        active_participants: Vec<C::PublicKey>,
-        inactive_participants: Vec<C::PublicKey>,
+        output: Option<Output<V, C::PublicKey>>,
+        share: Option<Share>,
         orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
-        dkg_chan: (
+        dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
         // cryptographic operations.
         spawn_cell!(
             self.context,
-            self.run(
-                initial_public,
-                initial_share,
-                active_participants,
-                inactive_participants,
-                orchestrator,
-                dkg_chan
-            )
-            .await
+            self.run(output, share, orchestrator, dkg, callback).await
         )
     }
 
     async fn run(
         mut self,
-        initial_public: Option<Public<V>>,
-        initial_share: Option<Share>,
-        active_participants: Vec<C::PublicKey>,
-        inactive_participants: Vec<C::PublicKey>,
+        output: Option<Output<V, C::PublicKey>>,
+        share: Option<Share>,
         mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
-        let is_dkg = initial_public.is_none();
+        let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
+        let is_dkg = output.is_none();
+
+        // Initialize persistent state
+        let mut storage = Storage::init(
+            self.context.with_label("storage"),
+            &self.partition_prefix,
+            max_read_size,
+        )
+        .await;
+        if storage.epoch().is_none() {
+            let initial_state = EpochState {
+                round: 0,
+                rng_seed: Summary::random(&mut self.context),
+                output,
+                share,
+            };
+            storage.append_epoch(initial_state).await;
+        }
 
         // Start a muxer for the physical channel used by DKG/reshare
         let (mux, mut dkg_mux) =
             Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
         mux.start();
 
-        // Collect all contributors (active + inactive.)
-        //
-        // In a practical application, all possible participants would not be known ahead of time,
-        // and pulled from a registry (e.g. an on-chain stake registry for a PoS chain.)
-        //
-        // For the sake of the example, we assume a fixed set of contributors that can be selected
-        // from.
-        let (current_epoch, current_public, current_share) =
-            if let Some(state) = self.epoch_metadata.get(&EPOCH_METADATA_KEY).cloned() {
-                (state.epoch, state.public, state.share)
+        'actor: loop {
+            // Get latest epoch and state
+            let (epoch, epoch_state) = storage.epoch().expect("epoch should be initialized");
+
+            // Prune everything older than the previous epoch
+            if let Some(prev) = epoch.previous() {
+                storage.prune(prev).await;
+            }
+
+            // Initialize dealer and player sets
+            let (dealers, players, next_players) = if is_dkg {
+                (
+                    self.peer_config.participants.clone(),
+                    self.peer_config.dealers(0),
+                    Set::<C::PublicKey>::default(),
+                )
             } else {
-                (Epoch::zero(), initial_public, initial_share)
-            };
-        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let (dealers, mut players) = Self::select_participants(
-            current_epoch,
-            self.num_participants_per_epoch,
-            active_participants,
-            inactive_participants,
-        );
-
-        // If we're performing DKG, dealers == players.
-        if is_dkg {
-            players = dealers.clone();
-        }
-
-        // Inform the orchestrator of the epoch transition
-        let dealers: Set<_> = dealers.try_into().expect("participants are unique");
-        let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
-            epoch: current_epoch,
-            poly: current_public.clone(),
-            share: current_share.clone(),
-            dealers: dealers.clone(),
-        };
-        orchestrator
-            .report(orchestrator::Message::Enter(transition))
-            .await;
-
-        // Register the initial set of peers.
-        //
-        // Any given peer set includes:
-        // - Dealers and players for the active epoch
-        // - Players for the next epoch
-        let peers = Set::from_iter_dedup(dealers.clone().into_iter().chain(players.clone()).chain(
-            Self::choose_from_all(
-                &all_participants,
-                self.num_participants_per_epoch,
-                current_epoch.next(),
-            ),
-        ));
-        self.manager.update(current_epoch.get(), peers).await;
-
-        // Initialize the DKG manager for the first round.
-        let mut manager = DkgManager::init(
-            &mut self.context,
-            self.namespace.clone(),
-            current_epoch,
-            current_public,
-            current_share,
-            &mut self.signer,
-            dealers,
-            players
-                .into_iter()
-                .try_collect::<Set<_>>()
-                .expect("participants are unique"),
-            &mut dkg_mux,
-            self.rate_limit,
-            &mut self.round_metadata,
-        )
-        .await;
-
-        while let Some(message) = self.mailbox.next().await {
-            match message {
-                Message::Act { response } => {
-                    let outcome = manager.take_deal_outcome();
-
-                    if let Some(ref outcome) = outcome {
-                        info!(
-                            n_acks = outcome.acks.len(),
-                            n_reveals = outcome.reveals.len(),
-                            "including reshare outcome in proposed block"
-                        );
-                    }
-
-                    let _ = response.send(outcome);
+                // In reshare mode, the initial dealer set must exactly match the players that
+                // hold shares from the prior output.
+                let dealers = self.peer_config.dealers(epoch_state.round);
+                let previous_players = epoch_state.output.as_ref().unwrap().players();
+                if epoch_state.round == 0 {
+                    assert_eq!(
+                        &dealers, previous_players,
+                        "dealers for round 0 must equal previous output players"
+                    );
+                } else {
+                    assert!(
+                        dealers
+                            .iter()
+                            .all(|d| previous_players.position(d).is_some()),
+                        "dealers for round {} must be drawn from previous output players",
+                        epoch_state.round
+                    );
                 }
-                Message::Finalized { block, response } => {
-                    let epoch = epoch(BLOCKS_PER_EPOCH, block.height);
-                    let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
-                    // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 0 && !epoch.is_zero() {
-                        orchestrator
-                            .report(orchestrator::Message::Exit(
-                                epoch.previous().expect("checked to be non-zero above"),
-                            ))
-                            .await;
-                    }
+                (
+                    dealers,
+                    self.peer_config.dealers(epoch_state.round + 1),
+                    self.peer_config.dealers(epoch_state.round + 2),
+                )
+            };
 
-                    // While not done in the example, an implementor could choose to mark a deal outcome as
-                    // "sent" as to not re-include it in future blocks in the event of a dealer node's
-                    // shutdown.
-                    //
-                    // if let Some(deal_outcome) = &block.deal_outcome {
-                    //     info!(
-                    //         epoch,
-                    //         n_acks = deal_outcome.acks.len(),
-                    //         n_reveals = deal_outcome.reveals.len(),
-                    //         "recording included deal outcome from block"
-                    //     );
-                    //     ...
-                    // }
+            // Any given peer set includes:
+            // - Dealers and players for the active epoch
+            // - Players for the next epoch
+            self.manager
+                .update(
+                    epoch.get(),
+                    Set::from_iter_dedup(
+                        dealers
+                            .iter()
+                            .cloned()
+                            .chain(players.iter().cloned())
+                            .chain(next_players.into_iter()),
+                    ),
+                )
+                .await;
 
-                    // Split the epoch into a "send" and "post" phase.
-                    //
-                    // In the first half of the epoch, dealers continuously distribute shares and process
-                    // acknowledgements from players.
-                    //
-                    // In the second half of the epoch, dealers include their commitment, acknowledgements,
-                    // and any share reveals in blocks. Players process these deal outcomes to gather
-                    // all of the information needed to reconstruct their new shares and the new group
-                    // polynomial.
-                    let epoch_transition = is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height);
-                    match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
-                        Ordering::Less => {
-                            // Continuously distribute shares to any players who haven't acknowledged
-                            // receipt yet.
-                            manager.distribute(epoch.get()).await;
+            let self_pk = self.signer.public_key();
+            let am_dealer = dealers.position(&self_pk).is_some();
+            let am_player = players.position(&self_pk).is_some();
 
-                            // Process any incoming messages from other dealers/players.
-                            manager.process_messages(epoch.get()).await;
-                        }
-                        Ordering::Equal => {
-                            // Process any final messages from other dealers/players.
-                            manager.process_messages(epoch.get()).await;
+            // Inform the orchestrator of the epoch transition
+            let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
+                epoch,
+                poly: epoch_state.output.as_ref().map(|o| o.public().clone()),
+                share: epoch_state.share.clone(),
+                dealers: dealers.clone(),
+            };
+            orchestrator
+                .report(orchestrator::Message::Enter(transition))
+                .await;
 
-                            // At the midpoint of the epoch, construct the deal outcome for inclusion.
-                            manager.construct_deal_outcome(epoch.get()).await;
-                        }
-                        Ordering::Greater => {
-                            // Process any incoming deal outcomes from dealing contributors.
-                            manager.process_block(epoch.get(), block).await;
-                        }
-                    }
+            // Register a channel for this round
+            let (mut round_sender, mut round_receiver) = dkg_mux
+                .register(epoch.get())
+                .await
+                .expect("should be able to create channel");
 
-                    // Attempt to transition epochs.
-                    if let Some(epoch) = epoch_transition {
-                        let (next_dealers, next_public, next_share, success) =
-                            match manager.finalize(epoch.get()).await {
-                                (
-                                    next_dealers,
-                                    RoundResult::Output(Output { public, share }),
-                                    success,
-                                ) => (next_dealers, Some(public), Some(share), success),
-                                (next_dealers, RoundResult::Polynomial(public), success) => {
-                                    (next_dealers, Some(public), None, success)
-                                }
-                                (next_dealers, RoundResult::None, success) => {
-                                    (next_dealers, None, None, success)
+            // Prepare round info
+            let round = Info::new(
+                namespace::APPLICATION,
+                epoch.get(),
+                epoch_state.output.clone(),
+                dealers,
+                players.clone(),
+            )
+            .expect("round info configuration should be correct");
+
+            // Initialize dealer state if we are a dealer (factory handles log submission check)
+            let mut dealer_state: Option<Dealer<V, C>> = am_dealer
+                .then(|| {
+                    storage.create_dealer(
+                        epoch,
+                        self.signer.clone(),
+                        round.clone(),
+                        epoch_state.share.clone(),
+                        epoch_state.rng_seed,
+                    )
+                })
+                .flatten();
+
+            // Initialize player state if we are a player
+            let mut player_state: Option<Player<V, C>> = am_player
+                .then(|| storage.create_player(epoch, self.signer.clone(), round.clone()))
+                .flatten();
+
+            select_loop! {
+                self.context,
+                on_stopped => {
+                    break 'actor;
+                },
+                // Process incoming network messages
+                network_msg = round_receiver.recv() => {
+                    match network_msg {
+                        Ok((sender_pk, msg_bytes)) => {
+                            let msg = match Message::<V, C::PublicKey>::read_cfg(
+                                &mut msg_bytes.clone(),
+                                &max_read_size,
+                            ) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
+                                    continue;
                                 }
                             };
-
-                        if !success {
-                            self.failed_rounds.inc();
+                            match msg {
+                                Message::Dealer(pub_msg, priv_msg) => {
+                                    if let Some(ref mut ps) = player_state {
+                                        let response = ps
+                                            .handle(
+                                                &mut storage,
+                                                epoch,
+                                                sender_pk.clone(),
+                                                pub_msg,
+                                                priv_msg,
+                                            )
+                                            .await;
+                                        if let Some(ack) = response {
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            if let Err(e) = round_sender
+                                                .send(Recipients::One(sender_pk.clone()), payload, true)
+                                                .await
+                                            {
+                                                warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                                            }
+                                        }
+                                    }
+                                }
+                                Message::Ack(ack) => {
+                                    if let Some(ref mut ds) = dealer_state {
+                                        ds.handle(&mut storage, epoch, sender_pk, ack).await;
+                                    }
+                                }
+                            }
                         }
-
-                        info!(
-                            success,
-                            %epoch,
-                            ?next_public,
-                            "finalized epoch's reshare; instructing reconfiguration after reshare.",
-                        );
-                        let next_epoch = epoch.next();
-
-                        // Persist the next epoch information
-                        let epoch_state = EpochState {
-                            epoch: next_epoch,
-                            public: next_public.clone(),
-                            share: next_share.clone(),
-                        };
-                        self.epoch_metadata
-                            .put_sync(EPOCH_METADATA_KEY, epoch_state)
-                            .await
-                            .expect("epoch metadata must update");
-
-                        // Prune the round metadata for two epochs ago (if this block is replayed,
-                        // we may still need the old metadata)
-                        if let Some(epoch) = next_epoch.checked_sub(EpochDelta::new(2)) {
-                            self.round_metadata.remove(&epoch.into());
-                            self.round_metadata
-                                .sync()
-                                .await
-                                .expect("metadata must sync");
+                        Err(err) => {
+                            // Network closed
+                            warn!(?err, "network closed");
+                            break 'actor;
                         }
+                    }
+                },
+                mailbox_msg = self.mailbox.next() => {
+                    let Some(mailbox_msg) = mailbox_msg else {
+                        warn!("dkg actor mailbox closed");
+                        break 'actor;
+                    };
+                    match mailbox_msg {
+                        MailboxMessage::Act { response } => {
+                            let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
+                            if outcome.is_some() {
+                                info!("including reshare outcome in proposed block");
+                            }
+                            if response.send(outcome).is_err() {
+                                warn!("dkg actor could not send response to Act");
+                            }
+                        }
+                        MailboxMessage::Finalized { block, response } => {
+                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
+                            let relative_height =
+                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
+                            let mid_point = BLOCKS_PER_EPOCH / 2;
+                            info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
-                        // If the DKG succeeded, exit.
-                        if is_dkg && next_public.is_some() {
-                            // Dump the share and group polynomial to disk so that it can be
-                            // used by the validator process.
-                            //
-                            // In a production setting, care should be taken to ensure the
-                            // share is stored securely.
-                            if let Some((path, config)) = self.participant_config.take() {
-                                config.update_and_write(path.as_path(), |config| {
-                                    config.polynomial =
-                                        next_public.map(|p| hex(p.encode().as_ref()));
-                                    config.share = next_share;
-                                });
+                            // Skip blocks from previous epochs (can happen on restart if we
+                            // persisted state but crashed before acknowledging)
+                            if block_epoch < epoch {
+                                response.acknowledge();
+                                continue;
                             }
 
-                            let self_idx = all_participants
-                                .position(&self.signer.public_key())
-                                .expect("self must be a participant");
-                            info!(
-                                participant = self_idx,
-                                "dkg completed successfully, persisted outcome."
-                            );
+                            // Inform the orchestrator of the epoch exit after first finalization
+                            if relative_height == 0 {
+                                if let Some(prev) = block_epoch.previous() {
+                                    orchestrator.report(orchestrator::Message::Exit(prev)).await;
+                                }
+                            }
+
+                            // Process dealer log from block if present
+                            if let Some(log) = block.log {
+                                if let Some((dealer, dealer_log)) = log.check(&round) {
+                                    // If we see our dealing outcome in a finalized block,
+                                    // make sure to take it, so that we don't post
+                                    // it in subsequent blocks
+                                    if dealer == self_pk {
+                                        if let Some(ref mut ds) = dealer_state {
+                                            ds.take_finalized();
+                                        }
+                                    }
+                                    storage.append_log(epoch, dealer, dealer_log).await;
+                                }
+                            }
+
+                            // In the first half of the epoch, continuously distribute shares
+                            if relative_height < mid_point {
+                                if let Some(ref mut ds) = dealer_state {
+                                    Self::distribute_shares(
+                                        &self_pk,
+                                        &mut storage,
+                                        epoch,
+                                        &self.rate_limiter,
+                                        ds,
+                                        player_state.as_mut(),
+                                        &mut round_sender,
+                                    )
+                                    .await;
+                                }
+                            }
+
+                            // At or past the midpoint, finalize dealer if not already done.
+                            // The >= check handles restart after midpoint acknowledgment.
+                            if relative_height >= mid_point {
+                                if let Some(ref mut ds) = dealer_state {
+                                    ds.finalize();
+                                }
+                            }
+
+                            // Continue if not the last block in the epoch
+                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                                // Acknowledge block processing
+                                response.acknowledge();
+                                continue;
+                            }
+
+                            // Finalize the round before acknowledging
+                            let logs = storage.logs(epoch);
+                            let (success, next_round, next_output, next_share) =
+                                if let Some(ps) = player_state.take() {
+                                    match ps.finalize(logs, 1) {
+                                        Ok((new_output, new_share)) => (
+                                            true,
+                                            epoch_state.round + 1,
+                                            Some(new_output),
+                                            Some(new_share),
+                                        ),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
+                                } else {
+                                    match observe(round.clone(), logs, 1) {
+                                        Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
+                                };
+                            if success {
+                                info!(?epoch, "epoch succeeded");
+                            } else {
+                                warn!(?epoch, "epoch failed");
+                            }
+                            storage
+                                .append_epoch(EpochState {
+                                    round: next_round,
+                                    rng_seed: Summary::random(&mut self.context),
+                                    output: next_output.clone(),
+                                    share: next_share.clone(),
+                                })
+                                .await;
+
+                            // Acknowledge block processing before callback
+                            response.acknowledge();
+
+                            // Send the callback.
+                            let update = if success {
+                                Update::Success {
+                                    epoch,
+                                    output: next_output.expect("ceremony output exists"),
+                                    share: next_share.clone(),
+                                }
+                            } else {
+                                Update::Failure { epoch }
+                            };
+
+                            // If the update is stop, wait forever.
+                            if let PostUpdate::Stop = callback.on_update(update).await {
+                                // Close the mailbox to prevent accepting any new messages
+                                drop(self.mailbox);
+                                // Exit last consensus instance to avoid useless work while we wait for shutdown
+                                orchestrator
+                                    .report(orchestrator::Message::Exit(epoch))
+                                    .await;
+                                // Keep running until killed to keep the orchestrator mailbox alive
+                                info!("DKG complete; waiting for shutdown...");
+                                futures::future::pending::<()>().await;
+                                break 'actor;
+                            }
 
                             break;
                         }
-
-                        let next_players = if is_dkg {
-                            // Use the same set of participants for DKG - if we enter a new epoch,
-                            // the DKG failed, and we do not want to change the set of participants.
-                            next_dealers.clone()
-                        } else {
-                            // Pseudorandomly select some random players to receive shares for the next epoch.
-                            Self::choose_from_all(
-                                &all_participants,
-                                self.num_participants_per_epoch,
-                                next_epoch,
-                            )
-                            .try_into()
-                            .expect("participants are unique")
-                        };
-
-                        // Register the players for the next epoch
-                        //
-                        // Any given peer set includes:
-                        // - Dealers and players for the active epoch
-                        // - Players for the next epoch
-                        let next_peers = Set::from_iter_dedup(
-                            next_dealers
-                                .clone()
-                                .into_iter()
-                                .chain(next_players.clone())
-                                .chain(Self::choose_from_all(
-                                    &all_participants,
-                                    self.num_participants_per_epoch,
-                                    next_epoch.next(),
-                                )),
-                        );
-                        self.manager.update(next_epoch.get(), next_peers).await;
-
-                        // Inform the orchestrator of the epoch transition
-                        let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
-                            epoch: next_epoch,
-                            poly: next_public.clone(),
-                            share: next_share.clone(),
-                            dealers: next_dealers.clone(),
-                        };
-                        orchestrator
-                            .report(orchestrator::Message::Enter(transition))
-                            .await;
-
-                        // Rotate the manager to begin a new round.
-                        manager = DkgManager::init(
-                            &mut self.context,
-                            self.namespace.clone(),
-                            next_epoch,
-                            next_public,
-                            next_share,
-                            &mut self.signer,
-                            next_dealers,
-                            next_players,
-                            &mut dkg_mux,
-                            self.rate_limit,
-                            &mut self.round_metadata,
-                        )
-                        .await;
                     }
+                },
+            }
+        }
+        info!("exiting DKG actor");
+    }
 
-                    // Wait to acknowledge until the block has been processed by the application.
-                    //
-                    // If we did not block on processing the block, marshal could continue processing finalized blocks and start
-                    // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
-                    // and not willing to enter the next epoch).
-                    response.acknowledge();
-                    info!(%epoch, relative_height, "finalized block");
+    async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
+        self_pk: &C::PublicKey,
+        storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
+        epoch: Epoch,
+        rate_limiter: &RateLimit<C::PublicKey, E>,
+        dealer_state: &mut Dealer<V, C>,
+        mut player_state: Option<&mut Player<V, C>>,
+        sender: &mut S,
+    ) {
+        for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
+            // Rate limit sends
+            if rate_limiter.check_key(&player).is_err() {
+                debug!(?epoch, ?player, "rate limited; skipping share send");
+                continue;
+            }
+
+            // Handle self-dealing if we are both dealer and player
+            if player == *self_pk {
+                if let Some(ref mut ps) = player_state {
+                    // Handle as player
+                    let ack = match ps
+                        .handle(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .await
+                    {
+                        Some(ack) => ack,
+                        _ => continue,
+                    };
+
+                    // Handle our own ack as dealer
+                    dealer_state
+                        .handle(storage, epoch, self_pk.clone(), ack)
+                        .await;
+                }
+                continue;
+            }
+
+            // Send to remote player
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
+                .encode()
+                .freeze();
+            match sender
+                .send(Recipients::One(player.clone()), payload, true)
+                .await
+            {
+                Ok(success) => {
+                    if success.is_empty() {
+                        debug!(?epoch, ?player, "failed to send share");
+                    } else {
+                        debug!(?epoch, ?player, "sent share");
+                    }
+                }
+                Err(e) => {
+                    warn!(?epoch, ?player, ?e, "error sending share");
                 }
             }
         }
-
-        // If the initial DKG was just performed, keep running until forcible exit.
-        if is_dkg {
-            // Close the mailbox to prevent accepting any new messages.
-            drop(self.mailbox);
-
-            // Exit last consensus instance to avoid useless work while we wait for shutdown (we
-            // won't need to finalize further blocks after the DKG completes).
-            orchestrator
-                .report(orchestrator::Message::Exit(current_epoch))
-                .await;
-
-            // Keep running until killed to keep the orchestrator mailbox alive, allowing
-            // peers that may have gone offline to catch up.
-            //
-            // The initial DKG process will never be exited automatically, assuming coordination
-            // between participants is manual.
-            info!("DKG complete...waiting for shutdown");
-            futures::future::pending::<()>().await;
-        }
-
-        info!("mailbox closed, exiting.");
-    }
-
-    fn select_participants(
-        current_epoch: Epoch,
-        num_participants: u32,
-        active_participants: Vec<C::PublicKey>,
-        inactive_participants: Vec<C::PublicKey>,
-    ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
-        let epoch0_players = Self::players_for_initial_epoch(
-            inactive_participants.clone(),
-            &active_participants,
-            num_participants,
-        );
-        if current_epoch.is_zero() {
-            return (active_participants, epoch0_players);
-        }
-
-        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let dealers = if current_epoch == Epoch::new(1) {
-            epoch0_players
-        } else {
-            Self::choose_from_all(
-                &all_participants,
-                num_participants,
-                current_epoch
-                    .previous()
-                    .expect("checked to be non-zero above"),
-            )
-        };
-        let players = Self::choose_from_all(&all_participants, num_participants, current_epoch);
-
-        (dealers, players)
-    }
-
-    fn players_for_initial_epoch(
-        mut candidates: Vec<C::PublicKey>,
-        fallback: &[C::PublicKey],
-        target: u32,
-    ) -> Vec<C::PublicKey> {
-        let target = target as usize;
-        match candidates.len().cmp(&target) {
-            Ordering::Less => {
-                let mut rng = StdRng::seed_from_u64(0);
-                let additions = fallback
-                    .choose_multiple(&mut rng, target - candidates.len())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                candidates.extend(additions);
-                candidates
-            }
-            Ordering::Greater => {
-                candidates.truncate(target);
-                candidates
-            }
-            Ordering::Equal => candidates,
-        }
-    }
-
-    fn choose_from_all(
-        participants: &Set<C::PublicKey>,
-        num_participants: u32,
-        seed: Epoch,
-    ) -> Vec<C::PublicKey> {
-        let mut rng = StdRng::seed_from_u64(seed.get());
-        participants
-            .iter()
-            .cloned()
-            .choose_multiple(&mut rng, num_participants as usize)
-    }
-
-    fn collect_all(
-        active_participants: &[C::PublicKey],
-        inactive_participants: &[C::PublicKey],
-    ) -> Set<C::PublicKey> {
-        Set::from_iter_dedup(
-            active_participants
-                .iter()
-                .chain(inactive_participants.iter())
-                .cloned(),
-        )
-    }
-}
-
-#[derive(Clone)]
-struct EpochState<V: Variant> {
-    epoch: Epoch,
-    public: Option<Public<V>>,
-    share: Option<Share>,
-}
-
-impl<V: Variant> Write for EpochState<V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.epoch.write(buf);
-        self.public.write(buf);
-        self.share.write(buf);
-    }
-}
-
-impl<V: Variant> EncodeSize for EpochState<V> {
-    fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.public.encode_size() + self.share.encode_size()
-    }
-}
-
-impl<V: Variant> Read for EpochState<V> {
-    type Cfg = u32;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            epoch: Epoch::read(buf)?,
-            public: Option::<Public<V>>::read_cfg(buf, &RangeCfg::exact(NZU32!(*cfg)))?,
-            share: Option::<Share>::read_cfg(buf, &())?,
-        })
-    }
-}
-
-#[allow(clippy::type_complexity)]
-pub(crate) struct RoundInfo<V: Variant, C: Signer> {
-    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
-    pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
-    pub local_outcome: Option<DealOutcome<C, V>>,
-    pub outcomes: Vec<DealOutcome<C, V>>,
-}
-
-impl<V: Variant, C: Signer> Default for RoundInfo<V, C> {
-    fn default() -> Self {
-        Self {
-            deal: None,
-            received_shares: Vec::new(),
-            local_outcome: None,
-            outcomes: Vec::new(),
-        }
-    }
-}
-
-impl<V: Variant, C: Signer> Write for RoundInfo<V, C> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.deal.write(buf);
-        self.received_shares.write(buf);
-        self.local_outcome.write(buf);
-        self.outcomes.write(buf);
-    }
-}
-
-impl<V: Variant, C: Signer> EncodeSize for RoundInfo<V, C> {
-    fn encode_size(&self) -> usize {
-        self.deal.encode_size()
-            + self.received_shares.encode_size()
-            + self.local_outcome.encode_size()
-            + self.outcomes.encode_size()
-    }
-}
-
-impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
-    // The consensus quorum
-    type Cfg = u32;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            deal: Option::<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
-                buf,
-                &(
-                    RangeCfg::exact(NZU32!(*cfg)),
-                    (RangeCfg::from(0..usize::MAX), ()),
-                    (RangeCfg::from(0..usize::MAX), ((), ())),
-                ),
-            )?,
-            received_shares: Vec::<(C::PublicKey, Public<V>, Share)>::read_cfg(
-                buf,
-                &(
-                    RangeCfg::from(0..usize::MAX),
-                    ((), RangeCfg::exact(NZU32!(*cfg)), ()),
-                ),
-            )?,
-            local_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
-            outcomes: Vec::<DealOutcome<C, V>>::read_cfg(
-                buf,
-                &(RangeCfg::from(0..usize::MAX), *cfg),
-            )?,
-        })
     }
 }

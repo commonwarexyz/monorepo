@@ -180,7 +180,7 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg2::{Dealer, Player, Info, SignedDealerLog, observe},
+//!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
 //!     primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
@@ -324,8 +324,6 @@ pub enum Error {
     NumDealers(usize),
     #[error("invalid number of players: {0}")]
     NumPlayers(usize),
-    #[error("duplicate players")]
-    DuplicatePlayers,
     #[error("dkg failed for some reason")]
     DkgFailed,
 }
@@ -1366,17 +1364,13 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
-    players: impl IntoIterator<Item = P>,
+    players: Set<P>,
 ) -> DealResult<V, P> {
-    let players: Set<_> = players
-        .into_iter()
-        .try_collect()
-        .map_err(|_| Error::DuplicatePlayers)?;
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
-    let private = poly::new_from(t - 1, &mut rng);
+    let private = poly::new_from(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
         .enumerate()
@@ -1407,7 +1401,8 @@ pub fn deal_anonymous<V: Variant>(
     rng: impl CryptoRngCore,
     n: NonZeroU32,
 ) -> (Poly<V::Public>, Vec<Share>) {
-    let (output, shares) = deal::<V, _>(rng, 0..n.get()).expect("players is > 0");
+    let players = (0..n.get()).try_collect().unwrap();
+    let (output, shares) = deal::<V, _>(rng, players).unwrap();
     (output.public().clone(), shares.values().to_vec())
 }
 
@@ -1923,7 +1918,7 @@ mod test_plan {
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
-                        "Round {i_round} should have failed but succeeded"
+                        "Round {i_round} should have failed but succeeded",
                     );
                     continue;
                 }
@@ -2129,12 +2124,13 @@ mod test_plan {
                     if !round
                         .expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32))
                     {
-                        last_successful_players = Some(round.players.iter().cloned().collect());
+                        last_successful_players =
+                            Some(round.players.iter().copied().try_collect().unwrap());
                     }
                     rounds.push(round);
                     Ok(ControlFlow::Continue(()))
                 })?;
-                let plan = Plan {
+                let plan = Self {
                     num_participants: NZU32!(num_participants),
                     rounds,
                 };

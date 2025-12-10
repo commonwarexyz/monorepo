@@ -1,8 +1,12 @@
-use commonware_cryptography::bls12381::{
-    dkg,
-    primitives::{self, variant::MinSig},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::deal,
+        primitives::{self, variant::MinSig},
+    },
+    ed25519::PrivateKey,
+    PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -20,9 +24,14 @@ fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let mut rng = StdRng::seed_from_u64(0);
-                            let (polynomial, shares) =
-                                dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+                            let players = (0..n)
+                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                .try_collect()
+                                .unwrap();
+                            let (output, shares) =
+                                deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
                             let signatures = shares
+                                .values()
                                 .iter()
                                 .enumerate()
                                 .map(|(idx, s)| {
@@ -39,7 +48,7 @@ fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
                                     }
                                 })
                                 .collect::<Vec<_>>();
-                            (rng, polynomial, signatures)
+                            (rng, output.public().clone(), signatures)
                         },
                         |(mut rng, polynomial, mut signatures)| {
                             // Shuffle faults

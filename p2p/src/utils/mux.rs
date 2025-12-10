@@ -10,7 +10,7 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -30,6 +30,12 @@ pub enum Error {
     Closed,
     #[error("recv failed")]
     RecvFailed,
+}
+
+/// Parse a muxed message into its subchannel and payload.
+pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
+    let subchannel: Channel = UInt::read(&mut bytes)?.into();
+    Ok((subchannel, bytes))
 }
 
 /// Control messages for the [Muxer].
@@ -137,11 +143,10 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             },
             // Process network messages.
             message = self.receiver.recv() => {
-                let (pk, mut bytes) = message?;
-
-                // Decode message: varint(subchannel) || bytes
-                let subchannel: Channel = match UInt::read(&mut bytes) {
-                    Ok(v) => v.into(),
+                // Decode the message.
+                let (pk, bytes) = message?;
+                let (subchannel, bytes) = match parse(bytes) {
+                    Ok(parsed) => parsed,
                     Err(_) => {
                         debug!(?pk, "invalid message: missing subchannel");
                         continue;
