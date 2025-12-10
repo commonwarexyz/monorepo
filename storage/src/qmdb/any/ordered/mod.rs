@@ -1620,4 +1620,38 @@ mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Builds a db with one key, and then creates another non-colliding key preceeding it in a
+    /// batch. The prev_key search will have to "cycle around" in order to find the correct next_key
+    /// value.
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_create_with_cycling_next_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let mid_key = FixedBytes::from([0xAAu8; 4]);
+            let val = Sha256::fill(1u8);
+
+            db.create(mid_key.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Batch-insert a preceeding non-translated-colliding key.
+            let preceeding_key = FixedBytes::from([0x55u8; 4]);
+            let mut batch = db.start_batch();
+            assert!(batch.create(preceeding_key.clone(), val).await.unwrap());
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&preceeding_key).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, mid_key);
+            let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, preceeding_key);
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
