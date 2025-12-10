@@ -183,6 +183,8 @@ pub mod tests {
         Runner as _,
     };
     use core::{fmt::Debug, future::Future};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::collections::HashSet;
 
     pub trait TestKey: Array {
         fn from_seed(seed: u8) -> Self;
@@ -350,8 +352,8 @@ pub mod tests {
         Ok(())
     }
 
-    /// Create an empty db, write a small # of keys, then delete half, then update them again. Also
-    /// includes a delete_unchecked of an inactive key.
+    /// Create an empty db, write a small # of keys, then delete half, then recreate those that were
+    /// deleted. Also includes a delete_unchecked of an inactive key.
     async fn test_update_delete_update<D, F, Fut>(new_db: &mut F) -> Result<(), Error>
     where
         F: FnMut() -> Fut,
@@ -370,10 +372,15 @@ pub mod tests {
         }
         db.commit().await?;
 
-        // Delete half of the keys.
+        // Delete half of the keys at random.
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut deleted = HashSet::new();
         let mut batch = db.start_batch();
-        for i in 0..50 {
-            batch.delete(D::Key::from_seed(i)).await?;
+        for i in 0..100 {
+            if rng.gen_bool(0.5) {
+                deleted.insert(i);
+                assert!(batch.delete(D::Key::from_seed(i)).await?);
+            }
         }
         // Try to delete an inactive key.
         batch.delete_unchecked(D::Key::from_seed(255)).await?;
@@ -381,43 +388,32 @@ pub mod tests {
         // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
         db.commit().await?;
-        for i in 0..50 {
-            assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
-        }
-        for i in 50..100 {
-            assert_eq!(
-                Store::get(&db, &D::Key::from_seed(i)).await?,
-                Some(D::Value::from_seed(i))
-            );
+        for i in 0..100 {
+            if deleted.contains(&i) {
+                assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
+            } else {
+                assert_eq!(
+                    Store::get(&db, &D::Key::from_seed(i)).await?,
+                    Some(D::Value::from_seed(i))
+                );
+            }
         }
 
-        // Update half the keys, create 50 new ones.
+        // Recreate the deleted keys.
         let mut batch = db.start_batch();
-        for i in 50..100 {
-            batch
-                .update(D::Key::from_seed(i), D::Value::from_seed(i + 100))
-                .await?;
-        }
-        for i in 100..150 {
-            batch
-                .create(D::Key::from_seed(i), D::Value::from_seed(i))
-                .await?;
+        for i in 0..100 {
+            if deleted.contains(&i) {
+                batch
+                    .create(D::Key::from_seed(i), D::Value::from_seed(i))
+                    .await?;
+            }
         }
 
         // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
         db.commit().await?;
 
-        for i in 0..50 {
-            assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
-        }
-        for i in 50..100 {
-            assert_eq!(
-                Store::get(&db, &D::Key::from_seed(i)).await?,
-                Some(D::Value::from_seed(i + 100))
-            );
-        }
-        for i in 100..150 {
+        for i in 0..100 {
             assert_eq!(
                 Store::get(&db, &D::Key::from_seed(i)).await?,
                 Some(D::Value::from_seed(i))
