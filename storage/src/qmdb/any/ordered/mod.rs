@@ -1180,7 +1180,6 @@ where
             let Some(value) = value else {
                 continue; // can happen from attempt to delete a non-existent key
             };
-
             created.insert(key.clone(), value);
 
             // Any newly created key must be a next_key for some remaining key.
@@ -1192,7 +1191,14 @@ where
         let mut locations = Vec::new();
         for key in deleted.iter().chain(created.keys()) {
             let iter = self.snapshot.prev_translated_key(key);
+            let count = locations.len();
             locations.extend(iter.copied());
+            if locations.len() == count {
+                // If there is no previous translated key then this must be first, and we may need
+                // to cycle around to the last key.
+                let iter = self.snapshot.last_translated_key();
+                locations.extend(iter.copied());
+            }
         }
         locations.sort();
         locations.dedup();

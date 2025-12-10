@@ -12,7 +12,10 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Bound::{Excluded, Unbounded},
+};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
@@ -60,7 +63,7 @@ fn fuzz(data: FuzzInput) {
         let mut batch = Some(db.start_batch());
         let mut last_commit = None;
 
-        let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut expected_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
 
         for op in data.operations.iter().take(MAX_OPS) {
@@ -157,6 +160,22 @@ fn fuzz(data: FuzzInput) {
                         v_bytes, expected_value,
                         "Final value mismatch for key {key:?}"
                     );
+                    // check the span is correct.
+                    let span = db
+                        .get_span(&k)
+                        .await
+                        .expect("get span should not fail")
+                        .expect("span should exist");
+                    let expected_next = expected_state.range((Excluded(*key), Unbounded)).next();
+                    match expected_next {
+                        Some((next_key, _)) => {
+                            assert_eq!(span.1.next_key, Key::new(*next_key));
+                        }
+                        None => {
+                            let first_key = expected_state.first_key_value().unwrap().0;
+                            assert_eq!(span.1.next_key, Key::new(*first_key));
+                        }
+                    }
                 }
                 None => {
                     assert!(
