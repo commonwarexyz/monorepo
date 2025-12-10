@@ -61,13 +61,15 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
+    use bytes::Bytes;
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
@@ -2018,5 +2020,200 @@ mod tests {
         no_resolver_boomerang(bls12381_multisig::<MinPk, _>);
         no_resolver_boomerang(bls12381_multisig::<MinSig, _>);
         no_resolver_boomerang(ed25519);
+    }
+
+    /// Tests that when proposal verification fails, the voter emits a nullify vote
+    /// immediately rather than waiting for the timeout.
+    fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Initialize voter actor (use participant[1] so we're NOT the leader for view 1)
+            let signing = schemes[1].clone();
+            let me = participants[1].clone();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (10.0, 0.0), // 10ms verification latency
+            };
+            let (mut actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            // Configure application to always fail verification
+            actor.set_fail_verification(true);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_verify_fail_test_{me}"),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                // Use a long timeouts to prove nullify comes immediately, not from timeout
+                leader_timeout: Duration::from_secs(10),
+                notarization_timeout: Duration::from_secs(10),
+                nullify_retry: Duration::from_secs(10),
+                activity_timeout,
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let (vote_sender, _vote_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (certificate_sender, _certificate_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    finalized,
+                    active,
+                    ..
+                } => {
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
+                    active.send(true).unwrap();
+                }
+                _ => panic!("expected Update message"),
+            }
+
+            // Advance to view 2 with a finalization so the parent payload is available and timeouts
+            // are not expired by the initial `expire_round` call.
+            let view1 = View::new(1);
+            let view2 = View::new(2);
+            let proposal_v1 = Proposal::new(
+                Round::new(Epoch::new(333), view1),
+                View::zero(),
+                Sha256::hash(b"v1"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_v1, quorum);
+            mailbox
+                .resolved(Certificate::Finalization(finalization))
+                .await;
+
+            // Wait for the view 2 update and confirm we are not the leader (so we verify).
+            let leader = loop {
+                match batcher_receiver.next().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        finalized,
+                        active,
+                        ..
+                    } => {
+                        active.send(true).unwrap();
+                        if current == view2 {
+                            assert_ne!(leader, 1);
+                            assert_eq!(finalized, view1);
+                            break participants[leader as usize].clone();
+                        }
+                    }
+                    batcher::Message::Constructed(Vote::Nullify(_)) => {
+                        // Ignore startup nullify from the expired initial view.
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            };
+
+            // Send a proposal for view 2 (where we are a verifier).
+            let proposal_v2 = Proposal::new(
+                Round::new(Epoch::new(333), view2),
+                view1,
+                Sha256::hash(b"v2"),
+            );
+            // Broadcast the payload contents so verification can complete (the automaton waits for
+            // the contents via the relay).
+            let contents = (proposal_v2.round, proposal_v1.payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal_v2.payload, Bytes::from(contents)))
+                .await;
+            mailbox.proposal(proposal_v2).await;
+
+            // Wait for nullify vote for view 2. Since timeouts are 10s, receiving it within 1s
+            // proves it came from verification failure, not timeout.
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == view2 => {
+                                break;
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!("expected nullify for view 2 within 1s (timeouts are 10s)");
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_failure_emits_nullify_immediately() {
+        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(ed25519);
     }
 }

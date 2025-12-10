@@ -726,4 +726,34 @@ mod tests {
         // Check that construct_nullify returns None
         assert!(round.construct_nullify().is_none());
     }
+
+    #[test]
+    fn verification_failed_prevents_notarize_and_finalize() {
+        let mut rng = StdRng::seed_from_u64(2030);
+        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let local_scheme = schemes[0].clone();
+
+        // Setup round and proposal
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([50u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+
+        // Set proposal from batcher
+        round.set_leader(None);
+        assert!(round.set_proposal(proposal));
+
+        // Mark verification as failed
+        assert!(round.verified(false));
+
+        // Should not be able to construct notarize vote
+        assert!(round.construct_notarize().is_none());
+
+        // Should not be able to construct finalize vote
+        assert!(round.construct_finalize().is_none());
+
+        // Should still be able to construct nullify
+        assert!(round.construct_nullify().is_some());
+    }
 }

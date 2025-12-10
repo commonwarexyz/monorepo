@@ -833,7 +833,8 @@ impl<
                     if !valid && view == self.state.current_view() {
                         // Verification failed for current view, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
+                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                            .await;
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
