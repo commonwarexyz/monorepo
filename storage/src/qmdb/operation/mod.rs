@@ -11,22 +11,22 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 pub mod fixed;
-mod unordered;
-pub use unordered::{Encoding, Fixed, FixedOperation, Operation, Variable, VariableOperation};
-mod ordered;
-pub use ordered::{
-    FixedOperation as FixedOrderedOperation, Operation as OrderedOperation,
-    VariableOperation as VariableOrderedOperation,
-};
 pub mod variable;
 
+// Re-export encoding and operation types from any subdirectory
+pub use crate::qmdb::any::{
+    ordered::{FixedOrderedOperation, OrderedOperation, VariableOrderedOperation},
+    unordered::{FixedOperation, Operation, VariableOperation},
+    Encoding, Fixed, Variable,
+};
+
 // Context byte prefixes for identifying the operation type.
-const DELETE_CONTEXT: u8 = 0;
-const UPDATE_CONTEXT: u8 = 1;
-const COMMIT_FLOOR_CONTEXT: u8 = 2;
-const SET_CONTEXT: u8 = 3;
-const COMMIT_CONTEXT: u8 = 4;
-const APPEND_CONTEXT: u8 = 5;
+pub(crate) const DELETE_CONTEXT: u8 = 0;
+pub(crate) const UPDATE_CONTEXT: u8 = 1;
+pub(crate) const COMMIT_FLOOR_CONTEXT: u8 = 2;
+pub(crate) const SET_CONTEXT: u8 = 3;
+pub(crate) const COMMIT_CONTEXT: u8 = 4;
+pub(crate) const APPEND_CONTEXT: u8 = 5;
 
 /// Errors returned by operation functions.
 #[derive(Error, Debug)]

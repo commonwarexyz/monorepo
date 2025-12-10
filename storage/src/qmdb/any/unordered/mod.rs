@@ -8,9 +8,9 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{CleanAny, DirtyAny},
+        any::{CleanAny, DirtyAny, Encoding},
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Encoding, Keyed, Operation},
+        operation::{Committable, Keyed},
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper, Index,
     },
@@ -24,6 +24,9 @@ use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::debug;
+
+pub mod operation;
+pub use operation::{FixedOperation, Operation, VariableOperation};
 
 pub mod fixed;
 pub mod sync;

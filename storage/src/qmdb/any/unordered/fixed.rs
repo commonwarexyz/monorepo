@@ -1,12 +1,13 @@
 //! An Any database implementation with an unordered key space and fixed-size values.
 
+use super::operation::FixedOperation as Operation;
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::{mem::Clean, Location},
     qmdb::{
-        any::{init_fixed_authenticated_log, unordered::IndexedLog, FixedConfig as Config},
-        operation::{fixed::Value, Fixed, FixedOperation as Operation},
+        any::{init_fixed_authenticated_log, unordered::IndexedLog, Fixed, FixedConfig as Config},
+        operation::fixed::Value,
         Error,
     },
     translator::Translator,

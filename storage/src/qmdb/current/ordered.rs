@@ -11,7 +11,9 @@ use crate::{
     qmdb::{
         any::{ordered::fixed::Any, CleanAny, DirtyAny},
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{fixed::Value, Committable as _, FixedOrderedOperation as Operation, KeyData, Keyed},
+        operation::{
+            fixed::Value, Committable as _, FixedOrderedOperation as Operation, KeyData, Keyed,
+        },
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },

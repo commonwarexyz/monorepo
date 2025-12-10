@@ -1,8 +1,6 @@
 use bytes::Buf;
 use commonware_codec::{CodecFixed, Error as CodecError, ReadExt as _};
 
-pub mod ordered;
-
 pub trait Value: CodecFixed<Cfg = ()> + Clone {}
 
 impl<T: CodecFixed<Cfg = ()> + Clone> Value for T {}
@@ -28,7 +26,7 @@ mod tests {
     use crate::{
         mmr::Location,
         qmdb::operation::{
-            fixed::ordered::Operation as FixedOrdered, FixedOperation, KeyData, Keyed as _,
+            FixedOperation, FixedOrderedOperation as FixedOrdered, KeyData, Keyed as _,
             Ordered as _,
         },
     };
@@ -63,7 +61,8 @@ mod tests {
         let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
-        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        let commit_op =
+            FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.key());
     }
 
@@ -99,11 +98,15 @@ mod tests {
         let delete_op = FixedOrdered::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.value());
 
-        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        let commit_op =
+            FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.value());
 
-        let commit_op =
-            FixedOrdered::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(
+            Some(value.clone()),
+            Location::new_unchecked(42),
+            PhantomData,
+        );
         assert_eq!(Some(&value), commit_op.value());
     }
 
@@ -139,11 +142,15 @@ mod tests {
         let delete_op = FixedOrdered::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.into_value());
 
-        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        let commit_op =
+            FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(None, commit_op.into_value());
 
-        let commit_op =
-            FixedOrdered::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(
+            Some(value.clone()),
+            Location::new_unchecked(42),
+            PhantomData,
+        );
         assert_eq!(Some(value), commit_op.into_value());
     }
 
@@ -260,7 +267,8 @@ mod tests {
         let delete_op = FixedOrdered::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
 
-        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        let commit_op =
+            FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         assert_eq!(
             format!("{commit_op}"),
             "[commit with inactivity floor: Location(42)]"
@@ -269,6 +277,7 @@ mod tests {
         let commit_op_with_metadata = FixedOrdered::<U64, U64>::CommitFloor(
             Some(U64::new(1234)),
             Location::new_unchecked(42),
+            PhantomData,
         );
         assert_eq!(
             format!("{commit_op_with_metadata}"),
@@ -333,22 +342,26 @@ mod tests {
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
-        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        let commit_op =
+            FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42), PhantomData);
         let from = FixedOrdered::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
         assert!(
-            matches!(from, FixedOrdered::CommitFloor(None, loc) if loc == Location::new_unchecked(42))
+            matches!(from, FixedOrdered::CommitFloor(None, loc, _) if loc == Location::new_unchecked(42))
         );
         assert_eq!(commit_op, from);
         assert!(commit_op.key_data().is_none());
         assert!(commit_op.into_key_data().is_none());
 
-        let commit_op =
-            FixedOrdered::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(
+            Some(value.clone()),
+            Location::new_unchecked(42),
+            PhantomData,
+        );
         let from = FixedOrdered::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(Some(&value), from.value());
         assert!(
-            matches!(&from, FixedOrdered::CommitFloor(Some(v), loc) if v == &value && *loc == Location::new_unchecked(42))
+            matches!(&from, FixedOrdered::CommitFloor(Some(v), loc, _) if v == &value && *loc == Location::new_unchecked(42))
         );
         assert_eq!(commit_op, from);
 

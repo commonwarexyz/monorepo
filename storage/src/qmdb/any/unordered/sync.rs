@@ -1,13 +1,10 @@
+use super::operation::FixedOperation as Operation;
 use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{
-        self,
-        any::unordered::fixed::Any,
-        operation::{fixed::Value, FixedOperation as Operation},
-    },
+    qmdb::{self, any::unordered::fixed::Any, operation::fixed::Value},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;

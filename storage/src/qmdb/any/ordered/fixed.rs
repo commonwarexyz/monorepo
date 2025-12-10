@@ -4,6 +4,7 @@
 //! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
 //! next-key value for `foo` is `bar`.
 
+use super::operation::FixedOperation as Operation;
 use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
@@ -14,7 +15,7 @@ use crate::{
             ordered::{IndexedLog, Operation as OperationTrait},
             FixedConfig as Config,
         },
-        operation::{fixed::Value, FixedOrderedOperation as Operation, KeyData},
+        operation::{fixed::Value, KeyData},
         Error,
     },
     translator::Translator,

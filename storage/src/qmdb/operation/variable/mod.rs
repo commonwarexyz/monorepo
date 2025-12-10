@@ -2,7 +2,6 @@ use commonware_codec::Codec;
 
 pub mod immutable;
 pub mod keyless;
-pub mod ordered;
 
 pub trait Value: Codec + Clone {}
 

@@ -22,6 +22,12 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
+pub mod operation;
+pub use operation::{
+    FixedOperation as FixedOrderedOperation, Operation as OrderedOperation,
+    VariableOperation as VariableOrderedOperation,
+};
+
 pub mod fixed;
 pub mod variable;
 

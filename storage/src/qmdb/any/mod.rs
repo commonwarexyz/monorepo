@@ -25,6 +25,9 @@ use std::{
     ops::Range,
 };
 
+mod encoding;
+pub use encoding::{Encoding, Fixed, Variable};
+
 mod ext;
 pub mod ordered;
 pub mod unordered;
