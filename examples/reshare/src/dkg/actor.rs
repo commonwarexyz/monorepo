@@ -30,17 +30,9 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
-
-/// Rate limiter for messages.
-type RateLimit<K, E> =
-    RateLimiter<K, HashMapStateStore<K>, E, NoOpMiddleware<<E as GClock>::Instant>>;
 
 /// Wire message type for DKG protocol communication.
 pub enum Message<V: Variant, P: PublicKey> {
@@ -101,12 +93,11 @@ pub struct Config<C: Signer, P> {
     pub mailbox_size: usize,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<C::PublicKey>,
-    pub rate_limit: Quota,
 }
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -117,13 +108,12 @@ where
     mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
-    rate_limiter: RateLimit<C::PublicKey, E>,
     partition_prefix: String,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -131,8 +121,6 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
-        let rate_limiter =
-            RateLimiter::hashmap_with_clock(config.rate_limit, context.with_label("rate_limiter"));
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -141,7 +129,6 @@ where
                 mailbox,
                 signer: config.signer,
                 peer_config: config.peer_config,
-                rate_limiter,
                 partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
@@ -427,7 +414,6 @@ where
                                         &self_pk,
                                         &mut storage,
                                         epoch,
-                                        &self.rate_limiter,
                                         ds,
                                         player_state.as_mut(),
                                         &mut round_sender,
@@ -535,18 +521,11 @@ where
         self_pk: &C::PublicKey,
         storage: &mut Storage<ContextCell<E>, V, C::PublicKey>,
         epoch: Epoch,
-        rate_limiter: &RateLimit<C::PublicKey, E>,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,
         sender: &mut S,
     ) {
         for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
-            // Rate limit sends
-            if rate_limiter.check_key(&player).is_err() {
-                debug!(?epoch, ?player, "rate limited; skipping share send");
-                continue;
-            }
-
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
