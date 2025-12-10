@@ -384,10 +384,10 @@ where
         );
 
         // Create epoch-specific subchannels
-        let vote_sc = vote_mux.register(epoch.get()).await.unwrap();
-        let certificate_sc = certificate_mux.register(epoch.get()).await.unwrap();
-        let resolver_sc = resolver_mux.register(epoch.get()).await.unwrap();
+        let vote = vote_mux.register(epoch.get()).await.unwrap();
+        let certificate = certificate_mux.register(epoch.get()).await.unwrap();
+        let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
-        engine.start(vote_sc, certificate_sc, resolver_sc)
+        engine.start(vote, certificate, resolver)
     }
 }
