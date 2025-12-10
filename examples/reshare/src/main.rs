@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::hex;
 use std::{future::Future, path::PathBuf, pin::Pin};
-use tracing::{info, warn, Level};
+use tracing::Level;
 
 mod application;
 mod dkg;
@@ -54,16 +54,8 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
         let config_path = self.path.clone();
         Box::pin(async move {
             match update {
-                Update::Failure { epoch } => {
-                    warn!(epoch = %epoch, "dkg failed; retrying");
-                    PostUpdate::Continue
-                }
-                Update::Success {
-                    output,
-                    share,
-                    epoch,
-                } => {
-                    info!(epoch = %epoch, "dkg succeeded; stopping");
+                Update::Failure { .. } => PostUpdate::Continue,
+                Update::Success { output, share, .. } => {
                     let config_str =
                         std::fs::read_to_string(&config_path).expect("failed to read config file");
                     let config: ParticipantConfig = serde_json::from_str(&config_str)

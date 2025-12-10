@@ -6,6 +6,7 @@ use commonware_cryptography::bls12381::{
 use std::{future::Future, pin::Pin};
 
 /// An update from the DKG Actor.
+#[allow(dead_code)]
 pub enum Update<V: Variant, P> {
     /// DKG at this epoch has failed.
     Failure { epoch: Epoch },
