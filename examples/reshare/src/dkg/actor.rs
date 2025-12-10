@@ -23,7 +23,7 @@ use commonware_cryptography::{
     transcript::Summary,
     Digest as _, Hasher, PublicKey, Signer,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
@@ -315,221 +315,217 @@ where
                 None
             };
 
-            loop {
-                let mailbox_msg = select! {
-                    _ = self.context.stopped() => {
-                        break 'actor;
-                    },
-                    // Process incoming network messages
-                    network_msg = round_receiver.recv().fuse() => {
-                        match network_msg {
-                            Ok((sender_pk, msg_bytes)) => {
-                                let msg = match Message::<V, C::PublicKey>::read_cfg(
-                                    &mut msg_bytes.clone(),
-                                    &max_read_size,
-                                ) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
-                                        continue;
-                                    }
-                                };
-                                match msg {
-                                    Message::Dealer(pub_msg, priv_msg) => {
-                                        if let Some(ref mut ps) = player_state {
-                                            let response = ps
-                                                .handle(
-                                                    &mut storage,
-                                                    epoch,
-                                                    sender_pk.clone(),
-                                                    pub_msg,
-                                                    priv_msg,
-                                                )
-                                                .await;
-                                            if let Some(ack) = response {
-                                                let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
-                                                if let Err(e) = round_sender
-                                                    .send(Recipients::One(sender_pk.clone()), payload, true)
-                                                    .await
-                                                {
-                                                    warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
-                                                }
+            select_loop! {
+                self.context,
+                on_stopped => {
+                    break 'actor;
+                },
+                // Process incoming network messages
+                network_msg = round_receiver.recv().fuse() => {
+                    match network_msg {
+                        Ok((sender_pk, msg_bytes)) => {
+                            let msg = match Message::<V, C::PublicKey>::read_cfg(
+                                &mut msg_bytes.clone(),
+                                &max_read_size,
+                            ) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
+                                    continue;
+                                }
+                            };
+                            match msg {
+                                Message::Dealer(pub_msg, priv_msg) => {
+                                    if let Some(ref mut ps) = player_state {
+                                        let response = ps
+                                            .handle(
+                                                &mut storage,
+                                                epoch,
+                                                sender_pk.clone(),
+                                                pub_msg,
+                                                priv_msg,
+                                            )
+                                            .await;
+                                        if let Some(ack) = response {
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            if let Err(e) = round_sender
+                                                .send(Recipients::One(sender_pk.clone()), payload, true)
+                                                .await
+                                            {
+                                                warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
                                             }
                                         }
                                     }
-                                    Message::Ack(ack) => {
-                                        if let Some(ref mut ds) = dealer_state {
-                                            ds.handle(&mut storage, epoch, sender_pk, ack).await;
-                                        }
+                                }
+                                Message::Ack(ack) => {
+                                    if let Some(ref mut ds) = dealer_state {
+                                        ds.handle(&mut storage, epoch, sender_pk, ack).await;
                                     }
                                 }
+                            }
+                        }
+                        Err(_) => {
+                            // Network closed
+                            break 'actor;
+                        }
+                    }
+                },
+                mailbox_msg = self.mailbox.next() => {
+                    let Some(mailbox_msg) = mailbox_msg else {
+                        warn!("dkg actor mailbox closed");
+                        break 'actor;
+                    };
+                    match mailbox_msg {
+                        MailboxMessage::Act { response } => {
+                            let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
+                            if outcome.is_some() {
+                                info!("including reshare outcome in proposed block");
+                            }
+                            if response.send(outcome).is_err() {
+                                warn!("dkg actor could not send response to Act");
+                            }
+                        }
+                        MailboxMessage::Finalized { block, response } => {
+                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
+                            let relative_height =
+                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
+                            let mid_point = BLOCKS_PER_EPOCH / 2;
+
+                            // Skip blocks from previous epochs (can happen on restart if we
+                            // persisted state but crashed before acknowledging)
+                            if block_epoch < epoch {
+                                response.acknowledge();
                                 continue;
                             }
-                            Err(_) => {
-                                // Network closed
-                                break 'actor;
-                            }
-                        }
-                    },
-                    mb = self.mailbox.next() => {
-                        let Some(m) = mb else {
-                            warn!("dkg actor mailbox closed");
-                            break 'actor;
-                        };
-                        m
-                    }
-                };
 
-                match mailbox_msg {
-                    MailboxMessage::Act { response } => {
-                        let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
-                        if outcome.is_some() {
-                            info!("including reshare outcome in proposed block");
-                        }
-                        if response.send(outcome).is_err() {
-                            warn!("dkg actor could not send response to Act");
-                        }
-                    }
-                    MailboxMessage::Finalized { block, response } => {
-                        let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
-                        let relative_height =
-                            relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
-                        let mid_point = BLOCKS_PER_EPOCH / 2;
-
-                        // Skip blocks from previous epochs (can happen on restart if we
-                        // persisted state but crashed before acknowledging)
-                        if block_epoch < epoch {
-                            response.acknowledge();
-                            continue;
-                        }
-
-                        // Inform the orchestrator of the epoch exit after first finalization
-                        if relative_height == 0 {
-                            if let Some(prev) = block_epoch.previous() {
-                                orchestrator.report(orchestrator::Message::Exit(prev)).await;
-                            }
-                        }
-
-                        // Process dealer log from block if present
-                        if let Some(log) = block.log {
-                            if let Some((dealer, dealer_log)) = log.check(&round) {
-                                // If we see our dealing outcome in a finalized block,
-                                // make sure to take it, so that we don't post
-                                // it in subsequent blocks
-                                if dealer == self_pk {
-                                    if let Some(ref mut ds) = dealer_state {
-                                        ds.take_finalized();
-                                    }
+                            // Inform the orchestrator of the epoch exit after first finalization
+                            if relative_height == 0 {
+                                if let Some(prev) = block_epoch.previous() {
+                                    orchestrator.report(orchestrator::Message::Exit(prev)).await;
                                 }
-                                storage.append_log(epoch, dealer, dealer_log).await;
                             }
-                        }
 
-                        // In the first half of the epoch, continuously distribute shares
-                        if relative_height < mid_point {
-                            if let Some(ref mut ds) = dealer_state {
-                                Self::distribute_shares(
-                                    &self_pk,
-                                    &mut storage,
-                                    epoch,
-                                    &self.rate_limiter,
-                                    ds,
-                                    player_state.as_mut(),
-                                    &mut round_sender,
-                                )
+                            // Process dealer log from block if present
+                            if let Some(log) = block.log {
+                                if let Some((dealer, dealer_log)) = log.check(&round) {
+                                    // If we see our dealing outcome in a finalized block,
+                                    // make sure to take it, so that we don't post
+                                    // it in subsequent blocks
+                                    if dealer == self_pk {
+                                        if let Some(ref mut ds) = dealer_state {
+                                            ds.take_finalized();
+                                        }
+                                    }
+                                    storage.append_log(epoch, dealer, dealer_log).await;
+                                }
+                            }
+
+                            // In the first half of the epoch, continuously distribute shares
+                            if relative_height < mid_point {
+                                if let Some(ref mut ds) = dealer_state {
+                                    Self::distribute_shares(
+                                        &self_pk,
+                                        &mut storage,
+                                        epoch,
+                                        &self.rate_limiter,
+                                        ds,
+                                        player_state.as_mut(),
+                                        &mut round_sender,
+                                    )
+                                    .await;
+                                }
+                            }
+
+                            // At or past the midpoint, finalize dealer if not already done.
+                            // The >= check handles restart after midpoint acknowledgment.
+                            if relative_height >= mid_point {
+                                if let Some(ref mut ds) = dealer_state {
+                                    ds.finalize();
+                                }
+                            }
+
+                            // Continue if not the last block in the epoch
+                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                                // Acknowledge block processing
+                                response.acknowledge();
+                                continue;
+                            }
+
+                            // Finalize the round before acknowledging
+                            let logs = storage.logs(epoch);
+                            let (success, next_round, next_output, next_share) =
+                                if let Some(ps) = player_state.take() {
+                                    match ps.finalize(logs, 1) {
+                                        Ok((new_output, new_share)) => (
+                                            true,
+                                            epoch_state.round + 1,
+                                            Some(new_output),
+                                            Some(new_share),
+                                        ),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
+                                } else {
+                                    match observe(round.clone(), logs, 1) {
+                                        Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
+                                };
+                            if success {
+                                info!(?epoch, "epoch succeeded");
+                            } else {
+                                warn!(?epoch, "epoch failed");
+                            }
+                            storage
+                                .append_epoch(EpochState {
+                                    round: next_round,
+                                    rng_seed: Summary::random(&mut self.context),
+                                    output: next_output.clone(),
+                                    share: next_share.clone(),
+                                })
                                 .await;
-                            }
-                        }
 
-                        // At or past the midpoint, finalize dealer if not already done.
-                        // The >= check handles restart after midpoint acknowledgment.
-                        if relative_height >= mid_point {
-                            if let Some(ref mut ds) = dealer_state {
-                                ds.finalize();
-                            }
-                        }
-
-                        // Continue if not the last block in the epoch
-                        if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
-                            // Acknowledge block processing
+                            // Acknowledge block processing before callback
                             response.acknowledge();
-                            continue;
-                        }
 
-                        // Finalize the round before acknowledging
-                        let logs = storage.logs(epoch);
-                        let (success, next_round, next_output, next_share) =
-                            if let Some(ps) = player_state.take() {
-                                match ps.finalize(logs, 1) {
-                                    Ok((new_output, new_share)) => (
-                                        true,
-                                        epoch_state.round + 1,
-                                        Some(new_output),
-                                        Some(new_share),
-                                    ),
-                                    Err(_) => (
-                                        false,
-                                        epoch_state.round,
-                                        epoch_state.output.clone(),
-                                        epoch_state.share.clone(),
-                                    ),
+                            // Send the callback.
+                            let update = if success {
+                                Update::Success {
+                                    epoch,
+                                    output: next_output.expect("ceremony output exists"),
+                                    share: next_share.clone(),
                                 }
                             } else {
-                                match observe(round.clone(), logs, 1) {
-                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
-                                    Err(_) => (
-                                        false,
-                                        epoch_state.round,
-                                        epoch_state.output.clone(),
-                                        epoch_state.share.clone(),
-                                    ),
-                                }
+                                Update::Failure { epoch }
                             };
-                        if success {
-                            info!(?epoch, "epoch succeeded");
-                        } else {
-                            warn!(?epoch, "epoch failed");
-                        }
-                        storage
-                            .append_epoch(EpochState {
-                                round: next_round,
-                                rng_seed: Summary::random(&mut self.context),
-                                output: next_output.clone(),
-                                share: next_share.clone(),
-                            })
-                            .await;
 
-                        // Acknowledge block processing before callback
-                        response.acknowledge();
-
-                        // Send the callback.
-                        let update = if success {
-                            Update::Success {
-                                epoch,
-                                output: next_output.expect("ceremony output exists"),
-                                share: next_share.clone(),
+                            // If the update is stop, wait forever.
+                            if let PostUpdate::Stop = callback.on_update(update).await {
+                                // Close the mailbox to prevent accepting any new messages
+                                drop(self.mailbox);
+                                // Exit last consensus instance to avoid useless work while we wait for shutdown
+                                orchestrator
+                                    .report(orchestrator::Message::Exit(epoch))
+                                    .await;
+                                // Keep running until killed to keep the orchestrator mailbox alive
+                                info!("DKG complete; waiting for shutdown...");
+                                futures::future::pending::<()>().await;
+                                break 'actor;
                             }
-                        } else {
-                            Update::Failure { epoch }
-                        };
 
-                        // If the update is stop, wait forever.
-                        if let PostUpdate::Stop = callback.on_update(update).await {
-                            // Close the mailbox to prevent accepting any new messages
-                            drop(self.mailbox);
-                            // Exit last consensus instance to avoid useless work while we wait for shutdown
-                            orchestrator
-                                .report(orchestrator::Message::Exit(epoch))
-                                .await;
-                            // Keep running until killed to keep the orchestrator mailbox alive
-                            info!("DKG complete; waiting for shutdown...");
-                            futures::future::pending::<()>().await;
-                            break 'actor;
+                            break;
                         }
-
-                        break;
                     }
-                }
+                },
             }
         }
         info!("exiting DKG actor");
