@@ -102,7 +102,14 @@ impl FuzzInput {
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let partition = u.arbitrary()?;
+
+        // Bias towards Connected partition
+        let partition = if u.ratio(4, 5)? {
+            Partition::Connected
+        } else {
+            u.arbitrary()?
+        };
+
         let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
         let containers = u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
 
