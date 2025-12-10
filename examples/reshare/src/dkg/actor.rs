@@ -506,7 +506,7 @@ where
                         let update = if success {
                             Update::Success {
                                 epoch,
-                                output: next_output.expect("success => output exists"),
+                                output: next_output.expect("ceremony output exists"),
                                 share: next_share.clone(),
                             }
                         } else {
@@ -522,7 +522,7 @@ where
                                 .report(orchestrator::Message::Exit(epoch))
                                 .await;
                             // Keep running until killed to keep the orchestrator mailbox alive
-                            info!("DKG complete; waiting for shutdown.");
+                            info!("DKG complete; waiting for shutdown...");
                             futures::future::pending::<()>().await;
                             break 'actor;
                         }
