@@ -261,14 +261,17 @@ mod tests {
         mmr::iterator::nodes_to_pin,
         qmdb::{
             self,
-            any::unordered::fixed::{
-                test::{
-                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest,
+            any::unordered::{
+                fixed::{
+                    test::{
+                        any_db_config, apply_ops, create_test_config, create_test_db,
+                        create_test_ops, AnyTest,
+                    },
+                    Any,
                 },
-                Any,
+                FixedOperation as Operation,
             },
-            operation::{FixedOperation as Operation, Keyed as _},
+            operation::Keyed as _,
             store::CleanStore as _,
             sync::{
                 self,

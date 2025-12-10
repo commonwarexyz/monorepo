@@ -3,9 +3,9 @@
 use crate::{
     mmr::Location,
     qmdb::{
-        any::{Encoding, Fixed, Variable},
+        any::{Encoding, Fixed, Variable, COMMIT_FLOOR_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
         operation::{
-            self, fixed::Value as FixedValue, variable::Value as VariableValue, Committable, Keyed,
+            fixed::Value as FixedValue, variable::Value as VariableValue, Committable, Keyed,
         },
     },
 };
@@ -122,20 +122,20 @@ impl<K: Array, V: FixedValue> Write for Operation<K, V, Fixed> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
-                operation::DELETE_CONTEXT.write(buf);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Self::Update(k, v) => {
-                operation::UPDATE_CONTEXT.write(buf);
+                UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
             Self::CommitFloor(metadata, floor_loc, _) => {
-                operation::COMMIT_FLOOR_CONTEXT.write(buf);
+                COMMIT_FLOOR_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
                     metadata.write(buf);
@@ -154,16 +154,16 @@ impl<K: Array, V: VariableValue> Write for Operation<K, V, Variable> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
-                operation::DELETE_CONTEXT.write(buf);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
             Self::Update(k, v) => {
-                operation::UPDATE_CONTEXT.write(buf);
+                UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Self::CommitFloor(v, floor_loc, _) => {
-                operation::COMMIT_FLOOR_CONTEXT.write(buf);
+                COMMIT_FLOOR_CONTEXT.write(buf);
                 v.write(buf);
                 UInt(**floor_loc).write(buf);
             }
@@ -178,18 +178,18 @@ impl<K: Array, V: FixedValue> Read for Operation<K, V, Fixed> {
         at_least(buf, Self::SIZE)?;
 
         match u8::read(buf)? {
-            operation::UPDATE_CONTEXT => {
+            UPDATE_CONTEXT => {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
                 Ok(Self::Update(key, value))
             }
-            operation::DELETE_CONTEXT => {
+            DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
                 Ok(Self::Delete(key))
             }
-            operation::COMMIT_FLOOR_CONTEXT => {
+            COMMIT_FLOOR_CONTEXT => {
                 let is_some = bool::read(buf)?;
                 let metadata = if is_some {
                     Some(V::read_cfg(buf, cfg)?)
@@ -218,16 +218,16 @@ impl<K: Array, V: VariableValue> Read for Operation<K, V, Variable> {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            operation::DELETE_CONTEXT => {
+            DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 Ok(Self::Delete(key))
             }
-            operation::UPDATE_CONTEXT => {
+            UPDATE_CONTEXT => {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Update(key, value))
             }
-            operation::COMMIT_FLOOR_CONTEXT => {
+            COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
                 let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {

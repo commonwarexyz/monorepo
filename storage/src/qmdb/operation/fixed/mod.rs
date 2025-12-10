@@ -25,9 +25,12 @@ mod tests {
     use super::*;
     use crate::{
         mmr::Location,
-        qmdb::operation::{
-            FixedOperation, FixedOrderedOperation as FixedOrdered, KeyData, Keyed as _,
-            Ordered as _,
+        qmdb::{
+            any::{
+                ordered::{FixedOrderedOperation as FixedOrdered, KeyData, Ordered as _},
+                unordered::FixedOperation,
+            },
+            operation::Keyed as _,
         },
     };
     use commonware_codec::{DecodeExt, Encode, FixedSize as _};

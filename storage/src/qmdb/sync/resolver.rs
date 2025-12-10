@@ -2,12 +2,11 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::unordered::fixed::Any,
+        any::unordered::{fixed::Any, FixedOperation},
         immutable::Immutable,
         operation::{
             fixed::Value as FixedValue,
             variable::{immutable::Operation as ImmutableOp, Value as VariableValue},
-            FixedOperation,
         },
         store::CleanStore as _,
     },

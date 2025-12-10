@@ -10,9 +10,12 @@ use crate::{
         verification, Location, Proof, StandardHasher,
     },
     qmdb::{
-        any::{unordered::fixed::Any, CleanAny, DirtyAny},
+        any::{
+            unordered::{fixed::Any, FixedOperation as Operation},
+            CleanAny, DirtyAny,
+        },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{fixed::Value, FixedOperation as Operation, Keyed as _},
+        operation::{fixed::Value, Keyed as _},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },

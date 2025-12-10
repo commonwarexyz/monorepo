@@ -7,8 +7,10 @@ use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::{unordered::fixed::Any, FixedConfig as Config},
-        operation::FixedOperation,
+        any::{
+            unordered::{fixed::Any, FixedOperation},
+            FixedConfig as Config,
+        },
         store::CleanStore,
     },
 };

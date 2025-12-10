@@ -5,45 +5,18 @@
 //! implement [commonware_codec::CodecFixed].
 
 use crate::mmr::Location;
-use commonware_codec::{Codec, Error as CodecError};
+use commonware_codec::Codec;
 use commonware_utils::Array;
-use std::fmt::Debug;
-use thiserror::Error;
 
 pub mod fixed;
 pub mod variable;
 
-// Re-export encoding and operation types from any subdirectory
-pub use crate::qmdb::any::{
-    ordered::{FixedOrderedOperation, OrderedOperation, VariableOrderedOperation},
-    unordered::{FixedOperation, Operation, VariableOperation},
-    Encoding, Fixed, Variable,
-};
-
 // Context byte prefixes for identifying the operation type.
-pub(crate) const DELETE_CONTEXT: u8 = 0;
-pub(crate) const UPDATE_CONTEXT: u8 = 1;
-pub(crate) const COMMIT_FLOOR_CONTEXT: u8 = 2;
-pub(crate) const SET_CONTEXT: u8 = 3;
-pub(crate) const COMMIT_CONTEXT: u8 = 4;
-pub(crate) const APPEND_CONTEXT: u8 = 5;
+const SET_CONTEXT: u8 = 3;
+const COMMIT_CONTEXT: u8 = 4;
+const APPEND_CONTEXT: u8 = 5;
 
 /// Errors returned by operation functions.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("invalid length")]
-    InvalidLength,
-    #[error("invalid key: {0}")]
-    InvalidKey(CodecError),
-    #[error("invalid value: {0}")]
-    InvalidValue(CodecError),
-    #[error("invalid context byte")]
-    InvalidContextByte,
-    #[error("delete operation has non-zero value")]
-    InvalidDeleteOp,
-    #[error("commit floor operation has non-zero bytes after location")]
-    InvalidCommitFloorOp,
-}
 
 /// A trait for operations used by database variants that support mutable keyed values.
 pub trait Keyed: Codec {
@@ -77,29 +50,4 @@ pub trait Keyed: Codec {
 pub trait Committable {
     /// If this operation is a commit operation.
     fn is_commit(&self) -> bool;
-}
-
-pub trait Ordered: Keyed {
-    /// Return this operation's key data, or None if this operation variant doesn't have any.
-    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
-
-    /// Convert this operation into its key data, or None if this operation variant doesn't have
-    /// any.
-    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
-}
-
-/// Data about a key in an ordered database or an ordered database operation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyData<K: Array + Ord, V: Codec> {
-    /// The key that exists in the database or in the database operation.
-    pub key: K,
-    /// The value of `key` in the database or operation.
-    pub value: V,
-    /// The next-key of `key` in the database or operation.
-    ///
-    /// The next-key is the next active key that lexicographically follows it in the key space. If
-    /// the key is the lexicographically-last active key, then next-key is the
-    /// lexicographically-first of all active keys (in a DB with only one key, this means its
-    /// next-key is itself)
-    pub next_key: K,
 }

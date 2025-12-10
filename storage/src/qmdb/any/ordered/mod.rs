@@ -11,14 +11,16 @@ use crate::{
     qmdb::{
         any::{CleanAny, DirtyAny},
         build_snapshot_from_log,
-        operation::{Committable, KeyData, Keyed, Ordered},
+        operation::{Committable, Keyed},
         store::{Batchable, LogStore},
         update_known_loc, Error, FloorHelper,
     },
     AuthenticatedBitMap,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
@@ -37,6 +39,32 @@ type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = (Location, KeyData<K, V>);
+
+/// Data about a key in an ordered database or an ordered database operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyData<K: Array + Ord, V: Codec> {
+    /// The key that exists in the database or in the database operation.
+    pub key: K,
+    /// The value of `key` in the database or operation.
+    pub value: V,
+    /// The next-key of `key` in the database or operation.
+    ///
+    /// The next-key is the next active key that lexicographically follows it in the key space. If
+    /// the key is the lexicographically-last active key, then next-key is the
+    /// lexicographically-first of all active keys (in a DB with only one key, this means its
+    /// next-key is itself)
+    pub next_key: K,
+}
+
+/// A trait for ordered database operations that maintain next-key information.
+pub trait Ordered: Keyed {
+    /// Return this operation's key data, or None if this operation variant doesn't have any.
+    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
+
+    /// Convert this operation into its key data, or None if this operation variant doesn't have
+    /// any.
+    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
+}
 
 /// A trait implemented by the ordered Any db operation type.
 pub trait Operation: Committable + Keyed + Ordered {

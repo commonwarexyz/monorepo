@@ -91,10 +91,9 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
+        any::unordered::VariableOperation as Operation,
         build_snapshot_from_log, create_key, delete_key,
-        operation::{
-            variable::Value, Committable as _, Keyed as _, VariableOperation as Operation,
-        },
+        operation::{variable::Value, Committable as _, Keyed as _},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
