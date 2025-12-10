@@ -35,7 +35,7 @@ pub enum Operation<K: Array, V: Codec + Clone, E: Encoding> {
     CommitFloor(Option<V>, Location, PhantomData<E>),
 }
 
-impl<K: Array + Ord, V: FixedValue> Operation<K, V, Fixed> {
+impl<K: Array, V: FixedValue> Operation<K, V, Fixed> {
     // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
 
@@ -46,7 +46,7 @@ impl<K: Array + Ord, V: FixedValue> Operation<K, V, Fixed> {
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<K: Array + Ord, V: FixedValue> CodecFixedSize for Operation<K, V, Fixed> {
+impl<K: Array, V: FixedValue> CodecFixedSize for Operation<K, V, Fixed> {
     // Make sure operation array is large enough to hold the maximum of all ops.
     const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
         Self::UPDATE_OP_SIZE

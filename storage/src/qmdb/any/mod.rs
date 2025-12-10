@@ -35,9 +35,9 @@ pub mod unordered;
 pub use ext::AnyExt;
 
 // Context byte prefixes for Any operation types.
-pub(crate) const DELETE_CONTEXT: u8 = 0;
-pub(crate) const UPDATE_CONTEXT: u8 = 1;
-pub(crate) const COMMIT_FLOOR_CONTEXT: u8 = 2;
+const DELETE_CONTEXT: u8 = 0;
+const UPDATE_CONTEXT: u8 = 1;
+const COMMIT_FLOOR_CONTEXT: u8 = 2;
 
 /// Extension trait for "Any" QMDBs in a clean (merkleized) state.
 pub trait CleanAny:
