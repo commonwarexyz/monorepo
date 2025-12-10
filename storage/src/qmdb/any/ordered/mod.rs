@@ -1223,10 +1223,10 @@ where
         let mut already_updated = BTreeSet::new();
         for (key, (value, loc)) in updated {
             let new_loc = self.op_count();
-            let next_key = find_next_key(&key, &possible_next);
             update_known_loc(&mut self.snapshot, &key, loc, new_loc);
 
-            let op = C::Item::new_update(key.clone(), value.clone(), next_key.clone());
+            let next_key = find_next_key(&key, &possible_next);
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key);
             self.log.append(op).await?;
 
             // Each update of an existing key inactivates its previous location.
@@ -1237,9 +1237,9 @@ where
         // Create each new key, and update its previous key if it hasn't already been updated.
         for (key, value) in created {
             let new_loc = self.op_count();
-            let next_key = find_next_key(&key, &possible_next);
             self.snapshot.insert(&key, new_loc);
-            let op = C::Item::new_update(key.clone(), value.clone(), next_key.clone());
+            let next_key = find_next_key(&key, &possible_next);
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key);
 
             // Each newly created key increases the active key count.
             self.log.append(op).await?;
@@ -1250,7 +1250,6 @@ where
                 continue;
             }
             let (prev_key, (prev_value, prev_loc)) = find_prev_key(&key, &possible_previous);
-            let next_key = find_next_key(prev_key, &possible_next);
             if already_updated.contains(prev_key) {
                 continue;
             }
@@ -1258,8 +1257,8 @@ where
 
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
             let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
-
             self.log.append(op).await?;
 
             // Each key whose next-key value is updated inactivates its previous location.
@@ -1273,7 +1272,6 @@ where
         // Update the previous key of each deleted key if it hasn't already been updated.
         for key in deleted.iter() {
             let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &possible_previous);
-            let next_key = find_next_key(prev_key, &possible_next);
             if already_updated.contains(prev_key) {
                 continue;
             }
@@ -1281,6 +1279,7 @@ where
 
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
             let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
             self.log.append(op).await?;
 
