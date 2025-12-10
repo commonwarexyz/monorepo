@@ -84,3 +84,11 @@ check-features:
 # Fix feature propagation and formatting
 fix-features:
     zepter && zepter format features --fix
+
+# Test codec conformance
+test-codec-fixtures:
+    just test --features arbitrary --profile codec_conformance
+
+# Regenerate codec conformance fixtures
+regenerate-codec-fixtures:
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile codec_conformance

@@ -441,7 +441,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         crate::conformance_tests! {
             u8 => 1024,

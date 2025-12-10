@@ -320,7 +320,7 @@ mod test {
         );
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
 

@@ -409,7 +409,7 @@ where
     Certificate<V, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.arbitrary::<u8>()? % 3;
+        let choice = u.int_in_range(0..=2)?;
         match choice {
             0 => Ok(Self::Ack(u.arbitrary::<Ack<V, D>>()?)),
             1 => Ok(Self::Certified(u.arbitrary::<Certificate<V, D>>()?)),

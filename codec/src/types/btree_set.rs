@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(set1.encode(), set2.encode());
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
 

@@ -731,7 +731,7 @@ where
     Lock<C, V, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.arbitrary::<u8>()? % 2;
+        let choice = u.int_in_range(0..=1)?;
         match choice {
             0 => Ok(Self::Tip(Proposal::<C, D>::arbitrary(u)?)),
             1 => Ok(Self::Lock(Lock::<C, V, D>::arbitrary(u)?)),

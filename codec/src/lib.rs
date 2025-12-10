@@ -212,10 +212,10 @@ pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
 
-#[cfg(feature = "conformance")]
+#[cfg(feature = "arbitrary")]
 pub mod conformance;
 
 // Re-export paste for use in conformance macros
-#[cfg(feature = "conformance")]
+#[cfg(feature = "arbitrary")]
 #[doc(hidden)]
 pub use paste;

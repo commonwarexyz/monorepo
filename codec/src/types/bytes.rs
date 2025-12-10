@@ -82,7 +82,7 @@ mod tests {
         assert_eq!(long_bytes.encode(), expected.as_slice());
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use arbitrary::Arbitrary;

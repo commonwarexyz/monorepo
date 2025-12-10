@@ -13,7 +13,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
-commonware-cryptography = { workspace = true, features = ["std", "fuzz"] }
+commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }

@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(map1.encode(), map2.encode());
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
 

@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(map4.encode(), expected4.freeze());
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
 

@@ -22,7 +22,7 @@ std = [
 	"sha2?/std",
 	"thiserror/std",
 ]
-conformance = [
+arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-macros",
 	"dep:rand",

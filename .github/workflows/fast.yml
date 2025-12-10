@@ -295,8 +295,4 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run codec conformance tests
-      run: |
-        just test -p commonware-codec --features conformance --profile codec_conformance && \
-        just test -p commonware-consensus --features arbitrary --profile codec_conformance && \
-        just test -p commonware-cryptography --features arbitrary --profile codec_conformance && \
-        git diff --exit-code
+      run: just test-codec-fixtures && git diff --exit-code

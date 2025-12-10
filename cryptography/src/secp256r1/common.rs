@@ -219,7 +219,7 @@ impl arbitrary::Arbitrary<'_> for PublicKeyInner {
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKeyInner::from_rng(&mut rand);
-        Ok(PublicKeyInner::from_private_key(&private_key))
+        Ok(Self::from_private_key(&private_key))
     }
 }
 

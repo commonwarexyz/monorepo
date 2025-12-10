@@ -834,7 +834,7 @@ where
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.arbitrary::<u8>()? % 2;
+        let choice = u.int_in_range(0..=1)?;
         match choice {
             0 => {
                 let ack = u.arbitrary()?;
@@ -914,7 +914,7 @@ where
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.arbitrary::<u8>()? % 2;
+        let choice = u.int_in_range(0..=1)?;
         match choice {
             0 => {
                 use commonware_utils::TryFromIterator;
@@ -1537,7 +1537,7 @@ pub fn deal_anonymous<V: Variant>(
     (output.public().clone(), shares.values().to_vec())
 }
 
-#[cfg(any(feature = "fuzz", test))]
+#[cfg(any(feature = "arbitrary", test))]
 mod test_plan {
     use super::*;
     use crate::{
@@ -2136,7 +2136,7 @@ mod test_plan {
         }
     }
 
-    #[cfg(feature = "fuzz")]
+    #[cfg(feature = "arbitrary")]
     mod impl_arbitrary {
         use super::*;
         use arbitrary::{Arbitrary, Unstructured};
@@ -2273,7 +2273,7 @@ mod test_plan {
     }
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(feature = "arbitrary")]
 pub use test_plan::Plan as FuzzPlan;
 
 #[cfg(test)]

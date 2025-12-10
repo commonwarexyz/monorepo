@@ -43,7 +43,6 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
-commonware-codec = { workspace = true, features = ["conformance"] }
 criterion.workspace = true
 rstest.workspace = true
 
@@ -53,9 +52,14 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-parallel = [ "blake3/rayon", "rayon" ]
-fuzz = [ "dep:anyhow", "dep:arbitrary" ]
-arbitrary = [ "dep:arbitrary", "dep:commonware-macros" ]
+parallel = [ "blake3/rayon", "rayon", "std" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"dep:anyhow",
+	"dep:arbitrary",
+	"dep:commonware-macros",
+	"std",
+]
 std = [
 	"anyhow?/std",
 	"blake3/std",

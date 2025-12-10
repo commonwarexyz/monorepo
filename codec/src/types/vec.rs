@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(v_long_u8.encode(), expected_long_u8.as_slice());
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         crate::conformance_tests! {
             Vec<u8> => 1024,

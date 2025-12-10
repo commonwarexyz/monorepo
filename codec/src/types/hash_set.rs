@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(set3.encode_size(), expected_size);
     }
 
-    #[cfg(feature = "conformance")]
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
 
