@@ -513,6 +513,9 @@ where
                                 return;
                             }
                         }
+                        Message::GetProcessedHeight { response } => {
+                            let _ = response.send(self.last_processed_height);
+                        }
                     }
                 },
                 // Handle resolver messages last

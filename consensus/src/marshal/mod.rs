@@ -1715,6 +1715,89 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_get_processed_height() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me,
+                schemes[0].clone().into(),
+            )
+            .await;
+
+            // Initially, processed height should be 0 (default floor)
+            assert_eq!(actor.get_processed_height().await, Some(0));
+
+            // Create and finalize first block
+            let parent = Sha256::hash(b"");
+            let block1 = B::new::<Sha256>(parent, 1, 1);
+            let commitment1 = block1.digest();
+            let round1 = Round::new(Epoch::new(0), View::new(1));
+            actor.verified(round1, block1.clone()).await;
+
+            let proposal1 = Proposal {
+                round: round1,
+                parent: View::new(0),
+                payload: commitment1,
+            };
+            let finalization1 = make_finalization(proposal1, &schemes, QUORUM);
+            actor.report(Activity::Finalization(finalization1)).await;
+
+            // Wait for application to acknowledge the block
+            let mut height = Some(0);
+            while height == Some(0) {
+                context.sleep(Duration::from_millis(10)).await;
+                height = actor.get_processed_height().await;
+            }
+            assert_eq!(height, Some(1));
+
+            // Create and finalize second block
+            let block2 = B::new::<Sha256>(commitment1, 2, 2);
+            let commitment2 = block2.digest();
+            let round2 = Round::new(Epoch::new(0), View::new(2));
+            actor.verified(round2, block2.clone()).await;
+
+            let proposal2 = Proposal {
+                round: round2,
+                parent: View::new(1),
+                payload: commitment2,
+            };
+            let finalization2 = make_finalization(proposal2, &schemes, QUORUM);
+            actor.report(Activity::Finalization(finalization2)).await;
+
+            // Wait for second block acknowledgment
+            while actor.get_processed_height().await != Some(2) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(actor.get_processed_height().await, Some(2));
+
+            // Verify application received both blocks in order
+            assert_eq!(application.blocks().len(), 2);
+            assert_eq!(application.tip(), Some((2, commitment2)));
+
+            // Test setting floor to same value (should be idempotent)
+            actor.set_floor(2).await;
+            assert_eq!(actor.get_processed_height().await, Some(2));
+
+            // Setting floor to lower value should be ignored (safety feature)
+            actor.set_floor(1).await;
+            assert_eq!(actor.get_processed_height().await, Some(2));
+
+            actor.set_floor(0).await;
+            assert_eq!(actor.get_processed_height().await, Some(2));
+        })
+    }
+
     #[test_traced("INFO")]
     fn test_broadcast_caches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
