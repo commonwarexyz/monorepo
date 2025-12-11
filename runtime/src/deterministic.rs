@@ -391,7 +391,11 @@ impl From<Config> for Runner {
 
 impl From<(Config, Box<dyn RngCore + Send>)> for Runner {
     fn from((cfg, rng): (Config, Box<dyn RngCore + Send>)) -> Self {
-        Self::new(cfg).with_rng(rng)
+        cfg.assert();
+        Self {
+            state: State::Config(cfg),
+            rng: Some(rng),
+        }
     }
 }
 
@@ -843,8 +847,8 @@ impl Context {
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
-        let rng: Box<dyn RngCore + Send> = rng
-            .unwrap_or_else(|| Box::new(StdRng::seed_from_u64(cfg.seed)));
+        let rng: Box<dyn RngCore + Send> =
+            rng.unwrap_or_else(|| Box::new(StdRng::seed_from_u64(cfg.seed)));
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
