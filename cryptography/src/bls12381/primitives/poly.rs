@@ -100,7 +100,8 @@ where
         let coeffs = (0..=degree)
             .map(|_| u.arbitrary::<C>())
             .collect::<arbitrary::Result<Vec<C>>>()?;
-        Ok(Self(coeffs))
+        Ok(Self::try_from_iter(coeffs)
+            .expect("coeffs always has at least one element (degree 0 means `[0]`)"))
     }
 }
 
