@@ -114,10 +114,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         channels::Sender<C::PublicKey, ContextCell<E>>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self
-            .cfg
-            .rate_limit_outbound
-            .then(|| self.context.with_label(&format!("channel_{channel}")));
+        let clock = self.context.with_label(&format!("channel_{channel}"));
         self.channels.register(channel, rate, backlog, clock)
     }
 

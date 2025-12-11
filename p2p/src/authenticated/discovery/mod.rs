@@ -235,7 +235,6 @@ mod tests {
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
-    use rstest::rstest;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -690,11 +689,8 @@ mod tests {
         });
     }
 
-    #[rstest]
-    #[should_panic]
-    #[case::outbound_disabled_triggers_inbound(false)]
-    #[case::outbound_enabled_prevents_inbound(true)]
-    fn test_rate_limiting(#[case] rate_limit_outbound: bool) {
+    #[test_traced]
+    fn test_rate_limiting() {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
@@ -713,14 +709,12 @@ mod tests {
 
             // Create network for peer 0
             let signer0 = peers[0].clone();
-            let mut config0 = Config::test(
+            let config0 = Config::test(
                 signer0.clone(),
                 socket0,
                 vec![(peers[1].public_key(), socket1)],
                 1_024 * 1_024, // 1MB
             );
-            config0.rate_limit_outbound = rate_limit_outbound;
-
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
             oracle0
                 .update(0, addresses.clone().try_into().unwrap())
@@ -761,31 +755,19 @@ mod tests {
                     break;
                 }
 
-                // Sleep and try again (avoid busy loop)
-                context
-                    .sleep(if rate_limit_outbound {
-                        // Ensure we don't rate limit outbound sends; Skip past
-                        // the rate limit and try again.
-                        Duration::from_mins(1)
-                    } else {
-                        Duration::from_millis(100)
-                    })
-                    .await
+                // Ensure we don't rate limit outbound sends; Skip past
+                // the rate limit and try again.
+                context.sleep(Duration::from_mins(1)).await
             }
 
             // Immediately send the second message to trigger the rate limit.
             // With partial sends, rate-limited recipients return empty vec (not error).
+            // Outbound rate limiting skips the peer, returns empty vec.
             let sent = sender0
                 .send(Recipients::One(addresses[1].clone()), msg.into(), true)
                 .await
                 .unwrap();
-            if rate_limit_outbound {
-                // Outbound rate limiting skips the peer, returns empty vec.
-                assert!(sent.is_empty());
-            } else {
-                // No outbound rate limiting, message is sent (peer will rate limit inbound)
-                assert!(!sent.is_empty());
-            }
+            assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
             for _ in 0..10 {

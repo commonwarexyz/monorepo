@@ -14,7 +14,7 @@ pub struct Sender<P: PublicKey, C: GClock> {
     channel: Channel,
     max_size: usize,
     messenger: router::Messenger<P>,
-    rate_limiter: Option<Arc<Mutex<RateLimiter<P, C>>>>,
+    rate_limiter: Arc<Mutex<RateLimiter<P, C>>>,
     peer_subscription: Option<ring::Receiver<Vec<P>>>,
     known_peers: Vec<P>,
 }
@@ -24,12 +24,10 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
         channel: Channel,
         max_size: usize,
         messenger: router::Messenger<P>,
-        per_peer_quota: Option<(C, Quota)>,
+        clock: C,
+        quota: Quota,
     ) -> Self {
-        let rate_limiter = per_peer_quota.map(|(clock, quota)| {
-            let inner = RateLimiter::hashmap_with_clock(quota, clock);
-            Arc::new(Mutex::new(inner))
-        });
+        let rate_limiter = Arc::new(Mutex::new(RateLimiter::hashmap_with_clock(quota, clock)));
         Self {
             channel,
             max_size,
@@ -71,9 +69,8 @@ where
     ///
     /// # Rate Limiting
     ///
-    /// If outbound rate limiting is enabled, recipients that exceed their rate limit
-    /// will be skipped. The message is still sent to non-limited recipients. Check the
-    /// returned vector to see which peers were sent the message.
+    /// Recipients that exceed their rate limit will be skipped. The message is still sent to
+    /// non-limited recipients. Check the returned vector to see which peers were sent the message.
     ///
     /// # Parameters
     ///
@@ -126,20 +123,14 @@ where
         };
 
         // Filter peers by rate limit, consuming rate tokens only for allowed peers
-        let allowed_peers = if let Some(ref rate_limiter) = self.rate_limiter {
-            let rate_limiter = rate_limiter.lock().await;
-            let filtered = peers
-                .into_iter()
-                .filter(|peer| rate_limiter.check_key(peer).is_ok())
-                .collect::<Vec<_>>();
+        let rate_limiter = self.rate_limiter.lock().await;
+        let allowed_peers: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| rate_limiter.check_key(peer).is_ok())
+            .collect();
 
-            // Clean up limiter state
-            rate_limiter.shrink_to_fit();
-
-            filtered
-        } else {
-            peers
-        };
+        // Clean up limiter state
+        rate_limiter.shrink_to_fit();
 
         // If no recipients are allowed, short-circuit and signal that no peers could
         // be sent the message.
@@ -219,19 +210,14 @@ impl<P: PublicKey> Channels<P> {
         channel: Channel,
         rate: governor::Quota,
         backlog: usize,
-        outbound_rate_limit_clock: Option<C>,
+        clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
         (
-            Sender::new(
-                channel,
-                self.max_size,
-                self.messenger.clone(),
-                outbound_rate_limit_clock.map(|clock| (clock, rate)),
-            ),
+            Sender::new(channel, self.max_size, self.messenger.clone(), clock, rate),
             Receiver::new(receiver),
         )
     }
