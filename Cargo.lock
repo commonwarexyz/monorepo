@@ -1036,14 +1036,13 @@ version = "0.0.63"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-conformance",
  "commonware-macros",
+ "futures",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "serde",
- "sha2 0.10.9",
  "thiserror 2.0.17",
- "toml",
 ]
 
 [[package]]
@@ -1127,6 +1126,16 @@ dependencies = [
  "libfuzzer-sys",
  "rand 0.8.5",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "commonware-conformance"
+version = "0.0.63"
+dependencies = [
+ "futures",
+ "serde",
+ "sha2 0.10.9",
+ "toml",
 ]
 
 [[package]]
