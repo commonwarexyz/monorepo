@@ -495,11 +495,9 @@ mod macros {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use super::super::*;
         use commonware_cryptography::bls12381::primitives::variant::MinSig;
 
         commonware_codec::conformance_tests! {
