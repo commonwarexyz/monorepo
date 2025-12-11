@@ -9,10 +9,10 @@
 //! ```
 //! use futures::executor::block_on;
 //! use futures::{SinkExt, StreamExt};
-//! use commonware_utils::channels::ring;
+//! use commonware_utils::{NZUsize, channels::ring};
 //!
 //! block_on(async {
-//!     let (mut sender, mut receiver) = ring::channel::<u32>(2);
+//!     let (mut sender, mut receiver) = ring::channel::<u32>(NZUsize!(2));
 //!
 //!     // Fill the channel
 //!     sender.send(1).await.unwrap();
@@ -38,11 +38,9 @@ use std::{
 use thiserror::Error;
 
 /// Error returned when sending to a channel whose receiver has been dropped.
-///
-/// Contains the item that failed to send, allowing recovery of the value.
 #[derive(Debug, Error)]
-#[error("receiver dropped")]
-pub struct SendError<T>(pub T);
+#[error("channel closed")]
+pub struct ChannelClosed;
 
 struct Shared<T: Send + Sync> {
     buffer: VecDeque<T>,
@@ -66,7 +64,7 @@ pub struct Sender<T: Send + Sync> {
 impl<T: Send + Sync> Sender<T> {
     /// Returns whether the receiver has been dropped.
     ///
-    /// If this returns `true`, subsequent sends will fail with [`SendError`].
+    /// If this returns `true`, subsequent sends will fail with [`ChannelClosed`].
     pub fn is_closed(&self) -> bool {
         let shared = self.shared.lock().unwrap();
         shared.receiver_dropped
@@ -105,10 +103,14 @@ impl<T: Send + Sync> Drop for Sender<T> {
 }
 
 impl<T: Send + Sync> Sink<T> for Sender<T> {
-    type Error = SendError<T>;
+    type Error = ChannelClosed;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // This channel never applies backpressure - it drops the oldest item instead.
+        let shared = self.shared.lock().unwrap();
+        if shared.receiver_dropped {
+            return Poll::Ready(Err(ChannelClosed));
+        }
+
         Poll::Ready(Ok(()))
     }
 
@@ -116,7 +118,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
         let mut shared = self.shared.lock().unwrap();
 
         if shared.receiver_dropped {
-            return Err(SendError(item));
+            return Err(ChannelClosed);
         }
 
         let old_item = if shared.buffer.len() >= shared.capacity {
@@ -266,7 +268,7 @@ mod tests {
             drop(receiver);
 
             let err = sender.send(1).await.unwrap_err();
-            assert_eq!(err.0, 1);
+            assert!(matches!(err, ChannelClosed));
         });
     }
 
