@@ -4,6 +4,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_utils::channels::ring;
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -25,8 +26,10 @@ pub enum Message<P: PublicKey> {
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
-    /// Get a list of currently connected peers.
-    Connected { response: oneshot::Sender<Vec<P>> },
+    /// Get a subscription to peers known by the router.
+    SubscribePeers {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
+    },
 }
 
 impl<P: PublicKey> Mailbox<Message<P>> {
@@ -87,11 +90,11 @@ impl<P: PublicKey> Messenger<P> {
         receiver.await.unwrap()
     }
 
-    /// Gets a list of currently connected peers.
-    pub async fn connected(&mut self) -> Vec<P> {
+    /// Returns a subscription channel for the peers known to the router.
+    pub async fn subscribe_peers(&mut self) -> ring::Receiver<Vec<P>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Connected { response: sender })
+            .send(Message::SubscribePeers { response: sender })
             .await
             .unwrap();
         receiver.await.unwrap()

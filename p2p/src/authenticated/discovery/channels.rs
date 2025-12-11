@@ -3,18 +3,20 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::RateLimiter;
-use futures::{channel::mpsc, lock::Mutex, StreamExt};
+use commonware_utils::channels::ring;
+use futures::{channel::mpsc, lock::Mutex, FutureExt, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
-#[derive(Clone)]
 pub struct Sender<P: PublicKey, C: GClock> {
     channel: Channel,
     max_size: usize,
     messenger: Messenger<P>,
     rate_limiter: Option<Arc<Mutex<RateLimiter<P, C>>>>,
+    peer_subscription: Option<ring::Receiver<Vec<P>>>,
+    known_peers: Vec<P>,
 }
 
 impl<P: PublicKey, C: GClock> Sender<P, C> {
@@ -33,6 +35,21 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
             max_size,
             messenger,
             rate_limiter,
+            peer_subscription: None,
+            known_peers: Vec::new(),
+        }
+    }
+}
+
+impl<P: PublicKey, C: GClock> Clone for Sender<P, C> {
+    fn clone(&self) -> Self {
+        Self {
+            channel: self.channel,
+            max_size: self.max_size,
+            messenger: self.messenger.clone(),
+            rate_limiter: self.rate_limiter.clone(),
+            peer_subscription: None,
+            known_peers: Vec::new(),
         }
     }
 }
@@ -83,11 +100,29 @@ where
             return Err(Error::MessageTooLarge(message_len));
         }
 
+        // If a subscription to peers is not yet established, do so now.
+        let subscription = if let Some(ref mut subscription) = self.peer_subscription {
+            subscription
+        } else {
+            let new_subscription = self.messenger.subscribe_peers().await;
+            self.peer_subscription = Some(new_subscription);
+            self.peer_subscription.as_mut().unwrap()
+        };
+
+        // Attempt to update known peers if there's a new update, but do not
+        // wait for one.
+        //
+        // When the subscription is first created, it is guaranteed to have
+        // the initial list of peers ready immediately.
+        if let Some(peers) = subscription.next().now_or_never().flatten() {
+            self.known_peers = peers;
+        }
+
         // Get the concrete list of peers to send to
         let peers: Vec<Self::PublicKey> = match recipients {
             Recipients::One(peer) => vec![peer],
             Recipients::Some(peers) => peers,
-            Recipients::All => self.messenger.connected().await,
+            Recipients::All => self.known_peers.clone(),
         };
 
         // Filter peers by rate limit, consuming rate tokens only for allowed peers
