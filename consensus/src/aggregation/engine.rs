@@ -481,8 +481,6 @@ impl<
         let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
             return Err(Error::UnknownEpoch(ack.epoch));
         };
-        let quorum = polynomial.required();
-
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
             None => {
@@ -513,9 +511,9 @@ impl<
             .filter(|a| a.item.digest == ack.item.digest)
             .map(|ack| &ack.signature)
             .collect::<Vec<_>>();
-        if partials.len() >= (quorum as usize) {
+        if partials.len() >= (polynomial.required() as usize) {
             let item = ack.item.clone();
-            let threshold = threshold_signature_recover::<V, _>(quorum, partials)
+            let threshold = threshold_signature_recover::<V, _>(polynomial, partials)
                 .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
             self.handle_threshold(item, threshold).await;

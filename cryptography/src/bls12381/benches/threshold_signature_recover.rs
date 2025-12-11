@@ -24,20 +24,30 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                         .map(|i| PrivateKey::from_seed(i as u64).public_key())
                         .try_collect()
                         .unwrap();
-                    let (_, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
+                    let (public, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
                         .expect("deal should succeed");
-                    shares
-                        .values()
-                        .iter()
-                        .map(|s| {
-                            primitives::ops::partial_sign_message::<MinSig>(s, Some(namespace), msg)
-                        })
-                        .collect::<Vec<_>>()
+                    (
+                        public,
+                        shares
+                            .values()
+                            .iter()
+                            .map(|s| {
+                                primitives::ops::partial_sign_message::<MinSig>(
+                                    s,
+                                    Some(namespace),
+                                    msg,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 },
-                |partials| {
+                |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold_signature_recover::<MinSig, _>(t, &partials)
-                            .unwrap(),
+                        primitives::ops::threshold_signature_recover::<MinSig, _>(
+                            public.public(),
+                            &partials,
+                        )
+                        .unwrap(),
                     );
                 },
                 BatchSize::SmallInput,

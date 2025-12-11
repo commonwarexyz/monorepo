@@ -435,8 +435,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             })
             .unzip();
 
-        let quorum = self.participants().quorum();
-        if vote_partials.len() < quorum as usize {
+        let quorum = self.polynomial();
+        if vote_partials.len() < quorum.required() as usize {
             return None;
         }
 

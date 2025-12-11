@@ -9,7 +9,7 @@
 use super::variant::Variant;
 use crate::bls12381::primitives::{
     group::{self, Element, Point, Scalar},
-    Error,
+    Error, Mode,
 };
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
@@ -138,7 +138,10 @@ impl Weight {
 }
 
 /// Prepares at least `t` evaluations for Lagrange interpolation.
-pub fn prepare_evaluations<'a, C, I>(threshold: u32, evals: I) -> Result<Vec<&'a Eval<C>>, Error>
+pub(crate) fn prepare_evaluations<'a, C, I>(
+    threshold: u32,
+    evals: I,
+) -> Result<Vec<&'a Eval<C>>, Error>
 where
     C: 'a + Element,
     I: IntoIterator<Item = &'a Eval<C>>,
@@ -167,12 +170,16 @@ where
 ///
 /// The `indices` of the points used for interpolation (x = index + 1). These indices
 /// should be of length `threshold`, deduped, and sorted.
-pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error> {
+pub fn compute_weights(
+    mode: Mode,
+    total: NonZeroU32,
+    indices: Vec<u32>,
+) -> Result<BTreeMap<u32, Weight>, Error> {
     // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
     for i in &indices {
         // Convert i_eval.index to x-coordinate (x = index + 1)
-        let xi = Scalar::from_index(*i);
+        let xi = mode.scalar(total, *i).ok_or(Error::InvalidIndex)?;
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
@@ -183,7 +190,7 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
             }
 
             // Convert j_eval.index to x-coordinate
-            let xj = Scalar::from_index(*j);
+            let xj = mode.scalar(total, *j).ok_or(Error::InvalidIndex)?;
 
             // Include `xj` in the numerator product for `l_i(0)`
             num.mul(&xj);
@@ -376,7 +383,7 @@ impl<C: Element> Poly<C> {
     ///
     /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
     /// fail with an error when attempting to compute the inverse of zero.
-    pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
+    pub fn recover<'a, I>(mode: Mode, n: NonZeroU32, t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,
         I: IntoIterator<Item = &'a Eval<C>>,
@@ -386,7 +393,7 @@ impl<C: Element> Poly<C> {
 
         // Compute weights
         let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
-        let weights = compute_weights(indices)?;
+        let weights = compute_weights(mode, n, indices)?;
 
         // Perform interpolation using the precomputed weights
         Self::recover_with_weights(&weights, evals)
@@ -437,7 +444,7 @@ pub mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
     use commonware_codec::{Decode, Encode};
-    use commonware_utils::NZU32;
+    use commonware_utils::{quorum, NZU32};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -465,13 +472,14 @@ pub mod tests {
 
     #[test]
     fn interpolation_insufficient_shares() {
-        let degree = 4;
-        let threshold = degree + 1;
+        let n = NZU32!(12);
+        let threshold = quorum(n.get());
+        let degree = threshold - 1;
         let poly = new_from(&mut ChaCha8Rng::seed_from_u64(0), degree);
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, &shares).unwrap_err();
+        Poly::recover(Default::default(), n, threshold, &shares).unwrap_err();
     }
 
     #[test]
@@ -539,11 +547,14 @@ pub mod tests {
     fn interpolation() {
         for degree in 0..100u32 {
             for num_evals in 0..100u32 {
+                let num_evals = num_evals.min(degree + 1);
+                let n = NZU32!(2 * (degree + 1));
                 let poly = new_from(&mut ChaCha8Rng::seed_from_u64(0), degree);
                 let expected = poly.0[0].clone();
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
+                let recovered_constant =
+                    Poly::recover(Default::default(), n, num_evals, &shares).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(

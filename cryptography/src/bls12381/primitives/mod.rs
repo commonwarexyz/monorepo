@@ -19,11 +19,11 @@
 //! use commonware_utils::NZU32;
 //! use rand::rngs::OsRng;
 //!
-//! // Configure threshold
-//! let (n, t) = (5, 4);
+//! // Configure number of players
+//! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), NZU32!(n));
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
@@ -32,14 +32,14 @@
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify_message::<MinSig>(&commitment, namespace, message, p).expect("signature should be valid");
+//!     partial_verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
+//! let threshold_sig = threshold_signature_recover::<MinSig, _>(&sharing, &partials).unwrap();
 //!
 //! // Verify threshold signature
-//! let threshold_pub = commitment.public();
+//! let threshold_pub = sharing.public();
 //! verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 

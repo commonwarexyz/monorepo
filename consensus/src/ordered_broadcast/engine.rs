@@ -594,10 +594,9 @@ impl<
         let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
             return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        let quorum = polynomial.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
-        if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
+        if let Some(threshold) = self.ack_manager.add_ack(ack, polynomial) {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)

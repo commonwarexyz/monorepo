@@ -416,7 +416,7 @@ where
 ///
 /// This function assumes that each partial signature is unique.
 pub fn threshold_signature_recover<'a, V, I>(
-    threshold: u32,
+    sharing: &Sharing<V>,
     partials: I,
 ) -> Result<V::Signature, Error>
 where
@@ -425,11 +425,11 @@ where
     V::Signature: 'a,
 {
     // Prepare evaluations
-    let evals = prepare_evaluations(threshold, partials)?;
+    let evals = prepare_evaluations(sharing.required(), partials)?;
 
     // Compute weights
     let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
-    let weights = compute_weights(indices)?;
+    let weights = compute_weights(sharing.mode(), sharing.total(), indices)?;
 
     // Perform interpolation with the precomputed weights.
     //
@@ -451,7 +451,7 @@ where
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
 pub fn threshold_signature_recover_multiple<'a, V, I>(
-    threshold: u32,
+    sharing: &Sharing<V>,
     mut many_evals: Vec<I>,
     #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
@@ -460,6 +460,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
+    let threshold = sharing.required();
     // Process first set of evaluations
     let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
     let evals = prepare_evaluations(threshold, evals)?;
@@ -482,7 +483,7 @@ where
         .iter()
         .map(|e| e.index)
         .collect::<Vec<_>>();
-    let weights = compute_weights(indices)?;
+    let weights = compute_weights(sharing.mode(), sharing.total(), indices)?;
 
     #[cfg(not(feature = "std"))]
     return prepared_evals
@@ -532,7 +533,7 @@ where
 ///
 /// This is just a wrapper around `threshold_signature_recover_multiple` with concurrency set to 2.
 pub fn threshold_signature_recover_pair<'a, V, I>(
-    threshold: u32,
+    sharing: &Sharing<V>,
     first: I,
     second: I,
 ) -> Result<(V::Signature, V::Signature), Error>
@@ -541,7 +542,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second], 2)?;
+    let mut sigs = threshold_signature_recover_multiple::<V, _>(sharing, vec![first, second], 2)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -796,7 +797,7 @@ mod tests {
 
     fn threshold_proof_of_possession<V: Variant>() {
         // Generate PoP
-        let (n, t) = (5, 4);
+        let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let partials: Vec<_> = shares
@@ -807,7 +808,7 @@ mod tests {
             partial_verify_proof_of_possession::<V>(&sharing, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
         // Verify PoP
@@ -887,7 +888,7 @@ mod tests {
 
     fn threshold_message<V: Variant>() {
         // Generate signature
-        let (n, t) = (5, 4);
+        let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let msg = &[1, 9, 6, 9];
@@ -900,7 +901,7 @@ mod tests {
             partial_verify_message::<V>(&sharing, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
         // Verify the signature
@@ -1352,10 +1353,10 @@ mod tests {
 
         // Compute barycentric weights once.
         let indices = partials.iter().map(|e| e.index).collect::<Vec<_>>();
-        let weights = compute_weights(indices).unwrap();
+        let weights = compute_weights(sharing.mode(), sharing.total(), indices).unwrap();
 
         // Path-1: generic recover
-        let sig1 = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let sig1 = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
 
         // Path-2: recover with *pre-computed* weights
         let sig2 = threshold_signature_recover_with_weights::<V, _>(&weights, &partials).unwrap();
@@ -1391,7 +1392,7 @@ mod tests {
 
         // Recover signatures
         let (sig_1, sig_2) =
-            threshold_signature_recover_pair::<V, _>(t, &partials_1, &partials_2).unwrap();
+            threshold_signature_recover_pair::<V, _>(&sharing, &partials_1, &partials_2).unwrap();
 
         // Verify with the aggregated public key.
         verify_message::<V>(sharing.public(), None, b"payload1", &sig_1).unwrap();
@@ -1419,7 +1420,8 @@ mod tests {
 
         // Compute weights
         let indices: Vec<u32> = eval_refs.iter().map(|e| e.index).collect();
-        let weights = poly::compute_weights(indices).expect("Failed to compute weights");
+        let weights = poly::compute_weights(Default::default(), NZU32!(3 * degree), indices)
+            .expect("Failed to compute weights");
 
         // Calculate using original polynomial recovery (naive interpolation)
         let expected_result =
@@ -1462,7 +1464,8 @@ mod tests {
 
         // Compute weights for *different* indices
         let wrong_indices: Vec<u32> = (threshold..threshold * 2).collect();
-        let weights = poly::compute_weights(wrong_indices).expect("Failed to compute weights");
+        let weights = poly::compute_weights(Default::default(), NZU32!(3 * degree), wrong_indices)
+            .expect("Failed to compute weights");
 
         // Try to interpolate with mismatched weights/evals
         let result = msm_interpolate::<V::Public, _>(&weights, eval_refs);
@@ -1503,7 +1506,7 @@ mod tests {
     }
 
     fn partial_aggregate_signature_correct<V: Variant>() {
-        let (n, t) = (5, 4);
+        let (n, _) = (5, 4);
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -1527,7 +1530,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
         verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -1538,7 +1541,7 @@ mod tests {
     }
 
     fn partial_aggregate_signature_bad_namespace<V: Variant>() {
-        let (n, t) = (5, 4);
+        let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -1566,7 +1569,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
         assert!(matches!(
             verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -1605,7 +1608,7 @@ mod tests {
 
         // Generate the threshold sig
         assert!(matches!(
-            threshold_signature_recover::<V, _>(t, &partials).unwrap_err(),
+            threshold_signature_recover::<V, _>(&group, &partials).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -1617,7 +1620,7 @@ mod tests {
     }
 
     fn partial_aggregate_signature_bad_share<V: Variant>() {
-        let (n, t) = (5, 4);
+        let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -1643,7 +1646,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
         verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 

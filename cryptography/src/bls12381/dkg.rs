@@ -468,6 +468,7 @@ where
 pub struct Info<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
+    mode: Mode,
     dealers: Set<P>,
     players: Set<P>,
     summary: Summary,
@@ -613,6 +614,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         Ok(Self {
             round,
             previous,
+            mode,
             dealers,
             players,
             summary,
@@ -1325,7 +1327,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                 .collect::<(Vec<_>, BTreeMap<_, _>)>();
 
             let weights =
-                poly::compute_weights(indices).expect("should be able to compute weights");
+                poly::compute_weights(info.mode, NZU32!(previous.players.len() as u32), indices)
+                    .expect("should be able to compute weights");
             let public = recover_public_with_weights::<V>(
                 &commitments,
                 &weights,
@@ -2130,7 +2133,7 @@ mod test_plan {
 
                 let threshold = observer_output.quorum();
                 let threshold_sig = threshold_signature_recover::<V, _>(
-                    threshold,
+                    &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                 )
                 .expect("Should recover threshold signature");
