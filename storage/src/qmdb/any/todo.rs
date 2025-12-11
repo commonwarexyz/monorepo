@@ -815,13 +815,11 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Operation,
+        Op: Operation + Codec,
         C: MutableContiguous<Item = Op>,
         I: Index<Value = Location>,
         H: Hasher,
     > IndexedLog<E, Op, C, I, H>
-where
-    Op: Codec,
 {
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
