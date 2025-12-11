@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, Mode},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
 //! use commonware_utils::NZU32;
@@ -46,7 +46,7 @@
 pub mod group;
 pub mod ops;
 pub mod poly;
-mod sharing;
+pub mod sharing;
 pub mod variant;
 
 use thiserror::Error;
@@ -67,5 +67,3 @@ pub enum Error {
     #[error("evaluation index is invalid")]
     InvalidIndex,
 }
-
-pub use sharing::{Mode, Sharing};

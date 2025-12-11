@@ -181,7 +181,7 @@
 //! ```
 //! use commonware_cryptography::bls12381::{
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
-//!     primitives::{variant::MinSig, Mode},
+//!     primitives::{variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
@@ -285,8 +285,8 @@ use crate::{
         group::{Element, Scalar},
         ops::msm_interpolate,
         poly::{self, new_with_constant, Eval, Poly, Public, Weight},
+        sharing::{Mode, Sharing},
         variant::Variant,
-        Mode, Sharing,
     },
     transcript::{Summary, Transcript},
     Digest, PublicKey, Signer,

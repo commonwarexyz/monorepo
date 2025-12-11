@@ -5,8 +5,8 @@ use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::*,
     poly::{Eval, Weight},
+    sharing::Sharing,
     variant::{MinPk, MinSig},
-    Sharing,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;

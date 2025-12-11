@@ -5,8 +5,8 @@
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
+        sharing::Sharing,
         variant::{MinSig, Variant},
-        Sharing,
     },
     ed25519::PublicKey,
     Hasher,

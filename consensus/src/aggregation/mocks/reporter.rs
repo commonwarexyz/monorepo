@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{variant::Variant, Sharing},
+    bls12381::primitives::{sharing::Sharing, variant::Variant},
     Digest,
 };
 use futures::{

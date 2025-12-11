@@ -1,7 +1,7 @@
 use super::types::Ack;
 use crate::types::Epoch;
 use commonware_cryptography::{
-    bls12381::primitives::{ops, poly::PartialSignature, variant::Variant, Sharing},
+    bls12381::primitives::{ops, poly::PartialSignature, sharing::Sharing, variant::Variant},
     Digest, PublicKey,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};

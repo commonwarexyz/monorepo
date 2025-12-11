@@ -17,7 +17,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant, Sharing},
+    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select;

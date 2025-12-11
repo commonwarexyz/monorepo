@@ -6,7 +6,9 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant, Sharing},
+    bls12381::primitives::{
+        group::Share, ops, poly::PartialSignature, sharing::Sharing, variant::Variant,
+    },
     Digest,
 };
 use commonware_utils::union;

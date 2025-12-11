@@ -77,8 +77,8 @@ mod tests {
             dkg,
             primitives::{
                 group::Share,
+                sharing::Sharing,
                 variant::{MinPk, MinSig, Variant},
-                Sharing,
             },
         },
         ed25519::{PrivateKey, PublicKey},

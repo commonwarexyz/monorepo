@@ -9,7 +9,8 @@
 use super::variant::Variant;
 use crate::bls12381::primitives::{
     group::{self, Element, Point, Scalar},
-    Error, Mode,
+    sharing::Mode,
+    Error,
 };
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
