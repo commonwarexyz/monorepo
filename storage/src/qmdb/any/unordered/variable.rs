@@ -113,6 +113,12 @@ pub(super) mod test {
     /// A type alias for the concrete [Any] type used in these unit tests.
     type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
+    /// Deterministic byte vector generator for variable-value tests.
+    fn to_bytes(i: u64) -> Vec<u8> {
+        let len = ((i % 13) + 7) as usize;
+        vec![(i % 255) as u8; len]
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         AnyTest::init(context, db_config("partition"))
@@ -129,7 +135,7 @@ pub(super) mod test {
                 context,
                 db,
                 |ctx| Box::pin(open_db(ctx)),
-                |i| vec![(i % 255) as u8; ((i % 13) + 7) as usize],
+                |i| to_bytes(i),
             )
             .await;
         });
@@ -147,7 +153,7 @@ pub(super) mod test {
             const UPDATES: u64 = 100;
             let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
-                let v = vec![(i % 255) as u8; ((i % 7) + 3) as usize];
+                let v = to_bytes(i);
                 db.update(k, v).await.unwrap();
             }
             db.commit(None).await.unwrap();
