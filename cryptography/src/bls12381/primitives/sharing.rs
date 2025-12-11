@@ -1,6 +1,6 @@
 use crate::bls12381::primitives::{group::Scalar, poly::Public, variant::Variant, Error};
 #[cfg(not(feature = "std"))]
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::sync::Arc;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::Interpolator;
@@ -214,7 +214,7 @@ impl<V: Variant> Sharing<V> {
                     })
                     .ok_or(Error::InvalidIndex)
             } else {
-                Ok(eval_msm::<V>(&self.poly, self.scalar(i).ok_or(Error::InvalidIndex)?))
+                Ok(self.poly.eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?))
             }
         }
     }

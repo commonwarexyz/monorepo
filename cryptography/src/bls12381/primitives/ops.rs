@@ -15,7 +15,7 @@ use super::{
 };
 use crate::bls12381::primitives::sharing::Sharing;
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
 use commonware_utils::{ordered::Map, union_unique};

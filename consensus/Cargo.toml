@@ -54,5 +54,6 @@ fuzz = [ "dep:commonware-math" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
 	"dep:arbitrary",
 ]
