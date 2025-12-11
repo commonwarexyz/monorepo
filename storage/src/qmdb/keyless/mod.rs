@@ -17,18 +17,15 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
-    qmdb::{
-        operation::{
-            variable::{keyless::Operation, Value},
-            Committable,
-        },
-        Error,
-    },
+    qmdb::{any::VariableValue, operation::Committable, Error},
 };
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
+
+mod operation;
+pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -70,8 +67,12 @@ pub struct Config<C> {
 /// A keyless QMDB for variable length data.
 type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
-pub struct Keyless<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>> = Dirty>
-{
+pub struct Keyless<
+    E: Storage + Clock + Metrics,
+    V: VariableValue,
+    H: Hasher,
+    S: State<DigestOf<H>> = Dirty,
+> {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H, S>,
 
@@ -79,7 +80,9 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<D
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: State<DigestOf<H>>>
+    Keyless<E, V, H, S>
+{
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -138,7 +141,7 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>> K
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -301,7 +304,7 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Clean<H
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Dirty> {
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, Dirty> {
     /// Merkleize the database and compute the root digest.
     pub fn merkleize(self) -> Keyless<E, V, H, Clean<H::Digest>> {
         Keyless {
@@ -311,7 +314,7 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Dirty> 
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: State<DigestOf<H>>>
     crate::qmdb::store::LogStore for Keyless<E, V, H, S>
 {
     type Value = V;
@@ -334,7 +337,7 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>>
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::qmdb::store::CleanStore
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> crate::qmdb::store::CleanStore
     for Keyless<E, V, H, Clean<H::Digest>>
 {
     type Digest = H::Digest;
@@ -368,7 +371,7 @@ impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::qmdb::store::Clea
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> crate::qmdb::store::DirtyStore
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> crate::qmdb::store::DirtyStore
     for Keyless<E, V, H, Dirty>
 {
     type Digest = H::Digest;

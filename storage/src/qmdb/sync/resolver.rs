@@ -2,12 +2,11 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::unordered::fixed::Any,
-        immutable::Immutable,
-        operation::{
-            fixed::{unordered::Operation as Fixed, Value as FixedValue},
-            variable::{immutable::Operation as ImmutableOp, Value as VariableValue},
+        any::{
+            unordered::{fixed::Any, FixedOperation},
+            FixedValue, VariableValue,
         },
+        immutable::{Immutable, Operation as ImmutableOp},
         store::CleanStore as _,
     },
     translator::Translator,
@@ -71,7 +70,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -103,7 +102,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -206,7 +205,7 @@ pub(crate) mod tests {
         V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = Fixed<K, V>;
+        type Op = FixedOperation<K, V>;
         type Error = qmdb::Error;
 
         async fn get_operations(

@@ -5,8 +5,10 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     qmdb::{
         self,
-        any::unordered::fixed::Any,
-        operation::fixed::{unordered::Operation, Value},
+        any::{
+            unordered::{fixed::Any, FixedOperation as Operation},
+            FixedValue,
+        },
     },
     translator::Translator,
 };
@@ -24,7 +26,7 @@ impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: FixedValue,
     H: Hasher,
     T: Translator,
 {
@@ -264,14 +266,17 @@ mod tests {
         mmr::iterator::nodes_to_pin,
         qmdb::{
             self,
-            any::unordered::fixed::{
-                test::{
-                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest,
+            any::unordered::{
+                fixed::{
+                    test::{
+                        any_db_config, apply_ops, create_test_config, create_test_db,
+                        create_test_ops, AnyTest,
+                    },
+                    Any,
                 },
-                Any,
+                FixedOperation as Operation,
             },
-            operation::{fixed::unordered::Operation, Keyed as _},
+            operation::Operation as _,
             store::CleanStore as _,
             sync::{
                 self,
@@ -345,7 +350,7 @@ mod tests {
             for op in &target_db_ops {
                 match op {
                     Operation::Update(key, _) => {
-                        if let Some((op, loc)) = target_db.get_key_op_loc(key).await.unwrap() {
+                        if let Some((op, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
                         }
@@ -388,12 +393,12 @@ mod tests {
 
             // Verify that the synced database matches the target state
             for (key, op_loc) in &expected_kvs {
-                let synced_opt = got_db.get_key_op_loc(key).await.unwrap();
+                let synced_opt = got_db.get_with_loc(key).await.unwrap();
                 assert_eq!(synced_opt.as_ref(), Some(op_loc));
             }
             // Verify that deleted keys are absent
             for key in &deleted_keys {
-                assert!(got_db.get_key_op_loc(key).await.unwrap().is_none());
+                assert!(got_db.get_with_loc(key).await.unwrap().is_none());
             }
 
             // Put more key-value pairs into both databases
@@ -448,9 +453,9 @@ mod tests {
             assert_eq!(reopened_db.root(), final_synced_root);
 
             // Verify that the original key-value pairs are still correct
-            for (key, op_loc) in &expected_kvs {
+            for (key, (value, _)) in &expected_kvs {
                 let reopened_value = reopened_db.get(key).await.unwrap();
-                assert_eq!(reopened_value.as_ref(), op_loc.0.value());
+                assert_eq!(reopened_value.as_ref(), Some(value));
             }
 
             // Verify all new key-value pairs are still correct
@@ -648,9 +653,11 @@ mod tests {
                 }
             }
             // Verify the last operation is present
-            let last_key = last_op[0].key().unwrap();
-            let last_value = *last_op[0].value().unwrap();
-            assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
+            let (last_key, last_value) = match last_op[0] {
+                Operation::Update(key, value) => (key, value),
+                _ => unreachable!("last operation is not an update"),
+            };
+            assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)

@@ -20,7 +20,7 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::Location,
-    qmdb::operation::Keyed,
+    qmdb::operation::Operation,
     DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::Digest;
@@ -104,7 +104,7 @@ pub(super) async fn build_snapshot_from_log<C, I, F>(
     mut callback: F,
 ) -> Result<usize, Error>
 where
-    C: Contiguous<Item: Keyed>,
+    C: Contiguous<Item: Operation>,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
@@ -144,11 +144,11 @@ where
 async fn delete_key<I, C>(
     snapshot: &mut I,
     log: &C,
-    key: &<C::Item as Keyed>::Key,
+    key: &<C::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    C: Contiguous<Item: Keyed>,
+    C: Contiguous<Item: Operation>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -169,12 +169,12 @@ where
 async fn update_key<I, C>(
     snapshot: &mut I,
     log: &C,
-    key: &<C::Item as Keyed>::Key,
+    key: &<C::Item as Operation>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    C: Contiguous<Item: Keyed>,
+    C: Contiguous<Item: Operation>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -200,12 +200,12 @@ where
 async fn create_key<I, C>(
     snapshot: &mut I,
     log: &C,
-    key: &<C::Item as Keyed>::Key,
+    key: &<C::Item as Operation>::Key,
     new_loc: Location,
 ) -> Result<bool, Error>
 where
     I: Index<Value = Location>,
-    C: Contiguous<Item: Keyed>,
+    C: Contiguous<Item: Operation>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -233,10 +233,10 @@ where
 async fn find_update_op<C>(
     log: &C,
     cursor: &mut impl Cursor<Value = Location>,
-    key: &<C::Item as Keyed>::Key,
+    key: &<C::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    C: Contiguous<Item: Keyed>,
+    C: Contiguous<Item: Operation>,
 {
     while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
@@ -285,7 +285,8 @@ fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], ol
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguous<Item: Keyed>> {
+pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguous<Item: Operation>>
+{
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
 }
@@ -293,7 +294,7 @@ pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguo
 impl<I, C> FloorHelper<'_, I, C>
 where
     I: Index<Value = Location>,
-    C: MutableContiguous<Item: Keyed>,
+    C: MutableContiguous<Item: Operation>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the

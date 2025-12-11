@@ -10,12 +10,11 @@ use crate::{
         verification, Location, Proof, StandardHasher,
     },
     qmdb::{
-        any::{unordered::fixed::Any, CleanAny, DirtyAny},
-        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::{
-            fixed::{unordered::Operation, Value},
-            Keyed as _,
+        any::{
+            unordered::{fixed::Any, FixedOperation as Operation},
+            CleanAny, DirtyAny, FixedValue,
         },
+        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -38,7 +37,7 @@ use std::num::NonZeroU64;
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: FixedValue,
     H: Hasher,
     T: Translator,
     const N: usize,
@@ -62,7 +61,7 @@ pub struct Current<
 
 /// The information required to verify a key value proof from a Current QMDB.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: Value, const N: usize> {
+pub struct KeyValueProofInfo<K: Array, V: FixedValue, const N: usize> {
     /// The key whose value is being proven.
     pub key: K,
 
@@ -79,7 +78,7 @@ pub struct KeyValueProofInfo<K: Array, V: Value, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -161,7 +160,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -271,8 +270,8 @@ impl<
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        let op_loc = self.any.get_key_op_loc(&key).await?;
-        let Some((op, loc)) = op_loc else {
+        let op_loc = self.any.get_with_loc(&key).await?;
+        let Some((value, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
@@ -294,7 +293,7 @@ impl<
             proof,
             KeyValueProofInfo {
                 key,
-                value: op.into_value().expect("update operation must have value"),
+                value,
                 loc,
                 chunk,
             },
@@ -466,7 +465,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -539,7 +538,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -553,7 +552,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -582,7 +581,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -601,7 +600,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -615,7 +614,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -629,7 +628,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -671,7 +670,7 @@ impl<E, K, V, T, H, const N: usize> Batchable for Current<E, K, V, H, T, N, Dirt
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: FixedValue,
     T: Translator,
     H: Hasher,
 {
@@ -680,7 +679,7 @@ where
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -698,7 +697,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -734,7 +733,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: FixedValue,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -979,7 +978,7 @@ pub mod test {
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
 
-            let op = db.any.get_key_op_loc(&k).await.unwrap().unwrap();
+            let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -1048,7 +1047,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_key_op_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.get_with_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
@@ -1196,13 +1195,17 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
-                let Some(key) = op.key() else {
-                    // Must be the last commit operation which doesn't update a key.
-                    continue;
+                let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
+                {
+                    Operation::Update(key, value) => (key, value),
+                    Operation::CommitFloor(_, _) => continue,
+                    Operation::Delete(_) => {
+                        unreachable!("location does not reference update/commit operation")
+                    }
                 };
-                let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
-                assert_eq!(info.value, *op.value().unwrap());
+
+                let (proof, info) = db.key_value_proof(hasher.inner(), key).await.unwrap();
+                assert_eq!(info.value, value);
                 // Proof should validate against the current value and correct root.
                 assert!(CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),

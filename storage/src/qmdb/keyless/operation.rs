@@ -1,12 +1,16 @@
-use crate::qmdb::operation::{self, variable::Value, Committable};
+use crate::qmdb::{any::VariableValue, operation::Committable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_utils::hex;
 use core::fmt::Display;
 
+// Context byte prefixes for identifying the operation type.
+const COMMIT_CONTEXT: u8 = 0;
+const APPEND_CONTEXT: u8 = 1;
+
 /// Operations for keyless stores.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<V: Value> {
+pub enum Operation<V: VariableValue> {
     /// Wraps the value appended to the database by this operation.
     Append(V),
 
@@ -14,7 +18,7 @@ pub enum Operation<V: Value> {
     Commit(Option<V>),
 }
 
-impl<V: Value> Operation<V> {
+impl<V: VariableValue> Operation<V> {
     /// Returns the value (if any) wrapped by this operation.
     pub fn into_value(self) -> Option<V> {
         match self {
@@ -24,7 +28,7 @@ impl<V: Value> Operation<V> {
     }
 }
 
-impl<V: Value> EncodeSize for Operation<V> {
+impl<V: VariableValue> EncodeSize for Operation<V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Append(v) => v.encode_size(),
@@ -33,40 +37,40 @@ impl<V: Value> EncodeSize for Operation<V> {
     }
 }
 
-impl<V: Value> Write for Operation<V> {
+impl<V: VariableValue> Write for Operation<V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Append(value) => {
-                operation::APPEND_CONTEXT.write(buf);
+                APPEND_CONTEXT.write(buf);
                 value.write(buf);
             }
             Self::Commit(metadata) => {
-                operation::COMMIT_CONTEXT.write(buf);
+                COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
             }
         }
     }
 }
 
-impl<V: Value> Committable for Operation<V> {
+impl<V: VariableValue> Committable for Operation<V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_))
     }
 }
 
-impl<V: Value> Read for Operation<V> {
+impl<V: VariableValue> Read for Operation<V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            operation::APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
-            operation::COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
+            APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
 }
 
-impl<V: Value> Display for Operation<V> {
+impl<V: VariableValue> Display for Operation<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
