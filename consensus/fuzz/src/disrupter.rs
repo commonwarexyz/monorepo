@@ -252,28 +252,43 @@ where
         self,
         vote_network: (impl Sender, impl Receiver),
         certificate_network: (impl Sender, impl Receiver),
+        resolver_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
         let context = self.context.clone();
-        context.spawn(|_| self.run(vote_network, certificate_network))
+        context.spawn(|_| self.run(vote_network, certificate_network, resolver_network))
     }
 
     async fn run(
         mut self,
         vote_network: (impl Sender, impl Receiver),
         certificate_network: (impl Sender, impl Receiver),
+        resolver_network: (impl Sender, impl Receiver),
     ) {
         let (mut vote_sender, mut vote_receiver) = vote_network;
         let (mut cert_sender, mut cert_receiver) = certificate_network;
+        let (mut resolver_sender, mut resolver_receiver) = resolver_network;
 
         loop {
-            // Send one of the disruptive messages then wait for responses
-            match self.fuzz_input.random_byte() % 3 {
-                0 => self.send_random_message(&mut vote_sender).await,
+            // Send disruptive messages across all channels
+            match self.fuzz_input.random_byte() % 6 {
+                0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
-                _ => {
+                2 => {
                     // Equivocation attack: send multiple different proposals
                     self.send_proposal(&mut vote_sender).await;
                     self.send_proposal(&mut vote_sender).await;
+                }
+                3 => {
+                    self.send_random_message(&mut cert_sender).await;
+                }
+                4 => {
+                    self.send_random_message(&mut resolver_sender).await;
+                }
+                _ => {
+                    // Send on multiple channels simultaneously
+                    self.send_proposal(&mut vote_sender).await;
+                    self.send_random_message(&mut cert_sender).await;
+                    self.send_random_message(&mut resolver_sender).await;
                 }
             }
 
@@ -288,9 +303,15 @@ where
                         self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
                     }
                 },
-                // We ignore resolver messages
+                result = resolver_receiver.recv().fuse() => {
+                    if let Ok((_, msg)) = result {
+                        self.handle_resolver(&mut resolver_sender, msg.to_vec()).await;
+                    }
+                },
                 _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random_message(&mut vote_sender).await;
+                    self.send_random_vote(&mut vote_sender).await;
+                    self.send_random_message(&mut cert_sender).await;
+                    self.send_random_message(&mut resolver_sender).await;
                 }
             }
         }
@@ -383,6 +404,28 @@ where
         }
     }
 
+    async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        // Randomly forward, drop, or respond with malformed data to resolver requests
+        match self.fuzz_input.random_byte() % 4 {
+            0 => {
+                let _ = sender.send(Recipients::All, Bytes::from(msg), true).await;
+            }
+            1 => {
+                // Send mutated resolver response
+                let mutated = self.mutate_bytes(&msg);
+                let _ = sender.send(Recipients::All, mutated.into(), true).await;
+            }
+            2 => {
+                // Send random garbage as resolver response
+                let garbage = self.bytes();
+                let _ = sender.send(Recipients::All, garbage.into(), true).await;
+            }
+            _ => {
+                // Drop the message (ignore resolver request)
+            }
+        }
+    }
+
     fn mutate_proposal(&mut self, original: &Proposal<Sha256Digest>) -> Proposal<Sha256Digest> {
         match self.mutation() {
             Mutation::Payload => Proposal::new(
@@ -421,6 +464,11 @@ where
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
+        let cert = self.bytes();
+        let _ = sender.send(Recipients::All, cert.into(), true).await;
+    }
+
+    async fn send_random_vote(&mut self, sender: &mut impl Sender) {
         let proposal = self.get_proposal();
 
         if self.participants.index(&self.validator).is_none() {
