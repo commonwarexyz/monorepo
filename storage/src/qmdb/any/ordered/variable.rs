@@ -5,6 +5,7 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::ordered::fixed]
 //! instead for better performance._
 
+use super::operation::VariableOperation as Operation;
 use crate::{
     index::ordered::Index,
     journal::{
@@ -13,14 +14,8 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{
-            ordered::{IndexedLog, Operation as OperationTrait},
-            VariableConfig,
-        },
-        operation::{
-            variable::{ordered::Operation, Value},
-            Committable as _, KeyData,
-        },
+        any::{ordered::IndexedLog, VariableConfig, VariableValue},
+        operation::Committable as _,
         Error,
     },
     translator::Translator,
@@ -30,30 +25,12 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
-    fn new_update(key: K, value: V, next_key: K) -> Self {
-        Self::Update(KeyData {
-            key,
-            value,
-            next_key,
-        })
-    }
-
-    fn new_delete(key: K) -> Self {
-        Self::Delete(key)
-    }
-
-    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
-    }
-}
-
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be

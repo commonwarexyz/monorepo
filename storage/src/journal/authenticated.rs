@@ -639,7 +639,7 @@ mod tests {
             journaled::{Config as MmrConfig, Mmr},
             Location,
         },
-        qmdb::operation::{fixed::unordered::Operation, Committable},
+        qmdb::{any::unordered::FixedOperation as Operation, operation::Committable},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};

@@ -11,12 +11,8 @@ use crate::{
     qmdb::{
         any::{
             init_fixed_authenticated_log,
-            ordered::{IndexedLog, Operation as OperationTrait},
-            FixedConfig as Config,
-        },
-        operation::{
-            fixed::{ordered::Operation, Value},
-            KeyData,
+            ordered::{FixedOperation as Operation, IndexedLog},
+            FixedConfig as Config, FixedValue,
         },
         Error,
     },
@@ -26,30 +22,12 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
-    fn new_update(key: K, value: V, next_key: K) -> Self {
-        Self::Update(KeyData {
-            key,
-            value,
-            next_key,
-        })
-    }
-
-    fn new_delete(key: K) -> Self {
-        Self::Delete(key)
-    }
-
-    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
-    }
-}
-
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -86,6 +64,7 @@ mod test {
         index::Unordered as _,
         mmr::{mem::Mmr, Position, StandardHasher as Standard},
         qmdb::{
+            any::ordered::KeyData,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },

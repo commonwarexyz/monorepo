@@ -2,12 +2,11 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::unordered::fixed::Any,
-        immutable::Immutable,
-        operation::{
-            fixed::{unordered::Operation as Fixed, Value as FixedValue},
-            variable::{immutable::Operation as ImmutableOp, Value as VariableValue},
+        any::{
+            unordered::{fixed::Any, FixedOperation},
+            FixedValue, VariableValue,
         },
+        immutable::{Immutable, Operation as ImmutableOp},
         store::CleanStore as _,
     },
     translator::Translator,
@@ -71,7 +70,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -103,7 +102,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -128,7 +127,7 @@ impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: VariableValue + Send + Sync + 'static,
+    V: VariableValue + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -160,7 +159,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: VariableValue + Send + Sync + 'static,
+    V: VariableValue + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -206,7 +205,7 @@ pub(crate) mod tests {
         V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = Fixed<K, V>;
+        type Op = FixedOperation<K, V>;
         type Error = qmdb::Error;
 
         async fn get_operations(
