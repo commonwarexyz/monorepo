@@ -127,7 +127,7 @@ impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: VariableValue + Clone + Send + Sync + 'static,
+    V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -159,7 +159,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: VariableValue + Clone + Send + Sync + 'static,
+    V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
