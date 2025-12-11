@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use tracing::debug;
 
 mod operation;
-use operation::Operation;
+pub(super) use operation::Operation;
 pub use operation::{FixedOperation, VariableOperation};
 
 pub mod fixed;
