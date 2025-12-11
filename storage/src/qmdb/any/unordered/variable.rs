@@ -135,7 +135,7 @@ pub(super) mod test {
                 context,
                 db,
                 |ctx| Box::pin(open_db(ctx)),
-                |i| to_bytes(i),
+                to_bytes,
             )
             .await;
         });
