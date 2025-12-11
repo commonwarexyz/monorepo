@@ -276,7 +276,7 @@ mod tests {
                 },
                 FixedOperation as Operation,
             },
-            operation::Keyed as _,
+            operation::Operation as _,
             store::CleanStore as _,
             sync::{
                 self,

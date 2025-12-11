@@ -4,7 +4,7 @@ use crate::Key;
 use commonware_codec::Encode;
 use commonware_storage::{
     mmr::{Location, Proof},
-    qmdb::{self, operation::Keyed},
+    qmdb::{self, operation::Operation},
 };
 use std::{future::Future, num::NonZeroU64};
 
@@ -44,7 +44,7 @@ impl DatabaseType {
 /// Helper trait for databases that can be synced.
 pub trait Syncable {
     /// The type of operations in the database.
-    type Operation: Keyed + Encode + Sync + 'static;
+    type Operation: Operation + Encode + Sync + 'static;
 
     /// Create test operations with the given count and seed.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;

@@ -10,7 +10,7 @@ use crate::{
     qmdb::{
         any::{CleanAny, DirtyAny, ValueEncoding},
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Keyed},
+        operation::{Committable, Operation as _},
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper, Index,
     },

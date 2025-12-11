@@ -5,7 +5,7 @@
 
 use crate::{
     mmr::Location,
-    qmdb::{any::VariableValue, operation::Keyed},
+    qmdb::{any::VariableValue, operation::Operation as OperationTrait},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -53,7 +53,7 @@ impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: VariableValue> Keyed for Operation<K, V> {
+impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {

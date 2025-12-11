@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         any::{CleanAny, DirtyAny, ValueEncoding, VariableValue},
         build_snapshot_from_log,
-        operation::{Committable, Keyed},
+        operation::{Committable, Operation as _},
         store::{Batchable, LogStore},
         update_known_loc, Error, FloorHelper,
     },

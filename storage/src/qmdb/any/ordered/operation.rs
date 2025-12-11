@@ -6,7 +6,7 @@ use crate::{
             value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
             COMMIT_FLOOR_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT,
         },
-        operation::{Committable, Keyed},
+        operation::{Committable, Operation as OperationTrait},
     },
 };
 use bytes::{Buf, BufMut};
@@ -66,7 +66,7 @@ impl<K: Array, V: VariableValue> EncodeSize for VariableOperation<K, V> {
     }
 }
 
-impl<K: Array, V: ValueEncoding> Keyed for Operation<K, V>
+impl<K: Array, V: ValueEncoding> OperationTrait for Operation<K, V>
 where
     Self: Codec,
 {
