@@ -24,35 +24,48 @@ pub type Public<V> = Poly<<V as Variant>::Public>;
 /// is interpolated using at least `threshold` evaluations).
 pub type Signature<V> = Poly<<V as Variant>::Signature>;
 
-/// The partial signature type.
-pub type PartialSignature<V> = Eval<<V as Variant>::Signature>;
-
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Eval<C> {
+pub struct PartialSignature<V: Variant> {
     pub index: u32,
-    pub value: C,
+    pub value: V::Signature,
 }
 
-impl<C: Write> Write for Eval<C> {
+impl<V: Variant> Write for PartialSignature<V> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
-impl<C: Read<Cfg = ()>> Read for Eval<C> {
+impl<V: Variant> Read for PartialSignature<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
-        let value = C::read(buf)?;
+        let value = V::Signature::read(buf)?;
         Ok(Self { index, value })
     }
 }
 
-impl<C: FixedSize> EncodeSize for Eval<C> {
+impl<V: Variant> EncodeSize for PartialSignature<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + C::SIZE
+        UInt(self.index).encode_size() + V::Signature::SIZE
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        use commonware_math::algebra::HashToGroup;
+        use rand::SeedableRng;
+
+        let index: u32 = u.int_in_range(0..=99)?;
+        Ok(Self {
+            index,
+            value: V::Signature::rand_to_group(&mut rand::rngs::StdRng::seed_from_u64(
+                u.arbitrary()?,
+            )),
+        })
     }
 }

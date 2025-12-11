@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::*,
-    poly::Eval,
+    poly::PartialSignature,
     sharing::Sharing,
     variant::{MinPk, MinSig},
 };
@@ -12,10 +12,11 @@ use libfuzzer_sys::fuzz_target;
 
 mod common;
 use common::{
-    arbitrary_bytes, arbitrary_eval_g1, arbitrary_eval_g2, arbitrary_messages,
-    arbitrary_optional_bytes, arbitrary_share, arbitrary_vec_eval_g1, arbitrary_vec_eval_g2,
-    arbitrary_vec_g1, arbitrary_vec_g2, arbitrary_vec_indexed_g1, arbitrary_vec_indexed_g2,
-    arbitrary_vec_of_vec_eval_g1, arbitrary_vec_of_vec_eval_g2,
+    arbitrary_bytes, arbitrary_messages, arbitrary_optional_bytes, arbitrary_partial_sig_g1,
+    arbitrary_partial_sig_g2, arbitrary_share, arbitrary_vec_g1, arbitrary_vec_g2,
+    arbitrary_vec_indexed_g1, arbitrary_vec_indexed_g2, arbitrary_vec_of_vec_partial_sig_g1,
+    arbitrary_vec_of_vec_partial_sig_g2, arbitrary_vec_partial_sig_g1,
+    arbitrary_vec_partial_sig_g2,
 };
 
 type Message = (Option<Vec<u8>>, Vec<u8>);
@@ -31,17 +32,17 @@ enum FuzzOperation {
     },
     PartialVerifyProofOfPossessionMinPk {
         public: Sharing<MinPk>,
-        partial: Eval<G2>,
+        partial: PartialSignature<MinPk>,
     },
     PartialVerifyProofOfPossessionMinSig {
         public: Sharing<MinSig>,
-        partial: Eval<G1>,
+        partial: PartialSignature<MinSig>,
     },
     PartialAggregateSignaturesMinPk {
-        partials: Vec<Eval<G2>>,
+        partials: Vec<PartialSignature<MinPk>>,
     },
     PartialAggregateSignaturesMinSig {
-        partials: Vec<Eval<G1>>,
+        partials: Vec<PartialSignature<MinSig>>,
     },
     PartialVerifyMultipleMessagesMinPk {
         public: Sharing<MinPk>,
@@ -69,31 +70,31 @@ enum FuzzOperation {
     },
     ThresholdSignatureRecoverMinPk {
         sharing: Sharing<MinPk>,
-        partials: Vec<Eval<G2>>,
+        partials: Vec<PartialSignature<MinPk>>,
     },
     ThresholdSignatureRecoverMinSig {
         sharing: Sharing<MinSig>,
-        partials: Vec<Eval<G1>>,
+        partials: Vec<PartialSignature<MinSig>>,
     },
     ThresholdSignatureRecoverMultipleMinPk {
         sharing: Sharing<MinPk>,
-        signature_groups: Vec<Vec<Eval<G2>>>,
+        signature_groups: Vec<Vec<PartialSignature<MinPk>>>,
         concurrency: usize,
     },
     ThresholdSignatureRecoverMultipleMinSig {
         sharing: Sharing<MinSig>,
-        signature_groups: Vec<Vec<Eval<G1>>>,
+        signature_groups: Vec<Vec<PartialSignature<MinSig>>>,
         concurrency: usize,
     },
     ThresholdSignatureRecoverPairMinPk {
         sharing: Sharing<MinPk>,
-        partials_1: Vec<Eval<G2>>,
-        partials_2: Vec<Eval<G2>>,
+        partials_1: Vec<PartialSignature<MinPk>>,
+        partials_2: Vec<PartialSignature<MinPk>>,
     },
     ThresholdSignatureRecoverPairMinSig {
         sharing: Sharing<MinSig>,
-        partials_1: Vec<Eval<G1>>,
-        partials_2: Vec<Eval<G1>>,
+        partials_1: Vec<PartialSignature<MinSig>>,
+        partials_2: Vec<PartialSignature<MinSig>>,
     },
 }
 
@@ -112,17 +113,17 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             2 => Ok(FuzzOperation::PartialVerifyProofOfPossessionMinPk {
                 public: u.arbitrary()?,
-                partial: arbitrary_eval_g2(u)?,
+                partial: arbitrary_partial_sig_g2(u)?,
             }),
             3 => Ok(FuzzOperation::PartialVerifyProofOfPossessionMinSig {
                 public: u.arbitrary()?,
-                partial: arbitrary_eval_g1(u)?,
+                partial: arbitrary_partial_sig_g1(u)?,
             }),
             4 => Ok(FuzzOperation::PartialAggregateSignaturesMinPk {
-                partials: arbitrary_vec_eval_g2(u, 0, 10)?,
+                partials: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
             }),
             5 => Ok(FuzzOperation::PartialAggregateSignaturesMinSig {
-                partials: arbitrary_vec_eval_g1(u, 0, 10)?,
+                partials: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
             }),
             6 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
                 public: u.arbitrary()?,
@@ -150,31 +151,31 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             10 => Ok(FuzzOperation::ThresholdSignatureRecoverMinSig {
                 sharing: u.arbitrary()?,
-                partials: arbitrary_vec_eval_g1(u, 0, 20)?,
+                partials: arbitrary_vec_partial_sig_g1(u, 0, 20)?,
             }),
             11 => Ok(FuzzOperation::ThresholdSignatureRecoverMinPk {
                 sharing: u.arbitrary()?,
-                partials: arbitrary_vec_eval_g2(u, 0, 20)?,
+                partials: arbitrary_vec_partial_sig_g2(u, 0, 20)?,
             }),
             12 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
                 sharing: u.arbitrary()?,
-                signature_groups: arbitrary_vec_of_vec_eval_g2(u, 0, 5, 0, 10)?,
+                signature_groups: arbitrary_vec_of_vec_partial_sig_g2(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
             13 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinSig {
                 sharing: u.arbitrary()?,
-                signature_groups: arbitrary_vec_of_vec_eval_g1(u, 0, 5, 0, 10)?,
+                signature_groups: arbitrary_vec_of_vec_partial_sig_g1(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
             14 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinPk {
                 sharing: u.arbitrary()?,
-                partials_1: arbitrary_vec_eval_g2(u, 0, 10)?,
-                partials_2: arbitrary_vec_eval_g2(u, 0, 10)?,
+                partials_1: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
+                partials_2: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
             }),
             15 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinSig {
                 sharing: u.arbitrary()?,
-                partials_1: arbitrary_vec_eval_g1(u, 0, 10)?,
-                partials_2: arbitrary_vec_eval_g1(u, 0, 10)?,
+                partials_1: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
+                partials_2: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
             }),
             _ => {
                 panic!("Unsupported operation type");
@@ -228,10 +229,10 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
-                let partials_evals: Vec<Eval<G2>> = partials
+                let partials_evals: Vec<PartialSignature<MinPk>> = partials
                     .into_iter()
                     .enumerate()
-                    .map(|(i, sig)| Eval {
+                    .map(|(i, sig)| PartialSignature {
                         index: index + i as u32,
                         value: sig,
                     })
@@ -256,10 +257,10 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
-                let partials_evals: Vec<Eval<G1>> = partials
+                let partials_evals: Vec<PartialSignature<MinSig>> = partials
                     .into_iter()
                     .enumerate()
-                    .map(|(i, sig)| Eval {
+                    .map(|(i, sig)| PartialSignature {
                         index: index + i as u32,
                         value: sig,
                     })
@@ -280,9 +281,9 @@ fn fuzz(op: FuzzOperation) {
             partials,
         } => {
             if public.required() as usize == partials.len() {
-                let partials_evals: Vec<Eval<G2>> = partials
+                let partials_evals: Vec<PartialSignature<MinPk>> = partials
                     .into_iter()
-                    .map(|(idx, sig)| Eval {
+                    .map(|(idx, sig)| PartialSignature {
                         index: idx,
                         value: sig,
                     })
@@ -303,9 +304,9 @@ fn fuzz(op: FuzzOperation) {
             partials,
         } => {
             if public.required() as usize == partials.len() {
-                let partials_evals: Vec<Eval<G1>> = partials
+                let partials_evals: Vec<PartialSignature<MinSig>> = partials
                     .into_iter()
-                    .map(|(idx, sig)| Eval {
+                    .map(|(idx, sig)| PartialSignature {
                         index: idx,
                         value: sig,
                     })
@@ -333,7 +334,7 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if concurrency > 0 && !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&Eval<G2>>> = signature_groups
+                let groups_refs: Vec<Vec<&PartialSignature<MinPk>>> = signature_groups
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
@@ -351,7 +352,7 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if concurrency > 0 && !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&Eval<G1>>> = signature_groups
+                let groups_refs: Vec<Vec<&PartialSignature<MinSig>>> = signature_groups
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();

@@ -9,7 +9,7 @@
 
 use super::{
     group::{self, Scalar, Share, DST},
-    poly::{Eval, PartialSignature},
+    poly::PartialSignature,
     variant::Variant,
     Error,
 };
@@ -148,7 +148,7 @@ pub fn partial_sign_proof_of_possession<V: Variant>(
         V::PROOF_OF_POSSESSION,
         &sharing.public().encode(),
     );
-    Eval {
+    PartialSignature {
         value: sig,
         index: private.index,
     }
@@ -178,7 +178,7 @@ pub fn partial_sign_message<V: Variant>(
     message: &[u8],
 ) -> PartialSignature<V> {
     let sig = sign_message::<V>(&private.private, namespace, message);
-    Eval {
+    PartialSignature {
         value: sig,
         index: private.index,
     }
@@ -2247,7 +2247,7 @@ mod tests {
             // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
             let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &scalars, 1);
-            let derived = Eval {
+            let derived = PartialSignature {
                 index: target,
                 value: derived,
             };
