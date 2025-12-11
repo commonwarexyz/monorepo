@@ -1137,14 +1137,14 @@ where
         let mut possible_previous = BTreeMap::new();
 
         // We divide keys in the batch into three disjoint sets:
-        // - `deleted`
-        // - `created`
-        // - `updated`
-        // For deleted keys only, we immediately update the log and snapshot during this process.
+        //   - `deleted`
+        //   - `created`
+        //   - `updated`
+        //
+        // Populate the the deleted and updated sets, and for deleted keys only, immediately update
+        // the log and snapshot.
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
-        let mut created = BTreeMap::new();
-
         for (op, old_loc) in (results.into_iter()).zip(locations) {
             let key = op.key().expect("updates should have a key").clone();
             let key_data = op.into_key_data().expect("updates should have key data");
@@ -1176,6 +1176,7 @@ where
         }
 
         // Any key remaining in `mutations` must be a new key so move it to the created map.
+        let mut created = BTreeMap::new();
         for (key, value) in mutations {
             let Some(value) = value else {
                 continue; // can happen from attempt to delete a non-existent key
