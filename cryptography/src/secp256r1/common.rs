@@ -121,6 +121,16 @@ impl Display for PrivateKeyInner {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::from_rng(&mut rand))
+    }
+}
+
 /// Internal Secp256r1 Public Key storage.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PublicKeyInner {
@@ -199,6 +209,17 @@ impl Debug for PublicKeyInner {
 impl Display for PublicKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKeyInner {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKeyInner::from_rng(&mut rand);
+        Ok(Self::from_private_key(&private_key))
     }
 }
 
@@ -834,5 +855,15 @@ pub(crate) mod tests {
             508033812c776a0e00c003c7e0d628e50736c7512df0acfa9f2320bd102229f46495ae6d0857cc452a84",
         );
         (public_key, sig, message, true)
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            PublicKeyInner,
+            PrivateKeyInner,
+        }
     }
 }

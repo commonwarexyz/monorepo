@@ -473,6 +473,77 @@ fn test_storage_conformance() {
 such an error. Callers must not use a database after a mutable method returns an error. Reviews
 need not comment the database being in an inconsistent state after such an error.
 
+## Codec Conformance Testing
+
+Codec conformance tests verify that codec implementations maintain backward compatibility by comparing encoded output against known-good hash values stored in TOML files. This prevents accidental breaking changes to wire formats.
+
+### Running Conformance Tests
+
+```bash
+# Run all codec conformance tests
+just test-conformance
+
+# Regenerate fixtures (use only for INTENTIONAL format changes)
+just regenerate-conformance
+```
+
+**WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking codec change. Only use this when you have intentionally changed the wire format and have verified that the change is correct. This will update the hash values in `codec_conformance.toml` files throughout the repository.
+
+### Adding Conformance Tests for New Types
+
+When creating a new type that implements `Write` (the codec trait), add conformance tests:
+
+#### Step 1: Add `Arbitrary` Implementation
+
+Add an `arbitrary::Arbitrary` impl gated by the `arbitrary` feature flag. Place this near the other trait impls for the type:
+
+```rust
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for MyType {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // ... construct your type using the unstructured data ...
+        Ok(my_instance)
+    }
+}
+```
+
+#### Step 2: Add Conformance Test Module
+
+Inside the `#[cfg(test)] mod tests` block, add a `conformance` submodule gated by the `arbitrary` feature:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ... other tests ...
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            MyType, // default # of cases
+            MyType2 => 1024, // custom # of cases
+        }
+    }
+}
+```
+
+The number (1024) is the number of test cases to generate and hash together.
+
+#### Step 3: Run Tests to Generate Fixtures
+
+Run `just test-conformance` to generate the initial hash values. The test framework will automatically add new types to the appropriate `codec_conformance.toml` file.
+
+### How It Works
+
+1. Tests generate deterministic values using seeded RNG + `arbitrary`
+2. Each value is encoded and all encodings are hashed together with SHA-256
+3. The hash is compared against the stored value in `codec_conformance.toml`
+4. Hash mismatches cause test failures (format changed)
+5. Missing types are automatically added to the TOML file
+
 ## Code Style Guide
 
 ### Runtime Isolation Rule

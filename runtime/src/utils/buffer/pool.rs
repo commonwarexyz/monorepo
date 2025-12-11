@@ -236,6 +236,13 @@ impl PoolRef {
     /// Cache the provided slice of data in the buffer pool, returning the remaining bytes that
     /// didn't fill a whole page. `offset` must be page aligned.
     ///
+    /// If the next page index would overflow `u64`, caching stops and the uncached bytes are
+    /// returned. This can only occur with 1-byte pages on 64-bit architectures. On 32-bit
+    /// architectures it cannot occur because the buffer length is bounded by `usize::MAX` (2^32-1),
+    /// so even starting at page `u64::MAX` with 1-byte pages, at most 2^32-1 pages can be cached.
+    /// On 64-bit architectures with page_size >= 2, the maximum starting page (`u64::MAX / 2`)
+    /// plus maximum cacheable pages (`usize::MAX / 2`) equals `u64::MAX - 1`.
+    ///
     /// # Panics
     ///
     /// Panics if `offset` is not page aligned.
@@ -248,7 +255,10 @@ impl PoolRef {
             while buf.len() >= self.page_size {
                 buffer_pool.cache(self.page_size, blob_id, &buf[..self.page_size], page_num);
                 buf = &buf[self.page_size..];
-                page_num += 1;
+                page_num = match page_num.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
         }
 
@@ -452,6 +462,48 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_pool_cache_max_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(2));
+
+            // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
+            let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE as u64);
+
+            // Caching exactly one page at the maximum offset should succeed.
+            let remaining = pool_ref
+                .cache(0, vec![42; PAGE_SIZE].as_slice(), aligned_max_offset)
+                .await;
+            assert_eq!(remaining, 0);
+
+            let mut buf = vec![0u8; PAGE_SIZE];
+            let pool = pool_ref.pool.read().await;
+            let bytes_read = pool.read_at(PAGE_SIZE, 0, &mut buf, aligned_max_offset);
+            assert_eq!(bytes_read, PAGE_SIZE);
+            assert!(buf.iter().all(|b| *b == 42));
+        });
+    }
+
+    #[test_traced]
+    fn test_pool_cache_page_overflow_partial() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            // Use the minimum page size to force the page index to reach u64::MAX and trigger the
+            // overflow guard.
+            let pool_ref = PoolRef::new(NZUsize!(1), NZUsize!(2));
+
+            // Caching across the maximum page should stop before overflow and report the remainder.
+            let remaining = pool_ref.cache(0, &[1, 2], u64::MAX).await;
+            assert_eq!(remaining, 1);
+
+            let mut buf = [0u8; 1];
+            let pool = pool_ref.pool.read().await;
+            assert_eq!(pool.read_at(1, 0, &mut buf, u64::MAX), 1);
+            assert_eq!(buf, [1]);
         });
     }
 }

@@ -327,4 +327,13 @@ mod tests {
             + Bytes::from_static(b"cherry").encode_size();
         assert_eq!(set3.encode_size(), expected_size);
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        crate::conformance_tests! {
+            HashSet<u32>
+        }
+    }
 }

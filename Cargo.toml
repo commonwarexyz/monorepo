@@ -44,7 +44,7 @@ license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 

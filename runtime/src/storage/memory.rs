@@ -22,6 +22,8 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), crate::Error> {
+        super::validate_partition_name(partition)?;
+
         let mut partitions = self.partitions.lock().unwrap();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
@@ -37,6 +39,8 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
+        super::validate_partition_name(partition)?;
+
         let mut partitions = self.partitions.lock().unwrap();
         match name {
             Some(name) => {
@@ -56,6 +60,8 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, crate::Error> {
+        super::validate_partition_name(partition)?;
+
         let partitions = self.partitions.lock().unwrap();
         let partition = partitions
             .get(partition)

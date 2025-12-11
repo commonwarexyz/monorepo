@@ -98,7 +98,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
                 )
             },
             |share| {
-                ThresholdScheme::new(
+                ThresholdScheme::signer(
                     transition.dealers.clone(),
                     transition
                         .poly
@@ -106,6 +106,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
                         .expect("group polynomial must exist"),
                     share.clone(),
                 )
+                .expect("share must be in dealers")
             },
         )
     }
@@ -120,6 +121,7 @@ impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        EdScheme::new(transition.dealers.clone(), self.signer.clone())
+        EdScheme::signer(transition.dealers.clone(), self.signer.clone())
+            .unwrap_or_else(|| EdScheme::verifier(transition.dealers.clone()))
     }
 }

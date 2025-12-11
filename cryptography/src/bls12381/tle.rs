@@ -145,6 +145,19 @@ impl<V: Variant> EncodeSize for Ciphertext<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Ciphertext<V>
+where
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let ge = u.arbitrary()?;
+        let v = FixedBytes::new(<[u8; BLOCK_SIZE]>::arbitrary(u)?);
+        let w = FixedBytes::new(<[u8; BLOCK_SIZE]>::arbitrary(u)?);
+        Ok(Self { u: ge, v, w })
+    }
+}
+
 /// Hash functions for IBE.
 mod hash {
     use super::*;
@@ -601,5 +614,14 @@ mod tests {
         // Try to decrypt - should fail
         let result = decrypt::<MinPk>(&signature, &ciphertext);
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Ciphertext<MinPk>,
+        }
     }
 }

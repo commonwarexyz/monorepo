@@ -81,4 +81,50 @@ mod tests {
         expected.extend_from_slice(&[0xAA; 150]);
         assert_eq!(long_bytes.encode(), expected.as_slice());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use arbitrary::Arbitrary;
+
+        /// Newtype wrapper to implement Arbitrary for [super::Bytes].
+        #[derive(Debug)]
+        struct Bytes(super::Bytes);
+
+        impl Write for Bytes {
+            fn write(&self, buf: &mut impl BufMut) {
+                self.0.write(buf);
+            }
+        }
+
+        impl EncodeSize for Bytes {
+            fn encode_size(&self) -> usize {
+                self.0.encode_size()
+            }
+        }
+
+        impl Read for Bytes {
+            type Cfg = RangeCfg<usize>;
+
+            fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+                Ok(Self(super::Bytes::read_cfg(buf, cfg)?))
+            }
+        }
+
+        impl Arbitrary<'_> for Bytes {
+            fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+                let len = u.arbitrary::<u8>()?;
+                let bytes: Vec<u8> = u
+                    .arbitrary_iter()?
+                    .take(len as usize)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                Ok(Self(super::Bytes::from(bytes)))
+            }
+        }
+
+        crate::conformance_tests! {
+            Bytes,
+        }
+    }
 }

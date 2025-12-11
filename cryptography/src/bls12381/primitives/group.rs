@@ -88,6 +88,28 @@ pub trait Point: Element {
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Scalar {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Generate 32 bytes and convert to scalar with automatic modular reduction
+        let bytes = u.arbitrary::<[u8; SCALAR_LENGTH]>()?;
+        let mut fr = blst_fr::default();
+        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_bendian handles reduction.
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+        let result = Self(fr);
+        // If zero, return one instead (scalars shouldn't be zero per BLS spec)
+        if result == Self::zero() {
+            Ok(BLST_FR_ONE)
+        } else {
+            Ok(result)
+        }
+    }
+}
+
 /// Number of bytes required to encode a scalar in its canonical
 /// little‑endian form (`32 × 8 = 256 bits`).
 ///
@@ -141,6 +163,16 @@ pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO
 /// to be safely deployed in this environment).
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for G1 {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let scalar = u.arbitrary::<Scalar>()?;
+        let mut point = Self::one();
+        point.mul(&scalar);
+        Ok(point)
+    }
+}
+
 /// A point on the BLS12-381 G2 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
@@ -159,6 +191,18 @@ pub const G2_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO
 /// any message could be aggregated into a multi-signature (which requires a proof-of-possession
 /// to be safely deployed in this environment).
 pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for G2 {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Generate a random scalar and multiply the generator point.
+        // This is guaranteed to produce a valid G2 point on the first try.
+        let scalar = u.arbitrary::<Scalar>()?;
+        let mut point = Self::one();
+        point.mul(&scalar);
+        Ok(point)
+    }
+}
 
 /// The target group of the BLS12-381 pairing.
 ///
@@ -427,6 +471,7 @@ impl ZeroizeOnDrop for Scalar {}
 
 /// A share of a threshold signing key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -1296,5 +1341,17 @@ mod tests {
             Scalar::zero(),
             "Hash should not produce zero scalar"
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            G1,
+            G2,
+            Scalar,
+            Share
+        }
     }
 }

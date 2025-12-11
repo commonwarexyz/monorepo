@@ -352,6 +352,16 @@ impl crate::Digest for Summary {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Summary {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes: [u8; blake3::OUT_LEN] = u.arbitrary()?;
+        Ok(Self {
+            hash: blake3::Hash::from_bytes(bytes),
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -456,5 +466,14 @@ mod test {
     fn test_summary_encode_roundtrip() {
         let s = Transcript::new(b"test").summarize();
         assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Summary,
+        }
     }
 }

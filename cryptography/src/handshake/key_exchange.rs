@@ -15,7 +15,7 @@ impl AsRef<[u8]> for SharedSecret {
 }
 
 /// An ephemeral X25519 public key used during handshake.
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct EphemeralPublicKey {
     inner: x25519_dalek::PublicKey,
 }
@@ -39,6 +39,16 @@ impl Read for EphemeralPublicKey {
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let bytes: [u8; 32] = ReadExt::read(buf)?;
+        Ok(Self {
+            inner: bytes.into(),
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for EphemeralPublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let bytes: [u8; 32] = u.arbitrary()?;
         Ok(Self {
             inner: bytes.into(),
         })
@@ -76,5 +86,14 @@ impl SecretKey {
             return None;
         }
         Some(SharedSecret { inner: out })
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+
+    commonware_codec::conformance_tests! {
+        EphemeralPublicKey,
     }
 }

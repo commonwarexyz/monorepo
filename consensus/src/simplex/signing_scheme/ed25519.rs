@@ -13,6 +13,20 @@ use crate::{
 
 impl_ed25519_scheme!(Subject<'a, D>);
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Certificate {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signatures = (0..signers.count())
+            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            signers,
+            signatures,
+        })
+    }
+}
+
 impl SeededScheme for Scheme {
     type Seed = ();
 
@@ -721,5 +735,14 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Certificate
+        }
     }
 }

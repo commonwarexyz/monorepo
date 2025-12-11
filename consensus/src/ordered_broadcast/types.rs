@@ -604,6 +604,30 @@ impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
 
 impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Node<C, V, D>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<C, D>::arbitrary(u)?;
+        let signature = C::Signature::arbitrary(u)?;
+        let parent = if chunk.height == 0 {
+            None
+        } else {
+            Some(Parent::<V, D>::arbitrary(u)?)
+        };
+        Ok(Self {
+            chunk,
+            signature,
+            parent,
+        })
+    }
+}
+
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
 /// When a validator receives and validates a chunk, it sends an Ack containing:
@@ -704,6 +728,25 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, V, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<P, D>::arbitrary(u)?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = PartialSignature::<V>::arbitrary(u)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            signature,
+        })
+    }
+}
+
 /// Activity is the type associated with the [crate::Reporter] trait.
 ///
 /// This enum represents the two main types of activities that are reported:
@@ -758,6 +801,22 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<P, S, D> {
         1 + match self {
             Self::Tip(proposal) => proposal.encode_size(),
             Self::Lock(lock) => lock.encode_size(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, V, D>
+where
+    Proposal<C, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Lock<C, V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => Ok(Self::Tip(Proposal::<C, D>::arbitrary(u)?)),
+            1 => Ok(Self::Lock(Lock::<C, V, D>::arbitrary(u)?)),
+            _ => unreachable!(),
         }
     }
 }
@@ -916,6 +975,71 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Lock<P, S, D> {
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.epoch.encode_size() + self.certificate.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Chunk<P, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let sequencer = P::arbitrary(u)?;
+        let height = u.arbitrary::<u64>()?;
+        let payload = D::arbitrary(u)?;
+        Ok(Self {
+            sequencer,
+            height,
+            payload,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Parent<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let digest = D::arbitrary(u)?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = V::Signature::arbitrary(u)?;
+        Ok(Self {
+            digest,
+            epoch,
+            signature,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Proposal<C, D>
+where
+    Chunk<C, D>: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<C, D>::arbitrary(u)?;
+        let signature = C::Signature::arbitrary(u)?;
+        Ok(Self { chunk, signature })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, V, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            chunk: u.arbitrary()?,
+            epoch: u.arbitrary()?,
+            signature: u.arbitrary()?,
+        })
     }
 }
 
@@ -1927,5 +2051,20 @@ mod tests {
     fn test_node_non_genesis_without_parent_fails() {
         node_non_genesis_without_parent_fails::<MinPk>();
         node_non_genesis_without_parent_fails::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Chunk<PublicKey, Sha256Digest>,
+            Parent<MinPk, Sha256Digest>,
+            Node<PublicKey, MinPk, Sha256Digest>,
+            Ack<PublicKey, MinPk, Sha256Digest>,
+            Activity<PublicKey, MinPk, Sha256Digest>,
+            Proposal<PublicKey, Sha256Digest>,
+            Lock<PublicKey, MinPk, Sha256Digest>,
+        }
     }
 }

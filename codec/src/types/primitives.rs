@@ -440,4 +440,26 @@ mod tests {
             &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
         );
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        crate::conformance_tests! {
+            u8,
+            u16,
+            u32,
+            u64,
+            u128,
+            i8,
+            i16,
+            i32,
+            i64,
+            i128,
+            f32,
+            f64,
+            bool,
+            [u8; 32],
+            Option<u64>,
+            (),
+        }
+    }
 }

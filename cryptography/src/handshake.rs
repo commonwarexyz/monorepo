@@ -57,7 +57,7 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Syn<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -91,9 +91,23 @@ impl<S: Signature + Read> Read for Syn<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for Syn<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+        })
+    }
+}
+
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct SynAck<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -130,9 +144,25 @@ impl<S: Signature + Read> Read for SynAck<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for SynAck<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+            confirmation: u.arbitrary()?,
+        })
+    }
+}
+
 /// Third handshake message sent by the dialer.
 /// Contains dialer's confirmation tag to complete the handshake.
 #[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(feature = "arbitrary", derive(Debug, arbitrary::Arbitrary))]
 pub struct Ack {
     confirmation: Summary,
 }
@@ -402,5 +432,16 @@ mod test {
         assert_eq!(m2, &m2_prime);
 
         Ok(())
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Syn<crate::ed25519::Signature>,
+            SynAck<crate::ed25519::Signature>,
+            Ack,
+        }
     }
 }
