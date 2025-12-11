@@ -16,7 +16,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -41,6 +41,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     last_finalized: u64,
     last_nullified: u64,
     last_notarized: u64,
+    latest_proposals: VecDeque<Proposal<Sha256Digest>>,
 }
 
 impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> Disrupter<E, S>
@@ -60,6 +61,7 @@ where
             last_finalized: 0,
             last_nullified: 0,
             last_notarized: 0,
+            latest_proposals: VecDeque::new(),
             context,
             validator,
             scheme,
@@ -87,7 +89,89 @@ where
         }
     }
 
-    fn random_view(&mut self, current: u64) -> u64 {
+    fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
+        let random_proposal = self.random_proposal();
+        let v = self.random_view_for_proposal(self.last_vote);
+
+        let proposal = match self.fuzz_input.random_byte() % 5 {
+            // Random proposal
+            0 => random_proposal,
+            // Random proposal from the past
+            1 => {
+                if !self.latest_proposals.is_empty() {
+                    let i = self.fuzz_input.random_u64() as usize % self.latest_proposals.len();
+                    let p = self.latest_proposals.get(i).unwrap();
+                    self.new_proposal(p, v)
+                } else {
+                    random_proposal
+                }
+            }
+            2 => {
+                let Some(p) = self.latest_proposals.back() else {
+                    return random_proposal;
+                };
+                self.new_proposal(p, v)
+            }
+            3 => {
+                let Some(p) = self.latest_proposals.front() else {
+                    return random_proposal;
+                };
+                self.new_proposal(p, v)
+            }
+            _ => {
+                let Some(p) = self.latest_proposals.front() else {
+                    return random_proposal;
+                };
+                self.new_proposal(p, v)
+            }
+        };
+
+        // Remove oldest proposal to prevent unbounded growth
+        if self.latest_proposals.len() > 100 {
+            self.latest_proposals.pop_front();
+        }
+
+        proposal
+    }
+
+    fn new_proposal(&self, old: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
+        Proposal::new(
+            Round::new(Epoch::new(EPOCH), View::new(view)),
+            old.parent.clone(),
+            old.payload.clone(),
+        )
+    }
+
+    fn random_proposal(&mut self) -> Proposal<Sha256Digest> {
+        let v = self.random_view_for_proposal(self.last_vote);
+        Proposal::new(
+            Round::new(Epoch::new(EPOCH), View::new(v)),
+            View::new(self.random_parent_view(v)),
+            self.random_payload(),
+        )
+    }
+
+    fn random_view_for_proposal(&mut self, current_view: u64) -> u64 {
+        let last_finalized = self.last_finalized;
+        let last_notarized = self.last_notarized;
+        let last_nullified = self.last_nullified;
+
+        match self.fuzz_input.random_byte() % 7 {
+            // Active band: [last_finalized, min(last_notarized, current_view)]
+            0 => {
+                let hi = last_notarized.min(current_view).max(last_finalized);
+                last_finalized + (self.fuzz_input.random_u64() % (hi - last_finalized + 1))
+            }
+            1 => current_view,
+            2 => current_view + 1,
+            3 => last_notarized + 1,
+            4 => last_notarized + 2,
+            5 => last_nullified + 1,
+            _ => self.fuzz_input.random_u64(),
+        }
+    }
+
+    fn random_view(&mut self, current_view: u64) -> u64 {
         let last_finalized = self.last_finalized;
         let last_notarized = self.last_notarized;
         let last_nullified = self.last_nullified;
@@ -103,24 +187,25 @@ where
             }
             // Active past: [last_finalized, current_view]
             1 => {
-                if current <= last_finalized {
+                if current_view <= last_finalized {
                     last_finalized
                 } else {
-                    last_finalized + (self.fuzz_input.random_u64() % (current - last_finalized + 1))
+                    last_finalized
+                        + (self.fuzz_input.random_u64() % (current_view - last_finalized + 1))
                 }
             }
             // Active band: [last_finalized, min(last_notarized, current_view)]
             2 => {
-                let hi = last_notarized.min(current).max(last_finalized);
+                let hi = last_notarized.min(current_view).max(last_finalized);
                 last_finalized + (self.fuzz_input.random_u64() % (hi - last_finalized + 1))
             }
             // Near future: [current_view+1, current_view+4]
-            3 => current + 1 + (self.fuzz_input.random_byte() as u64 % 4),
+            3 => current_view + 1 + (self.fuzz_input.random_byte() as u64 % 4),
             // Moderate future: [current_view+5, current_view+10]
-            4 => current.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
+            4 => current_view.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
             // Nullification-based future: start after max(current_view, last_nullified)
             5 => {
-                let base = current.max(last_nullified);
+                let base = current_view.max(last_nullified);
                 base.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 10))
             }
             // Pure random
@@ -128,11 +213,11 @@ where
         }
     }
 
-    fn parent(&mut self) -> u64 {
-        self.fuzz_input.random_u64()
+    fn random_parent_view(&mut self, view: u64) -> u64 {
+        self.random_view(view.saturating_sub(1))
     }
 
-    fn payload(&mut self) -> Sha256Digest {
+    fn random_payload(&mut self) -> Sha256Digest {
         let bytes = self.fuzz_input.random(32);
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes[..32.min(bytes.len())]);
@@ -181,8 +266,15 @@ where
         let (mut cert_sender, mut cert_receiver) = certificate_network;
 
         loop {
-            if self.fuzz_input.random_byte() % 100 < 10 {
-                self.send_random(&mut vote_sender).await;
+            // Send one of the disruptive messages then wait for responses
+            match self.fuzz_input.random_byte() % 3 {
+                0 => self.send_random_message(&mut vote_sender).await,
+                1 => self.send_proposal(&mut vote_sender).await,
+                _ => {
+                    // Equivocation attack: send multiple different proposals
+                    self.send_proposal(&mut vote_sender).await;
+                    self.send_proposal(&mut vote_sender).await;
+                }
             }
 
             select! {
@@ -198,7 +290,7 @@ where
                 },
                 // We ignore resolver messages
                 _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random(&mut vote_sender).await;
+                    self.send_random_message(&mut vote_sender).await;
                 }
             }
         }
@@ -217,6 +309,8 @@ where
         self.last_vote = vote.view().get();
         match vote {
             Vote::Notarize(notarize) => {
+                self.latest_proposals.push_back(notarize.proposal.clone());
+
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
@@ -294,7 +388,7 @@ where
             Mutation::Payload => Proposal::new(
                 Round::new(original.epoch(), original.view()),
                 original.parent,
-                self.payload(),
+                self.random_payload(),
             ),
             Mutation::View => Proposal::new(
                 Round::new(
@@ -306,7 +400,7 @@ where
             ),
             Mutation::Parent => Proposal::new(
                 Round::new(original.epoch(), original.view()),
-                View::new(self.parent()),
+                View::new(self.random_parent_view(original.view().get())),
                 original.payload,
             ),
             Mutation::All => Proposal::new(
@@ -314,21 +408,20 @@ where
                     original.epoch(),
                     View::new(self.random_view(original.view().get())),
                 ),
-                View::new(self.parent()),
-                self.payload(),
+                View::new(self.random_parent_view(original.view().get())),
+                self.random_payload(),
             ),
         }
     }
 
-    async fn send_random(&mut self, sender: &mut impl Sender) {
-        let proposal = Proposal::new(
-            Round::new(
-                Epoch::new(EPOCH),
-                View::new(self.random_view(self.last_vote)),
-            ),
-            View::new(self.parent()),
-            self.payload(),
-        );
+    async fn send_proposal(&mut self, sender: &mut impl Sender) {
+        let proposal = self.get_proposal();
+        let msg = proposal.encode().into();
+        let _ = sender.send(Recipients::All, msg, true).await;
+    }
+
+    async fn send_random_message(&mut self, sender: &mut impl Sender) {
+        let proposal = self.get_proposal();
 
         if self.participants.index(&self.validator).is_none() {
             let bytes = self.bytes();
