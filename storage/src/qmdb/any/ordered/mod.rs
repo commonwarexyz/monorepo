@@ -1263,7 +1263,7 @@ where
 
                 // Update the log and snapshot.
                 delete_known_loc(&mut self.snapshot, &key, old_loc);
-                self.log.append(Operation::Delete(key.clone())).await?;
+                self.log.append(Operation::Delete(key)).await?;
 
                 // Each delete reduces the active key count by one and inactivates that key.
                 self.active_keys -= 1;
