@@ -13,7 +13,7 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{unordered::IndexedLog, VariableConfig, VariableValue},
+        any::{todo::IndexedLog, VariableConfig, VariableValue},
         operation::Committable as _,
         Error,
     },
@@ -27,7 +27,7 @@ use commonware_utils::Array;
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, Operation<K, V>, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>

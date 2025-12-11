@@ -1,5 +1,5 @@
 use crate::{
-    index::{Cursor as _, Ordered as Index},
+    index::{Cursor as _, Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
@@ -15,13 +15,13 @@ use crate::{
             CleanAny, DirtyAny, ValueEncoding, VariableValue,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Operation},
+        operation::Operation,
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper,
     },
     AuthenticatedBitMap,
 };
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -56,7 +56,7 @@ pub struct IndexedLog<
     E: Storage + Clock + Metrics,
     Op: Codec,
     C: Contiguous<Item = Op>,
-    I: Index,
+    I,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
@@ -80,7 +80,7 @@ pub struct IndexedLog<
     ///
     /// # Invariant
     ///
-    /// - Only references [Operation::Update]s.
+    /// - Only references update operations.
     pub(crate) snapshot: I,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
@@ -95,7 +95,7 @@ impl<
         E: Storage + Clock + Metrics,
         Op: Codec,
         C: Contiguous<Item = Op>,
-        I: Index<Value = Location>,
+        I,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, Op, C, I, H, S>
@@ -150,7 +150,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
@@ -313,7 +313,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, UnorderedOperation<K, V>, C, I, H, S>
@@ -391,7 +391,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
@@ -725,7 +725,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, UnorderedOperation<K, V>, C, I, H, S>
@@ -817,7 +817,7 @@ impl<
         E: Storage + Clock + Metrics,
         Op: Operation + Codec,
         C: MutableContiguous<Item = Op>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > IndexedLog<E, Op, C, I, H>
 {
@@ -879,7 +879,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -932,7 +932,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
 where
@@ -983,7 +983,7 @@ where
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last commit location is set to None and it is the responsibility of the
     /// caller to ensure it is set correctly.
-    async fn from_components(
+    pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
@@ -1002,13 +1002,8 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: Contiguous<Item = Op>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, Op, C, I, H>
+impl<E: Storage + Clock + Metrics, Op: Codec, C: Contiguous<Item = Op>, I, H: Hasher>
+    IndexedLog<E, Op, C, I, H>
 {
     /// Convert this database into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> IndexedLog<E, Op, C, I, H, Dirty> {
@@ -1023,13 +1018,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: MutableContiguous<Item = Op>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, Op, C, I, H>
+impl<E: Storage + Clock + Metrics, Op: Codec, C: MutableContiguous<Item = Op>, I, H: Hasher>
+    IndexedLog<E, Op, C, I, H>
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -1056,7 +1046,7 @@ impl<
         E: Storage + Clock + Metrics,
         Op: Codec,
         C: PersistableContiguous<Item = Op>,
-        I: Index<Value = Location>,
+        I,
         H: Hasher,
     > IndexedLog<E, Op, C, I, H>
 {
@@ -1106,7 +1096,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1138,7 +1128,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
 where
@@ -1167,13 +1157,8 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: Contiguous<Item = Op>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, Op, C, I, H, Dirty>
+impl<E: Storage + Clock + Metrics, Op: Codec, C: Contiguous<Item = Op>, I, H: Hasher>
+    IndexedLog<E, Op, C, I, H, Dirty>
 {
     /// Merkleize the database and compute the root digest.
     pub fn merkleize(self) -> IndexedLog<E, Op, C, I, H, Clean<H::Digest>> {
@@ -1193,7 +1178,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::store::StorePersistable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1213,7 +1198,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > crate::store::StorePersistable for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
 where
@@ -1233,7 +1218,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::LogStorePrunable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1248,7 +1233,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         V: ValueEncoding,
     > crate::qmdb::store::LogStorePrunable for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
@@ -1265,7 +1250,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::CleanStore for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1310,7 +1295,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::CleanStore for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
 where
@@ -1358,7 +1343,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > LogStore for IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
@@ -1388,7 +1373,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         C: Contiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
         V: ValueEncoding,
@@ -1420,7 +1405,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::store::Store for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1439,7 +1424,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         C: Contiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         V: ValueEncoding,
     > crate::store::Store for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
@@ -1460,7 +1445,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::store::StoreMut for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1475,7 +1460,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         V: ValueEncoding,
     > crate::store::StoreMut for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
@@ -1492,7 +1477,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::store::StoreDeletable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1507,7 +1492,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
         V: ValueEncoding,
     > crate::store::StoreDeletable for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
@@ -1524,7 +1509,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::DirtyStore for IndexedLog<E, OrderedOperation<K, V>, C, I, H, Dirty>
 where
@@ -1544,7 +1529,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > crate::qmdb::store::DirtyStore for IndexedLog<E, UnorderedOperation<K, V>, C, I, H, Dirty>
 where
@@ -1564,7 +1549,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > CleanAny for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
 where
@@ -1602,7 +1587,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: PersistableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > CleanAny for IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
 where
@@ -1640,7 +1625,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: OrderedIndex<Value = Location>,
         H: Hasher,
     > DirtyAny for IndexedLog<E, OrderedOperation<K, V>, C, I, H, Dirty>
 where
@@ -1670,7 +1655,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: Index<Value = Location>,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
     > DirtyAny for IndexedLog<E, UnorderedOperation<K, V>, C, I, H, Dirty>
 where
@@ -1739,7 +1724,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = OrderedOperation<K, V>>,
-    I: Index<Value = Location>,
+    I: OrderedIndex<Value = Location>,
     H: Hasher,
     OrderedOperation<K, V>: Codec,
 {
@@ -1944,7 +1929,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-    I: Index<Value = Location>,
+    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     V: ValueEncoding,
     UnorderedOperation<K, V>: Codec,

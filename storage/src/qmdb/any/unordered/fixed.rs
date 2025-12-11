@@ -6,8 +6,7 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            unordered::{FixedOperation as Operation, IndexedLog},
+            init_fixed_authenticated_log, todo::IndexedLog, unordered::FixedOperation as Operation,
             FixedConfig as Config, FixedValue,
         },
         Error,
@@ -21,7 +20,7 @@ use commonware_utils::Array;
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, Operation<K, V>, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
