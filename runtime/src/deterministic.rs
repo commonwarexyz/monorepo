@@ -272,7 +272,7 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<Box<dyn RngCore + Send>>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -358,7 +358,7 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<Box<dyn RngCore + Send>>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     catch_panics: bool,
@@ -380,6 +380,7 @@ enum State {
 /// Implementation of [crate::Runner] for the `deterministic` runtime.
 pub struct Runner {
     state: State,
+    rng: Option<Box<dyn RngCore + Send>>,
 }
 
 impl From<Config> for Runner {
@@ -388,10 +389,17 @@ impl From<Config> for Runner {
     }
 }
 
+impl From<(Config, Box<dyn RngCore + Send>)> for Runner {
+    fn from((cfg, rng): (Config, Box<dyn RngCore + Send>)) -> Self {
+        Self::new(cfg).with_rng(rng)
+    }
+}
+
 impl From<Checkpoint> for Runner {
     fn from(checkpoint: Checkpoint) -> Self {
         Self {
             state: State::Checkpoint(checkpoint),
+            rng: None,
         }
     }
 }
@@ -403,7 +411,16 @@ impl Runner {
         cfg.assert();
         Self {
             state: State::Config(cfg),
+            rng: None,
         }
+    }
+
+    /// Override the source of randomness for the runtime.
+    ///
+    /// Ignored if this [Runner] was created from a [Checkpoint].
+    pub fn with_rng(mut self, rng: impl RngCore + Send + 'static) -> Self {
+        self.rng = Some(Box::new(rng));
+        self
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -435,7 +452,7 @@ impl Runner {
     {
         // Setup context and return strong reference to executor
         let (context, executor, panicked) = match self.state {
-            State::Config(config) => Context::new(config),
+            State::Config(config) => Context::new(config, self.rng),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
@@ -804,7 +821,7 @@ impl Clone for Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config, rng: Option<Box<dyn RngCore + Send>>) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -826,13 +843,16 @@ impl Context {
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
+        let rng: Box<dyn RngCore + Send> = rng
+            .unwrap_or_else(|| Box::new(StdRng::seed_from_u64(cfg.seed)));
+
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng: Mutex::new(rng),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
