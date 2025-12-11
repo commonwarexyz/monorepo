@@ -284,7 +284,6 @@ use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
         group::Scalar,
-        poly::{Poly, Public},
         sharing::{Mode, Sharing},
         variant::Variant,
     },
@@ -294,7 +293,7 @@ use crate::{
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
-    poly::Interpolator,
+    poly::{Interpolator, Poly},
 };
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
@@ -588,7 +587,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
 #[derive(Clone, Debug)]
 pub struct DealerPubMsg<V: Variant> {
-    commitment: Public<V>,
+    commitment: Poly<V::Public>,
 }
 
 impl<V: Variant> PartialEq for DealerPubMsg<V> {

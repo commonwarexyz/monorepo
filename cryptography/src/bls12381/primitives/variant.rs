@@ -13,7 +13,10 @@ use blst::{
     blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
     BLS12_381_NEG_G2,
 };
-use commonware_codec::{FixedSize, Read, Write};
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
 use commonware_math::algebra::{Additive, HashToGroup, Space};
 use core::{
     fmt::{Debug, Formatter},
@@ -365,5 +368,53 @@ impl Variant for MinSig {
 impl Debug for MinSig {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MinSig").finish()
+    }
+}
+
+/// A partial signature.
+///
+/// c.f. [`super::ops`] for how to manipulate these.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PartialSignature<V: Variant> {
+    pub index: u32,
+    pub value: V::Signature,
+}
+
+impl<V: Variant> Write for PartialSignature<V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.index).write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<V: Variant> Read for PartialSignature<V> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let index = UInt::read(buf)?.into();
+        let value = V::Signature::read(buf)?;
+        Ok(Self { index, value })
+    }
+}
+
+impl<V: Variant> EncodeSize for PartialSignature<V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + V::Signature::SIZE
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        use commonware_math::algebra::HashToGroup;
+        use rand::SeedableRng;
+
+        let index: u32 = u.int_in_range(0..=99)?;
+        Ok(Self {
+            index,
+            value: V::Signature::rand_to_group(&mut rand::rngs::StdRng::seed_from_u64(
+                u.arbitrary()?,
+            )),
+        })
     }
 }

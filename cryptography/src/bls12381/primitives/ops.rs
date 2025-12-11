@@ -9,11 +9,10 @@
 
 use super::{
     group::{self, Scalar, Share, DST},
-    poly::PartialSignature,
     variant::Variant,
     Error,
 };
-use crate::bls12381::primitives::sharing::Sharing;
+use crate::bls12381::primitives::{sharing::Sharing, variant::PartialSignature};
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::Encode;

@@ -1,8 +1,5 @@
-use commonware_cryptography::bls12381::primitives::{
-    group::{Scalar, G1},
-    poly::Poly,
-};
-use commonware_math::algebra::Random;
+use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
+use commonware_math::{algebra::Random, poly::Poly};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};

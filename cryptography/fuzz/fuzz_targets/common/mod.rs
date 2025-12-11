@@ -6,12 +6,14 @@ use commonware_cryptography::bls12381::{
         group::{
             Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, SCALAR_LENGTH,
         },
-        poly::{PartialSignature, Poly},
-        variant::{MinPk, MinSig, Variant},
+        variant::{MinPk, MinSig, PartialSignature, Variant},
     },
     tle::{Block, Ciphertext},
 };
-use commonware_math::algebra::{Additive, CryptoGroup};
+use commonware_math::{
+    algebra::{Additive, CryptoGroup},
+    poly::Poly,
+};
 use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(unused)]

@@ -4,9 +4,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::*,
-    poly::PartialSignature,
     sharing::Sharing,
-    variant::{MinPk, MinSig},
+    variant::{MinPk, MinSig, PartialSignature},
 };
 use libfuzzer_sys::fuzz_target;
 

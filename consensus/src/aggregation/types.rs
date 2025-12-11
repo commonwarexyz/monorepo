@@ -7,7 +7,10 @@ use commonware_codec::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::Share, ops, poly::PartialSignature, sharing::Sharing, variant::Variant,
+        group::Share,
+        ops,
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
     },
     Digest,
 };

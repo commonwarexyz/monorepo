@@ -45,7 +45,6 @@
 
 pub mod group;
 pub mod ops;
-pub mod poly;
 pub mod sharing;
 pub mod variant;
 

@@ -5,10 +5,12 @@ use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH},
     ops::*,
-    poly::Poly,
     variant::{MinPk, MinSig, Variant},
 };
-use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Ring, Space};
+use commonware_math::{
+    algebra::{Additive, CryptoGroup, HashToGroup, Ring, Space},
+    poly::Poly,
+};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 

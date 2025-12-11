@@ -15,9 +15,9 @@
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
 //! - Requesting externally synchronized [commonware_cryptography::Digest]s
-//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
+//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::variant::PartialSignature]
 //! - Multicasting partial signatures to other validators
-//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Recovering [commonware_cryptography::bls12381::primitives::variant::Variant::Signature]s from a quorum of partial signatures
 //! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:

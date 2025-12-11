@@ -1,9 +1,9 @@
-use crate::bls12381::primitives::{group::Scalar, poly::Public, variant::Variant, Error};
+use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_math::poly::Interpolator;
+use commonware_math::poly::{Interpolator, Poly};
 use commonware_utils::{ordered::Set, quorum, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
@@ -124,7 +124,7 @@ impl Read for Mode {
 pub struct Sharing<V: Variant> {
     mode: Mode,
     total: NonZeroU32,
-    poly: Arc<Public<V>>,
+    poly: Arc<Poly<V::Public>>,
     #[cfg(feature = "std")]
     evals: Arc<Vec<OnceLock<V::Public>>>,
 }
@@ -138,7 +138,7 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
-    pub(crate) fn new(mode: Mode, total: NonZeroU32, poly: Public<V>) -> Self {
+    pub(crate) fn new(mode: Mode, total: NonZeroU32, poly: Poly<V::Public>) -> Self {
         Self {
             mode,
             total,
@@ -270,7 +270,6 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::poly::Poly;
     use arbitrary::Arbitrary;
     use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
