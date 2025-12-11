@@ -232,6 +232,12 @@ where
     T: Encode + for<'a> Arbitrary<'a> + Debug,
 {
     use std::io::{Read, Seek, Write};
+
+    // Compute the hash first WITHOUT holding the lock - this is the expensive part
+    // and can run in parallel across all conformance tests
+    let actual_hash = compute_conformance_hash::<T>(n_cases);
+
+    // Now acquire the lock only for file I/O
     let mut lock = acquire_lock(path);
 
     let mut contents = String::new();
@@ -244,8 +250,6 @@ where
         toml::from_str(&contents)
             .unwrap_or_else(|e| panic!("failed to parse conformance file: {e}"))
     };
-
-    let actual_hash = compute_conformance_hash::<T>(n_cases);
 
     match file.types.get(type_name) {
         Some(entry) => {
@@ -301,6 +305,12 @@ where
     T: Encode + for<'a> Arbitrary<'a> + Debug,
 {
     use std::io::{Read, Seek, Write};
+
+    // Compute the hash first WITHOUT holding the lock - this is the expensive part
+    // and can run in parallel across all conformance tests
+    let hash = compute_conformance_hash::<T>(n_cases);
+
+    // Now acquire the lock only for file I/O
     let mut lock = acquire_lock(path);
 
     let mut contents = String::new();
@@ -313,8 +323,6 @@ where
         toml::from_str(&contents)
             .unwrap_or_else(|e| panic!("failed to parse conformance file: {e}"))
     };
-
-    let hash = compute_conformance_hash::<T>(n_cases);
 
     // Update or insert the entry for this type
     file.types
