@@ -1191,14 +1191,10 @@ where
         let mut locations = Vec::new();
         for key in deleted.iter().chain(created.keys()) {
             let iter = self.snapshot.prev_translated_key(key);
-            let count = locations.len();
+            let Some(iter) = iter else {
+                continue;
+            };
             locations.extend(iter.copied());
-            if locations.len() == count {
-                // If there is no previous translated key then this must be first, and we may need
-                // to cycle around to the last key.
-                let iter = self.snapshot.last_translated_key();
-                locations.extend(iter.copied());
-            }
         }
         locations.sort();
         locations.dedup();
@@ -1650,6 +1646,54 @@ mod test {
             assert_eq!(span1.1.next_key, mid_key);
             let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, preceeding_key);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Builds a db with three keys A < B < C, then batch-deletes B. Verifies that A's next_key is
+    /// correctly updated to C (skipping the deleted B).
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_delete_middle_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let key_a = FixedBytes::from([0x11u8; 4]);
+            let key_b = FixedBytes::from([0x22u8; 4]);
+            let key_c = FixedBytes::from([0x33u8; 4]);
+            let val = Sha256::fill(1u8);
+
+            // Create three keys in order: A -> B -> C -> A (circular)
+            db.create(key_a.clone(), val).await.unwrap();
+            db.create(key_b.clone(), val).await.unwrap();
+            db.create(key_c.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify initial spans
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_b);
+            let span_b = db.get_span(&key_b).await.unwrap().unwrap();
+            assert_eq!(span_b.1.next_key, key_c);
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            // Batch-delete the middle key B
+            let mut batch = db.start_batch();
+            batch.delete(key_b.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify B is deleted
+            assert!(db.get(&key_b).await.unwrap().is_none());
+
+            // Verify A's next_key is now C (not B)
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_c);
+
+            // Verify C's next_key is still A
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
 
             db.destroy().await.unwrap();
         });
