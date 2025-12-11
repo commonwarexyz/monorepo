@@ -28,7 +28,7 @@ hash = "06cd5f1dca291e1812e01a82474926520794c8844813d64882c9a1cd6106e771"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::Output<MinPk, ed25519::PublicKey>"]
 n_cases = 65536
-hash = "aec33e38ce0e3e2be9e5343ee3d416519738d9283b49ce6a70325af926ce0326"
+hash = "aa59e152a5402fe91de7af791ee90d0301ac788904b3ee2232c97e049ceacb80"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::PlayerAck<ed25519::PublicKey>"]
 n_cases = 65536
