@@ -1198,10 +1198,10 @@ pub mod test {
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
                     Operation::Update(key, value) => (key, value),
-                    Operation::Delete(_) => {
-                        unreachable!("location does not reference update operation")
-                    }
                     Operation::CommitFloor(_, _) => continue,
+                    Operation::Delete(_) => {
+                        unreachable!("location does not reference update/delete operation")
+                    }
                 };
 
                 let (proof, info) = db.key_value_proof(hasher.inner(), key).await.unwrap();

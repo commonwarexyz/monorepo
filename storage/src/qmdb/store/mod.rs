@@ -92,8 +92,7 @@ use crate::{
     qmdb::{
         any::{unordered::VariableOperation as Operation, VariableValue},
         build_snapshot_from_log, create_key, delete_key,
-        operation::Committable as _,
-        operation::Operation as _,
+        operation::{Committable as _, Operation as _},
         update_key, Error, FloorHelper,
     },
     translator::Translator,

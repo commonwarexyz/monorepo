@@ -420,9 +420,9 @@ mod tests {
         let update_op = TestOp::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
-        let delete_op = TestOp::Delete(key.clone());
+        let delete_op = TestOp::Delete(key);
         let commit_none = TestOp::CommitFloor(None, floor_loc);
         let commit_some = TestOp::CommitFloor(Some(value), floor_loc);
 
@@ -444,9 +444,9 @@ mod tests {
         let update_op = VarOp::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
-        let delete_op = VarOp::Delete(key.clone());
+        let delete_op = VarOp::Delete(key);
         let commit_none = VarOp::CommitFloor(None, floor_loc);
         let commit_some = VarOp::CommitFloor(Some(value), floor_loc);
 

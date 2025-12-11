@@ -6,7 +6,10 @@ use std::marker::PhantomData;
 mod sealed {
     use commonware_codec::Codec;
 
-    /// A fixed size or variable size value.
+    /// A wrapper around a value to indicate whether it is fixed or variable size.
+    /// Having separate wrappers for fixed and variable size values allows us to use the same
+    /// operation type for both fixed and variable size values, while still being able to
+    /// parameterize the operation encoding by the value type.
     pub trait ValueEncoding: Clone {
         /// The wrapped value type.
         type Value: Codec + Clone;
@@ -15,7 +18,7 @@ mod sealed {
 
 pub(crate) use sealed::ValueEncoding;
 
-/// A fixed size value.
+/// A fixed-size value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FixedEncoding<V: FixedValue>(PhantomData<V>);
 
@@ -23,7 +26,7 @@ impl<V: FixedValue> sealed::ValueEncoding for FixedEncoding<V> {
     type Value = V;
 }
 
-/// A variable size value.
+/// A variable-size value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VariableEncoding<V: VariableValue>(PhantomData<V>);
 

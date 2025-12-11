@@ -365,7 +365,7 @@ mod tests {
         let floor_loc = Location::new_unchecked(5);
 
         let update_op = TestOp::Update(key.clone(), value.clone());
-        let delete_op = TestOp::Delete(key.clone());
+        let delete_op = TestOp::Delete(key);
         let commit_none = TestOp::CommitFloor(None, floor_loc);
         let commit_some = TestOp::CommitFloor(Some(value), floor_loc);
 
@@ -384,7 +384,7 @@ mod tests {
         let floor_loc = Location::new_unchecked(5);
 
         let update_op = VarOp::Update(key.clone(), value.clone());
-        let delete_op = VarOp::Delete(key.clone());
+        let delete_op = VarOp::Delete(key);
         let commit_none = VarOp::CommitFloor(None, floor_loc);
         let commit_some = VarOp::CommitFloor(Some(value), floor_loc);
 
