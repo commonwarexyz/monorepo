@@ -17,10 +17,7 @@ use crate::bls12381::primitives::sharing::Sharing;
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_math::{
-    algebra::{Additive, CryptoGroup, HashToGroup},
-    poly::Interpolator,
-};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -382,8 +379,8 @@ where
     V::Signature: 'a,
 {
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
-    let interpolator = Interpolator::new(evals.iter().map(|&i| (i, Scalar::from_index(i))));
-    interpolator
+    sharing
+        .interpolator(evals.keys())?
         .interpolate(&evals, 1)
         .ok_or(Error::InvalidRecovery)
 }
@@ -425,7 +422,7 @@ where
         return Err(Error::InvalidIndex);
     }
 
-    let interpolator = Interpolator::new(first_eval.iter().map(|&i| (i, Scalar::from_index(i))));
+    let interpolator = sharing.interpolator(first_eval.keys())?;
     #[cfg(feature = "std")]
     {
         let concurrency = core::cmp::min(concurrency, prepared_evals.len());

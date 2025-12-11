@@ -3,8 +3,9 @@ use crate::bls12381::primitives::{group::Scalar, poly::Public, variant::Variant,
 use alloc::{sync::Arc, vec, vec::Vec};
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_utils::{quorum, NZU32};
-use core::num::NonZeroU32;
+use commonware_math::poly::Interpolator;
+use commonware_utils::{ordered::Set, quorum, NZU32};
+use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
 
@@ -36,6 +37,58 @@ impl Mode {
     /// Compute the scalars for all participants.
     pub(crate) fn all_scalars(self, total: NonZeroU32) -> impl Iterator<Item = Scalar> {
         (0..total.get()).map(move |i| self.scalar(total, i).expect("i < total"))
+    }
+
+    /// Create an interpolator for this mode, given a set of indices.
+    ///
+    /// This will return `None` if:
+    /// - any `to_index` call on the provided `indices` returns `None`,
+    /// - any index returned by `to_index` is >= `total`.
+    ///
+    /// To be generic over different use cases, we need:
+    /// - the total number of participants,
+    /// - a set of indices (of any type),
+    /// - a means to convert indices to u32 values.
+    fn interpolator<I: Clone + Ord>(
+        self,
+        total: NonZeroU32,
+        indices: &Set<I>,
+        to_index: impl Fn(&I) -> Option<u32>,
+    ) -> Option<Interpolator<I, Scalar>> {
+        let mut count = 0;
+        let iter = indices
+            .iter()
+            .filter_map(|i| {
+                let scalar = self.scalar(total, to_index(i)?)?;
+                Some((i.clone(), scalar))
+            })
+            .inspect(|_| {
+                count += 1;
+            });
+        let out = Interpolator::new(iter);
+        // If any indices failed to produce a scalar, reject.
+        if count != indices.len() {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// Create an interpolator for this mode, given a set, and a subset.
+    ///
+    /// The set determines the total number of participants to use for interpolation,
+    /// and the indices that will get assigned to the subset.
+    ///
+    /// This function will return `None` only if `subset` contains elements
+    /// not in `set`.
+    pub(crate) fn subset_interpolator<I: Clone + Ord>(
+        self,
+        set: &Set<I>,
+        subset: &Set<I>,
+    ) -> Option<Interpolator<I, Scalar>> {
+        let Ok(total) = NonZeroU32::try_from(set.len() as u32) else {
+            return Some(Interpolator::new(iter::empty()));
+        };
+        self.interpolator(total, subset, |i| set.position(i).map(|x| x as u32))
     }
 }
 
@@ -100,7 +153,7 @@ impl<V: Variant> Sharing<V> {
         self.mode
     }
 
-    fn scalar(&self, i: u32) -> Option<Scalar> {
+    pub(crate) fn scalar(&self, i: u32) -> Option<Scalar> {
         self.mode.scalar(self.total, i)
     }
 
@@ -116,6 +169,18 @@ impl<V: Variant> Sharing<V> {
     /// Return the total number of participants in this sharing.
     pub const fn total(&self) -> NonZeroU32 {
         self.total
+    }
+
+    /// Create an interpolator over some indices.
+    ///
+    /// This will return an error if any of the indices are >= [`Self::total`].
+    pub(crate) fn interpolator(
+        &self,
+        indices: &Set<u32>,
+    ) -> Result<Interpolator<u32, Scalar>, Error> {
+        self.mode
+            .interpolator(self.total, indices, |&x| Some(x))
+            .ok_or(Error::InvalidIndex)
     }
 
     /// Call this to pre-compute the results of [`Self::partial_public`].
