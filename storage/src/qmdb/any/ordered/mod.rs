@@ -1698,4 +1698,59 @@ mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Batch create/delete cases where the deleted key is the previous key of a newly created key,
+    /// and vice-versa.
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_create_delete_prev_links() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
+            let key2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x00]);
+            let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x00]);
+            let val1 = Sha256::fill(1u8);
+            let val2 = Sha256::fill(2u8);
+            let val3 = Sha256::fill(3u8);
+
+            // Delete the previous key of a newly created key.
+            let mut db = open_variable_db(context.clone()).await;
+            db.update(key1.clone(), val1).await.unwrap();
+            db.update(key3.clone(), val3).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            let mut batch = db.start_batch();
+            batch.delete(key1.clone()).await.unwrap();
+            batch.create(key2.clone(), val2).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+
+            assert!(db.get(&key1).await.unwrap().is_none());
+            assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
+            assert_eq!(db.get(&key3).await.unwrap(), Some(val3));
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key3);
+            let span3 = db.get_span(&key3).await.unwrap().unwrap();
+            assert_eq!(span3.1.next_key, key2);
+            db.destroy().await.unwrap();
+
+            // Create a key that becomes the previous key of a concurrently deleted key.
+            let mut db = open_variable_db(context.clone()).await;
+            db.update(key1.clone(), val1).await.unwrap();
+            db.update(key3.clone(), val3).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            let mut batch = db.start_batch();
+            batch.create(key2.clone(), val2).await.unwrap();
+            batch.delete(key3.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
+            assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
+            assert!(db.get(&key3).await.unwrap().is_none());
+            let span1 = db.get_span(&key1).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, key2);
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key1);
+            db.destroy().await.unwrap();
+        });
+    }
 }
