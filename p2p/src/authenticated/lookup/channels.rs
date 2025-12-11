@@ -133,6 +133,8 @@ where
             .filter(|peer| rate_limiter.check_key(peer).is_ok())
             .collect();
 
+        drop(rate_limiter);
+
         // If no recipients are allowed, short-circuit and signal that no peers could
         // be sent the message.
         if allowed_peers.is_empty() {
