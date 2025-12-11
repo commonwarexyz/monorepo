@@ -25,7 +25,6 @@
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
-pub mod utils;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
