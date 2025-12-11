@@ -106,7 +106,7 @@ pub(super) mod test {
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
-        Sha256::hash(&(i * 1000).to_be_bytes())
+        Sha256::hash(&i.to_be_bytes())
     }
 
     /// Return an `Any` database initialized with a fixed config.
