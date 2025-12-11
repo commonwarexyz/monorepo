@@ -175,7 +175,7 @@ where
         finalizations_by_height: FC,
         finalized_blocks: FB,
         config: Config<B, P, S>,
-    ) -> (Self, Mailbox<S, B>) {
+    ) -> (Self, Mailbox<S, B>, u64) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -243,6 +243,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender),
+            last_processed_height,
         )
     }
 
@@ -512,9 +513,6 @@ where
                                 error!(?err, height, "failed to prune finalized archives");
                                 return;
                             }
-                        }
-                        Message::GetProcessedHeight { response } => {
-                            let _ = response.send(self.last_processed_height);
                         }
                     }
                 },

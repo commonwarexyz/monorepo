@@ -225,6 +225,21 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
+        let (app, mailbox, _processed_height) =
+            setup_validator_with_height(context, oracle, validator, scheme_provider).await;
+        (app, mailbox)
+    }
+
+    async fn setup_validator_with_height(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K>,
+        validator: K,
+        scheme_provider: P,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        u64,
+    ) {
         let config: Config<B, _, _> = Config {
             scheme_provider,
             epoch_length: BLOCKS_PER_EPOCH,
@@ -344,7 +359,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -356,7 +371,7 @@ mod tests {
         // Start the application
         actor.start(application.clone(), buffer, resolver);
 
-        (application, mailbox)
+        (application, mailbox, processed_height)
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -1716,7 +1731,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_processed_height() {
+    fn test_init_processed_height() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1726,75 +1741,62 @@ mod tests {
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
+            // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
-            let (application, mut actor) = setup_validator(
+            let (application, mut actor, initial_height) = setup_validator_with_height(
                 context.with_label("validator-0"),
                 &mut oracle,
-                me,
+                me.clone(),
                 schemes[0].clone().into(),
             )
             .await;
+            assert_eq!(initial_height, 0);
 
-            // Initially, processed height should be 0 (default floor)
-            assert_eq!(actor.get_processed_height().await, Some(0));
+            // Process multiple blocks (1, 2, 3)
+            let mut parent = Sha256::hash(b"");
+            let mut blocks = Vec::new();
+            for i in 1..=3 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(Epoch::new(0), View::new(i));
 
-            // Create and finalize first block
-            let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let commitment1 = block1.digest();
-            let round1 = Round::new(Epoch::new(0), View::new(1));
-            actor.verified(round1, block1.clone()).await;
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
 
-            let proposal1 = Proposal {
-                round: round1,
-                parent: View::new(0),
-                payload: commitment1,
-            };
-            let finalization1 = make_finalization(proposal1, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization1)).await;
-
-            // Wait for application to acknowledge the block
-            let mut height = Some(0);
-            while height == Some(0) {
-                context.sleep(Duration::from_millis(10)).await;
-                height = actor.get_processed_height().await;
+                blocks.push(block);
+                parent = commitment;
             }
-            assert_eq!(height, Some(1));
 
-            // Create and finalize second block
-            let block2 = B::new::<Sha256>(commitment1, 2, 2);
-            let commitment2 = block2.digest();
-            let round2 = Round::new(Epoch::new(0), View::new(2));
-            actor.verified(round2, block2.clone()).await;
-
-            let proposal2 = Proposal {
-                round: round2,
-                parent: View::new(1),
-                payload: commitment2,
-            };
-            let finalization2 = make_finalization(proposal2, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization2)).await;
-
-            // Wait for second block acknowledgment
-            while actor.get_processed_height().await != Some(2) {
+            // Wait for application to process all blocks
+            while application.blocks().len() < 3 {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(actor.get_processed_height().await, Some(2));
 
-            // Verify application received both blocks in order
-            assert_eq!(application.blocks().len(), 2);
-            assert_eq!(application.tip(), Some((2, commitment2)));
+            // Set marshal's processed height to 3
+            actor.set_floor(3).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-            // Test setting floor to same value (should be idempotent)
-            actor.set_floor(2).await;
-            assert_eq!(actor.get_processed_height().await, Some(2));
+            // Verify application received all blocks
+            assert_eq!(application.blocks().len(), 3);
+            assert_eq!(application.tip(), Some((3, blocks[2].digest())));
 
-            // Setting floor to lower value should be ignored (safety feature)
-            actor.set_floor(1).await;
-            assert_eq!(actor.get_processed_height().await, Some(2));
+            // Test 2: Restart with marshal processed height = 3
+            let (_restart_application, _restart_actor, restart_height) =
+                setup_validator_with_height(
+                    context.with_label("validator-0-restart"),
+                    &mut oracle,
+                    me,
+                    schemes[0].clone().into(),
+                )
+                .await;
 
-            actor.set_floor(0).await;
-            assert_eq!(actor.get_processed_height().await, Some(2));
+            assert_eq!(restart_height, 3);
         })
     }
 

@@ -125,14 +125,6 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The candidate sync floor height.
         height: u64,
     },
-    /// A request to retrieve the last processed height from marshal's perspective.
-    ///
-    /// This is the height that marshal will resume delivery from after a restart.
-    /// Applications can use this to detect acknowledged-but-unpersisted blocks.
-    GetProcessedHeight {
-        /// A channel to send the last processed height.
-        response: oneshot::Sender<u64>,
-    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
@@ -314,33 +306,6 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send set sync floor message to actor: receiver dropped");
         }
-    }
-
-    /// Get the last block height that marshal considers "processed" by the application.
-    ///
-    /// This is the height that marshal will resume delivery from after a restart.
-    /// Applications can use this to detect acknowledged-but-unpersisted blocks
-    /// and coordinate state recovery when using AncestorStream.
-    ///
-    /// Returns `None` if the marshal actor is unavailable or has failed.
-    pub async fn get_processed_height(&mut self) -> Option<u64> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetProcessedHeight { response: tx })
-            .await
-            .is_err()
-        {
-            error!("failed to send get processed height message to actor: receiver dropped");
-            return None;
-        }
-        (rx.await).map_or_else(
-            |_| {
-                error!("failed to get processed height: receiver dropped");
-                None
-            },
-            Some,
-        )
     }
 
     /// Notifies the actor of a verified [`Finalization`].
