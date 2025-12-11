@@ -232,15 +232,11 @@ impl<
             return Ok(Some(span));
         }
 
-        let iter = self.snapshot.prev_translated_key(key);
-        let span = self.find_span(iter, key).await?;
-        if let Some(span) = span {
-            return Ok(Some(span));
-        }
+        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+            // DB is empty.
+            return Ok(None);
+        };
 
-        // If we get here, then `key` must precede the first key in the snapshot, in which case we
-        // have to cycle around to the very last key.
-        let iter = self.snapshot.last_translated_key();
         let span = self
             .find_span(iter, key)
             .await?
@@ -327,24 +323,17 @@ impl<
     ///
     /// # Panics
     ///
-    /// Panics if the snapshot is empty.
+    /// Panics if the db is empty.
     async fn update_non_colliding_prev_key_loc(
         &mut self,
         key: &Key<C::Item>,
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
-        assert!(!self.is_empty(), "snapshot should not be empty");
-        let iter = self.snapshot.prev_translated_key(key);
-        if let Some((loc, prev_key)) = self.last_key_in_iter(iter).await? {
-            callback(Some(loc));
-            update_known_loc(&mut self.snapshot, &prev_key.key, loc, next_loc);
-            return Ok(UpdateLocResult::NotExists(prev_key));
-        }
+        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+            unreachable!("database should not be empty");
+        };
 
-        // Unusual case where there is no previous key, in which case we cycle around to the
-        // greatest key.
-        let iter = self.snapshot.last_translated_key();
         let last_key = self.last_key_in_iter(iter).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
@@ -576,14 +565,9 @@ impl<
 
         // Find & update the affected span.
         if prev_key.is_none() {
-            let iter = self.snapshot.prev_translated_key(&key);
-            let last_key = self.last_key_in_iter(iter).await?;
-            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
-        }
-        if prev_key.is_none() {
-            // Unusual case where we deleted the very first key in the DB, so the very last key in
-            // the DB defines the span in need of update.
-            let iter = self.snapshot.last_translated_key();
+            let Some(iter) = self.snapshot.prev_translated_key(&key) else {
+                unreachable!("DB should not be empty");
+            };
             let last_key = self.last_key_in_iter(iter).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
