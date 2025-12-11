@@ -295,4 +295,4 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run codec conformance tests
-      run: just test-codec-fixtures && git diff --exit-code
+      run: just test-conformance && git diff --exit-code

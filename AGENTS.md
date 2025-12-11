@@ -481,13 +481,13 @@ Codec conformance tests verify that codec implementations maintain backward comp
 
 ```bash
 # Run all codec conformance tests
-just test-codec-fixtures
+just test-conformance
 
 # Regenerate fixtures (use only for INTENTIONAL format changes)
-just regenerate-codec-fixtures
+just regenerate-conformance
 ```
 
-**WARNING**: Running `just regenerate-codec-fixtures` is effectively a manual approval of a breaking codec change. Only use this when you have intentionally changed the wire format and have verified that the change is correct. This will update the hash values in `codec_conformance.toml` files throughout the repository.
+**WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking codec change. Only use this when you have intentionally changed the wire format and have verified that the change is correct. This will update the hash values in `codec_conformance.toml` files throughout the repository.
 
 ### Adding Conformance Tests for New Types
 
@@ -534,7 +534,7 @@ The number (1024) is the number of test cases to generate and hash together.
 
 #### Step 3: Run Tests to Generate Fixtures
 
-Run `just test-codec-fixtures` to generate the initial hash values. The test framework will automatically add new types to the appropriate `codec_conformance.toml` file.
+Run `just test-conformance` to generate the initial hash values. The test framework will automatically add new types to the appropriate `codec_conformance.toml` file.
 
 ### How It Works
 

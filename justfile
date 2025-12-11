@@ -86,9 +86,9 @@ fix-features:
     zepter && zepter format features --fix
 
 # Test codec conformance
-test-codec-fixtures:
+test-conformance:
     just test --features arbitrary --profile codec_conformance
 
 # Regenerate codec conformance fixtures
-regenerate-codec-fixtures:
+regenerate-conformance:
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile codec_conformance
