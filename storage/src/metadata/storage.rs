@@ -4,7 +4,7 @@ use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::Span;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -27,7 +27,7 @@ impl Info {
 }
 
 /// One of the two wrappers that store metadata.
-struct Wrapper<B: Blob, K: Array> {
+struct Wrapper<B: Blob, K: Span> {
     blob: B,
     version: u64,
     lengths: HashMap<K, Info>,
@@ -35,7 +35,7 @@ struct Wrapper<B: Blob, K: Array> {
     data: Vec<u8>,
 }
 
-impl<B: Blob, K: Array> Wrapper<B, K> {
+impl<B: Blob, K: Span> Wrapper<B, K> {
     /// Create a new [Wrapper].
     const fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
         Self {
@@ -60,7 +60,7 @@ impl<B: Blob, K: Array> Wrapper<B, K> {
 }
 
 /// Implementation of [Metadata] storage.
-pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
+pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
@@ -75,7 +75,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     keys: Gauge,
 }
 
-impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
+impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
@@ -305,23 +305,23 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         past
     }
 
-    /// Iterate over all keys in metadata, optionally filtered by prefix.
-    ///
-    /// If a prefix is provided, only keys that start with the prefix bytes will be returned.
-    pub fn keys<'a>(&'a self, prefix: Option<&'a [u8]>) -> impl Iterator<Item = &'a K> + 'a {
-        self.map.keys().filter(move |key| {
-            prefix.is_none_or(|prefix_bytes| key.as_ref().starts_with(prefix_bytes))
-        })
+    /// Iterate over all keys in metadata.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.map.keys()
     }
 
-    /// Remove all keys that start with the given prefix.
-    pub fn remove_prefix(&mut self, prefix: &[u8]) {
-        // Retain only keys that do not start with the prefix
-        self.map.retain(|key, _| !key.as_ref().starts_with(prefix));
+    /// Retain only the keys that satisfy the predicate.
+    pub fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
+        // Retain only keys that satisfy the predicate
+        let old_len = self.map.len();
+        self.map.retain(|k, v| f(k, v));
+        let new_len = self.map.len();
 
-        // Mark key order as changed since we may have removed keys
-        self.key_order_changed = self.next_version;
-        let _ = self.keys.try_set(self.map.len());
+        // If the number of keys has changed, mark the key order as changed
+        if new_len != old_len {
+            self.key_order_changed = self.next_version;
+            let _ = self.keys.try_set(self.map.len());
+        }
     }
 
     /// Atomically commit the current state of [Metadata].

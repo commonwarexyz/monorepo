@@ -1,11 +1,15 @@
 [test-groups]
 slow = { max-threads = "num-cpus" }
+codec_conformance = { max-threads = "num-cpus" }
 
 [profile.default]
-default-filter = 'not test(/.*_slow_$/)'
+default-filter = 'not test(/(.*_slow_$|.*_codec_conformance_$)/)'
 
 [profile.slow]
 default-filter = 'test(/.*_slow_$/)'
+
+[profile.codec_conformance]
+default-filter = 'test(/.*_codec_conformance_$/)'
 
 [profile.all]
 default-filter = 'test(/.*/)'

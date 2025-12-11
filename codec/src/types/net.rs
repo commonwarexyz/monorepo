@@ -319,4 +319,17 @@ mod test {
             &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
         );
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        crate::conformance_tests! {
+            Ipv4Addr,
+            Ipv6Addr,
+            SocketAddrV4,
+            SocketAddrV6,
+            SocketAddr,
+        }
+    }
 }

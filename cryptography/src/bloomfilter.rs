@@ -121,6 +121,20 @@ impl EncodeSize for BloomFilter {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for BloomFilter {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let hashers = u8::arbitrary(u)?;
+        // Ensure at least 1 bit to avoid empty bitmap
+        let bits_len = u.arbitrary_len::<u64>()?.max(1);
+        let mut bits = BitMap::with_capacity(bits_len as u64);
+        for _ in 0..bits_len {
+            bits.push(u.arbitrary::<bool>()?);
+        }
+        Ok(Self { hashers, bits })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +260,14 @@ mod tests {
                 "bitmap length doesn't match config"
             ))
         ));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            BloomFilter,
+        }
     }
 }

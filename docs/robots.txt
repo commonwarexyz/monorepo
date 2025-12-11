@@ -1,3 +1,3 @@
 User-agent: *
-Disallow:
+Disallow: /cdn-cgi/
 Sitemap: https://commonware.xyz/sitemap.xml

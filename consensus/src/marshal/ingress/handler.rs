@@ -237,6 +237,31 @@ impl<B: Block> Debug for Request<B> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<B: Block> arbitrary::Arbitrary<'_> for Request<B>
+where
+    B::Commitment: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => {
+                let commitment = B::Commitment::arbitrary(u)?;
+                Ok(Self::Block(commitment))
+            }
+            1 => {
+                let height = u.arbitrary::<u64>()?;
+                Ok(Self::Finalized { height })
+            }
+            2 => {
+                let round = Round::arbitrary(u)?;
+                Ok(Self::Notarized { round })
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +548,14 @@ mod tests {
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Request<B>,
+        }
     }
 }

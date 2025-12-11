@@ -84,4 +84,15 @@ mod tests {
         // None -> 0x00
         assert_eq!(t_option_none.encode(), &[0xFF, 0x00][..]);
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        crate::conformance_tests! {
+            (u32, u32),
+            (u32, u32, u32),
+            (u32, u32, u32, u32),
+            (u32, u32, u32, u32, u32),
+            (u32, u32, u32, u32, u32, u32),
+        }
+    }
 }
