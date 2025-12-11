@@ -815,6 +815,17 @@ impl<
                     // Clear verify waiter
                     let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
+                    view = context.view();
+
+                    // Ensure the proposal is still current
+                    if view != self.state.current_view() {
+                        debug!(
+                            ?view,
+                            current = ?self.state.current_view(),
+                            "ignoring proposal verification result for stale view",
+                        );
+                        continue;
+                    }
 
                     // Try to use result
                     let valid = match verified {
@@ -825,12 +836,10 @@ impl<
                         }
                     };
 
-                    // Mark verification complete
-                    view = context.view();
-                    if !self.state.verified(view, valid) {
-                        continue;
-                    }
-                    if !valid && view == self.state.current_view() {
+                    if valid {
+                        // Mark verification complete
+                        self.state.verified(view);
+                    } else {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
                         self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)

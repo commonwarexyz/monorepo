@@ -406,11 +406,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Some((context, proposal))
     }
 
-    /// Marks proposal verification as complete.
-    pub fn verified(&mut self, view: View, valid: bool) -> bool {
+    /// Marks proposal verification as complete when the peer payload validates.
+    pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)
-            .map(|round| round.verified(valid))
+            .map(|round| round.verified())
             .unwrap_or(false)
     }
 
@@ -1115,7 +1115,7 @@ mod tests {
 
             // We should not want to verify (already timeout)
             assert!(state.try_verify().is_some());
-            assert!(state.verified(view, true));
+            assert!(state.verified(view));
 
             // Handle timeout
             assert!(!state.handle_timeout().0);

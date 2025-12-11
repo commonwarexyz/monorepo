@@ -181,11 +181,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns `true` if the slot was updated, `false` if we already broadcast nullify
     /// or the slot was in an invalid state (e.g., we received a certificate for a
     /// conflicting proposal).
-    pub fn verified(&mut self, valid: bool) -> bool {
+    pub fn verified(&mut self) -> bool {
         if self.broadcast_nullify {
             return false;
         }
-        if !self.proposal.mark_verified(valid) {
+        if !self.proposal.mark_verified() {
             // If we receive a certificate for some proposal, we ignore our verification.
             return false;
         }
@@ -388,11 +388,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Even if we've already seen a notarization, we still broadcast our notarize vote
         // in case it is useful (in the worst case it lets others observe we are alive).
 
-        // If we don't have a valid verified proposal, return None.
+        // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated) or if verification failed.
-        if self.proposal.status() != (ProposalStatus::Verified { valid: true }) {
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
+        if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
         self.broadcast_notarize = true;
@@ -415,11 +416,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        // If we don't have a valid verified proposal, return None.
+        // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated) or if verification failed.
-        if self.proposal.status() != (ProposalStatus::Verified { valid: true }) {
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
+        if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
         self.broadcast_finalize = true;
@@ -508,7 +510,7 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
-        assert!(round.verified(true));
+        assert!(round.verified());
 
         // Attempt to vote
         assert_eq!(round.construct_notarize(), Some(&proposal_a));
@@ -561,7 +563,7 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
-        assert!(round.verified(true));
+        assert!(round.verified());
 
         // Attempt to vote
         assert_eq!(round.construct_notarize(), Some(&proposal_a));
@@ -725,35 +727,5 @@ mod tests {
 
         // Check that construct_nullify returns None
         assert!(round.construct_nullify().is_none());
-    }
-
-    #[test]
-    fn verification_failed_prevents_notarize_and_finalize() {
-        let mut rng = StdRng::seed_from_u64(2030);
-        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
-        let local_scheme = schemes[0].clone();
-
-        // Setup round and proposal
-        let now = SystemTime::UNIX_EPOCH;
-        let round_info = Rnd::new(Epoch::new(1), View::new(1));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([50u8; 32]));
-
-        let mut round = Round::new(local_scheme, round_info, now);
-
-        // Set proposal from batcher
-        round.set_leader(None);
-        assert!(round.set_proposal(proposal));
-
-        // Mark verification as failed
-        assert!(round.verified(false));
-
-        // Should not be able to construct notarize vote
-        assert!(round.construct_notarize().is_none());
-
-        // Should not be able to construct finalize vote
-        assert!(round.construct_finalize().is_none());
-
-        // Should still be able to construct nullify
-        assert!(round.construct_nullify().is_some());
     }
 }
