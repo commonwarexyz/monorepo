@@ -605,11 +605,11 @@ impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
 impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 
 #[cfg(feature = "arbitrary")]
-impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Node<C, V, D>
+impl<C: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Node<C, S, D>
 where
     C: for<'a> arbitrary::Arbitrary<'a>,
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -618,7 +618,7 @@ where
         let parent = if chunk.height == 0 {
             None
         } else {
-            Some(Parent::<V, D>::arbitrary(u)?)
+            Some(Parent::<S, D>::arbitrary(u)?)
         };
         Ok(Self {
             chunk,
@@ -729,16 +729,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, V, D>
+impl<P: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, S, D>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let chunk = Chunk::<P, D>::arbitrary(u)?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = PartialSignature::<V>::arbitrary(u)?;
+        let signature = Signature::arbitrary(u)?;
         Ok(Self {
             chunk,
             epoch,
@@ -806,16 +806,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<P, S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, V, D>
+impl<C: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, S, D>
 where
     Proposal<C, D>: for<'a> arbitrary::Arbitrary<'a>,
-    Lock<C, V, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Lock<C, S, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=1)?;
         match choice {
             0 => Ok(Self::Tip(Proposal::<C, D>::arbitrary(u)?)),
-            1 => Ok(Self::Lock(Lock::<C, V, D>::arbitrary(u)?)),
+            1 => Ok(Self::Lock(Lock::<C, S, D>::arbitrary(u)?)),
             _ => unreachable!(),
         }
     }
@@ -997,19 +997,19 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Parent<V, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Parent<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let digest = D::arbitrary(u)?;
+        let digest = u.arbitrary::<D>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = V::Signature::arbitrary(u)?;
+        let certificate = u.arbitrary::<S::Certificate>()?;
         Ok(Self {
             digest,
             epoch,
-            signature,
+            certificate,
         })
     }
 }
@@ -1028,17 +1028,17 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, V, D>
+impl<P: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, S, D>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             chunk: u.arbitrary()?,
             epoch: u.arbitrary()?,
-            signature: u.arbitrary()?,
+            certificate: u.arbitrary()?,
         })
     }
 }
@@ -2057,14 +2057,16 @@ mod tests {
     mod conformance {
         use super::*;
 
+        type Scheme = Bls12381ThresholdScheme<PublicKey, MinSig>;
+
         commonware_codec::conformance_tests! {
             Chunk<PublicKey, Sha256Digest>,
-            Parent<MinPk, Sha256Digest>,
-            Node<PublicKey, MinPk, Sha256Digest>,
-            Ack<PublicKey, MinPk, Sha256Digest>,
-            Activity<PublicKey, MinPk, Sha256Digest>,
+            Parent<Scheme, Sha256Digest>,
+            Node<PublicKey, Scheme, Sha256Digest>,
+            Ack<PublicKey, Scheme, Sha256Digest>,
+            Activity<PublicKey, Scheme, Sha256Digest>,
             Proposal<PublicKey, Sha256Digest>,
-            Lock<PublicKey, MinPk, Sha256Digest>,
+            Lock<PublicKey, Scheme, Sha256Digest>,
         }
     }
 }

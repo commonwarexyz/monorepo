@@ -250,18 +250,6 @@ impl<D: Digest> Viewable for Subject<'_, D> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme> arbitrary::Arbitrary<'_> for Signature<S>
-where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let signer = u32::arbitrary(u)?;
-        let signature = S::Signature::arbitrary(u)?;
-        Ok(Self { signer, signature })
-    }
-}
-
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Vote<S: Scheme, D: Digest> {

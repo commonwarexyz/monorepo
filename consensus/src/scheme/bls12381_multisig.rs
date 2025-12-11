@@ -335,6 +335,18 @@ impl<V: Variant> Read for Certificate<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signature = V::Signature::arbitrary(u)?;
+        Ok(Self { signers, signature })
+    }
+}
+
 mod macros {
     /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
     ///
@@ -478,5 +490,20 @@ mod macros {
                 }
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_cryptography::bls12381::primitives::variant::MinSig;
+
+        commonware_codec::conformance_tests! {
+            Certificate<MinSig>,
+        }
     }
 }

@@ -14,18 +14,6 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey}
 
 impl_bls12381_multisig_scheme!(Subject<'a, D>);
 
-#[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
-where
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let signers = Signers::arbitrary(u)?;
-        let signature = V::Signature::arbitrary(u)?;
-        Ok(Self { signers, signature })
-    }
-}
-
 impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
     type Seed = ();
 
@@ -828,14 +816,5 @@ mod tests {
     fn test_certificate_decode_checks_sorted_unique_signers() {
         certificate_decode_checks_sorted_unique_signers::<MinPk>();
         certificate_decode_checks_sorted_unique_signers::<MinSig>();
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-
-        commonware_codec::conformance_tests! {
-            Certificate<MinSig>,
-        }
     }
 }

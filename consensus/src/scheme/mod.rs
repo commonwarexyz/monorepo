@@ -63,6 +63,18 @@ impl<S: Scheme> Read for Signature<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme> arbitrary::Arbitrary<'_> for Signature<S>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signer = u32::arbitrary(u)?;
+        let signature = S::Signature::arbitrary(u)?;
+        Ok(Self { signer, signature })
+    }
+}
+
 /// Result of verifying a batch of signatures.
 pub struct SignatureVerification<S: Scheme> {
     /// Contains the signatures accepted by the scheme.

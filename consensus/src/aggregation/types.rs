@@ -204,15 +204,15 @@ impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<V, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
 where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
-    PartialSignature<V>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = u.arbitrary::<PartialSignature<V>>()?;
+        let signature = Signature::arbitrary(u)?;
         Ok(Self {
             item,
             epoch,
@@ -256,14 +256,14 @@ impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for TipAck<V, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for TipAck<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let tip = u.arbitrary::<u64>()?;
-        let ack = u.arbitrary::<Ack<V, D>>()?;
+        let ack = u.arbitrary::<Ack<S, D>>()?;
         Ok(Self { tip, ack })
     }
 }
@@ -338,15 +338,15 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Certificate<V, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
-        let signature = u.arbitrary::<V::Signature>()?;
-        Ok(Self { item, signature })
+        let certificate = u.arbitrary::<S::Certificate>()?;
+        Ok(Self { item, certificate })
     }
 }
 
@@ -411,17 +411,17 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<V, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
-    Certificate<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Certificate<S, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=2)?;
         match choice {
-            0 => Ok(Self::Ack(u.arbitrary::<Ack<V, D>>()?)),
-            1 => Ok(Self::Certified(u.arbitrary::<Certificate<V, D>>()?)),
+            0 => Ok(Self::Ack(u.arbitrary::<Ack<S, D>>()?)),
+            1 => Ok(Self::Certified(u.arbitrary::<Certificate<S, D>>()?)),
             2 => Ok(Self::Tip(u.arbitrary::<u64>()?)),
             _ => unreachable!(),
         }
@@ -649,17 +649,20 @@ mod tests {
         let threshold_schemes = generate_bls12381_threshold_schemes::<MinSig>(4, 1);
         activity_invalid_enum(&threshold_schemes);
     }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
+        type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
+
         commonware_codec::conformance_tests! {
             Item<Sha256Digest>,
-            Ack<MinSig, Sha256Digest>,
-            TipAck<MinSig, Sha256Digest>,
-            Certificate<MinSig, Sha256Digest>,
-            Activity<MinSig, Sha256Digest>,
+            Ack<Scheme, Sha256Digest>,
+            TipAck<Scheme, Sha256Digest>,
+            Certificate<Scheme, Sha256Digest>,
+            Activity<Scheme, Sha256Digest>,
         }
     }
 }
