@@ -49,20 +49,22 @@ mod tests {
         };
 
         // Sign with quorum-of-validators (each needs their own scheme instance)
-        let quorum = Scheme::<EdPublicKey, MinPk>::new(
+        let quorum = Scheme::<EdPublicKey, MinPk>::signer(
             Set::try_from_iter(validators.clone()).unwrap(),
             &polynomial,
             shares[0].clone(),
         )
+        .unwrap()
         .participants()
         .quorum() as usize;
         let mut votes = Vec::new();
         for share in shares.iter().take(quorum) {
-            let validator_scheme = Scheme::<EdPublicKey, MinPk>::new(
+            let validator_scheme = Scheme::<EdPublicKey, MinPk>::signer(
                 Set::try_from_iter(validators.clone()).unwrap(),
                 &polynomial,
                 share.clone(),
-            );
+            )
+            .unwrap();
 
             if let Some(vote) = SchemeTrait::sign_vote(&validator_scheme, b"test", ctx.clone()) {
                 votes.push(vote);
@@ -72,10 +74,9 @@ mod tests {
         assert_eq!(votes.len(), quorum);
 
         // Create a verifier scheme (without a local share, just for verification)
-        let scheme = Scheme::<EdPublicKey, MinPk>::new(
+        let scheme = Scheme::<EdPublicKey, MinPk>::verifier(
             Set::try_from_iter(validators).unwrap(),
             &polynomial,
-            shares[0].clone(),
         );
 
         // Assemble certificate

@@ -63,13 +63,12 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
-    /// If the provided share does not match the polynomial evaluation at its index,
-    /// the instance will act as a verifier (unable to sign votes).
+    /// Returns `None` if the share's public key does not match any participant.
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn new(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Self {
+    pub fn signer(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Option<Self> {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
@@ -79,22 +78,19 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
             .expect("participants are unique");
 
         let public_key = share.public::<V>();
-        if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
-            assert_eq!(
-                index as u32, share.index,
-                "share index must match participant index"
-            );
-            Self::Signer {
-                participants,
-                identity,
-                share,
-            }
-        } else {
-            Self::Verifier {
-                participants,
-                identity,
-            }
-        }
+        let index = participants
+            .values()
+            .iter()
+            .position(|p| p == &public_key)?;
+        assert_eq!(
+            index as u32, share.index,
+            "share index must match participant index"
+        );
+        Some(Self::Signer {
+            participants,
+            identity,
+            share,
+        })
     }
 
     /// Produces a verifier that can authenticate votes but does not hold signing state.
@@ -387,18 +383,18 @@ mod macros {
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > Scheme<P, V> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
-                pub fn new(
+                pub fn signer(
                     participants: commonware_utils::ordered::Set<P>,
                     polynomial: &commonware_cryptography::bls12381::primitives::poly::Public<V>,
                     share: commonware_cryptography::bls12381::primitives::group::Share,
-                ) -> Self {
-                    Self {
-                        raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::new(
+                ) -> Option<Self> {
+                    Some(Self {
+                        raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::signer(
                             participants,
                             polynomial,
                             share,
-                        ),
-                    }
+                        )?,
+                    })
                 }
 
                 /// Creates a verifier that can authenticate partial signatures.

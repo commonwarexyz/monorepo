@@ -63,7 +63,12 @@ where
     // Extract private keys and schemes
     let (private_keys, schemes): (Vec<_>, Vec<_>) = ed25519_associated
         .into_iter()
-        .map(|(_, sk)| (sk.clone(), EdScheme::new(participants.clone(), sk)))
+        .map(|(_, sk)| {
+            (
+                sk.clone(),
+                EdScheme::signer(participants.clone(), sk).unwrap(),
+            )
+        })
         .unzip();
     let verifier = EdScheme::verifier(participants.clone());
 
@@ -107,7 +112,7 @@ where
         .unwrap();
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::signer(signers.clone(), sk).unwrap())
         .collect();
     let verifier = bls12381_multisig::Scheme::verifier(signers);
 
@@ -162,7 +167,8 @@ where
     let schemes: Vec<_> = shares
         .into_iter()
         .map(|(_, share)| {
-            bls12381_threshold::Scheme::new(participants.clone(), output.public(), share)
+            bls12381_threshold::Scheme::signer(participants.clone(), output.public(), share)
+                .unwrap()
         })
         .collect();
 

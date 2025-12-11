@@ -467,7 +467,7 @@ mod tests {
 
         private_keys
             .into_iter()
-            .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
+            .map(|sk| ed25519::Scheme::signer(participants.clone(), sk).unwrap())
             .collect()
     }
 
@@ -496,7 +496,9 @@ mod tests {
 
         bls_keys
             .into_iter()
-            .map(|bls_sk| bls12381_multisig::Scheme::new(participants_with_bls.clone(), bls_sk))
+            .map(|bls_sk| {
+                bls12381_multisig::Scheme::signer(participants_with_bls.clone(), bls_sk).unwrap()
+            })
             .collect()
     }
 
@@ -516,7 +518,10 @@ mod tests {
 
         shares
             .into_iter()
-            .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
+            .map(|share| {
+                bls12381_threshold::Scheme::signer(participants.clone(), &polynomial, share)
+                    .unwrap()
+            })
             .collect()
     }
 

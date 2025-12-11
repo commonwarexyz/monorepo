@@ -29,15 +29,18 @@ pub struct Ed25519 {
 
 impl Ed25519 {
     /// Creates a new raw Ed25519 scheme instance.
-    pub fn new(participants: Set<ed25519::PublicKey>, private_key: ed25519::PrivateKey) -> Self {
+    pub fn signer(
+        participants: Set<ed25519::PublicKey>,
+        private_key: ed25519::PrivateKey,
+    ) -> Option<Self> {
         let signer = participants
             .index(&private_key.public_key())
-            .map(|index| (index, private_key));
+            .map(|index| (index, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
@@ -356,18 +359,21 @@ mod macros {
                 ///
                 /// If the provided private key does not match any consensus key in the committee,
                 /// the instance will act as a verifier (unable to generate signatures).
-                pub fn new(
+                ///
+                /// Returns `None` if the provided private key does not match any participant
+                /// in the committee.
+                pub fn signer(
                     participants: commonware_utils::ordered::Set<
                         commonware_cryptography::ed25519::PublicKey,
                     >,
                     private_key: commonware_cryptography::ed25519::PrivateKey,
-                ) -> Self {
-                    Self {
-                        raw: $crate::signing_scheme::ed25519::Ed25519::new(
+                ) -> Option<Self> {
+                    Some(Self {
+                        raw: $crate::signing_scheme::ed25519::Ed25519::signer(
                             participants,
                             private_key,
-                        ),
-                    }
+                        )?,
+                    })
                 }
 
                 /// Builds a verifier that can authenticate votes without generating signatures.
@@ -519,11 +525,11 @@ mod tests {
     }
 
     impl TestScheme {
-        fn new(participants: Set<PublicKey>, private_key: PrivateKey) -> Self {
-            Self {
-                raw: super::Ed25519::new(participants, private_key),
+        fn signer(participants: Set<PublicKey>, private_key: PrivateKey) -> Option<Self> {
+            Some(Self {
+                raw: super::Ed25519::signer(participants, private_key)?,
                 _pd: PhantomData,
-            }
+            })
         }
 
         fn verifier(participants: Set<PublicKey>) -> Self {
@@ -643,7 +649,7 @@ mod tests {
 
         let signers = private_keys
             .into_iter()
-            .map(|sk| TestScheme::new(participants.clone(), sk))
+            .map(|sk| TestScheme::signer(participants.clone(), sk).unwrap())
             .collect();
 
         let verifier = TestScheme::verifier(participants);
