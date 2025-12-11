@@ -148,6 +148,7 @@ impl<T> NonEmptyVec<T> {
     ///
     /// Panics if `index >= len`.
     pub fn remove(&mut self, index: usize) -> Option<T> {
+        assert!(index < self.0.len(), "index out of bounds");
         if self.0.len() > 1 {
             Some(self.0.remove(index))
         } else {
