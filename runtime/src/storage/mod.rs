@@ -423,7 +423,13 @@ pub(crate) mod tests {
         }
 
         // Invalid partition names should return PartitionNameInvalid
-        for invalid in ["my/partition", "my.partition", "my partition", "../escape", ""] {
+        for invalid in [
+            "my/partition",
+            "my.partition",
+            "my partition",
+            "../escape",
+            "",
+        ] {
             assert!(
                 matches!(
                     storage.open(invalid, b"blob").await,
