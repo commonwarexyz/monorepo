@@ -184,13 +184,13 @@ pub trait Ordered: Unordered {
     where
         Self::Value: 'a;
 
-    // Returns a cursor over all values associated with the lexicographically first translated
+    // Returns an iterator over all values associated with the lexicographically first translated
     // key, or None if there are no keys in the index.
     fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a;
 
-    // Returns a cursor over all values associated with the lexicographically last translated
+    // Returns an iterator over all values associated with the lexicographically last translated
     // key, or None if there are no keys in the index.
     fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
