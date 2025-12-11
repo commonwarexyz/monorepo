@@ -4,7 +4,7 @@ mod round;
 mod verifier;
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     types::{Epoch, ViewDelta},
     Reporter,
 };
@@ -37,7 +37,7 @@ mod tests {
                 self,
                 fixtures::{bls12381_multisig, ed25519, Fixture},
             },
-            signing_scheme::SimplexScheme,
+            scheme::SimplexScheme,
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,

@@ -1,8 +1,6 @@
 //! Deterministic test fixtures for `aggregation` signing schemes.
 
-use crate::aggregation::signing_scheme::{
-    bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
-};
+use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
 use commonware_cryptography::{
     bls12381::{
         dkg,

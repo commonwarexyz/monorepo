@@ -10,11 +10,11 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
 use commonware_consensus::{
-    signing_scheme,
+    scheme,
     simplex::{
         config,
         mocks::{application, fixtures::Fixture, relay, reporter},
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         Engine,
     },
     types::{Delta, Epoch, View},
@@ -49,7 +49,7 @@ const EXPECTED_PANICS: [&str; 3] = [
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as signing_scheme::Scheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as scheme::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: SimplexScheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;

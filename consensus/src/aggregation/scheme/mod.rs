@@ -1,7 +1,7 @@
 //! Signing schemes for aggregation.
 
 use super::types::Item;
-use crate::signing_scheme::Scheme;
+use crate::scheme::Scheme;
 use commonware_cryptography::Digest;
 
 pub mod bls12381_multisig;

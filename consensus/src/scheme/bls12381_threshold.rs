@@ -8,7 +8,7 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
-use crate::signing_scheme::{Context, Scheme, Signature, SignatureVerification};
+use crate::scheme::{Context, Scheme, Signature, SignatureVerification};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -375,7 +375,7 @@ mod macros {
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > {
-                raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold<P, V>,
+                raw: $crate::scheme::bls12381_threshold::Bls12381Threshold<P, V>,
             }
 
             impl<
@@ -389,7 +389,7 @@ mod macros {
                     share: commonware_cryptography::bls12381::primitives::group::Share,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::signer(
+                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::signer(
                             participants,
                             polynomial,
                             share,
@@ -403,7 +403,7 @@ mod macros {
                     polynomial: &commonware_cryptography::bls12381::primitives::poly::Public<V>,
                 ) -> Self {
                     Self {
-                        raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::verifier(
+                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::verifier(
                             participants,
                             polynomial,
                         ),
@@ -413,7 +413,7 @@ mod macros {
                 /// Creates a lightweight verifier that only checks recovered certificates.
                 pub const fn certificate_verifier(identity: V::Public) -> Self {
                     Self {
-                        raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::certificate_verifier(
+                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::certificate_verifier(
                             identity,
                         ),
                     }
@@ -423,7 +423,7 @@ mod macros {
             impl<
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync,
-            > $crate::signing_scheme::Scheme for Scheme<P, V> {
+            > $crate::scheme::Scheme for Scheme<P, V> {
                 type Context<'a, D: commonware_cryptography::Digest> = $context;
                 type PublicKey = P;
                 type Signature = V::Signature;
@@ -441,7 +441,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Signature<Self>> {
+                ) -> Option<$crate::scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -449,7 +449,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    signature: &$crate::signing_scheme::Signature<Self>,
+                    signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
                     self.raw.verify_vote(namespace, context, signature)
                 }
@@ -460,18 +460,18 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                     signatures: I,
-                ) -> $crate::signing_scheme::SignatureVerification<Self>
+                ) -> $crate::scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.assemble_certificate(signatures)
                 }
@@ -515,7 +515,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::<P, V>::certificate_codec_config_unbounded()
+                    $crate::scheme::bls12381_threshold::Bls12381Threshold::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };

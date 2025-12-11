@@ -5,9 +5,9 @@
 //! same round. It does not emit any `Finalize` messages.
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Nullify, Vote},
     },
 };

@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
-    signing_scheme::{
+    scheme::{
         bls12381_multisig,
         bls12381_threshold::{self},
         ed25519, SimplexScheme,

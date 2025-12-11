@@ -1,6 +1,6 @@
 //! Interface for a store of finalized blocks, used by [Actor](super::Actor).
 
-use crate::{signing_scheme::Scheme, simplex::types::Finalization, Block};
+use crate::{scheme::Scheme, simplex::types::Finalization, Block};
 use commonware_cryptography::{Committable, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{

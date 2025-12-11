@@ -1,9 +1,9 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Finalize, Notarize, Vote},
     },
 };

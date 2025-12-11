@@ -34,7 +34,7 @@ cfg_if::cfg_if! {
 }
 
 use crate::{
-    signing_scheme::{Context, Scheme},
+    scheme::{Context, Scheme},
     simplex::types::Subject,
     types::Round,
 };

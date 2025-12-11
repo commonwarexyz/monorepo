@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Activity, Certificate, Vote},
     },
     types::{Epoch, View, ViewDelta},

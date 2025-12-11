@@ -1,5 +1,5 @@
 use super::types::Node;
-use crate::signing_scheme::Scheme;
+use crate::scheme::Scheme;
 use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -68,7 +68,7 @@ mod tests {
     // Dummy context for testing
     #[derive(Clone, Debug)]
     struct DummyContext;
-    impl crate::signing_scheme::Context for DummyContext {
+    impl crate::scheme::Context for DummyContext {
         fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
             (namespace.to_vec(), Vec::new())
         }
@@ -88,7 +88,7 @@ mod tests {
         }
     }
 
-    impl crate::signing_scheme::Scheme for DummyScheme {
+    impl crate::scheme::Scheme for DummyScheme {
         type Context<'a, D: commonware_cryptography::Digest> = DummyContext;
         type PublicKey = commonware_cryptography::ed25519::PublicKey;
         type Signature = ();
@@ -102,7 +102,7 @@ mod tests {
             &self,
             _namespace: &[u8],
             _context: Self::Context<'_, D>,
-        ) -> Option<crate::signing_scheme::Signature<Self>> {
+        ) -> Option<crate::scheme::Signature<Self>> {
             None
         }
 
@@ -110,14 +110,14 @@ mod tests {
             &self,
             _namespace: &[u8],
             _context: Self::Context<'_, D>,
-            _signature: &crate::signing_scheme::Signature<Self>,
+            _signature: &crate::scheme::Signature<Self>,
         ) -> bool {
             true
         }
 
         fn assemble_certificate<I>(&self, _signatures: I) -> Option<Self::Certificate>
         where
-            I: IntoIterator<Item = crate::signing_scheme::Signature<Self>>,
+            I: IntoIterator<Item = crate::scheme::Signature<Self>>,
         {
             None
         }

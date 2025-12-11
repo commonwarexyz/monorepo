@@ -9,14 +9,14 @@
 
 use super::{
     metrics,
-    signing_scheme::OrderedBroadcastScheme,
+    scheme::OrderedBroadcastScheme,
     types::{
         Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal, SequencersProvider,
     },
     AckManager, Config, TipManager,
 };
 use crate::{
-    signing_scheme::{Scheme, SchemeProvider},
+    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };

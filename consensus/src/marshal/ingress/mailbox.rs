@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,

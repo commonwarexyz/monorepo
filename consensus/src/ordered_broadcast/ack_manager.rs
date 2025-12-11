@@ -1,6 +1,6 @@
 use super::types::Ack;
 use crate::{
-    signing_scheme::{Scheme, Signature},
+    scheme::{Scheme, Signature},
     types::Epoch,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -150,8 +150,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 mod tests {
     use super::*;
     use crate::{
-        ordered_broadcast::{mocks, signing_scheme::OrderedBroadcastScheme, types::Chunk},
-        signing_scheme::Scheme,
+        ordered_broadcast::{mocks, scheme::OrderedBroadcastScheme, types::Chunk},
+        scheme::Scheme,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},

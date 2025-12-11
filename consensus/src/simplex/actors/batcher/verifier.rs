@@ -1,7 +1,7 @@
 use crate::{
-    signing_scheme::SignatureVerification,
+    scheme::SignatureVerification,
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
     },
 };
@@ -441,7 +441,7 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::signing_scheme::{bls12381_threshold, ed25519},
+        simplex::scheme::{bls12381_threshold, ed25519},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{

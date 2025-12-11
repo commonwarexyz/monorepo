@@ -2,7 +2,7 @@
 //!
 //! This module provides both the raw Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
-use crate::signing_scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
+use crate::scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
@@ -313,7 +313,7 @@ impl Read for Certificate {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "consensus::signing_scheme::ed25519::Certificate",
+                "consensus::scheme::ed25519::Certificate",
                 "Certificate contains no signers",
             ));
         }
@@ -321,7 +321,7 @@ impl Read for Certificate {
         let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
-                "consensus::signing_scheme::ed25519::Certificate",
+                "consensus::scheme::ed25519::Certificate",
                 "Signers and signatures counts differ",
             ));
         }
@@ -349,7 +349,7 @@ mod macros {
             /// Ed25519 signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme {
-                raw: $crate::signing_scheme::ed25519::Ed25519,
+                raw: $crate::scheme::ed25519::Ed25519,
             }
 
             impl Scheme {
@@ -369,10 +369,7 @@ mod macros {
                     private_key: commonware_cryptography::ed25519::PrivateKey,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::signing_scheme::ed25519::Ed25519::signer(
-                            participants,
-                            private_key,
-                        )?,
+                        raw: $crate::scheme::ed25519::Ed25519::signer(participants, private_key)?,
                     })
                 }
 
@@ -385,16 +382,16 @@ mod macros {
                     >,
                 ) -> Self {
                     Self {
-                        raw: $crate::signing_scheme::ed25519::Ed25519::verifier(participants),
+                        raw: $crate::scheme::ed25519::Ed25519::verifier(participants),
                     }
                 }
             }
 
-            impl $crate::signing_scheme::Scheme for Scheme {
+            impl $crate::scheme::Scheme for Scheme {
                 type Context<'a, D: commonware_cryptography::Digest> = $context;
                 type PublicKey = commonware_cryptography::ed25519::PublicKey;
                 type Signature = commonware_cryptography::ed25519::Signature;
-                type Certificate = $crate::signing_scheme::ed25519::Certificate;
+                type Certificate = $crate::scheme::ed25519::Certificate;
 
                 fn me(&self) -> Option<u32> {
                     self.raw.me()
@@ -408,7 +405,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Signature<Self>> {
+                ) -> Option<$crate::scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -416,7 +413,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    signature: &$crate::signing_scheme::Signature<Self>,
+                    signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
                     self.raw.verify_vote(namespace, context, signature)
                 }
@@ -427,18 +424,18 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                     signatures: I,
-                ) -> $crate::signing_scheme::SignatureVerification<Self>
+                ) -> $crate::scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.assemble_certificate(signatures)
                 }
@@ -484,7 +481,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::signing_scheme::ed25519::Ed25519::certificate_codec_config_unbounded()
+                    $crate::scheme::ed25519::Ed25519::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -1018,10 +1015,10 @@ mod tests {
 mod simplex_tests {
     use super::*;
     use crate::{
-        signing_scheme::Scheme as SchemeTrait,
+        scheme::Scheme as SchemeTrait,
         simplex::{
             mocks::fixtures::{ed25519, Fixture},
-            signing_scheme::ed25519::Scheme,
+            scheme::ed25519::Scheme,
             types::{Proposal, Subject},
         },
         types::Round,

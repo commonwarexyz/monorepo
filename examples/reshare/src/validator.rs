@@ -7,7 +7,7 @@ use crate::{
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
-    marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::SimplexScheme,
+    marshal::resolver::p2p as marshal_resolver, simplex::scheme::SimplexScheme,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,

@@ -13,7 +13,7 @@
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
 //! * Pluggable Hashing and Cryptography
-//! * Embedded VRF (via [signing_scheme::bls12381_threshold])
+//! * Embedded VRF (via [scheme::bls12381_threshold])
 //!
 //! # Design
 //!
@@ -149,26 +149,26 @@
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
-//! the [crate::signing_scheme::Scheme] trait, allowing deployments to employ approaches that best match their
-//! requirements (or to provide their own without modifying any consensus logic). The following [crate::signing_scheme::Scheme]s
+//! the [crate::scheme::Scheme] trait, allowing deployments to employ approaches that best match their
+//! requirements (or to provide their own without modifying any consensus logic). The following [crate::scheme::Scheme]s
 //! are supported out-of-the-box:
 //!
-//! ### [signing_scheme::ed25519]
+//! ### [scheme::ed25519]
 //!
 //! [commonware_cryptography::ed25519] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
 //! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
 //! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
 //!
-//! ### [signing_scheme::bls12381_multisig]
+//! ### [scheme::bls12381_multisig]
 //!
 //! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
 //! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
 //! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
 //! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
 //!
-//! ### [signing_scheme::bls12381_threshold]
+//! ### [scheme::bls12381_threshold]
 //!
-//! Last but not least, [signing_scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! Last but not least, [scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
 //! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
 //! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
 //! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
@@ -207,7 +207,7 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
-pub mod signing_scheme;
+pub mod scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
@@ -226,7 +226,7 @@ pub mod mocks;
 
 use crate::types::{Round, View, ViewDelta};
 use commonware_codec::Encode;
-use signing_scheme::SeededScheme;
+use scheme::SeededScheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
@@ -292,7 +292,7 @@ mod tests {
                 fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
                 twins::Strategy,
             },
-            signing_scheme::{bls12381_threshold::Seedable, SimplexScheme},
+            scheme::{bls12381_threshold::Seedable, SimplexScheme},
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
@@ -3968,7 +3968,7 @@ mod tests {
                 );
 
                 // Wrap with `AttributableReporter`
-                let attributable_reporter = signing_scheme::reporter::AttributableReporter::new(
+                let attributable_reporter = scheme::reporter::AttributableReporter::new(
                     context.with_label("rng"),
                     schemes[idx].clone(),
                     namespace.clone(),

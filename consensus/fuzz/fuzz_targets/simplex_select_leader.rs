@@ -3,12 +3,12 @@ use arbitrary::Arbitrary;
 use commonware_codec::DecodeExt;
 use commonware_consensus::{
     simplex::{
-        select_leader,
-        signing_scheme::{
+        scheme::{
             bls12381_multisig,
             bls12381_threshold::{self, Seed},
             ed25519, SeededScheme,
         },
+        select_leader,
     },
     types::{Epoch, Round, View},
 };

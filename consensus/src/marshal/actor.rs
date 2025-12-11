@@ -12,9 +12,9 @@ use crate::{
         store::{Blocks, Certificates},
         Update,
     },
-    signing_scheme::{Scheme, SchemeProvider},
+    scheme::{Scheme, SchemeProvider},
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Finalization, Notarization},
     },
     types::{Epoch, Round, ViewDelta},

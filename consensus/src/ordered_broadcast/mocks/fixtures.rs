@@ -1,10 +1,8 @@
 //! Deterministic test fixtures for `ordered_broadcast` signing scheme.
 
 use crate::{
-    ordered_broadcast::signing_scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
-    },
-    signing_scheme::{Scheme, SchemeProvider},
+    ordered_broadcast::scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme},
+    scheme::{Scheme, SchemeProvider},
     types::Epoch,
 };
 use commonware_cryptography::{

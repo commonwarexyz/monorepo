@@ -5,7 +5,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{resolver::state::State, voter},
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::Certificate,
     },
     types::{Epoch, View},

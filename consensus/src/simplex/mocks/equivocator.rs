@@ -2,10 +2,10 @@
 
 use super::relay::Relay;
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
+        scheme::SimplexScheme,
         select_leader,
-        signing_scheme::SimplexScheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Round, View},

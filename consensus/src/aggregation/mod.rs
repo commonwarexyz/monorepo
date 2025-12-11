@@ -24,7 +24,7 @@
 //! - [crate::Automaton]: Provides external digests
 //! - [crate::Reporter]: Receives agreement confirmations
 //! - [crate::Monitor]: Tracks epoch transitions
-//! - [crate::signing_scheme::SchemeProvider]: Manages validator sets and network identities
+//! - [crate::scheme::SchemeProvider]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!
@@ -49,7 +49,7 @@
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
 //! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
 
-pub mod signing_scheme;
+pub mod scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
@@ -72,7 +72,7 @@ mod tests {
     use crate::{
         aggregation::{
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            signing_scheme::AggregationScheme,
+            scheme::AggregationScheme,
         },
         types::{Epoch, EpochDelta},
     };

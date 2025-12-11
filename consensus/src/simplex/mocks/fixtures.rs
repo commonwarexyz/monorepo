@@ -1,6 +1,6 @@
 //! Deterministic test fixtures for `simplex` signing scheme.
 
-use crate::simplex::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
+use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
 use commonware_cryptography::{
     bls12381::{
         dkg::deal,

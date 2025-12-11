@@ -3,7 +3,7 @@
 //! This module provides both the raw BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
-use crate::signing_scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
+use crate::scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -324,7 +324,7 @@ impl<V: Variant> Read for Certificate<V> {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "consensus::signing_scheme::bls12381_multisig::Certificate",
+                "consensus::scheme::bls12381_multisig::Certificate",
                 "Certificate contains no signers",
             ));
         }
@@ -348,7 +348,7 @@ mod macros {
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > {
-                raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig<P, V>,
+                raw: $crate::scheme::bls12381_multisig::Bls12381Multisig<P, V>,
             }
 
             impl<
@@ -361,7 +361,7 @@ mod macros {
                     private_key: commonware_cryptography::bls12381::primitives::group::Private,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::signer(
+                        raw: $crate::scheme::bls12381_multisig::Bls12381Multisig::signer(
                             participants,
                             private_key,
                         )?,
@@ -373,7 +373,7 @@ mod macros {
                     participants: commonware_utils::ordered::BiMap<P, V::Public>,
                 ) -> Self {
                     Self {
-                        raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::verifier(
+                        raw: $crate::scheme::bls12381_multisig::Bls12381Multisig::verifier(
                             participants,
                         ),
                     }
@@ -383,11 +383,11 @@ mod macros {
             impl<
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync,
-            > $crate::signing_scheme::Scheme for Scheme<P, V> {
+            > $crate::scheme::Scheme for Scheme<P, V> {
                 type Context<'a, D: commonware_cryptography::Digest> = $context;
                 type PublicKey = P;
                 type Signature = V::Signature;
-                type Certificate = $crate::signing_scheme::bls12381_multisig::Certificate<V>;
+                type Certificate = $crate::scheme::bls12381_multisig::Certificate<V>;
 
                 fn me(&self) -> Option<u32> {
                     self.raw.me()
@@ -401,7 +401,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::signing_scheme::Signature<Self>> {
+                ) -> Option<$crate::scheme::Signature<Self>> {
                     self.raw.sign_vote(namespace, context)
                 }
 
@@ -409,7 +409,7 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    signature: &$crate::signing_scheme::Signature<Self>,
+                    signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
                     self.raw.verify_vote(namespace, context, signature)
                 }
@@ -420,18 +420,18 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                     signatures: I,
-                ) -> $crate::signing_scheme::SignatureVerification<Self>
+                ) -> $crate::scheme::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.verify_votes(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::signing_scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
                     self.raw.assemble_certificate(signatures)
                 }
@@ -474,7 +474,7 @@ mod macros {
                 }
 
                 fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::<P, V>::certificate_codec_config_unbounded()
+                    $crate::scheme::bls12381_multisig::Bls12381Multisig::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };

@@ -2,7 +2,7 @@
 
 use commonware_consensus::simplex::{
     mocks::fixtures::{ed25519, Fixture},
-    signing_scheme::ed25519 as ed25519_scheme,
+    scheme::ed25519 as ed25519_scheme,
 };
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_runtime::deterministic;

@@ -1,7 +1,7 @@
 use super::Verifier;
 use crate::{
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,

@@ -2,7 +2,7 @@
 
 use commonware_consensus::simplex::{
     mocks::fixtures::{bls12381_multisig, Fixture},
-    signing_scheme::bls12381_multisig as multisig_scheme,
+    scheme::bls12381_multisig as multisig_scheme,
 };
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{

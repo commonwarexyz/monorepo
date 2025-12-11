@@ -35,7 +35,7 @@
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::types::Context,
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,

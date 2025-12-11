@@ -1,8 +1,8 @@
 //! Types used in [crate::ordered_broadcast].
 
-use super::signing_scheme::OrderedBroadcastScheme;
+use super::scheme::OrderedBroadcastScheme;
 use crate::{
-    signing_scheme::{self, Scheme, SchemeProvider, Signature},
+    scheme::{self, Scheme, SchemeProvider, Signature},
     types::Epoch,
 };
 use bytes::{Buf, BufMut};
@@ -256,7 +256,7 @@ pub struct AckContext<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> signing_scheme::Context for AckContext<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> scheme::Context for AckContext<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
@@ -1049,9 +1049,9 @@ mod tests {
     use crate::{
         ordered_broadcast::{
             mocks, mocks::fixtures::SingleSchemeProvider,
-            signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
+            scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
         },
-        signing_scheme::Scheme as SchemeTrait,
+        scheme::Scheme as SchemeTrait,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{

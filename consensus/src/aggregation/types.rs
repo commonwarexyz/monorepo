@@ -1,8 +1,8 @@
 //! Types used in [aggregation](super).
 
 use crate::{
-    aggregation::signing_scheme::AggregationScheme,
-    signing_scheme::{Context, Scheme, Signature},
+    aggregation::scheme::AggregationScheme,
+    scheme::{Context, Scheme, Signature},
     types::Epoch,
 };
 use bytes::{Buf, BufMut};
@@ -431,7 +431,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519};
+    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519};
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{

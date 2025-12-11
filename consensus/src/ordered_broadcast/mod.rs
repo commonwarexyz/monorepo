@@ -33,7 +33,7 @@
 //! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
-pub mod signing_scheme;
+pub mod scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
@@ -57,8 +57,8 @@ pub mod mocks;
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        ordered_broadcast::signing_scheme::OrderedBroadcastScheme,
-        signing_scheme::Scheme,
+        ordered_broadcast::scheme::OrderedBroadcastScheme,
+        scheme::Scheme,
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{

@@ -1,9 +1,9 @@
 use crate::{
     ordered_broadcast::{
-        signing_scheme::OrderedBroadcastScheme,
+        scheme::OrderedBroadcastScheme,
         types::{Activity, Chunk, Lock, Proposal},
     },
-    signing_scheme::Scheme,
+    scheme::Scheme,
     types::Epoch,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};

@@ -1,9 +1,9 @@
 //! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::signing_scheme::SchemeProvider] implementation.
+//! [commonware_consensus::scheme::SchemeProvider] implementation.
 
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{
-    signing_scheme::{self, Scheme},
+    scheme::{self, Scheme},
     simplex,
     types::Epoch,
 };
@@ -17,11 +17,10 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> =
-    simplex::signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
+pub type ThresholdScheme<V> = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
-pub type EdScheme = simplex::signing_scheme::ed25519::Scheme;
+pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
@@ -57,7 +56,7 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> signing_scheme::SchemeProvider for SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> scheme::SchemeProvider for SchemeProvider<S, C> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

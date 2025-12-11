@@ -7,8 +7,8 @@ use super::{
     Config,
 };
 use crate::{
-    aggregation::{signing_scheme::AggregationScheme, types::Certificate},
-    signing_scheme::{Scheme, SchemeProvider},
+    aggregation::{scheme::AggregationScheme, types::Certificate},
+    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };

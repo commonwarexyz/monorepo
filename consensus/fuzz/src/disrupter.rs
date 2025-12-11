@@ -4,7 +4,7 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Round, View},

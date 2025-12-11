@@ -1,7 +1,7 @@
 //! Signing schemes for ordered broadcast.
 
 use super::types::AckContext;
-use crate::signing_scheme::Scheme;
+use crate::scheme::Scheme;
 use commonware_cryptography::{Digest, PublicKey};
 
 pub mod bls12381_multisig;

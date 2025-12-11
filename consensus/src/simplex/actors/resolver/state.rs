@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::types::{Certificate, Nullification},
     types::View,
     Viewable,
@@ -151,7 +151,7 @@ mod tests {
     use crate::{
         simplex::{
             mocks::fixtures::{ed25519 as build_fixture, Fixture},
-            signing_scheme::ed25519 as ed_scheme,
+            scheme::ed25519 as ed_scheme,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },

@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_consensus::{
-    signing_scheme::Signature,
+    scheme::Signature,
     simplex::{
-        signing_scheme::ed25519,
+        scheme::ed25519,
         types::{AttributableMap, Nullify},
     },
     types::{Epoch, Round, View},

@@ -1,7 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
-        signing_scheme::SeededScheme,
+        scheme::SeededScheme,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::Round as Rnd,

@@ -3,7 +3,7 @@
 //! [`Scheme`] is **attributable**: individual signatures can be safely
 //! presented to some third party as evidence of either liveness or of committing a fault.
 
-use crate::{ordered_broadcast::types::AckContext, signing_scheme::impl_ed25519_scheme};
+use crate::{ordered_broadcast::types::AckContext, scheme::impl_ed25519_scheme};
 use commonware_cryptography::ed25519;
 
 impl_ed25519_scheme!(AckContext<'a, ed25519::PublicKey, D>);

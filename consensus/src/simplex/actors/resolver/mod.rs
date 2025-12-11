@@ -2,7 +2,7 @@ mod actor;
 mod ingress;
 mod state;
 
-use crate::{signing_scheme::Scheme, types::Epoch};
+use crate::{scheme::Scheme, types::Epoch};
 pub use actor::Actor;
 use commonware_p2p::Blocker;
 use governor::Quota;

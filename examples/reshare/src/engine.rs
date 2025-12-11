@@ -11,7 +11,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{signing_scheme::SimplexScheme, types::Finalization},
+    simplex::{scheme::SimplexScheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{

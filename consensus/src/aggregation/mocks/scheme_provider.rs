@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::{self, Scheme},
+    scheme::{self, Scheme},
     types::Epoch,
 };
 use std::{
@@ -37,7 +37,7 @@ impl<S: Scheme> SchemeProvider<S> {
     }
 }
 
-impl<S: Scheme> signing_scheme::SchemeProvider for SchemeProvider<S> {
+impl<S: Scheme> scheme::SchemeProvider for SchemeProvider<S> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

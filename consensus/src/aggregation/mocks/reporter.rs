@@ -1,9 +1,9 @@
 use crate::{
     aggregation::{
-        signing_scheme::AggregationScheme,
+        scheme::AggregationScheme,
         types::{Ack, Activity, Certificate, Index},
     },
-    signing_scheme::Scheme,
+    scheme::Scheme,
     types::Epoch,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};

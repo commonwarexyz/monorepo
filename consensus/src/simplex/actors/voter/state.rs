@@ -1,9 +1,9 @@
 use super::round::Round;
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
         interesting, min_active,
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,

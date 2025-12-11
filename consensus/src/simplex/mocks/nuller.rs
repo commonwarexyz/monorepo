@@ -1,9 +1,9 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Finalize, Nullify, Vote},
     },
 };

@@ -108,10 +108,10 @@ mod tests {
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
-        signing_scheme::{Scheme, SchemeProvider},
+        scheme::{Scheme, SchemeProvider},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
-            signing_scheme::bls12381_threshold,
+            scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round, View, ViewDelta},

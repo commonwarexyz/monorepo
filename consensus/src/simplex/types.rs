@@ -1,8 +1,8 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    signing_scheme::{Scheme, Signature},
-    simplex::signing_scheme::SimplexScheme,
+    scheme::{Scheme, Signature},
+    simplex::scheme::SimplexScheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
@@ -878,7 +878,7 @@ where
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`super::signing_scheme::SeededScheme::seed`].
+/// leader rotation), it can be accessed via [`super::scheme::SeededScheme::seed`].
 #[derive(Clone, Debug)]
 pub struct Notarization<S: Scheme, D: Digest> {
     /// The proposal that has been notarized.
@@ -1350,7 +1350,7 @@ where
 /// When a proposal is finalized, it becomes the canonical block for its view.
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`super::signing_scheme::SeededScheme::seed`].
+/// leader rotation), it can be accessed via [`super::scheme::SeededScheme::seed`].
 #[derive(Clone, Debug)]
 pub struct Finalization<S: Scheme, D: Digest> {
     /// The proposal that has been finalized.
@@ -1763,11 +1763,11 @@ where
 ///
 /// # Activity Filtering
 ///
-/// For **non-attributable** schemes like [`crate::simplex::signing_scheme::bls12381_threshold`], exposing
+/// For **non-attributable** schemes like [`crate::simplex::scheme::bls12381_threshold`], exposing
 /// per-validator activity as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
 /// be used to forge a partial signature for any player.
 ///
-/// Use [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to automatically filter and
+/// Use [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter and
 /// verify activities based on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
@@ -2421,7 +2421,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::signing_scheme::{bls12381_threshold, ed25519};
+    use crate::simplex::scheme::{bls12381_threshold, ed25519};
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{dkg, primitives::variant::MinSig},

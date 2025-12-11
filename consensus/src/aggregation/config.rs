@@ -1,6 +1,6 @@
 use super::types::{Activity, Index};
 use crate::{
-    signing_scheme::{Scheme, SchemeProvider},
+    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };

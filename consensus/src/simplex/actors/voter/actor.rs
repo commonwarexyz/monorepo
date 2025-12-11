@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         metrics::{self, Outbound},
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,

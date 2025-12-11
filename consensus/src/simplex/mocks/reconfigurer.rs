@@ -3,9 +3,9 @@
 //! reject messages from an unexpected epoch.
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
-        signing_scheme::SimplexScheme,
+        scheme::SimplexScheme,
         types::{Finalize, Notarize, Nullify, Vote},
     },
 };

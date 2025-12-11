@@ -1,6 +1,6 @@
 use super::types::{Activity, Context, SequencersProvider};
 use crate::{
-    signing_scheme::SchemeProvider,
+    scheme::SchemeProvider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };

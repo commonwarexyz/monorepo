@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::types::{Certificate, Proposal},
 };
 use commonware_cryptography::Digest;

@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::types::Activity,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
@@ -56,8 +56,8 @@ mod tests {
                 self,
                 fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             },
+            scheme::SimplexScheme,
             select_leader,
-            signing_scheme::SimplexScheme,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Round, View},

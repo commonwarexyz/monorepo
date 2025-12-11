@@ -1,10 +1,10 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     simplex::{
+        scheme::{SeededScheme, SimplexScheme},
         select_leader,
-        signing_scheme::{SeededScheme, SimplexScheme},
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
