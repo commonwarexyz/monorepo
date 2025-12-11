@@ -83,6 +83,16 @@ impl Read for Signers {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signers {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let participants = u.arbitrary_len::<u8>()? % 10;
+        let signer_count = u.arbitrary_len::<u8>()?.min(participants);
+        let signers = (0..signer_count as u32).collect::<Vec<_>>();
+        Ok(Self::from(participants, signers))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +141,14 @@ mod tests {
         assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
         // Less participants than expected succeeds (upper bound).
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Signers,
+        }
     }
 }

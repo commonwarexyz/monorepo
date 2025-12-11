@@ -96,6 +96,7 @@ impl Hasher for Blake3 {
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -230,5 +231,14 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Digest,
+        }
     }
 }

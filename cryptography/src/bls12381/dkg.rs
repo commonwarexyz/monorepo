@@ -433,6 +433,31 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, V: Variant> arbitrary::Arbitrary<'_> for Output<V, P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let summary = u.arbitrary()?;
+        let public: poly::Public<V> = u.arbitrary()?;
+        let num_players = public.degree();
+        let players = Set::try_from(
+            u.arbitrary_iter::<P>()?
+                .take(num_players as usize)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+
+        Ok(Self {
+            summary,
+            players,
+            public,
+        })
+    }
+}
+
 /// Information about the current round of the DKG.
 ///
 /// This is used to bind signatures to the current round, and to provide the
@@ -639,6 +664,17 @@ impl<V: Variant> Read for DealerPubMsg<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for DealerPubMsg<V>
+where
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let commitment = u.arbitrary()?;
+        Ok(Self { commitment })
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct DealerPrivMsg {
     share: Scalar,
@@ -675,6 +711,14 @@ impl Read for DealerPrivMsg {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let share = u.arbitrary()?;
+        Ok(Self { share })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
@@ -708,6 +752,17 @@ impl<P: PublicKey> Read for PlayerAck<P> {
         Ok(Self {
             sig: ReadExt::read(buf)?,
         })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey> arbitrary::Arbitrary<'_> for PlayerAck<P>
+where
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let sig = u.arbitrary()?;
+        Ok(Self { sig })
     }
 }
 
@@ -772,6 +827,28 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey> arbitrary::Arbitrary<'_> for AckOrReveal<P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => {
+                let ack = u.arbitrary()?;
+                Ok(Self::Ack(ack))
+            }
+            1 => {
+                let reveal = u.arbitrary()?;
+                Ok(Self::Reveal(reveal))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum DealerResult<P: PublicKey> {
     Ok(Map<P, AckOrReveal<P>>),
@@ -826,6 +903,31 @@ impl<P: PublicKey> Read for DealerResult<P> {
             )?)),
             1 => Ok(Self::TooManyReveals),
             x => Err(commonware_codec::Error::InvalidEnum(x)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey> arbitrary::Arbitrary<'_> for DealerResult<P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => {
+                use commonware_utils::TryFromIterator;
+                use std::collections::HashMap;
+
+                let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
+                let map = Map::try_from_iter(base.into_iter())
+                    .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+
+                Ok(Self::Ok(map))
+            }
+            1 => Ok(Self::TooManyReveals),
+            _ => unreachable!(),
         }
     }
 }
@@ -894,6 +996,20 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
                 Some(players.iter().zip(results.values().iter()))
             }
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for DealerLog<V, P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let pub_msg = u.arbitrary()?;
+        let results = u.arbitrary()?;
+        Ok(Self { pub_msg, results })
     }
 }
 
@@ -971,6 +1087,21 @@ impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
             log: Read::read_cfg(buf, cfg)?,
             sig: ReadExt::read(buf)?,
         })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, S: Signer> arbitrary::Arbitrary<'_> for SignedDealerLog<V, S>
+where
+    S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let dealer = u.arbitrary()?;
+        let log = u.arbitrary()?;
+        let sig = u.arbitrary()?;
+        Ok(Self { dealer, log, sig })
     }
 }
 
@@ -1406,7 +1537,7 @@ pub fn deal_anonymous<V: Variant>(
     (output.public().clone(), shares.values().to_vec())
 }
 
-#[cfg(any(feature = "fuzz", test))]
+#[cfg(any(feature = "arbitrary", test))]
 mod test_plan {
     use super::*;
     use crate::{
@@ -2005,7 +2136,7 @@ mod test_plan {
         }
     }
 
-    #[cfg(feature = "fuzz")]
+    #[cfg(feature = "arbitrary")]
     mod impl_arbitrary {
         use super::*;
         use arbitrary::{Arbitrary, Unstructured};
@@ -2142,7 +2273,7 @@ mod test_plan {
     }
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(feature = "arbitrary")]
 pub use test_plan::Plan as FuzzPlan;
 
 #[cfg(test)]
@@ -2310,5 +2441,21 @@ mod test {
         assert!(log1.check(&info).is_none());
 
         Ok(())
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Output<MinPk, ed25519::PublicKey>,
+            DealerPubMsg<MinPk>,
+            DealerPrivMsg,
+            PlayerAck<ed25519::PublicKey>,
+            AckOrReveal<ed25519::PublicKey>,
+            DealerResult<ed25519::PublicKey>,
+            DealerLog<MinPk, ed25519::PublicKey>,
+            SignedDealerLog<MinPk, ed25519::PrivateKey>,
+        }
     }
 }

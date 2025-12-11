@@ -40,6 +40,7 @@ use std::{
 /// An epoch increments when the validator set changes, providing a reconfiguration boundary.
 /// All consensus operations within an epoch use the same validator set.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Epoch(u64);
 
 impl Epoch {
@@ -136,6 +137,7 @@ impl From<Epoch> for U64 {
 /// Views represent individual consensus rounds within an epoch. Each view corresponds to
 /// one attempt to reach consensus on a proposal.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct View(u64);
 
 impl View {
@@ -286,6 +288,7 @@ pub type ViewDelta = Delta<View>;
 /// Round provides a total ordering across epoch boundaries, where rounds are
 /// ordered first by epoch, then by view within that epoch.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Round {
     epoch: Epoch,
     view: View,
@@ -740,5 +743,16 @@ mod tests {
         assert_eq!(range.next(), Some(View::new(7)));
         assert_eq!(range.next(), None);
         assert_eq!(range.next_back(), None);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Epoch,
+            View,
+            Round
+        }
     }
 }

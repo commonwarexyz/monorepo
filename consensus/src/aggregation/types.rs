@@ -122,6 +122,18 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Item<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary::<u64>()?;
+        let digest = u.arbitrary::<D>()?;
+        Ok(Self { index, digest })
+    }
+}
+
 /// Acknowledgment (ack) represents a validator's partial signature on an item.
 /// Multiple acks can be recovered into a threshold signature for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -203,6 +215,24 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    PartialSignature<V>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let item = u.arbitrary::<Item<D>>()?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = u.arbitrary::<PartialSignature<V>>()?;
+        Ok(Self {
+            item,
+            epoch,
+            signature,
+        })
+    }
+}
+
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's partial signature with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -234,6 +264,19 @@ impl<V: Variant, D: Digest> Read for TipAck<V, D> {
 impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
     fn encode_size(&self) -> usize {
         UInt(self.tip).encode_size() + self.ack.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for TipAck<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tip = u.arbitrary::<u64>()?;
+        let ack = u.arbitrary::<Ack<V, D>>()?;
+        Ok(Self { tip, ack })
     }
 }
 
@@ -282,6 +325,19 @@ impl<V: Variant, D: Digest> Certificate<V, D> {
             &self.signature,
         )
         .is_ok()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Certificate<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let item = u.arbitrary::<Item<D>>()?;
+        let signature = u.arbitrary::<V::Signature>()?;
+        Ok(Self { item, signature })
     }
 }
 
@@ -341,6 +397,24 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
             Self::Ack(ack) => ack.encode_size(),
             Self::Certified(certificate) => certificate.encode_size(),
             Self::Tip(index) => UInt(*index).encode_size(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Certificate<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::Ack(u.arbitrary::<Ack<V, D>>()?)),
+            1 => Ok(Self::Certified(u.arbitrary::<Certificate<V, D>>()?)),
+            2 => Ok(Self::Tip(u.arbitrary::<u64>()?)),
+            _ => unreachable!(),
         }
     }
 }
@@ -435,5 +509,19 @@ mod tests {
                 "Invalid type"
             ))
         ));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_codec::conformance_tests! {
+            Item<Sha256Digest>,
+            Ack<MinSig, Sha256Digest>,
+            TipAck<MinSig, Sha256Digest>,
+            Certificate<MinSig, Sha256Digest>,
+            Activity<MinSig, Sha256Digest>,
+        }
     }
 }

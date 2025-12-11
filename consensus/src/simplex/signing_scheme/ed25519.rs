@@ -147,6 +147,20 @@ impl Read for Certificate {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Certificate {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signatures = (0..signers.count())
+            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            signers,
+            signatures,
+        })
+    }
+}
+
 impl signing_scheme::Scheme for Scheme {
     type PublicKey = ed25519::PublicKey;
     type Signature = ed25519::Signature;
@@ -1028,5 +1042,14 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Certificate
+        }
     }
 }

@@ -67,6 +67,19 @@ impl<C: Element> EncodeSize for Eval<C> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<C: Element> arbitrary::Arbitrary<'_> for Eval<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            index: u.arbitrary::<u32>()?,
+            value: u.arbitrary::<C>()?,
+        })
+    }
+}
+
 /// A polynomial that is using a scalar for the variable x and a generic
 /// element for the coefficients.
 ///
@@ -75,6 +88,20 @@ impl<C: Element> EncodeSize for Eval<C> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
 pub struct Poly<C>(Vec<C>);
+
+#[cfg(feature = "arbitrary")]
+impl<C: Element> arbitrary::Arbitrary<'_> for Poly<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let degree = (u.arbitrary::<u32>()? % 10).max(1);
+        let coeffs = (0..=degree)
+            .map(|_| u.arbitrary::<C>())
+            .collect::<arbitrary::Result<Vec<C>>>()?;
+        Ok(Self(coeffs))
+    }
+}
 
 // Returns a new scalar polynomial of the given degree where each coefficient is
 // sampled at random from the provided RNG.
@@ -567,5 +594,15 @@ pub mod tests {
         let constant = Scalar::from_rand(&mut rng);
         let poly = new_with_constant(5, &mut rng, constant.clone());
         assert_eq!(poly.constant(), &constant);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod arbitrary_tests {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Eval<Scalar>,
+            Poly<Scalar>,
+        }
     }
 }

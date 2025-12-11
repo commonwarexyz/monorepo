@@ -255,6 +255,19 @@ impl<V: Variant> FixedSize for Signature<V> {
     const SIZE: usize = V::Signature::SIZE * 2;
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Signature<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            vote_signature: u.arbitrary()?,
+            seed_signature: u.arbitrary()?,
+        })
+    }
+}
+
 /// Seed represents a threshold signature over the current view.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Seed<V: Variant> {
@@ -340,6 +353,19 @@ impl<V: Variant> Read for Seed<V> {
 impl<V: Variant> EncodeSize for Seed<V> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.signature.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Seed<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            round: u.arbitrary()?,
+            signature: u.arbitrary()?,
+        })
     }
 }
 
@@ -1526,5 +1552,15 @@ mod tests {
     fn test_encrypt_decrypt() {
         encrypt_decrypt::<MinPk>();
         encrypt_decrypt::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Signature<MinSig>,
+            Seed<MinSig>
+        }
     }
 }

@@ -297,6 +297,18 @@ impl<S: Scheme> Read for Signature<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme> arbitrary::Arbitrary<'_> for Signature<S>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signer = u32::arbitrary(u)?;
+        let signature = S::Signature::arbitrary(u)?;
+        Ok(Self { signer, signature })
+    }
+}
+
 /// Result of verifying a batch of signatures.
 pub struct SignatureVerification<S: Scheme> {
     /// Contains the signatures accepted by the scheme.
@@ -398,6 +410,32 @@ impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Vote<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=2)?;
+        match tag {
+            0 => {
+                let v = Notarize::arbitrary(u)?;
+                Ok(Self::Notarize(v))
+            }
+            1 => {
+                let v = Nullify::arbitrary(u)?;
+                Ok(Self::Nullify(v))
+            }
+            2 => {
+                let v = Finalize::arbitrary(u)?;
+                Ok(Self::Finalize(v))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Certificate<S: Scheme, D: Digest> {
@@ -480,6 +518,32 @@ impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
             Self::Notarization(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalization(v) => v.view(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=2)?;
+        match tag {
+            0 => {
+                let v = Notarization::arbitrary(u)?;
+                Ok(Self::Notarization(v))
+            }
+            1 => {
+                let v = Nullification::arbitrary(u)?;
+                Ok(Self::Nullification(v))
+            }
+            2 => {
+                let v = Finalization::arbitrary(u)?;
+                Ok(Self::Finalization(v))
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -629,6 +693,45 @@ impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Artifact<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=5)?;
+        match tag {
+            0 => {
+                let v = Notarize::arbitrary(u)?;
+                Ok(Self::Notarize(v))
+            }
+            1 => {
+                let v = Notarization::arbitrary(u)?;
+                Ok(Self::Notarization(v))
+            }
+            2 => {
+                let v = Nullify::arbitrary(u)?;
+                Ok(Self::Nullify(v))
+            }
+            3 => {
+                let v = Nullification::arbitrary(u)?;
+                Ok(Self::Nullification(v))
+            }
+            4 => {
+                let v = Finalize::arbitrary(u)?;
+                Ok(Self::Finalize(v))
+            }
+            5 => {
+                let v = Finalization::arbitrary(u)?;
+                Ok(Self::Finalization(v))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -690,6 +793,23 @@ impl<D: Digest> Epochable for Proposal<D> {
 impl<D: Digest> Viewable for Proposal<D> {
     fn view(&self) -> View {
         self.round.view()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Proposal<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let round = Round::arbitrary(u)?;
+        let parent = View::arbitrary(u)?;
+        let payload = D::arbitrary(u)?;
+        Ok(Self {
+            round,
+            parent,
+            payload,
+        })
     }
 }
 
@@ -799,6 +919,22 @@ impl<S: Scheme, D: Digest> Viewable for Notarize<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarize<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let proposal = Proposal::arbitrary(u)?;
+        let signature = Signature::arbitrary(u)?;
+        Ok(Self {
+            proposal,
+            signature,
+        })
+    }
+}
+
 /// Aggregated notarization certificate recovered from notarize votes.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///
@@ -904,6 +1040,22 @@ impl<S: Scheme, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarization<S, D>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let proposal = Proposal::arbitrary(u)?;
+        let certificate = S::Certificate::arbitrary(u)?;
+        Ok(Self {
+            proposal,
+            certificate,
+        })
+    }
+}
+
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug)]
@@ -993,6 +1145,18 @@ impl<S: Scheme> Epochable for Nullify<S> {
 impl<S: Scheme> Viewable for Nullify<S> {
     fn view(&self) -> View {
         self.round.view()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme> arbitrary::Arbitrary<'_> for Nullify<S>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let round = Round::arbitrary(u)?;
+        let signature = Signature::arbitrary(u)?;
+        Ok(Self { round, signature })
     }
 }
 
@@ -1092,6 +1256,18 @@ impl<S: Scheme> Epochable for Nullification<S> {
 impl<S: Scheme> Viewable for Nullification<S> {
     fn view(&self) -> View {
         self.round.view()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme> arbitrary::Arbitrary<'_> for Nullification<S>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let round = Round::arbitrary(u)?;
+        let certificate = S::Certificate::arbitrary(u)?;
+        Ok(Self { round, certificate })
     }
 }
 
@@ -1203,6 +1379,22 @@ impl<S: Scheme, D: Digest> Viewable for Finalize<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Finalize<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let proposal = Proposal::arbitrary(u)?;
+        let signature = Signature::arbitrary(u)?;
+        Ok(Self {
+            proposal,
+            signature,
+        })
+    }
+}
+
 /// Aggregated finalization certificate recovered from finalize votes.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 ///
@@ -1308,6 +1500,22 @@ impl<S: Scheme, D: Digest> Viewable for Finalization<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Finalization<S, D>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let proposal = Proposal::arbitrary(u)?;
+        let certificate = S::Certificate::arbitrary(u)?;
+        Ok(Self {
+            proposal,
+            certificate,
+        })
+    }
+}
+
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
@@ -1365,9 +1573,32 @@ impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Backfiller<S, D>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=1)?;
+        match tag {
+            0 => {
+                let v = Request::arbitrary(u)?;
+                Ok(Self::Request(v))
+            }
+            1 => {
+                let v = Response::<S, D>::arbitrary(u)?;
+                Ok(Self::Response(v))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Request is a message to request missing notarizations and nullifications.
 /// This is used by validators who need to catch up with the consensus state.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Request {
     /// Unique identifier for this request (used to match responses)
     pub id: u64,
@@ -1540,6 +1771,24 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
                 ));
             }
         }
+        Ok(Self {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Response<S, D>
+where
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let id = u.arbitrary()?;
+        let notarizations = u.arbitrary()?;
+        let nullifications = u.arbitrary()?;
         Ok(Self {
             id,
             notarizations,
@@ -1826,6 +2075,57 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=8)?;
+        match tag {
+            0 => {
+                let v = Notarize::<S, D>::arbitrary(u)?;
+                Ok(Self::Notarize(v))
+            }
+            1 => {
+                let v = Notarization::<S, D>::arbitrary(u)?;
+                Ok(Self::Notarization(v))
+            }
+            2 => {
+                let v = Nullify::<S>::arbitrary(u)?;
+                Ok(Self::Nullify(v))
+            }
+            3 => {
+                let v = Nullification::<S>::arbitrary(u)?;
+                Ok(Self::Nullification(v))
+            }
+            4 => {
+                let v = Finalize::<S, D>::arbitrary(u)?;
+                Ok(Self::Finalize(v))
+            }
+            5 => {
+                let v = Finalization::<S, D>::arbitrary(u)?;
+                Ok(Self::Finalization(v))
+            }
+            6 => {
+                let v = ConflictingNotarize::<S, D>::arbitrary(u)?;
+                Ok(Self::ConflictingNotarize(v))
+            }
+            7 => {
+                let v = ConflictingFinalize::<S, D>::arbitrary(u)?;
+                Ok(Self::ConflictingFinalize(v))
+            }
+            8 => {
+                let v = NullifyFinalize::<S, D>::arbitrary(u)?;
+                Ok(Self::NullifyFinalize(v))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug)]
@@ -1918,6 +2218,22 @@ impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     fn encode_size(&self) -> usize {
         self.notarize_1.encode_size() + self.notarize_2.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingNotarize<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let notarize_1 = Notarize::arbitrary(u)?;
+        let notarize_2 = Notarize::arbitrary(u)?;
+        Ok(Self {
+            notarize_1,
+            notarize_2,
+        })
     }
 }
 
@@ -2016,6 +2332,22 @@ impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingFinalize<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let finalize_1 = Finalize::arbitrary(u)?;
+        let finalize_2 = Finalize::arbitrary(u)?;
+        Ok(Self {
+            finalize_1,
+            finalize_2,
+        })
+    }
+}
+
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
@@ -2103,6 +2435,19 @@ impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
     fn encode_size(&self) -> usize {
         self.nullify.encode_size() + self.finalize.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for NullifyFinalize<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let nullify = Nullify::arbitrary(u)?;
+        let finalize = Finalize::arbitrary(u)?;
+        Ok(Self { nullify, finalize })
     }
 }
 
@@ -2788,5 +3133,34 @@ mod tests {
         let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == 2));
         assert!(iter.next().is_none());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
+
+        commonware_codec::conformance_tests! {
+            Signature<Scheme>,
+            Vote<Scheme, Sha256Digest>,
+            Certificate<Scheme, Sha256Digest>,
+            Artifact<Scheme, Sha256Digest>,
+            Proposal<Sha256Digest>,
+            Notarize<Scheme, Sha256Digest>,
+            Notarization<Scheme, Sha256Digest>,
+            Nullify<Scheme>,
+            Nullification<Scheme>,
+            Finalize<Scheme, Sha256Digest>,
+            Finalization<Scheme, Sha256Digest>,
+            Backfiller<Scheme, Sha256Digest>,
+            Request,
+            Response<Scheme, Sha256Digest>,
+            Activity<Scheme, Sha256Digest>,
+            ConflictingNotarize<Scheme, Sha256Digest>,
+            ConflictingFinalize<Scheme, Sha256Digest>,
+            NullifyFinalize<Scheme, Sha256Digest>,
+        }
     }
 }
