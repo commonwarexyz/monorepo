@@ -27,6 +27,7 @@
 //! });
 //! ```
 
+use core::num::NonZeroUsize;
 use futures::{stream::FusedStream, Sink, Stream};
 use std::{
     collections::VecDeque,
@@ -43,7 +44,7 @@ use thiserror::Error;
 #[error("receiver dropped")]
 pub struct SendError<T>(pub T);
 
-struct Shared<T> {
+struct Shared<T: Send + Sync> {
     buffer: VecDeque<T>,
     capacity: usize,
     receiver_waker: Option<Waker>,
@@ -58,11 +59,11 @@ struct Shared<T> {
 ///
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
-pub struct Sender<T> {
+pub struct Sender<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T> Sender<T> {
+impl<T: Send + Sync> Sender<T> {
     /// Returns whether the receiver has been dropped.
     ///
     /// If this returns `true`, subsequent sends will fail with [`SendError`].
@@ -72,7 +73,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Clone for Sender<T> {
+impl<T: Send + Sync> Clone for Sender<T> {
     fn clone(&self) -> Self {
         let mut shared = self.shared.lock().unwrap();
         shared.sender_count += 1;
@@ -84,7 +85,7 @@ impl<T> Clone for Sender<T> {
     }
 }
 
-impl<T> Drop for Sender<T> {
+impl<T: Send + Sync> Drop for Sender<T> {
     fn drop(&mut self) {
         let Ok(mut shared) = self.shared.lock() else {
             return;
@@ -103,7 +104,7 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-impl<T> Sink<T> for Sender<T> {
+impl<T: Send + Sync> Sink<T> for Sender<T> {
     type Error = SendError<T>;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -156,11 +157,11 @@ impl<T> Sink<T> for Sender<T> {
 ///
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
-pub struct Receiver<T> {
+pub struct Receiver<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T> Stream for Receiver<T> {
+impl<T: Send + Sync> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -185,14 +186,14 @@ impl<T> Stream for Receiver<T> {
     }
 }
 
-impl<T> FusedStream for Receiver<T> {
+impl<T: Send + Sync> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
         let shared = self.shared.lock().unwrap();
         shared.sender_count == 0 && shared.buffer.is_empty()
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T: Send + Sync> Drop for Receiver<T> {
     fn drop(&mut self) {
         let Ok(mut shared) = self.shared.lock() else {
             return;
@@ -205,16 +206,10 @@ impl<T> Drop for Receiver<T> {
 ///
 /// Returns a ([`Sender`], [`Receiver`]) pair. The sender can be cloned to create
 /// multiple producers.
-///
-/// # Panics
-///
-/// Panics if `capacity` is zero.
-pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-    assert!(capacity > 0, "capacity must be greater than zero");
-
+pub fn channel<T: Send + Sync>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(Shared {
-        buffer: VecDeque::with_capacity(capacity),
-        capacity,
+        buffer: VecDeque::with_capacity(capacity.get()),
+        capacity: capacity.get(),
         receiver_waker: None,
         sender_count: 1,
         receiver_dropped: false,
@@ -231,12 +226,13 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NZUsize;
     use futures::{executor::block_on, SinkExt, StreamExt};
 
     #[test]
     fn test_basic_send_recv() {
         block_on(async {
-            let (mut sender, mut receiver) = channel::<i32>(10);
+            let (mut sender, mut receiver) = channel::<i32>(NZUsize!(10));
 
             sender.send(1).await.unwrap();
             sender.send(2).await.unwrap();
@@ -251,7 +247,7 @@ mod tests {
     #[test]
     fn test_overflow_drops_oldest() {
         block_on(async {
-            let (mut sender, mut receiver) = channel::<i32>(2);
+            let (mut sender, mut receiver) = channel::<i32>(NZUsize!(2));
 
             sender.send(1).await.unwrap();
             sender.send(2).await.unwrap();
@@ -266,7 +262,7 @@ mod tests {
     #[test]
     fn test_send_after_receiver_dropped() {
         block_on(async {
-            let (mut sender, receiver) = channel::<i32>(10);
+            let (mut sender, receiver) = channel::<i32>(NZUsize!(10));
             drop(receiver);
 
             let err = sender.send(1).await.unwrap_err();
@@ -277,7 +273,7 @@ mod tests {
     #[test]
     fn test_recv_after_sender_dropped() {
         block_on(async {
-            let (mut sender, mut receiver) = channel::<i32>(10);
+            let (mut sender, mut receiver) = channel::<i32>(NZUsize!(10));
 
             sender.send(1).await.unwrap();
             sender.send(2).await.unwrap();
@@ -292,7 +288,7 @@ mod tests {
     #[test]
     fn test_stream_collect() {
         block_on(async {
-            let (mut sender, receiver) = channel::<i32>(10);
+            let (mut sender, receiver) = channel::<i32>(NZUsize!(10));
 
             sender.send(1).await.unwrap();
             sender.send(2).await.unwrap();
@@ -307,7 +303,7 @@ mod tests {
     #[test]
     fn test_clone_sender() {
         block_on(async {
-            let (mut sender1, mut receiver) = channel::<i32>(10);
+            let (mut sender1, mut receiver) = channel::<i32>(NZUsize!(10));
             let mut sender2 = sender1.clone();
 
             sender1.send(1).await.unwrap();
@@ -321,7 +317,7 @@ mod tests {
     #[test]
     fn test_sender_drop_with_clones() {
         block_on(async {
-            let (sender1, mut receiver) = channel::<i32>(10);
+            let (sender1, mut receiver) = channel::<i32>(NZUsize!(10));
             let mut sender2 = sender1.clone();
 
             drop(sender1);
@@ -337,15 +333,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "capacity must be greater than zero")]
-    fn test_zero_capacity_panics() {
-        let _ = channel::<i32>(0);
-    }
-
-    #[test]
     fn test_capacity_one() {
         block_on(async {
-            let (mut sender, mut receiver) = channel::<i32>(1);
+            let (mut sender, mut receiver) = channel::<i32>(NZUsize!(1));
 
             sender.send(1).await.unwrap();
             sender.send(2).await.unwrap(); // Drops 1
@@ -363,7 +353,7 @@ mod tests {
     #[test]
     fn test_send_all() {
         block_on(async {
-            let (mut sender, receiver) = channel::<i32>(10);
+            let (mut sender, receiver) = channel::<i32>(NZUsize!(10));
 
             let items = futures::stream::iter(vec![1, 2, 3]);
             sender.send_all(&mut items.map(Ok)).await.unwrap();
@@ -379,7 +369,7 @@ mod tests {
         use futures::stream::FusedStream;
 
         block_on(async {
-            let (mut sender, mut receiver) = channel::<i32>(10);
+            let (mut sender, mut receiver) = channel::<i32>(NZUsize!(10));
 
             assert!(!receiver.is_terminated());
 
@@ -401,7 +391,7 @@ mod tests {
     #[test]
     fn test_is_closed() {
         block_on(async {
-            let (sender, receiver) = channel::<i32>(10);
+            let (sender, receiver) = channel::<i32>(NZUsize!(10));
 
             assert!(!sender.is_closed());
 
