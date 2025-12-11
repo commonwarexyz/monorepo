@@ -86,7 +86,7 @@ impl<
         S: State<DigestOf<H>>,
     > IndexedLog<E, C, I, H, S>
 where
-    C::Item: Codec,
+    Operation<K, V>: Codec,
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -268,6 +268,69 @@ where
     pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         Ok(self.delete_key(key).await?.is_some())
     }
+
+    /// Performs a batch update, invoking the callback for each resulting operation. The first
+    /// argument of the callback is the activity status of the operation, and the second argument is
+    /// the location of the operation it inactivates (if any).
+    pub(crate) async fn write_batch_with_callback<F>(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        mut callback: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
+        let mut updates = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            updates.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // Process the deletes & updates of existing keys, which must appear in the results.
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key");
+            let Some(update) = updates.remove(key) else {
+                continue; // translated key collision
+            };
+
+            let new_loc = self.op_count();
+            if let Some(value) = update {
+                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
+                self.log
+                    .append(Operation::Update(key.clone(), value))
+                    .await?;
+                callback(true, Some(old_loc));
+            } else {
+                delete_known_loc(&mut self.snapshot, key, old_loc);
+                self.log.append(Operation::Delete(key.clone())).await?;
+                callback(false, Some(old_loc));
+                self.active_keys -= 1;
+            }
+            self.steps += 1;
+        }
+
+        // Process the creates.
+        for (key, value) in updates {
+            let Some(value) = value else {
+                continue; // attempt to delete a non-existent key
+            };
+            self.snapshot.insert(&key, self.op_count());
+            self.log.append(Operation::Update(key, value)).await?;
+            callback(true, None);
+            self.active_keys += 1;
+        }
+
+        Ok(())
+    }
 }
 
 impl<
@@ -395,6 +458,26 @@ where
             log: &mut self.log,
         }
     }
+
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
 }
 
 impl<
@@ -496,38 +579,6 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-        V: ValueEncoding,
-    > IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -572,10 +623,10 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
+        V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        V: ValueEncoding,
     > crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H>
 where
     Operation<K, V>: Codec,
@@ -636,11 +687,11 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
+        V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-        V: ValueEncoding,
     > LogStore for IndexedLog<E, C, I, H, S>
 where
     Operation<K, V>: Codec,
@@ -667,10 +718,10 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
+        V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        V: ValueEncoding,
     > crate::store::Store for IndexedLog<E, C, I, H>
 where
     Operation<K, V>: Codec,
@@ -687,10 +738,10 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
+        V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        V: ValueEncoding,
     > crate::store::StoreMut for IndexedLog<E, C, I, H>
 where
     Operation<K, V>: Codec,
@@ -703,10 +754,10 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
+        V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        V: ValueEncoding,
     > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
 where
     Operation<K, V>: Codec,
@@ -808,63 +859,17 @@ impl<E, K, V, C, I, H> Batchable for IndexedLog<E, C, I, H>
 where
     E: Storage + Clock + Metrics,
     K: Array,
+    V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
     I: Index<Value = Location>,
     H: Hasher,
-    V: ValueEncoding,
     Operation<K, V>: Codec,
 {
     async fn write_batch(
         &mut self,
         iter: impl Iterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
-        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
-        let mut updates = BTreeMap::new();
-        let mut locations = Vec::with_capacity(iter.size_hint().0);
-        for (key, value) in iter {
-            let iter = self.snapshot.get(&key);
-            locations.extend(iter.copied());
-            updates.insert(key, value);
-        }
-
-        // Concurrently look up all possible matching locations.
-        locations.sort();
-        locations.dedup();
-        let futures = locations.iter().map(|loc| self.log.read(*loc));
-        let results = try_join_all(futures).await?;
-
-        // Process the deletes & updates of existing keys, which must appear in the results.
-        for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let key = op.key().expect("updates should have a key");
-            let Some(update) = updates.remove(key) else {
-                continue; // translated key collision
-            };
-
-            let new_loc = self.op_count();
-            if let Some(value) = update {
-                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
-                self.log
-                    .append(Operation::Update(key.clone(), value))
-                    .await?;
-            } else {
-                delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(Operation::Delete(key.clone())).await?;
-                self.active_keys -= 1;
-            }
-            self.steps += 1;
-        }
-
-        // Process the creates.
-        for (key, value) in updates {
-            let Some(value) = value else {
-                continue; // attempt to delete a non-existent key
-            };
-            self.snapshot.insert(&key, self.op_count());
-            self.log.append(Operation::Update(key, value)).await?;
-            self.active_keys += 1;
-        }
-
-        Ok(())
+        self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }
 
