@@ -124,7 +124,9 @@ impl EncodeSize for BloomFilter {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for BloomFilter {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let hashers = u8::arbitrary(u)?;
+        // Ensure at least 1 hasher to avoid empty iterator in indices(),
+        // which would cause contains() to always return true
+        let hashers = u8::arbitrary(u)?.max(1);
         // Ensure at least 1 bit to avoid empty bitmap
         let bits_len = u.arbitrary_len::<u64>()?.max(1);
         let mut bits = BitMap::with_capacity(bits_len as u64);
