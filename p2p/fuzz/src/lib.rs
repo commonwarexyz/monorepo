@@ -11,7 +11,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     deterministic::{self, Context},
-    Clock, ContextCell, Handle, Metrics, Runner,
+    Clock, Handle, Metrics, Runner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
@@ -208,7 +208,7 @@ pub trait NetworkScheme: Send + 'static {
 pub struct Discovery;
 
 impl NetworkScheme for Discovery {
-    type Sender = discovery::Sender<ed25519::PublicKey, ContextCell<Context>>;
+    type Sender = discovery::Sender<ed25519::PublicKey, Context>;
     type Receiver = discovery::Receiver<ed25519::PublicKey>;
     type Oracle = discovery::Oracle<ed25519::PublicKey>;
 
@@ -299,7 +299,7 @@ impl NetworkScheme for Discovery {
 pub struct Lookup;
 
 impl NetworkScheme for Lookup {
-    type Sender = lookup::Sender<ed25519::PublicKey, ContextCell<Context>>;
+    type Sender = lookup::Sender<ed25519::PublicKey, Context>;
     type Receiver = lookup::Receiver<ed25519::PublicKey>;
     type Oracle = lookup::Oracle<ed25519::PublicKey>;
 

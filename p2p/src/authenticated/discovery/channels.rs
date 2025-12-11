@@ -106,6 +106,8 @@ where
             self.peer_subscription.as_mut().unwrap()
         };
 
+        let rate_limiter = self.rate_limiter.lock().await;
+
         // Attempt to update known peers if there's a new update, but do not
         // wait for one.
         //
@@ -113,6 +115,9 @@ where
         // the initial list of peers ready immediately.
         if let Some(peers) = subscription.next().now_or_never().flatten() {
             self.known_peers = peers;
+
+            // Clean up limiter state
+            rate_limiter.shrink_to_fit();
         }
 
         // Get the concrete list of peers to send to
@@ -123,14 +128,10 @@ where
         };
 
         // Filter peers by rate limit, consuming rate tokens only for allowed peers
-        let rate_limiter = self.rate_limiter.lock().await;
         let allowed_peers: Vec<_> = peers
             .into_iter()
             .filter(|peer| rate_limiter.check_key(peer).is_ok())
             .collect();
-
-        // Clean up limiter state
-        rate_limiter.shrink_to_fit();
 
         // If no recipients are allowed, short-circuit and signal that no peers could
         // be sent the message.
