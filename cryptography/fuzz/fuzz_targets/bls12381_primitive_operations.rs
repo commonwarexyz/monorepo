@@ -11,6 +11,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, Variant},
 };
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU32;
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -769,7 +770,12 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::PolyRecover { threshold, evals } => {
-            let _ = Poly::<Scalar>::recover(threshold, &evals);
+            let _ = Poly::<Scalar>::recover(
+                Default::default(),
+                NonZeroU32::try_from(3 * (threshold - 1)).unwrap_or(NonZeroU32::MIN),
+                threshold,
+                &evals,
+            );
         }
 
         FuzzOperation::PolyAdd { mut a, b } => {

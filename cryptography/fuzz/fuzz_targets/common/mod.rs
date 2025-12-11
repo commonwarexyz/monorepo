@@ -12,7 +12,7 @@ use commonware_cryptography::bls12381::{
     },
     tle::{Block, Ciphertext},
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 #[allow(unused)]
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -252,7 +252,12 @@ pub fn arbitrary_weights(
     }
 
     indices.sort();
-    compute_weights(indices).or_else(|_| Ok(BTreeMap::new()))
+    compute_weights(
+        Default::default(),
+        NonZeroU32::try_from(indices.len() as u32).unwrap(),
+        indices,
+    )
+    .or_else(|_| Ok(BTreeMap::new()))
 }
 
 #[allow(unused)]
