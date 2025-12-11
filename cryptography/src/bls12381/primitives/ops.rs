@@ -15,7 +15,7 @@ use super::{
 };
 use crate::bls12381::primitives::{
     poly::{compute_weights, prepare_evaluations},
-    Sharing,
+    sharing::Sharing,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
@@ -1737,8 +1737,8 @@ mod tests {
             .iter()
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
-
         sharing.precompute_partial_publics();
+
         // Attempt verification and expect failure with bisection identifying invalid signatures
         let result =
             partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);

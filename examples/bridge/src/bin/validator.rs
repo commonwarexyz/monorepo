@@ -10,8 +10,8 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
+        sharing::Sharing,
         variant::{MinSig, Variant},
-        Sharing,
     },
     ed25519, PrivateKeyExt as _, Sha256, Signer as _,
 };

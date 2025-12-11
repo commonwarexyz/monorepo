@@ -1,6 +1,6 @@
 use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, variant::Variant, Sharing},
+    bls12381::primitives::{group::Share, sharing::Sharing, variant::Variant},
     PublicKey,
 };
 use std::{collections::HashMap, marker::PhantomData};

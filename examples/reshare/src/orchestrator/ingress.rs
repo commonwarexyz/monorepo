@@ -2,7 +2,7 @@
 
 use commonware_consensus::{types::Epoch, Reporter};
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant, Sharing},
+    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     PublicKey,
 };
 use commonware_utils::ordered::Set;

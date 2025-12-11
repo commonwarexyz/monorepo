@@ -12,7 +12,9 @@ use crate::{
     Automaton, Monitor, Reporter, ThresholdSupervisor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant, Sharing},
+    bls12381::primitives::{
+        group, ops::threshold_signature_recover, sharing::Sharing, variant::Variant,
+    },
     Digest, PublicKey,
 };
 use commonware_macros::select;

@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Mode {
-    // TODO: Add a mode for sub O(N^2) interpolation
+    // TODO (https://github.com/commonware-xyz/monorepo/issues/1836): Add a mode for sub O(N^2) interpolation
     #[default]
     NonZeroCounter = 0,
 }
