@@ -164,27 +164,35 @@ pub trait Unordered {
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
 pub trait Ordered: Unordered {
+    type Iterator<'a>: Iterator<Item = &'a Self::Value>
+    where
+        Self: 'a;
+
     // Returns an iterator over all values associated with a translated key that lexicographically
-    // precedes the result of translating `key`.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    // precedes the result of translating `key`. The implementation will cycle around to the last
+    // translated key if `key` is less than or equal to the first translated key. Returns None if
+    // there are no keys in the index.
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
-    // follows the result of translating `key`.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    // follows the result of translating `key`. The implementation will cycle around to the first
+    // translated key if `key` is greater than or equal to the last translated key. Returns None if
+    // there are no keys in the index.
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with the lexicographically first translated
-    // key.
-    fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    // key, or None if there are no keys in the index.
+    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with the lexicographically last translated
-    // key.
-    fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    // key, or None if there are no keys in the index.
+    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a;
 }
