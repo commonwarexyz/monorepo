@@ -35,7 +35,7 @@ pub mod variable;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
-/// An indexed, authenticated log of [Keyed] database operations.
+/// An indexed, authenticated log of database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
     C: Contiguous,
@@ -65,7 +65,7 @@ pub struct IndexedLog<
     ///
     /// # Invariant
     ///
-    /// - Only references update variants of [Keyed] operations.
+    /// - Only references [Operation::Update]s.
     pub(crate) snapshot: I,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one

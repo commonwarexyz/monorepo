@@ -62,7 +62,7 @@ enum UpdateLocResult<K: Array, V: VariableValue> {
     NotExists(KeyData<K, V>),
 }
 
-/// An indexed, authenticated log of ordered [Keyed] database operations.
+/// An indexed, authenticated log of ordered database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
     C: Contiguous,
@@ -92,7 +92,7 @@ pub struct IndexedLog<
     ///
     /// # Invariant
     ///
-    /// - Only references update variants of [Keyed] operations.
+    /// - Only references [Operation::Update]s.
     pub(crate) snapshot: I,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
