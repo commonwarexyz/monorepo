@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{CleanAny, DirtyAny},
-        build_snapshot_from_log,
+        build_snapshot_from_log, delete_known_loc,
         operation::{Committable, KeyData, Keyed, Ordered},
         store::{Batchable, LogStore},
         update_known_loc, Error, FloorHelper,
@@ -20,6 +20,11 @@ use crate::{
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::try_join_all;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 use tracing::debug;
 
 pub mod fixed;
@@ -30,7 +35,7 @@ type Value<T> = <T as Keyed>::Value;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for a location and its associated key data.
-type LocatedKey<K, V> = (Location, KeyData<K, V>);
+type LocatedKey<K, V> = Option<(Location, KeyData<K, V>)>;
 
 /// A trait implemented by the ordered Any db operation type.
 pub trait Operation: Committable + Keyed + Ordered {
@@ -154,9 +159,8 @@ impl<
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
-        #[allow(clippy::type_complexity)]
-        let mut last_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
+        let mut last_key: LocatedKey<Key<C::Item>, Value<C::Item>> = None;
         for &loc in iter {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
@@ -203,7 +207,7 @@ impl<
         &self,
         iter: impl Iterator<Item = &Location>,
         key: &Key<C::Item>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
@@ -220,7 +224,7 @@ impl<
     pub async fn get_span(
         &self,
         key: &Key<C::Item>,
-    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
+    ) -> Result<LocatedKey<Key<C::Item>, Value<C::Item>>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -355,8 +359,7 @@ impl<
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
-        #[allow(clippy::type_complexity)]
-        let mut best_prev_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
+        let mut best_prev_key: LocatedKey<Key<C::Item>, Value<C::Item>> = None;
         {
             // If the translated key is not in the snapshot, insert the new location and return the
             // previous key info.
@@ -1062,6 +1065,44 @@ impl<
     }
 }
 
+/// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
+/// first key if `key` is the last key.
+///
+/// # Panics
+///
+/// Panics if `possible_next` is empty.
+fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
+    let next = possible_next
+        .range((Bound::Excluded(key), Bound::Unbounded))
+        .next();
+    if let Some(next) = next {
+        return next.clone();
+    }
+    possible_next
+        .first()
+        .expect("possible_next should not be empty")
+        .clone()
+}
+
+/// Returns the previous key to `key` within `possible_previous`. The result will "cycle around"
+/// to the last key if `key` is the first key.
+///
+/// # Panics
+///
+/// Panics if `possible_previous` is empty.
+fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) -> (&'a K, &'a V) {
+    let prev = possible_previous
+        .range((Bound::Unbounded, Bound::Excluded(key)))
+        .next_back();
+    if let Some(prev) = prev {
+        return prev;
+    }
+    possible_previous
+        .iter()
+        .next_back()
+        .expect("possible_previous should not be empty")
+}
+
 impl<E, C, I, H> Batchable for IndexedLog<E, C, I, H>
 where
     E: Storage + Clock + Metrics,
@@ -1069,6 +1110,181 @@ where
     I: Index<Value = Location>,
     H: Hasher,
 {
+    async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (Key<C::Item>, Option<Value<C::Item>>)>,
+    ) -> Result<(), Error> {
+        // Collect all the possible matching `locations` for any referenced key, while retaining
+        // each item in the batch in a `mutations` map.
+        let mut mutations = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            mutations.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // A set of possible "next_key" values for any keys whose next_key value will need to be
+        // updated.
+        let mut possible_next = BTreeSet::new();
+        // A set of possible previous keys to any new or deleted keys.
+        let mut possible_previous = BTreeMap::new();
+
+        // We divide keys in the batch into three disjoint sets:
+        //   - `deleted`
+        //   - `created`
+        //   - `updated`
+        //
+        // Populate the the deleted and updated sets, and for deleted keys only, immediately update
+        // the log and snapshot.
+        let mut deleted = Vec::new();
+        let mut updated = BTreeMap::new();
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key").clone();
+            let key_data = op.into_key_data().expect("updates should have key data");
+            possible_previous.insert(key.clone(), (key_data.value, old_loc));
+            possible_next.insert(key_data.next_key);
+
+            let Some(update) = mutations.remove(&key) else {
+                // Due to translated key collisions, we may look up keys that aren't in the
+                // mutations set. Note that these could still end up next or previous keys to other
+                // keys in the batch, so they are still added to these sets above.
+                continue;
+            };
+
+            if let Some(value) = update {
+                // This is an update of an existing key.
+                updated.insert(key.clone(), (value, old_loc));
+            } else {
+                // This is a delete of an existing key.
+                deleted.push(key.clone());
+
+                // Update the log and snapshot.
+                delete_known_loc(&mut self.snapshot, &key, old_loc);
+                self.log.append(C::Item::new_delete(key.clone())).await?;
+
+                // Each delete reduces the active key count by one and inactivates that key.
+                self.active_keys -= 1;
+                self.steps += 1;
+            }
+        }
+
+        // Any key remaining in `mutations` must be a new key so move it to the created map.
+        let mut created = BTreeMap::new();
+        for (key, value) in mutations {
+            let Some(value) = value else {
+                continue; // can happen from attempt to delete a non-existent key
+            };
+            created.insert(key.clone(), value);
+
+            // Any newly created key must be a next_key for some remaining key.
+            possible_next.insert(key);
+        }
+
+        // Complete the `possible_previous` and `possible_next` sets by including entries from the
+        // previous _translated_ key for any created or deleted key.
+        let mut locations = Vec::new();
+        for key in deleted.iter().chain(created.keys()) {
+            let iter = self.snapshot.prev_translated_key(key);
+            let Some(iter) = iter else {
+                continue;
+            };
+            locations.extend(iter.copied());
+        }
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key").clone();
+            let key_data = op.into_key_data().expect("updates should have key data");
+            possible_next.insert(key_data.next_key);
+            possible_previous.insert(key, (key_data.value, old_loc));
+        }
+
+        // Remove deleted keys from the possible_* sets.
+        for key in deleted.iter() {
+            possible_previous.remove(key);
+            possible_next.remove(key);
+        }
+
+        // Apply the updates of existing keys.
+        let mut already_updated = BTreeSet::new();
+        for (key, (value, loc)) in updated {
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, &key, loc, new_loc);
+
+            let next_key = find_next_key(&key, &possible_next);
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key);
+            self.log.append(op).await?;
+
+            // Each update of an existing key inactivates its previous location.
+            self.steps += 1;
+            already_updated.insert(key);
+        }
+
+        // Create each new key, and update its previous key if it hasn't already been updated.
+        for (key, value) in created {
+            let new_loc = self.op_count();
+            self.snapshot.insert(&key, new_loc);
+            let next_key = find_next_key(&key, &possible_next);
+            let op = C::Item::new_update(key.clone(), value.clone(), next_key);
+
+            // Each newly created key increases the active key count.
+            self.log.append(op).await?;
+            self.active_keys += 1;
+
+            // Update the next_key value of its previous key (unless there are no existing keys).
+            if possible_previous.is_empty() {
+                continue;
+            }
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(&key, &possible_previous);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
+            let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
+            self.log.append(op).await?;
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        if possible_next.is_empty() || possible_previous.is_empty() {
+            return Ok(());
+        }
+
+        // Update the previous key of each deleted key if it hasn't already been updated.
+        for key in deleted.iter() {
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &possible_previous);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
+            let op = C::Item::new_update(prev_key.clone(), prev_value.clone(), next_key);
+            self.log.append(op).await?;
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1355,6 +1571,187 @@ mod test {
         executor.start(|context| async move {
             let db = open_variable_db(context.clone()).await;
             test_ordered_any_update_collision_edge_case(db).await;
+        });
+    }
+
+    /// Builds a db with two colliding keys, and creates a new one between them using a batch
+    /// update.
+    #[test_traced("WARN")]
+    fn test_ordered_any_update_batch_create_between_collisions() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_variable_db(context.clone()).await;
+
+            // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
+            // collisions.
+            let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
+            let key2 = FixedBytes::from([0xFFu8, 0xFFu8, 6u8, 6u8]);
+            let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
+            let val = Sha256::fill(1u8);
+
+            db.update(key1.clone(), val).await.unwrap();
+            db.update(key3.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+            assert!(db.get(&key2).await.unwrap().is_none());
+            assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+            // Batch-insert the middle key.
+            let mut batch = db.start_batch();
+            batch.update(key2.clone(), val).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&key1).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, key2);
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key3);
+            let span3 = db.get_span(&key3).await.unwrap().unwrap();
+            assert_eq!(span3.1.next_key, key1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Builds a db with one key, and then creates another non-colliding key preceeding it in a
+    /// batch. The prev_key search will have to "cycle around" in order to find the correct next_key
+    /// value.
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_create_with_cycling_next_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let mid_key = FixedBytes::from([0xAAu8; 4]);
+            let val = Sha256::fill(1u8);
+
+            db.create(mid_key.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Batch-insert a preceeding non-translated-colliding key.
+            let preceeding_key = FixedBytes::from([0x55u8; 4]);
+            let mut batch = db.start_batch();
+            assert!(batch.create(preceeding_key.clone(), val).await.unwrap());
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&preceeding_key).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, mid_key);
+            let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, preceeding_key);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Builds a db with three keys A < B < C, then batch-deletes B. Verifies that A's next_key is
+    /// correctly updated to C (skipping the deleted B).
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_delete_middle_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let key_a = FixedBytes::from([0x11u8; 4]);
+            let key_b = FixedBytes::from([0x22u8; 4]);
+            let key_c = FixedBytes::from([0x33u8; 4]);
+            let val = Sha256::fill(1u8);
+
+            // Create three keys in order: A -> B -> C -> A (circular)
+            db.create(key_a.clone(), val).await.unwrap();
+            db.create(key_b.clone(), val).await.unwrap();
+            db.create(key_c.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify initial spans
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_b);
+            let span_b = db.get_span(&key_b).await.unwrap().unwrap();
+            assert_eq!(span_b.1.next_key, key_c);
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            // Batch-delete the middle key B
+            let mut batch = db.start_batch();
+            batch.delete(key_b.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify B is deleted
+            assert!(db.get(&key_b).await.unwrap().is_none());
+
+            // Verify A's next_key is now C (not B)
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_c);
+
+            // Verify C's next_key is still A
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch create/delete cases where the deleted key is the previous key of a newly created key,
+    /// and vice-versa.
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_create_delete_prev_links() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
+            let key2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x00]);
+            let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x00]);
+            let val1 = Sha256::fill(1u8);
+            let val2 = Sha256::fill(2u8);
+            let val3 = Sha256::fill(3u8);
+
+            // Delete the previous key of a newly created key.
+            let mut db = open_variable_db(context.clone()).await;
+            db.update(key1.clone(), val1).await.unwrap();
+            db.update(key3.clone(), val3).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            let mut batch = db.start_batch();
+            batch.delete(key1.clone()).await.unwrap();
+            batch.create(key2.clone(), val2).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+
+            assert!(db.get(&key1).await.unwrap().is_none());
+            assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
+            assert_eq!(db.get(&key3).await.unwrap(), Some(val3));
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key3);
+            let span3 = db.get_span(&key3).await.unwrap().unwrap();
+            assert_eq!(span3.1.next_key, key2);
+            db.destroy().await.unwrap();
+
+            // Create a key that becomes the previous key of a concurrently deleted key.
+            let mut db = open_variable_db(context.clone()).await;
+            db.update(key1.clone(), val1).await.unwrap();
+            db.update(key3.clone(), val3).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            let mut batch = db.start_batch();
+            batch.create(key2.clone(), val2).await.unwrap();
+            batch.delete(key3.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+
+            assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
+            assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
+            assert!(db.get(&key3).await.unwrap().is_none());
+            let span1 = db.get_span(&key1).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, key2);
+            let span2 = db.get_span(&key2).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, key1);
+            db.destroy().await.unwrap();
         });
     }
 }

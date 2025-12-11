@@ -264,7 +264,7 @@ fn update_known_loc<I: Index<Value = Location>>(
     let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
-        "prev_key with given old_loc should have been found"
+        "known key with given old_loc should have been found"
     );
     cursor.update(new_loc);
 }
@@ -279,7 +279,7 @@ fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], ol
     let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
-        "prev_key with given old_loc should have been found"
+        "known key with given old_loc should have been found"
     );
     cursor.delete();
 }
