@@ -1209,4 +1209,28 @@ mod test {
         .run()
         .unwrap();
     }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
+                count: 4,
+            }),
+            failures: HashSet::from([3]),
+        }
+        .run()
+        .unwrap();
+    }
 }
