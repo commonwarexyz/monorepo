@@ -690,7 +690,6 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "no messages should be rate limited")]
     fn test_rate_limiting() {
         // Configure test
         let base_port = 3000;
@@ -721,7 +720,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender0, _receiver0) =
-                network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
             // Create network for peer 1
@@ -737,7 +736,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (_sender1, _receiver1) =
-                network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
 
             // Send first message, which should be allowed and consume the quota.
@@ -756,18 +755,21 @@ mod tests {
                     break;
                 }
 
-                // Sleep and try again (avoid busy loop)
-                context.sleep(Duration::from_millis(100)).await;
+                // Ensure we don't rate limit outbound sends while
+                // waiting for peers to connect
+                context.sleep(Duration::from_mins(1)).await
             }
 
             // Immediately send the second message to trigger the rate limit.
+            // With partial sends, rate-limited recipients return empty vec (not error).
+            // Outbound rate limiting skips the peer, returns empty vec.
             let sent = sender0
                 .send(Recipients::One(addresses[1].clone()), msg.into(), true)
                 .await
                 .unwrap();
-            assert!(!sent.is_empty());
+            assert!(sent.is_empty());
 
-            // Loop until the metrics reflect the rate-limited message.
+            // Give the metrics time to reflect the rate-limited message.
             for _ in 0..10 {
                 assert_no_rate_limiting(&context);
                 context.sleep(Duration::from_millis(100)).await;

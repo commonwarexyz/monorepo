@@ -257,6 +257,19 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     fn encode(&self) -> String;
 }
 
+/// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
+///
+/// This is a convenience type alias for creating per-peer rate limiters
+/// using governor's [HashMapStateStore].
+///
+/// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+pub type RateLimiter<K, C> = governor::RateLimiter<
+    K,
+    governor::state::keyed::HashMapStateStore<K>,
+    C,
+    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+>;
+
 /// Interface that any task scheduler must implement to provide
 /// time-based operations.
 ///

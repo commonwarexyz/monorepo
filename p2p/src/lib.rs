@@ -38,7 +38,7 @@ pub enum Recipients<P: PublicKey> {
 }
 
 /// Interface for sending messages to a set of recipients.
-pub trait Sender: Clone + Debug + Send + 'static {
+pub trait Sender: Clone + Debug + Send + Sync + 'static {
     /// Error that can occur when sending a message.
     type Error: Debug + StdError + Send + Sync;
 
