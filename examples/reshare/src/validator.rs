@@ -457,11 +457,11 @@ mod test {
             /// Number of participants to crash each time.
             count: usize,
         },
-        /// Delay some participants from starting until after N successful epochs.
+        /// Delay some participants from starting until after N epochs.
         Delay {
             /// Number of participants to delay.
             count: usize,
-            /// Number of successful epochs to wait before starting delayed participants.
+            /// Number of epochs to wait before starting delayed participants.
             after: u64,
         },
     }
@@ -629,7 +629,7 @@ mod test {
                         // Check if it's time to start delayed participants
                         if !delayed_started {
                             if let Some(Crash::Delay { after, .. }) = &self.crash {
-                                if successes >= *after {
+                                if epoch.get()+1 >= *after {
                                     for pk in &delayed_pks {
                                         team.start_participant(
                                             &ctx,
@@ -1223,7 +1223,7 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: Some(Crash::Delay { count: 1, after: 2 }),
-            failures: HashSet::from([0, 1]),
+            failures: HashSet::from([0, 1, 2, 3, 4]),
         }
         .run()
         .unwrap();
