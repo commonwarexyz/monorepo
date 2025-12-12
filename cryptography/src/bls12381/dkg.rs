@@ -367,6 +367,49 @@ impl From<ShareStatus> for Share {
     }
 }
 
+impl Write for ShareStatus {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Recovered(share) => {
+                buf.put_u8(0);
+                share.write(buf);
+            }
+            Self::Revealed(share) => {
+                buf.put_u8(1);
+                share.write(buf);
+            }
+        }
+    }
+}
+
+impl Read for ShareStatus {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            0 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Recovered(share))
+            }
+            1 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Revealed(share))
+            }
+            other => Err(commonware_codec::Error::InvalidEnum(other)),
+        }
+    }
+}
+
+impl EncodeSize for ShareStatus {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Recovered(share) => share.encode_size(),
+            Self::Revealed(share) => share.encode_size(),
+        }
+    }
+}
+
 /// Recover public polynomial by interpolating coefficient-wise all
 /// polynomials using precomputed Barycentric Weights.
 ///

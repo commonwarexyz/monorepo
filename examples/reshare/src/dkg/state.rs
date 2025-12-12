@@ -17,7 +17,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
-            Player as CryptoPlayer, PlayerAck, SignedDealerLog,
+            Player as CryptoPlayer, PlayerAck, ShareStatus, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
     },
@@ -48,7 +48,7 @@ pub struct Epoch<V: Variant, P: PublicKey> {
     pub round: u64,
     pub rng_seed: Summary,
     pub output: Option<Output<V, P>>,
-    pub share: Option<Share>,
+    pub share: Option<ShareStatus>,
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
