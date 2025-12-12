@@ -1422,37 +1422,45 @@ impl<V: Variant, S: Signer> Player<V, S> {
         Some(PlayerAck { sig })
     }
 
-    /// Finalize the player, producing an output, and a share.
+    /// Finalize the player, producing an output, a share, and the number of reveals
+    /// that were used to recover the player's share components.
     ///
     /// This should agree with [`observe`], in terms of `Ok` vs `Err` and the
     /// public output, so long as the logs agree. It's crucial that the players
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
+    /// The returned `usize` indicates how many dealers had to reveal their private
+    /// message because this player didn't acknowledge in time. A value of 0 means
+    /// the player participated fully (sent acks to all selected dealers).
+    ///
     /// This will only ever return [`Error::DkgFailed`].
+    #[allow(clippy::type_complexity)]
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         concurrency: usize,
-    ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
+    ) -> Result<(Output<V, S::PublicKey>, Share, usize), Error> {
         let selected = select(&self.info, logs)?;
+        let mut reveal_count = 0;
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
-                let share = self
-                    .view
-                    .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| {
-                        log.get_reveal(&self.me_pub).map_or_else(
-                            || {
-                                unreachable!(
-                                    "select didn't check dealer reveal, or we're not a player?"
-                                )
-                            },
-                            |priv_msg| priv_msg.share.clone(),
-                        )
-                    });
+                let share = if let Some((_, priv_msg)) = self.view.get(dealer) {
+                    // We received this share directly (via ack flow)
+                    priv_msg.share.clone()
+                } else {
+                    // We had to recover this share from a reveal
+                    reveal_count += 1;
+                    log.get_reveal(&self.me_pub).map_or_else(
+                        || {
+                            unreachable!(
+                                "select didn't check dealer reveal, or we're not a player?"
+                            )
+                        },
+                        |priv_msg| priv_msg.share.clone(),
+                    )
+                };
                 let index = if let Some(previous) = self.info.previous.as_ref() {
                     previous
                         .players
@@ -1485,7 +1493,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             index: self.index,
             private,
         };
-        Ok((output, share))
+        Ok((output, share, reveal_count))
     }
 }
 
@@ -2061,7 +2069,7 @@ mod test_plan {
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
-                    let (player_output, share) = player
+                    let (player_output, share, _reveals) = player
                         .finalize(dealer_logs.clone(), 1)
                         .expect("Player finalize should succeed");
 

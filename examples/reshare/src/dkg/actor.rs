@@ -453,30 +453,35 @@ where
 
                             // Finalize the round before acknowledging
                             let logs = storage.logs(epoch);
-                            let (success, next_round, next_output, next_share) =
+                            let (success, next_round, next_output, next_share, reveal_count) =
                                 if let Some(ps) = player_state.take() {
                                     match ps.finalize(logs, 1) {
-                                        Ok((new_output, new_share)) => (
+                                        Ok((new_output, new_share, reveals)) => (
                                             true,
                                             epoch_state.round + 1,
                                             Some(new_output),
                                             Some(new_share),
+                                            Some(reveals),
                                         ),
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
                                             epoch_state.output.clone(),
                                             epoch_state.share.clone(),
+                                            None,
                                         ),
                                     }
                                 } else {
                                     match observe(round.clone(), logs, 1) {
-                                        Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                        Ok(output) => {
+                                            (true, epoch_state.round + 1, Some(output), None, None)
+                                        }
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
                                             epoch_state.output.clone(),
                                             epoch_state.share.clone(),
+                                            None,
                                         ),
                                     }
                                 };
@@ -502,7 +507,10 @@ where
                                 Update::Success {
                                     epoch,
                                     output: next_output.expect("ceremony output exists"),
-                                    share: next_share.clone(),
+                                    share: next_share
+                                        .clone()
+                                        .zip(reveal_count)
+                                        .map(|(s, r)| (s, r)),
                                 }
                             } else {
                                 Update::Failure { epoch }

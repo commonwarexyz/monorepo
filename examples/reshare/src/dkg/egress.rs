@@ -15,8 +15,13 @@ pub enum Update<V: Variant, P> {
         epoch: Epoch,
         /// The public output, shared by all parties.
         output: Output<V, P>,
-        /// We will be missing a share if we were not a player.
-        share: Option<Share>,
+        /// The player's share and the number of reveals used to derive it.
+        ///
+        /// `None` if the player was only an observer.
+        /// The `usize` indicates how many dealers had to reveal their private
+        /// message because this player didn't acknowledge in time. A value of 0
+        /// means the player participated fully (sent acks to all selected dealers).
+        share: Option<(Share, usize)>,
     },
 }
 

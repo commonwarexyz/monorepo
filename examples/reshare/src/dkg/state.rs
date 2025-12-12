@@ -652,12 +652,16 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Finalize the player's participation in the DKG round.
+    ///
+    /// Returns the output, the player's share, and the number of reveals used.
     pub fn finalize(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
         threshold: usize,
-    ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
-    {
+    ) -> Result<
+        (Output<V, C::PublicKey>, Share, usize),
+        commonware_cryptography::bls12381::dkg::Error,
+    > {
         self.player.finalize(logs, threshold)
     }
 }

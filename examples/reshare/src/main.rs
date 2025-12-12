@@ -62,7 +62,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
                         .expect("Failed to deserialize participant configuration");
                     config.update_and_write(&config_path, |config| {
                         config.output = Some(hex(output.encode().as_ref()));
-                        config.share = share;
+                        config.share = share.map(|(s, _)| s);
                     });
                     PostUpdate::Stop
                 }

@@ -561,8 +561,10 @@ mod test {
             let mut successes = 0u64;
             let mut failures = 0u64;
 
-            // Track epochs where the delayed participant received a share (was a dealer)
-            let mut delayed_participant_shares: Vec<Epoch> = Vec::new();
+            // Track whether the delayed participant ever fully participated (0 reveals) after starting
+            let mut delayed_fully_participated: Option<Epoch> = None;
+            // The epoch when the delayed participant was started
+            let mut delayed_started_at_epoch: Option<Epoch> = None;
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(crash) = &self.crash {
                 let frequency = crash.frequency;
@@ -594,11 +596,25 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Track if the delayed participant received a share
+                                // Check if the delayed participant fully participated (0 reveals)
                                 if let Some(ref delayed_pk) = delayed_pk {
-                                    if &update.pk == delayed_pk && share.is_some() {
-                                        info!(epoch = ?epoch, "delayed participant received share");
-                                        delayed_participant_shares.push(epoch);
+                                    if let Some((_, reveals)) = share {
+                                        if &update.pk == delayed_pk {
+                                            let is_post_start = delayed_started_at_epoch
+                                                .is_some_and(|start| epoch >= start);
+                                            info!(
+                                                epoch = ?epoch,
+                                                reveals,
+                                                is_post_start,
+                                                "delayed participant received share"
+                                            );
+                                            if is_post_start
+                                                && reveals == 0
+                                                && delayed_fully_participated.is_none()
+                                            {
+                                                delayed_fully_participated = Some(epoch);
+                                            }
+                                        }
                                     }
                                 }
 
@@ -633,8 +649,12 @@ mod test {
                                     info!(
                                         successes,
                                         after_epochs = delayed.after_epochs,
+                                        start_epoch = ?epoch.next(),
                                         "starting delayed participants"
                                     );
+                                    // Record the next epoch as when they'll start participating
+                                    // (they're joining mid-current-epoch so won't fully participate until next)
+                                    delayed_started_at_epoch = Some(epoch.next());
                                     for pk in &delayed_pks {
                                         if team.output.is_none() {
                                             team.start_one::<EdScheme>(
@@ -680,18 +700,21 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
-                                // Verify delayed participant received shares if configured
+                                // Verify delayed participant fully participated in at least one epoch
                                 if self.delayed_start.is_some() {
-                                    if delayed_participant_shares.is_empty() {
-                                        return Err(anyhow!(
-                                            "delayed participant never received a share"
-                                        ));
+                                    match delayed_fully_participated {
+                                        Some(epoch) => {
+                                            info!(
+                                                epoch = ?epoch,
+                                                "delayed participant fully participated (0 reveals)"
+                                            );
+                                        }
+                                        None => {
+                                            return Err(anyhow!(
+                                                "delayed participant never fully participated (0 reveals) after starting"
+                                            ));
+                                        }
                                     }
-                                    info!(
-                                        epochs_with_shares = ?delayed_participant_shares,
-                                        "delayed participant received shares in {} epochs",
-                                        delayed_participant_shares.len()
-                                    );
                                 }
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
@@ -1196,10 +1219,14 @@ mod test {
         // (and receive a share) in epochs after they start.
         //
         // Timeline:
-        // - Epochs 0-1: Only participants 0,1,2 are online (3 is delayed)
+        // - Epoch 0: Only participants 0,1,2 are online (3 is delayed)
         //   DKG still succeeds with 3 of 4 dealers (meets 2f+1 threshold with f=1)
-        // - After epoch 1 succeeds: participant 3 starts and syncs up
-        // - Epochs 2-3: All 4 participants are dealers, including participant 3
+        // - After epoch 0 succeeds: participant 3 starts and begins syncing
+        // - Epochs 1+: participant 3 should eventually catch up and participate
+        //   with 0 reveals in at least one epoch
+        //
+        // We run 8 epochs to give the delayed participant enough time to sync
+        // and have at least one full epoch where they participate from the start.
         Plan {
             seed: 0,
             total: 4,
@@ -1209,12 +1236,12 @@ mod test {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            mode: Mode::Reshare(4),
+            mode: Mode::Reshare(8),
             crash: None,
             failures: HashSet::new(),
             delayed_start: Some(DelayedStart {
                 participant_index: 3,
-                after_epochs: 2,
+                after_epochs: 1,
             }),
         }
         .run()
