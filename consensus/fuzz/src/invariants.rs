@@ -1,10 +1,23 @@
-use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use crate::{
+    simplex::{
+        Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
+    },
+    types::{Finalization, Notarization, Nullification, ReplicaState},
+    MAX_REQUIRED_CONTAINERS, MIN_REQUIRED_CONTAINERS,
+};
+use commonware_consensus::simplex::signing_scheme;
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinPk, MinSig},
+    sha256::Digest as Sha256Digest,
+};
 use commonware_utils::quorum;
 use rand::{CryptoRng, Rng};
-use std::collections::{HashMap, HashSet};
+use std::{
+    any::TypeId,
+    collections::{HashMap, HashSet},
+};
 
-pub fn check(n: u32, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = quorum(n) as usize;
 
     // Invariant: agreement
@@ -33,11 +46,20 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_nullification_in_finalized_view
-    // If any replica finalized view v, no replica may have a nullification for view v.
+    // If any replica finalized view v, no replica may have nullification for view v.
     let finalized_views: HashMap<u64, Sha256Digest> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
+
+    // Test invariant: finalized_views is in the test range
+    if let Some(max) = finalized_views.keys().max() {
+        assert!(
+            (&MIN_REQUIRED_CONTAINERS..=&MAX_REQUIRED_CONTAINERS).contains(&max),
+            "Invariant violation: max finalized view {max} is not in the test range"
+        );
+    }
+
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
             assert!(
@@ -48,7 +70,7 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_conflicting_notarization_in_finalized_view
-    // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
+    // If any replica finalized view v for a digest, no replica may have notarization for a different digest.
     for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
         for (&view, data) in notarizations.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
@@ -113,30 +135,54 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     // Enforce per-replica invariants
     for (notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid
-        // Certificates have correct number of signatures.
+        // Certificates have the correct number of signatures.
         for (view, data) in nullifications.iter() {
-            if let Some(count) = data.signature_count {
+            if is_attributable_scheme::<P>() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: nullification in view {view} has {count} < {threshold} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
                 );
             }
         }
 
         for (view, data) in notarizations.iter() {
-            if let Some(count) = data.signature_count {
+            if is_attributable_scheme::<P>() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: notarization in view {view} has {count} < {threshold} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
                 );
             }
         }
 
         for (view, data) in finalizations.iter() {
-            if let Some(count) = data.signature_count {
+            if is_attributable_scheme::<P>() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: finalization in view {view} has {count} < {threshold} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
                 );
             }
         }
@@ -166,6 +212,42 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
+fn is_attributable_scheme<P: Simplex>() -> bool {
+    let type_id = TypeId::of::<P>();
+    type_id == TypeId::of::<SimplexEd25519>()
+        || type_id == TypeId::of::<SimplexBls12381MultisigMinPk>()
+        || type_id == TypeId::of::<SimplexBls12381MultisigMinSig>()
+}
+
+fn get_signature_count<S: signing_scheme::Scheme>(certificate: &S::Certificate) -> Option<usize> {
+    let type_id = TypeId::of::<S::Certificate>();
+
+    match type_id {
+        t if t == TypeId::of::<signing_scheme::ed25519::Certificate>() => {
+            let cert = unsafe {
+                &*(certificate as *const S::Certificate
+                    as *const signing_scheme::ed25519::Certificate)
+            };
+            Some(cert.signatures.len())
+        }
+        t if t == TypeId::of::<signing_scheme::bls12381_multisig::Certificate<MinPk>>() => {
+            let cert = unsafe {
+                &*(certificate as *const S::Certificate
+                    as *const signing_scheme::bls12381_multisig::Certificate<MinPk>)
+            };
+            Some(cert.signers.count())
+        }
+        t if t == TypeId::of::<signing_scheme::bls12381_multisig::Certificate<MinSig>>() => {
+            let cert = unsafe {
+                &*(certificate as *const S::Certificate
+                    as *const signing_scheme::bls12381_multisig::Certificate<MinSig>)
+            };
+            Some(cert.signers.count())
+        }
+        _ => None,
+    }
+}
+
 pub fn extract<E, P, S>(
     reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, P, S, Sha256Digest>>,
 ) -> Vec<ReplicaState>
@@ -185,7 +267,7 @@ where
                         view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })
@@ -193,12 +275,12 @@ where
 
             let nullifications = reporter.nullifications.lock().unwrap();
             let nullification_data = nullifications
-                .keys()
-                .map(|view| {
+                .iter()
+                .map(|(view, cert)| {
                     (
                         view.get(),
                         Nullification {
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })
@@ -212,7 +294,7 @@ where
                         view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })

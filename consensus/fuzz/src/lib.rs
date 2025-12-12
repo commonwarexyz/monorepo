@@ -26,7 +26,6 @@ use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-// Re-export simplex implementations for fuzz targets
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519,
@@ -37,10 +36,13 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const MIN_REQUIRED_CONTAINERS: u64 = 10;
+const MIN_REQUIRED_CONTAINERS: u64 = 5;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;
 const NAMESPACE: &[u8] = b"consensus_fuzz";
-const CONFIGURATIONS: [(u32, u32, u32); 2] = [(3, 2, 1), (4, 3, 1)];
+// 4 nodes, 3 correct, 1 faulty
+const N4C3F1: (u32, u32, u32) = (4, 3, 1);
+// 3 nodes, 2 correct, 1 faulty
+const N3C2F1: (u32, u32, u32) = (3, 2, 1);
 const MAX_RAW_BYTES: usize = 4096;
 
 const EXPECTED_PANICS: [&str; 3] = [
@@ -110,7 +112,9 @@ impl Arbitrary<'_> for FuzzInput {
             u.arbitrary()?
         };
 
-        let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
+        // Bias towards the configuration where nodes can make progress and finalize containers
+        let configuration = if u.ratio(4, 5)? { N4C3F1 } else { N3C2F1 };
+
         let containers = u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
 
         let mut raw_bytes = Vec::new();
@@ -271,7 +275,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters);
-        invariants::check(n, states);
+        invariants::check::<P>(n, states);
     });
 }
 

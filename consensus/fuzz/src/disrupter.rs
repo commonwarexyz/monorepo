@@ -18,7 +18,7 @@ use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::{collections::VecDeque, time::Duration};
 
-const TIMEOUT: Duration = Duration::from_millis(500);
+const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
 
 /// Which fields to mutate when creating a malformed proposal.
@@ -95,35 +95,26 @@ where
         let v = self.random_view_for_proposal(self.last_vote);
 
         let proposal = match self.fuzz_input.random_byte() % 5 {
-            // Random proposal
             0 => random_proposal,
-            // Random proposal from the past
+            // A mutated proposal based on the proposals from the past
             1 => {
-                if !self.latest_proposals.is_empty() {
-                    let i = self.fuzz_input.random_u64() as usize % self.latest_proposals.len();
-                    let p = self.latest_proposals.get(i).unwrap();
-                    self.new_proposal(p, v)
-                } else {
-                    random_proposal
-                }
+                let i = self.fuzz_input.random_u64() as usize % self.latest_proposals.len().max(1);
+                let p = self.latest_proposals.get(i).unwrap_or(&random_proposal);
+                self.proposal_with_view(p, v)
             }
             2 => {
-                let Some(p) = self.latest_proposals.back() else {
-                    return random_proposal;
-                };
-                self.new_proposal(p, v)
+                let p = self.latest_proposals.back().unwrap_or(&random_proposal);
+                self.proposal_with_view(p, v)
             }
             3 => {
-                let Some(p) = self.latest_proposals.front() else {
-                    return random_proposal;
-                };
-                self.new_proposal(p, v)
+                let p = self.latest_proposals.back().unwrap_or(&random_proposal);
+                self.proposal_with_parent(p, v)
             }
             _ => {
                 let Some(p) = self.latest_proposals.front() else {
                     return random_proposal;
                 };
-                self.new_proposal(p, v)
+                self.proposal_with_view(p, v)
             }
         };
 
@@ -142,12 +133,24 @@ where
         proposal
     }
 
-    fn new_proposal(&self, old: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
+    fn proposal_with_view(
+        &self,
+        old: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
             old.parent,
             old.payload,
         )
+    }
+
+    fn proposal_with_parent(
+        &self,
+        old: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
+        Proposal::new(old.round, View::new(view), old.payload)
     }
 
     fn random_proposal(&mut self) -> Proposal<Sha256Digest> {
