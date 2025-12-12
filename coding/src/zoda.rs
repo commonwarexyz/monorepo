@@ -477,12 +477,17 @@ impl<H: Hasher> CheckingData<H> {
         transcript.commit(root.encode());
         let expected_commitment = transcript.summarize();
         if *commitment != expected_commitment {
-            return Err(Error::InvalidShard);
+            return Err(Error::ShardCommitmentMismatch);
         }
         let transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
-            return Err(Error::InvalidShard);
+            return Err(Error::ShardChecksumDimensionsMismatch(
+                checksum.rows(),
+                checksum.cols(),
+                topology.data_rows,
+                topology.column_samples,
+            ));
         }
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
@@ -505,7 +510,12 @@ impl<H: Hasher> CheckingData<H> {
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
         {
-            return Err(Error::InvalidReShard);
+            return Err(Error::ReshardDimensionsMismatch(
+                reshard.shard.rows(),
+                reshard.shard.cols(),
+                self.topology.samples,
+                self.topology.data_cols,
+            ));
         }
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
@@ -522,13 +532,13 @@ impl<H: Hasher> CheckingData<H> {
             &proof_elements,
             &self.root,
         ) {
-            return Err(Error::InvalidReShard);
+            return Err(Error::ReshardInclusionProofFailed);
         }
         let shard_checksum = reshard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
             if row != &self.encoded_checksum[u64::from(i) as usize] {
-                return Err(Error::InvalidReShard);
+                return Err(Error::ReshardChecksumMismatch(u64::from(i)));
             }
         }
         Ok(CheckedShard {
@@ -540,10 +550,16 @@ impl<H: Hasher> CheckingData<H> {
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("invalid shard")]
-    InvalidShard,
-    #[error("invalid reshard")]
-    InvalidReShard,
+    #[error("shard commitment mismatch")]
+    ShardCommitmentMismatch,
+    #[error("shard checksum dimensions mismatch: rows={0}, cols={1}, expected rows={2}, cols={3}")]
+    ShardChecksumDimensionsMismatch(usize, usize, usize, usize),
+    #[error("reshard dimensions mismatch: rows={0}, cols={1}, expected rows={2}, cols={3}")]
+    ReshardDimensionsMismatch(usize, usize, usize, usize),
+    #[error("reshard inclusion proof verification failed")]
+    ReshardInclusionProofFailed,
+    #[error("reshard checksum mismatch at shuffled index {0}")]
+    ReshardChecksumMismatch(u64),
     #[error("invalid index {0}")]
     InvalidIndex(u16),
     #[error("insufficient shards {0} < {1}")]
