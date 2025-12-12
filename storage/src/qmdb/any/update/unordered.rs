@@ -1,5 +1,5 @@
 use crate::qmdb::any::{
-    update::Update,
+    update::{sealed::Sealed, Update},
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
@@ -12,6 +12,8 @@ use std::fmt;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
+
+impl<K: Array, V: ValueEncoding> Sealed for UnorderedUpdate<K, V> {}
 
 impl<K: Array, V: ValueEncoding> Update<K, V> for UnorderedUpdate<K, V> {
     fn key(&self) -> &K {

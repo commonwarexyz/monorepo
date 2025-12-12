@@ -2,6 +2,10 @@ use crate::qmdb::any::value::ValueEncoding;
 use commonware_utils::Array;
 use std::fmt;
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 mod ordered;
 pub use ordered::OrderedUpdate;
 
@@ -9,7 +13,7 @@ mod unordered;
 pub use unordered::UnorderedUpdate;
 
 /// An operation that updates a key-value pair.
-pub trait Update<K: Array, V: ValueEncoding>: Clone {
+pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
     /// The updated key.
     fn key(&self) -> &K;
 

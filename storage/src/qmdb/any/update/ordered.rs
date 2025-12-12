@@ -1,6 +1,6 @@
 use crate::qmdb::any::{
     ordered::KeyData,
-    update::Update,
+    update::{sealed::Sealed, Update},
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
@@ -13,6 +13,8 @@ use std::fmt;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);
+
+impl<K: Array, V: ValueEncoding> Sealed for OrderedUpdate<K, V> {}
 
 impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {
     fn key(&self) -> &K {
