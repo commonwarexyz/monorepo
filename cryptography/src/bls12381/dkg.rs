@@ -181,7 +181,7 @@
 //! ```
 //! use commonware_cryptography::bls12381::{
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
-//!     primitives::variant::MinSig,
+//!     primitives::{group::Share, variant::MinSig},
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
@@ -258,11 +258,12 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize(
+//!     let (output, status) = player.finalize(
 //!       dealer_logs.clone(),
 //!       1 // Increase this for parallelism.
 //!     )?;
-//!     println!("Player {:?} got share at index {}", player_pk, share.index);
+//!     println!("Player {:?} received share {:?}", player_pk, status);
+//!     let share: Share = status.into();
 //!     player_shares.insert(player_pk, share);
 //! }
 //!
@@ -455,6 +456,98 @@ where
             players,
             public,
         })
+    }
+}
+
+/// Indicates whether the player safely recovered their share in the DKG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareStatus {
+    /// The player recovered their share with at most `max_faults` reveals.
+    Recovered(Share),
+    /// The player had more than `max_faults` reveals, meaning their share
+    /// may be known by an adversary.
+    Revealed(Share),
+}
+
+impl ShareStatus {
+    /// Returns a reference to the share, regardless of status.
+    pub const fn share(&self) -> &Share {
+        match self {
+            Self::Recovered(share) | Self::Revealed(share) => share,
+        }
+    }
+
+    /// Returns true if the share was recovered (at most `max_faults` reveals).
+    pub const fn is_recovered(&self) -> bool {
+        matches!(self, Self::Recovered(_))
+    }
+
+    /// Returns true if the share was revealed (more than `max_faults` reveals).
+    pub const fn is_revealed(&self) -> bool {
+        matches!(self, Self::Revealed(_))
+    }
+}
+
+impl From<ShareStatus> for Share {
+    fn from(status: ShareStatus) -> Self {
+        match status {
+            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
+        }
+    }
+}
+
+impl Write for ShareStatus {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Recovered(share) => {
+                buf.put_u8(0);
+                share.write(buf);
+            }
+            Self::Revealed(share) => {
+                buf.put_u8(1);
+                share.write(buf);
+            }
+        }
+    }
+}
+
+impl Read for ShareStatus {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            0 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Recovered(share))
+            }
+            1 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Revealed(share))
+            }
+            other => Err(commonware_codec::Error::InvalidEnum(other)),
+        }
+    }
+}
+
+impl EncodeSize for ShareStatus {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Recovered(share) => share.encode_size(),
+            Self::Revealed(share) => share.encode_size(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for ShareStatus {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let share = Share::arbitrary(u)?;
+        match u.int_in_range(0..=1)? {
+            0 => Ok(Self::Recovered(share)),
+            1 => Ok(Self::Revealed(share)),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -1429,30 +1522,36 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
+    /// The returned [`ShareStatus`] indicates whether the player safely recovered their share in the DKG (`Recovered`)
+    /// or had to recover their share from more than `max_faults` public reveals (`Revealed`).
+    ///
     /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         concurrency: usize,
-    ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
+    ) -> Result<(Output<V, S::PublicKey>, ShareStatus), Error> {
         let selected = select(&self.info, logs)?;
+        let max_faults = self.info.max_reveals();
+        let mut reveal_count = 0u32;
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
-                let share = self
-                    .view
-                    .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| {
-                        log.get_reveal(&self.me_pub).map_or_else(
-                            || {
-                                unreachable!(
-                                    "select didn't check dealer reveal, or we're not a player?"
-                                )
-                            },
-                            |priv_msg| priv_msg.share.clone(),
-                        )
-                    });
+                let share = if let Some((_, priv_msg)) = self.view.get(dealer) {
+                    // We received this share directly (via ack flow)
+                    priv_msg.share.clone()
+                } else {
+                    // We had to recover this share from a reveal
+                    reveal_count += 1;
+                    log.get_reveal(&self.me_pub).map_or_else(
+                        || {
+                            unreachable!(
+                                "select didn't check dealer reveal, or we're not a player?"
+                            )
+                        },
+                        |priv_msg| priv_msg.share.clone(),
+                    )
+                };
                 let index = if let Some(previous) = self.info.previous.as_ref() {
                     previous
                         .players
@@ -1485,7 +1584,12 @@ impl<V: Variant, S: Signer> Player<V, S> {
             index: self.index,
             private,
         };
-        Ok((output, share))
+        let status = if reveal_count <= max_faults {
+            ShareStatus::Recovered(share)
+        } else {
+            ShareStatus::Revealed(share)
+        };
+        Ok((output, status))
     }
 }
 
@@ -2061,10 +2165,10 @@ mod test_plan {
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
-                    let (player_output, share) = player
+                    let (player_output, status) = player
                         .finalize(dealer_logs.clone(), 1)
                         .expect("Player finalize should succeed");
-
+                    let share: Share = status.into();
                     assert_eq!(
                         player_output, observer_output,
                         "Player output should match observer output"
@@ -2449,6 +2553,7 @@ mod test {
 
         commonware_codec::conformance_tests! {
             Output<MinPk, ed25519::PublicKey>,
+            ShareStatus,
             DealerPubMsg<MinPk>,
             DealerPrivMsg,
             PlayerAck<ed25519::PublicKey>,

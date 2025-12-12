@@ -17,8 +17,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
-        primitives::{group::Share, variant::Variant},
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck, ShareStatus},
+        primitives::variant::Variant,
     },
     transcript::Summary,
     Digest as _, Hasher, PublicKey, Signer,
@@ -139,7 +139,7 @@ where
     pub fn start(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
-        share: Option<Share>,
+        share: Option<ShareStatus>,
         orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
@@ -159,7 +159,7 @@ where
     async fn run(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
-        share: Option<Share>,
+        share: Option<ShareStatus>,
         mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
@@ -259,7 +259,7 @@ where
             let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                 epoch,
                 poly: epoch_state.output.as_ref().map(|o| o.public().clone()),
-                share: epoch_state.share.clone(),
+                share: epoch_state.share.as_ref().map(|s| s.share().clone()),
                 dealers: dealers.clone(),
             };
             orchestrator
@@ -289,7 +289,7 @@ where
                         epoch,
                         self.signer.clone(),
                         round.clone(),
-                        epoch_state.share.clone(),
+                        epoch_state.share.as_ref().map(|s| s.share().clone()),
                         epoch_state.rng_seed,
                     )
                 })
@@ -442,12 +442,14 @@ where
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
                                     match ps.finalize(logs, 1) {
-                                        Ok((new_output, new_share)) => (
-                                            true,
-                                            epoch_state.round + 1,
-                                            Some(new_output),
-                                            Some(new_share),
-                                        ),
+                                        Ok((new_output, status)) => {
+                                            (
+                                                true,
+                                                epoch_state.round + 1,
+                                                Some(new_output),
+                                                Some(status),
+                                            )
+                                        }
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
@@ -457,7 +459,9 @@ where
                                     }
                                 } else {
                                     match observe(round.clone(), logs, 1) {
-                                        Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                        Ok(output) => {
+                                            (true, epoch_state.round + 1, Some(output), None)
+                                        }
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
@@ -488,7 +492,7 @@ where
                                 Update::Success {
                                     epoch,
                                     output: next_output.expect("ceremony output exists"),
-                                    share: next_share.clone(),
+                                    share: next_share,
                                 }
                             } else {
                                 Update::Failure { epoch }

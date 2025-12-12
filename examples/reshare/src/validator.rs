@@ -29,7 +29,6 @@ const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
 const ORCHESTRATOR_CHANNEL: u64 = 6;
 
-const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
@@ -66,7 +65,7 @@ pub async fn run<S>(
     );
 
     let p2p_namespace = union_unique(namespace::APPLICATION, b"_P2P");
-    let mut p2p_cfg = discovery::Config::local(
+    let p2p_cfg = discovery::Config::local(
         config.signing_key.clone(),
         &p2p_namespace,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
@@ -74,7 +73,6 @@ pub async fn run<S>(
         config.bootstrappers.clone().into_iter().collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
-    p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
     let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
@@ -90,7 +88,7 @@ pub async fn run<S>(
     let broadcaster_limit = Quota::per_second(NZU32!(8));
     let broadcaster = network.register(BROADCASTER_CHANNEL, broadcaster_limit, MESSAGE_BACKLOG);
 
-    let marshal_limit = Quota::per_second(NZU32!(8));
+    let marshal_limit = Quota::per_second(NZU32!(32));
     let marshal = network.register(MARSHAL_CHANNEL, marshal_limit, MESSAGE_BACKLOG);
 
     let orchestrator_limit = Quota::per_second(NZU32!(1));
@@ -104,7 +102,7 @@ pub async fn run<S>(
         public_key: config.signing_key.public_key(),
         manager: oracle.clone(),
         blocker: oracle.clone(),
-        mailbox_size: 200,
+        mailbox_size: 1_000,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
             rate_limit: marshal_limit,
@@ -161,8 +159,8 @@ mod test {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
-            dkg::{deal, Output},
-            primitives::{group::Share, variant::MinSig},
+            dkg::{deal, Output, ShareStatus},
+            primitives::variant::MinSig,
         },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
@@ -261,7 +259,7 @@ mod test {
     struct Team {
         peer_config: PeerConfig,
         output: Option<Output<MinSig, PublicKey>>,
-        participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
+        participants: BTreeMap<PublicKey, (PrivateKey, Option<ShareStatus>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
     }
@@ -271,7 +269,7 @@ mod test {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
-                    (sk.public_key(), (sk, None::<Share>))
+                    (sk.public_key(), (sk, None::<ShareStatus>))
                 })
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
@@ -282,7 +280,7 @@ mod test {
                 deal(&mut rng, peer_config.dealers(0)).expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
-                    *maybe_share = Some(share);
+                    *maybe_share = Some(ShareStatus::Recovered(share));
                 };
             }
             Self {
@@ -298,7 +296,7 @@ mod test {
             let participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
-                    (sk.public_key(), (sk, None::<Share>))
+                    (sk.public_key(), (sk, None::<ShareStatus>))
                 })
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
@@ -393,12 +391,30 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
+        /// Start a participant using the appropriate scheme based on whether
+        /// we have an initial output (reshare mode) or not (DKG mode).
+        async fn start_participant(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) {
+            if self.output.is_none() {
+                self.start_one::<EdScheme>(ctx, oracle, updates, pk).await;
+            } else {
+                self.start_one::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
+                    .await;
+            }
+        }
+
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
+            delayed: &HashSet<PublicKey>,
         ) {
             // Add links between all participants
             for v1 in self.participants.keys() {
@@ -413,33 +429,37 @@ mod test {
                 }
             }
 
-            // Start all participants (even if not active at first)
+            // Start participants that aren't delayed
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                if self.output.is_none() {
-                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
-                        .await;
-                } else {
-                    self.start_one::<ThresholdScheme<MinSig>>(
-                        ctx,
-                        oracle,
-                        updates.clone(),
-                        pk.clone(),
-                    )
-                    .await;
+                if delayed.contains(&pk) {
+                    info!(pk = ?pk, "delayed participant");
+                    continue;
                 }
+                self.start_participant(ctx, oracle, updates.clone(), pk)
+                    .await;
             }
         }
     }
 
-    /// Configuration for simulating participant crashes during a test.
+    /// Configuration for simulating participant unavailability during a test.
     #[derive(Clone)]
-    struct Crash {
-        /// How often to trigger crashes.
-        frequency: Duration,
-        /// How long crashed participants stay offline before restarting.
-        downtime: Duration,
-        /// Number of participants to crash each time.
-        count: usize,
+    enum Crash {
+        /// Randomly crash participants periodically.
+        Random {
+            /// How often to trigger crashes.
+            frequency: Duration,
+            /// How long crashed participants stay offline before restarting.
+            downtime: Duration,
+            /// Number of participants to crash each time.
+            count: usize,
+        },
+        /// Delay some participants from starting until after N epochs.
+        Delay {
+            /// Number of participants to delay.
+            count: usize,
+            /// Number of epochs to wait before starting delayed participants.
+            after: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -464,7 +484,7 @@ mod test {
         link: Link,
         /// Whether to run in DKG or reshare mode.
         mode: Mode,
-        /// Optional crash simulation configuration.
+        /// Optional crash/delay simulation configuration.
         crash: Option<Crash>,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
         failures: HashSet<u64>,
@@ -505,8 +525,30 @@ mod test {
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-            team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
-                .await;
+
+            // Determine which participants should have a delayed start
+            let delayed_pks: HashSet<PublicKey> =
+                if let Some(Crash::Delay { count, after }) = &self.crash {
+                    let all_pks: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                    let delayed: Vec<PublicKey> =
+                        all_pks.choose_multiple(&mut ctx, *count).cloned().collect();
+                    for pk in &delayed {
+                        info!(?pk, after, "participant with delayed start");
+                    }
+                    delayed.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
+            let mut delayed_started = delayed_pks.is_empty();
+
+            team.start(
+                &ctx,
+                &mut oracle,
+                self.link.clone(),
+                updates_in.clone(),
+                &delayed_pks,
+            )
+            .await;
 
             // Set up crash ticker if needed
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
@@ -514,9 +556,10 @@ mod test {
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
+            let mut delayed_recovered = false;
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
-            if let Some(crash) = &self.crash {
-                let frequency = crash.frequency;
+            if let Some(Crash::Random { frequency, .. }) = &self.crash {
+                let frequency = *frequency;
                 let mut crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
@@ -541,8 +584,19 @@ mod test {
                                 failures += 1;
                                 (epoch, None)
                             }
-                            Update::Success { epoch, output, .. } => {
-                                info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
+                            Update::Success { epoch, output, share } => {
+                                let has_share = share.is_some();
+                                info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
+
+                                // Check if a delayed participant got a recovered share after starting
+                                if delayed_pks.contains(&update.pk) {
+                                    if let Some(ref status) = share {
+                                        let is_recovered = status.is_recovered();
+                                        if is_recovered && !delayed_recovered {
+                                            delayed_recovered = true;
+                                        }
+                                    }
+                                }
 
                                 (epoch, Some(output))
                             }
@@ -567,6 +621,25 @@ mod test {
                                 }
                             }
                         }
+
+                        // Check if it's time to start delayed participants
+                        if !delayed_started {
+                            if let Some(Crash::Delay { after, .. }) = &self.crash {
+                                if epoch.get() >= *after - 1 {
+                                    for pk in &delayed_pks {
+                                        team.start_participant(
+                                            &ctx,
+                                            &mut oracle,
+                                            updates_in.clone(),
+                                            pk.clone(),
+                                        )
+                                        .await;
+                                    }
+                                    delayed_started = true;
+                                }
+                            }
+                        }
+
                         if successes >= target {
                             success_target_reached_epoch = Some(epoch);
                         }
@@ -588,6 +661,12 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
+                                // Verify delayed participant got a recovered share after catching up
+                                if matches!(self.crash, Some(Crash::Delay { .. })) && !delayed_recovered {
+                                    return Err(anyhow!(
+                                        "delayed participant never received a recovered share after starting"
+                                    ));
+                                }
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
                                     failures,
@@ -603,18 +682,14 @@ mod test {
                         };
 
                         info!(pk = ?pk, "restarting participant");
-                        if team.output.is_none() {
-                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                        } else {
-                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                        }
+                        team.start_participant(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired
-                        if let Some(crash) = &self.crash {
+                        if let Some(Crash::Random { count, downtime, .. }) = &self.crash {
                             // Pick multiple random participants to crash
                             let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
+                            let crash_count = (*count).min(all_participants.len());
                             let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
 
                             for pk in to_crash {
@@ -624,14 +699,16 @@ mod test {
                                     info!(pk = ?pk, "crashed participant");
 
                                     // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
+                                    ctx.clone().spawn({
+                                        let mut restart_sender = restart_sender.clone();
+                                        let pk_clone = pk.clone();
+                                        let downtime = *downtime;
+                                        move |ctx| async move {
+                                            if downtime > Duration::ZERO {
+                                                ctx.sleep(downtime).await;
+                                            }
+                                            let _ = restart_sender.send(pk_clone).await;
                                         }
-                                        let _ = restart_sender.send(pk_clone).await;
                                     });
                                 } else {
                                     debug!(pk = ?pk, "participant already crashed");
@@ -901,7 +978,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -925,7 +1002,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -949,10 +1026,34 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 4,
             }),
             failures: HashSet::new(),
         }
@@ -973,10 +1074,34 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
+                count: 4,
             }),
             failures: HashSet::new(),
         }
@@ -997,7 +1122,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(1),
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0]),
         }
         .run()
@@ -1017,7 +1146,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(3),
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0, 2, 3]),
         }
         .run()
@@ -1037,7 +1170,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0]),
         }
         .run()
@@ -1057,8 +1194,72 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0, 1]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([0, 1, 2, 3, 4]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(5),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay_subset() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![4, 5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(8),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
         }
         .run()
         .unwrap();

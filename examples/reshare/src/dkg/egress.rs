@@ -1,7 +1,7 @@
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
-    dkg::Output,
-    primitives::{group::Share, variant::Variant},
+    dkg::{Output, ShareStatus},
+    primitives::variant::Variant,
 };
 use std::{future::Future, pin::Pin};
 
@@ -15,8 +15,10 @@ pub enum Update<V: Variant, P> {
         epoch: Epoch,
         /// The public output, shared by all parties.
         output: Output<V, P>,
-        /// We will be missing a share if we were not a player.
-        share: Option<Share>,
+        /// The player's share status.
+        ///
+        /// `None` if the player was only an observer.
+        share: Option<ShareStatus>,
     },
 }
 

@@ -17,7 +17,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
-            Player as CryptoPlayer, PlayerAck, SignedDealerLog,
+            Player as CryptoPlayer, PlayerAck, ShareStatus, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
     },
@@ -48,7 +48,7 @@ pub struct Epoch<V: Variant, P: PublicKey> {
     pub round: u64,
     pub rng_seed: Summary,
     pub output: Option<Output<V, P>>,
-    pub share: Option<Share>,
+    pub share: Option<ShareStatus>,
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
@@ -652,12 +652,19 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Finalize the player's participation in the DKG round.
+    ///
+    /// Returns the output and the share status.
     pub fn finalize(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
         threshold: usize,
-    ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
-    {
+    ) -> Result<
+        (
+            Output<V, C::PublicKey>,
+            commonware_cryptography::bls12381::dkg::ShareStatus,
+        ),
+        commonware_cryptography::bls12381::dkg::Error,
+    > {
         self.player.finalize(logs, threshold)
     }
 }
