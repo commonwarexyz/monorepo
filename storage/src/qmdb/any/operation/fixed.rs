@@ -31,17 +31,10 @@ where
     V: FixedValue,
     S: Update<K, FixedEncoding<V>> + FixedSize,
 {
-    const SIZE: usize = {
-        let max = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-            Self::UPDATE_OP_SIZE
-        } else {
-            Self::COMMIT_OP_SIZE
-        };
-        if max > Self::DELETE_OP_SIZE {
-            max
-        } else {
-            Self::DELETE_OP_SIZE
-        }
+    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+        Self::UPDATE_OP_SIZE
+    } else {
+        Self::COMMIT_OP_SIZE
     };
 }
 
