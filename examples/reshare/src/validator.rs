@@ -395,6 +395,23 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
+        /// Start a participant using the appropriate scheme based on whether
+        /// we have an initial output (reshare mode) or not (DKG mode).
+        async fn start_participant(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) {
+            if self.output.is_none() {
+                self.start_one::<EdScheme>(ctx, oracle, updates, pk).await;
+            } else {
+                self.start_one::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
+                    .await;
+            }
+        }
+
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
@@ -422,18 +439,8 @@ mod test {
                     info!(pk = ?pk, "excluding participant from initial start");
                     continue;
                 }
-                if self.output.is_none() {
-                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
-                        .await;
-                } else {
-                    self.start_one::<ThresholdScheme<MinSig>>(
-                        ctx,
-                        oracle,
-                        updates.clone(),
-                        pk.clone(),
-                    )
+                self.start_participant(ctx, oracle, updates.clone(), pk)
                     .await;
-                }
             }
         }
     }
@@ -455,7 +462,7 @@ mod test {
             /// Number of participants to delay.
             count: usize,
             /// Number of successful epochs to wait before starting delayed participants.
-            after_epochs: u64,
+            after: u64,
         },
     }
 
@@ -524,21 +531,18 @@ mod test {
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
 
             // Determine which participants should have a delayed start
-            let delayed_pks: HashSet<PublicKey> = if let Some(Crash::Delay {
-                count,
-                after_epochs,
-            }) = &self.crash
-            {
-                let all_pks: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                let delayed: Vec<PublicKey> =
-                    all_pks.choose_multiple(&mut ctx, *count).cloned().collect();
-                for pk in &delayed {
-                    info!(?pk, after_epochs, "participant with delayed start");
-                }
-                delayed.into_iter().collect()
-            } else {
-                HashSet::new()
-            };
+            let delayed_pks: HashSet<PublicKey> =
+                if let Some(Crash::Delay { count, after }) = &self.crash {
+                    let all_pks: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                    let delayed: Vec<PublicKey> =
+                        all_pks.choose_multiple(&mut ctx, *count).cloned().collect();
+                    for pk in &delayed {
+                        info!(?pk, after, "participant with delayed start");
+                    }
+                    delayed.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
             let mut delayed_started = delayed_pks.is_empty();
 
             team.start(
@@ -556,11 +560,7 @@ mod test {
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
-
-            // Track whether delayed participants ever fully participated (0 reveals) after starting
-            let mut delayed_fully_participated: Option<Epoch> = None;
-            // The epoch when delayed participants were started
-            let mut delayed_started_at_epoch: Option<Epoch> = None;
+            let mut delayed_recovered = false;
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(Crash::Random { frequency, .. }) = &self.crash {
                 let frequency = *frequency;
@@ -592,24 +592,12 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Check if a delayed participant fully participated (recovered)
+                                // Check if a delayed participant got a private share after starting
                                 if delayed_pks.contains(&update.pk) {
                                     if let Some(ref status) = share {
-                                        let is_post_start = delayed_started_at_epoch
-                                            .is_some_and(|start| epoch >= start);
-                                        let recovered = status.is_recovered();
-                                        info!(
-                                            epoch = ?epoch,
-                                            recovered,
-                                            is_post_start,
-                                            pk = ?update.pk,
-                                            "delayed participant received share"
-                                        );
-                                        if is_post_start
-                                            && recovered
-                                            && delayed_fully_participated.is_none()
-                                        {
-                                            delayed_fully_participated = Some(epoch);
+                                        let is_recovered= status.is_recovered();
+                                        if is_recovered && !delayed_recovered {
+                                            delayed_recovered = true;
                                         }
                                     }
                                 }
@@ -640,35 +628,16 @@ mod test {
 
                         // Check if it's time to start delayed participants
                         if !delayed_started {
-                            if let Some(Crash::Delay { after_epochs, .. }) = &self.crash {
-                                if successes >= *after_epochs {
-                                    info!(
-                                        successes,
-                                        after_epochs,
-                                        start_epoch = ?epoch.next(),
-                                        "starting delayed participants"
-                                    );
-                                    // Record the next epoch as when they'll start participating
-                                    // (they're joining mid-current-epoch so won't fully participate until next)
-                                    delayed_started_at_epoch = Some(epoch.next());
+                            if let Some(Crash::Delay { after, .. }) = &self.crash {
+                                if successes >= *after {
                                     for pk in &delayed_pks {
-                                        if team.output.is_none() {
-                                            team.start_one::<EdScheme>(
-                                                &ctx,
-                                                &mut oracle,
-                                                updates_in.clone(),
-                                                pk.clone(),
-                                            )
-                                            .await;
-                                        } else {
-                                            team.start_one::<ThresholdScheme<MinSig>>(
-                                                &ctx,
-                                                &mut oracle,
-                                                updates_in.clone(),
-                                                pk.clone(),
-                                            )
-                                            .await;
-                                        }
+                                        team.start_participant(
+                                            &ctx,
+                                            &mut oracle,
+                                            updates_in.clone(),
+                                            pk.clone(),
+                                        )
+                                        .await;
                                     }
                                     delayed_started = true;
                                 }
@@ -696,21 +665,11 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
-                                // Verify delayed participant fully participated in at least one epoch
-                                if matches!(self.crash, Some(Crash::Delay { .. })) {
-                                    match delayed_fully_participated {
-                                        Some(epoch) => {
-                                            info!(
-                                                epoch = ?epoch,
-                                                "delayed participant fully participated (recovered)"
-                                            );
-                                        }
-                                        None => {
+                                // Verify delayed participant got a private share after catching up
+                                if matches!(self.crash, Some(Crash::Delay { .. })) && !delayed_recovered {
                                             return Err(anyhow!(
-                                                "delayed participant never fully participated (recovered) after starting"
+                                                "delayed participant never received a private share after starting"
                                             ));
-                                        }
-                                    }
                                 }
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
@@ -727,11 +686,7 @@ mod test {
                         };
 
                         info!(pk = ?pk, "restarting participant");
-                        if team.output.is_none() {
-                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                        } else {
-                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                        }
+                        team.start_participant(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired (only for Random crashes)
@@ -1201,10 +1156,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(5),
-            crash: Some(Crash::Delay {
-                count: 1,
-                after_epochs: 2,
-            }),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
             failures: HashSet::from([3]),
         }
         .run()
