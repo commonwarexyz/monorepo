@@ -34,21 +34,7 @@ impl<K: Array, V: FixedValue> FixedSize for OrderedUpdate<K, FixedEncoding<V>> {
     const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
 }
 
-impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.0.value.encode_size() + K::SIZE
-    }
-}
-
 impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.key.write(buf);
-        self.0.value.write(buf);
-        self.0.next_key.write(buf);
-    }
-}
-
-impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.key.write(buf);
         self.0.value.write(buf);
@@ -68,6 +54,20 @@ impl<K: Array, V: FixedValue> Read for OrderedUpdate<K, FixedEncoding<V>> {
             value,
             next_key,
         }))
+    }
+}
+
+impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
+    fn encode_size(&self) -> usize {
+        K::SIZE + self.0.value.encode_size() + K::SIZE
+    }
+}
+
+impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.key.write(buf);
+        self.0.value.write(buf);
+        self.0.next_key.write(buf);
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::{at_least, ensure_zeros},
-    Codec, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Codec, CodecFixed, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_utils::Array;
 
@@ -49,7 +49,7 @@ impl<K, V, S> Write for Operation<K, FixedEncoding<V>, S>
 where
     K: Array + Codec,
     V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize + Write,
+    S: Update<K, FixedEncoding<V>> + CodecFixed,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -90,15 +90,15 @@ where
         at_least(buf, Self::SIZE)?;
 
         match u8::read(buf)? {
-            UPDATE_CONTEXT => {
-                let payload = S::read_cfg(buf, cfg)?;
-                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-                Ok(Self::Update(payload))
-            }
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
                 Ok(Self::Delete(key))
+            }
+            UPDATE_CONTEXT => {
+                let payload = S::read_cfg(buf, cfg)?;
+                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
+                Ok(Self::Update(payload))
             }
             COMMIT_CONTEXT => {
                 let is_some = bool::read(buf)?;

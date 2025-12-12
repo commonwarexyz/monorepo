@@ -27,20 +27,7 @@ impl<K: Array, V: FixedValue> FixedSize for UnorderedUpdate<K, FixedEncoding<V>>
     const SIZE: usize = K::SIZE + V::SIZE;
 }
 
-impl<K: Array, V: VariableValue> EncodeSize for UnorderedUpdate<K, VariableEncoding<V>> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.1.encode_size()
-    }
-}
-
 impl<K: Array, V: FixedValue> Write for UnorderedUpdate<K, FixedEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
-    }
-}
-
-impl<K: Array, V: VariableValue> Write for UnorderedUpdate<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
         self.1.write(buf);
@@ -54,6 +41,19 @@ impl<K: Array, V: FixedValue> Read for UnorderedUpdate<K, FixedEncoding<V>> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
         Ok(Self(key, value))
+    }
+}
+
+impl<K: Array, V: VariableValue> EncodeSize for UnorderedUpdate<K, VariableEncoding<V>> {
+    fn encode_size(&self) -> usize {
+        K::SIZE + self.1.encode_size()
+    }
+}
+
+impl<K: Array, V: VariableValue> Write for UnorderedUpdate<K, VariableEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+        self.1.write(buf);
     }
 }
 
