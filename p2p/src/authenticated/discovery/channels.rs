@@ -106,13 +106,12 @@ where
             self.peer_subscription.as_mut().unwrap()
         };
 
-        let rate_limiter = self.rate_limiter.lock().await;
-
         // Attempt to update known peers if there's a new update, but do not
         // wait for one.
         //
         // When the subscription is first created, it is guaranteed to have
         // the initial list of peers ready immediately.
+        let rate_limiter = self.rate_limiter.lock().await;
         if let Some(peers) = subscription.next().now_or_never().flatten() {
             self.known_peers = peers;
 
@@ -132,7 +131,6 @@ where
             .into_iter()
             .filter(|peer| rate_limiter.check_key(peer).is_ok())
             .collect();
-
         drop(rate_limiter);
 
         // If no recipients are allowed, short-circuit and signal that no peers could

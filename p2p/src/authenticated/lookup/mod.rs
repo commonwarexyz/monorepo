@@ -683,8 +683,8 @@ mod tests {
                     break;
                 }
 
-                // Ensure we don't rate limit outbound sends; Skip past
-                // the rate limit and try again.
+                // Ensure we don't rate limit outbound sends while
+                // waiting for peers to connect
                 context.sleep(Duration::from_mins(1)).await
             }
 
