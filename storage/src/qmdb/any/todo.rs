@@ -1,25 +1,14 @@
 use crate::{
-    index::{Cursor as _, Ordered as OrderedIndex, Unordered as UnorderedIndex},
-    journal::{
+    AuthenticatedBitMap, index::{Cursor as _, Ordered as OrderedIndex, Unordered as UnorderedIndex}, journal::{
         authenticated,
         contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
-    },
-    mmr::{
-        mem::{Clean, Dirty, State},
-        Location, Proof,
-    },
-    qmdb::{
-        any::{
-            ordered::KeyData,
-            value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-            CleanAny, DirtyAny,
-        },
-        build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Operation as OperationTrait},
-        store::{Batchable, LogStore},
-        update_key, update_known_loc, Error, FloorHelper,
-    },
-    AuthenticatedBitMap,
+    }, mmr::{
+        Location, Proof, mem::{Clean, Dirty, State}
+    }, qmdb::{
+        Error, FloorHelper, any::{
+            CleanAny, DirtyAny, OrderedUpdate, UnorderedUpdate, ordered::KeyData, update::Update, value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue}
+        }, build_snapshot_from_log, create_key, delete_key, delete_known_loc, operation::{Committable, Operation as OperationTrait}, store::{Batchable, LogStore}, update_key, update_known_loc
+    }
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -1998,146 +1987,6 @@ where
 const DELETE_CONTEXT: u8 = 0xD1;
 const UPDATE_CONTEXT: u8 = 0xD2;
 const COMMIT_CONTEXT: u8 = 0xD3;
-
-pub trait Update<K: Array, V: ValueEncoding>: Clone {
-    /// Extract the key from an update.
-    fn key(&self) -> &K;
-
-    /// Format the update for display.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);
-
-impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {
-    fn key(&self) -> &K {
-        &self.0.key
-    }
-
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[key:{} next_key:{} value:{}]",
-            self.0.key,
-            self.0.next_key,
-            hex(&self.0.value.encode())
-        )
-    }
-}
-
-impl<K: Array, V: FixedValue> FixedSize for OrderedUpdate<K, FixedEncoding<V>> {
-    const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
-}
-
-impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.0.value.encode_size() + K::SIZE
-    }
-}
-
-impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.key.write(buf);
-        self.0.value.write(buf);
-        self.0.next_key.write(buf);
-    }
-}
-
-impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.key.write(buf);
-        self.0.value.write(buf);
-        self.0.next_key.write(buf);
-    }
-}
-
-impl<K: Array, V: FixedValue> Read for OrderedUpdate<K, FixedEncoding<V>> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next_key = K::read(buf)?;
-        Ok(Self(KeyData {
-            key,
-            value,
-            next_key,
-        }))
-    }
-}
-
-impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> {
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next_key = K::read(buf)?;
-        Ok(Self(KeyData {
-            key,
-            value,
-            next_key,
-        }))
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
-
-impl<K: Array, V: ValueEncoding> Update<K, V> for UnorderedUpdate<K, V> {
-    fn key(&self) -> &K {
-        &self.0
-    }
-
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[key:{} value:{}]", self.0, hex(&self.1.encode()))
-    }
-}
-
-impl<K: Array, V: FixedValue> FixedSize for UnorderedUpdate<K, FixedEncoding<V>> {
-    const SIZE: usize = K::SIZE + V::SIZE;
-}
-
-impl<K: Array, V: VariableValue> EncodeSize for UnorderedUpdate<K, VariableEncoding<V>> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.1.encode_size()
-    }
-}
-
-impl<K: Array, V: FixedValue> Write for UnorderedUpdate<K, FixedEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
-    }
-}
-
-impl<K: Array, V: VariableValue> Write for UnorderedUpdate<K, VariableEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
-    }
-}
-
-impl<K: Array, V: FixedValue> Read for UnorderedUpdate<K, FixedEncoding<V>> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self(key, value))
-    }
-}
-
-impl<K: Array, V: VariableValue> Read for UnorderedUpdate<K, VariableEncoding<V>> {
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self(key, value))
-    }
-}
 
 type OrderedOperation<K, V> = Operation<OrderedUpdate<K, V>, K, V>;
 type UnorderedOperation<K, V> = Operation<UnorderedUpdate<K, V>, K, V>;

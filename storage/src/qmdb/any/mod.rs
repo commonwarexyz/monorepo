@@ -25,8 +25,11 @@ use std::{
     ops::Range,
 };
 
+mod update;
+pub use update::{OrderedUpdate, UnorderedUpdate};
+
 mod todo;
-pub use todo::{Operation, OrderedUpdate, UnorderedUpdate};
+pub use todo::Operation;
 
 mod value;
 pub(crate) use value::{FixedValue, VariableValue};
