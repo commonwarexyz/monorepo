@@ -6,18 +6,17 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use governor::{clock::Clock as GClock, Quota};
+use governor::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
-pub enum Message<P: PublicKey, C: GClock> {
+pub enum Message<P: PublicKey> {
     Register {
         channel: Channel,
         public_key: P,
         quota: Quota,
-        clock: C,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P, C>, Receiver<P>), Error>>,
+        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
     Update {
         id: u64,
@@ -79,27 +78,19 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Debug)]
-pub struct Oracle<P: PublicKey, C: GClock> {
-    sender: mpsc::UnboundedSender<Message<P, C>>,
+#[derive(Debug, Clone)]
+pub struct Oracle<P: PublicKey> {
+    sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: PublicKey, C: GClock> Clone for Oracle<P, C> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock> Oracle<P, C> {
+impl<P: PublicKey> Oracle<P> {
     /// Create a new instance of the oracle.
-    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P, C>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
     }
 
     /// Create a new [Control] interface for some peer.
-    pub fn control(&self, me: P) -> Control<P, C> {
+    pub fn control(&self, me: P) -> Control<P> {
         Control {
             me,
             sender: self.sender.clone(),
@@ -109,7 +100,7 @@ impl<P: PublicKey, C: GClock> Oracle<P, C> {
     /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    pub fn manager(&self) -> Manager<P, C> {
+    pub fn manager(&self) -> Manager<P> {
         Manager {
             oracle: self.clone(),
         }
@@ -118,7 +109,7 @@ impl<P: PublicKey, C: GClock> Oracle<P, C> {
     /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    pub fn socket_manager(&self) -> SocketManager<P, C> {
+    pub fn socket_manager(&self) -> SocketManager<P> {
         SocketManager {
             oracle: self.clone(),
         }
@@ -247,30 +238,13 @@ impl<P: PublicKey, C: GClock> Oracle<P, C> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-pub struct Manager<P: PublicKey, C: GClock> {
+#[derive(Clone, Debug)]
+pub struct Manager<P: PublicKey> {
     /// The oracle to send messages to.
-    oracle: Oracle<P, C>,
+    oracle: Oracle<P>,
 }
 
-impl<P: PublicKey, C: GClock> Clone for Manager<P, C> {
-    fn clone(&self) -> Self {
-        Self {
-            oracle: self.oracle.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock> std::fmt::Debug for Manager<P, C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Manager").finish()
-    }
-}
-
-impl<P, C> crate::Manager for Manager<P, C>
-where
-    P: PublicKey,
-    C: GClock + Clone + Send + 'static,
-{
+impl<P: PublicKey> crate::Manager for Manager<P> {
     type PublicKey = P;
     type Peers = Set<Self::PublicKey>;
 
@@ -298,30 +272,13 @@ where
 /// Because [SocketAddr]s are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all [SocketAddr]s to be valid.
-pub struct SocketManager<P: PublicKey, C: GClock> {
+#[derive(Clone, Debug)]
+pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.
-    oracle: Oracle<P, C>,
+    oracle: Oracle<P>,
 }
 
-impl<P: PublicKey, C: GClock> Clone for SocketManager<P, C> {
-    fn clone(&self) -> Self {
-        Self {
-            oracle: self.oracle.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock> std::fmt::Debug for SocketManager<P, C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SocketManager").finish()
-    }
-}
-
-impl<P, C> crate::Manager for SocketManager<P, C>
-where
-    P: PublicKey,
-    C: GClock + Clone + Send + 'static,
-{
+impl<P: PublicKey> crate::Manager for SocketManager<P> {
     type PublicKey = P;
     type Peers = Map<Self::PublicKey, SocketAddr>;
 
@@ -342,45 +299,33 @@ where
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[derive(Debug)]
-pub struct Control<P: PublicKey, C: GClock> {
+#[derive(Debug, Clone)]
+pub struct Control<P: PublicKey> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
-    sender: mpsc::UnboundedSender<Message<P, C>>,
+    sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: PublicKey, C: GClock> Clone for Control<P, C> {
-    fn clone(&self) -> Self {
-        Self {
-            me: self.me.clone(),
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock + Clone + Send + 'static> Control<P, C> {
+impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
     ///
     /// # Rate Limiting
     ///
     /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
-    /// Recipients that exceed their rate limit will be skipped when sending. The `clock`
-    /// is used to track time for rate limiting.
+    /// Recipients that exceed their rate limit will be skipped when sending.
     pub async fn register(
         &mut self,
         channel: Channel,
         quota: Quota,
-        clock: C,
-    ) -> Result<(Sender<P, C>, Receiver<P>), Error> {
+    ) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
                 quota,
-                clock,
                 result: tx,
             })
             .await
@@ -389,11 +334,7 @@ impl<P: PublicKey, C: GClock + Clone + Send + 'static> Control<P, C> {
     }
 }
 
-impl<P, C> crate::Blocker for Control<P, C>
-where
-    P: PublicKey,
-    C: GClock + Send + 'static,
-{
+impl<P: PublicKey> crate::Blocker for Control<P> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {

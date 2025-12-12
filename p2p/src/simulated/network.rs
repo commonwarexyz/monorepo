@@ -20,11 +20,9 @@ use commonware_utils::{ordered::Set, TryCollect};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future,
-    lock::Mutex,
-    SinkExt, StreamExt,
+    future, SinkExt, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
+use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -32,7 +30,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -119,7 +116,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
-    ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
+    ingress: mpsc::UnboundedReceiver<ingress::Message<P>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -148,9 +145,12 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     // State of the transmitter
     transmitter: transmitter::State<P>,
 
-    // Subscribers to peer set updates (used by both Manager::subscribe() and Sender)
+    // Subscribers to peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
+
+    // Rate limiters for each (sender, channel) pair
+    rate_limiters: HashMap<(P, Channel), RateLimiter<P, ContextCell<E>>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -162,7 +162,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
+    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -193,6 +193,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
+                rate_limiters: HashMap::new(),
                 received_messages,
                 sent_messages,
             },
@@ -229,7 +230,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    async fn handle_ingress(&mut self, message: ingress::Message<P, E>) {
+    async fn handle_ingress(&mut self, message: ingress::Message<P>) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -307,18 +308,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 channel,
                 public_key,
                 quota,
-                clock,
                 result,
             } => {
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
 
-                // Create a subscription for peer updates (same channel as Manager::subscribe())
-                let (peer_sub_sender, peer_sub_receiver) = mpsc::unbounded();
-                self.subscribers.push(peer_sub_sender);
-
-                // Get the current set of all tracked peers
-                let initial_peers = self.all_tracked_peers();
+                // Create rate limiter for this (sender, channel) pair
+                let rate_limiter =
+                    RateLimiter::hashmap_with_clock(quota, self.context.with_label("rate_limiter"));
+                self.rate_limiters
+                    .insert((public_key.clone(), channel), rate_limiter);
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let (sender, handle) = Sender::new(
@@ -327,10 +326,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    quota,
-                    clock,
-                    peer_sub_receiver,
-                    initial_peers,
                 );
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
@@ -572,6 +567,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 continue;
             };
 
+            // Check rate limit for this (sender, channel) pair
+            if let Some(limiter) = self.rate_limiters.get(&(origin.clone(), channel)) {
+                if limiter.check_key(&recipient).is_err() {
+                    trace!(
+                        ?origin,
+                        ?recipient,
+                        reason = "rate limited",
+                        "dropping message"
+                    );
+                    continue;
+                }
+            }
+
             // Record sent message as soon as we determine there is a link with recipient (approximates
             // having an open connection)
             self.sent_messages
@@ -647,38 +655,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 }
 
 /// Implementation of a [crate::Sender] for the simulated network.
-pub struct Sender<P: PublicKey, C: GClock> {
+#[derive(Clone)]
+pub struct Sender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
-    rate_limiter: Arc<Mutex<RateLimiter<P, C>>>,
-    // Subscription receives (id, peers_in_set, all_tracked_peers); we only use the third element.
-    // Only the original sender has a subscription; clones share the known_peers state.
-    #[allow(clippy::type_complexity)]
-    peer_subscription: Option<mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>>,
-    // Shared across all clones so peer updates from the subscription are visible to everyone
-    known_peers: Arc<std::sync::RwLock<Vec<P>>>,
 }
 
-impl<P: PublicKey, C: GClock> Clone for Sender<P, C> {
-    fn clone(&self) -> Self {
-        Self {
-            me: self.me.clone(),
-            channel: self.channel,
-            max_size: self.max_size,
-            high: self.high.clone(),
-            low: self.low.clone(),
-            rate_limiter: self.rate_limiter.clone(),
-            // Clones don't get a subscription; they share known_peers with the original
-            peer_subscription: None,
-            known_peers: self.known_peers.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock> Debug for Sender<P, C> {
+impl<P: PublicKey> Debug for Sender<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sender")
             .field("me", &self.me)
@@ -688,22 +674,14 @@ impl<P: PublicKey, C: GClock> Debug for Sender<P, C> {
     }
 }
 
-impl<P: PublicKey, C: GClock> Sender<P, C> {
-    #[allow(clippy::too_many_arguments)]
+impl<P: PublicKey> Sender<P> {
     fn new(
         context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task<P>>,
-        quota: Quota,
-        clock: C,
-        peer_subscription: mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>,
-        initial_peers: Set<P>,
     ) -> (Self, Handle<()>) {
-        // Create rate limiter for this sender
-        let rate_limiter = Arc::new(Mutex::new(RateLimiter::hashmap_with_clock(quota, clock)));
-
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
@@ -741,9 +719,6 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
                 max_size,
                 high,
                 low,
-                rate_limiter,
-                peer_subscription: Some(peer_subscription),
-                known_peers: Arc::new(std::sync::RwLock::new(initial_peers.into_iter().collect())),
             },
             processor,
         )
@@ -753,7 +728,7 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
-    ) -> (SplitSender<P, C, F>, SplitSender<P, C, F>) {
+    ) -> (SplitSender<P, F>, SplitSender<P, F>) {
         (
             SplitSender {
                 replica: SplitOrigin::Primary,
@@ -769,11 +744,7 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
     }
 }
 
-impl<P, C> crate::Sender for Sender<P, C>
-where
-    P: PublicKey,
-    C: GClock + Clone + Send + 'static,
-{
+impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -781,8 +752,9 @@ where
     ///
     /// # Rate Limiting
     ///
-    /// Recipients that exceed their rate limit will be skipped. The message is still sent to
-    /// non-limited recipients. Check the returned vector to see which peers were sent the message.
+    /// Rate limiting is applied in the Network, not the Sender. Recipients that exceed their
+    /// rate limit will be filtered out. Check the returned vector to see which peers were
+    /// actually sent the message.
     async fn send(
         &mut self,
         recipients: Recipients<P>,
@@ -794,104 +766,25 @@ where
             return Err(Error::MessageTooLarge(message.len()));
         }
 
-        let rate_limiter = self.rate_limiter.lock().await;
-
-        // Update known peers from subscription (non-blocking)
-        // Subscription sends (id, peers_in_set, all_tracked_peers); we only use the third element.
-        // Only the original sender has a subscription; clones share the known_peers state.
-        if let Some(ref mut subscription) = self.peer_subscription {
-            // Drain all pending updates, keeping the most recent
-            while let Ok(Some((_, _, all_peers))) = subscription.try_next() {
-                *self.known_peers.write().unwrap() = all_peers.into_iter().collect();
-                rate_limiter.retain_recent();
-            }
-        }
-
-        // Get the concrete list of peers to send to
-        let peers: Vec<P> = match recipients {
-            Recipients::One(peer) => vec![peer],
-            Recipients::Some(peers) => peers,
-            Recipients::All => {
-                // Copy known peers while holding the lock briefly
-                let known: Vec<P> = self
-                    .known_peers
-                    .read()
-                    .unwrap()
-                    .iter()
-                    .filter(|&p| p != &self.me)
-                    .cloned()
-                    .collect();
-
-                // If we have known peers, use them (allows rate limiting to work)
-                if !known.is_empty() {
-                    known
-                } else {
-                    // If no peer sets are tracked, fall back to having the network
-                    // resolve the peers. This bypasses rate limiting for Recipients::All
-                    // when peer sets are not explicitly configured.
-                    let (sender, receiver) = oneshot::channel();
-                    let channel = if priority { &self.high } else { &self.low };
-                    channel
-                        .unbounded_send((
-                            self.channel,
-                            self.me.clone(),
-                            Recipients::All,
-                            message,
-                            sender,
-                        ))
-                        .map_err(|_| Error::NetworkClosed)?;
-                    return receiver.await.map_err(|_| Error::NetworkClosed);
-                }
-            }
-        };
-
-        // Filter peers by rate limit, consuming rate tokens only for allowed peers
-        let allowed_peers: Vec<_> = peers
-            .into_iter()
-            .filter(|peer| rate_limiter.check_key(peer).is_ok())
-            .collect();
-        drop(rate_limiter);
-
-        // If no recipients are allowed, short-circuit and signal that no peers could
-        // be sent the message.
-        if allowed_peers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Send message
+        // Send message to network for delivery
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         channel
-            .unbounded_send((
-                self.channel,
-                self.me.clone(),
-                Recipients::Some(allowed_peers),
-                message,
-                sender,
-            ))
+            .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
-pub struct SplitSender<P: PublicKey, C: GClock, F: SplitForwarder<P>> {
+#[derive(Clone)]
+pub struct SplitSender<P: PublicKey, F: SplitForwarder<P>> {
     replica: SplitOrigin,
-    inner: Sender<P, C>,
+    inner: Sender<P>,
     forwarder: F,
 }
 
-impl<P: PublicKey, C: GClock, F: SplitForwarder<P>> Clone for SplitSender<P, C, F> {
-    fn clone(&self) -> Self {
-        Self {
-            replica: self.replica,
-            inner: self.inner.clone(),
-            forwarder: self.forwarder.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, C: GClock, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, C, F> {
+impl<P: PublicKey, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SplitSender")
             .field("replica", &self.replica)
@@ -900,12 +793,7 @@ impl<P: PublicKey, C: GClock, F: SplitForwarder<P>> std::fmt::Debug for SplitSen
     }
 }
 
-impl<P, C, F> crate::Sender for SplitSender<P, C, F>
-where
-    P: PublicKey,
-    C: GClock + Clone + Send + 'static,
-    F: SplitForwarder<P>,
-{
+impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
     type Error = Error;
     type PublicKey = P;
 
@@ -1235,6 +1123,8 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU32;
     use futures::FutureExt;
+    use governor::Quota;
+
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -1263,29 +1153,14 @@ mod tests {
                 .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
             let mut control = oracle.control(pk1.clone());
-            control
-                .register(0, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
-            control
-                .register(1, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            control.register(0, TEST_QUOTA).await.unwrap();
+            control.register(1, TEST_QUOTA).await.unwrap();
             let mut control = oracle.control(pk2.clone());
-            control
-                .register(0, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
-            control
-                .register(1, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            control.register(0, TEST_QUOTA).await.unwrap();
+            control.register(1, TEST_QUOTA).await.unwrap();
 
             // Overwrite if registering again
-            control
-                .register(1, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            control.register(1, TEST_QUOTA).await.unwrap();
 
             // Add link
             let link = ingress::Link {
@@ -1338,12 +1213,12 @@ mod tests {
             // Register normal peers
             let (mut peer_a_sender, mut peer_a_recv) = oracle
                 .control(peer_a.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (mut peer_b_sender, mut peer_b_recv) = oracle
                 .control(peer_b.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1354,7 +1229,7 @@ mod tests {
             // - Messages from peer_b go to secondary receiver
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let peer_a_for_router = peer_a.clone();
@@ -1468,14 +1343,14 @@ mod tests {
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
                 .control(peer_c.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (_twin_primary_sender, _twin_secondary_sender) =
@@ -1543,14 +1418,14 @@ mod tests {
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
                 .control(peer_c.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (mut twin_primary_sender, mut twin_secondary_sender) =
@@ -1713,12 +1588,12 @@ mod tests {
                 .await;
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1794,17 +1669,17 @@ mod tests {
                 .await;
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (_sender3, mut recv_b) = oracle
                 .control(recipient_b.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1887,15 +1762,9 @@ mod tests {
             // Register with a very restrictive quota: 1 message per second
             let restrictive_quota = Quota::per_second(NZU32!(1));
             let mut control1 = oracle.control(pk1.clone());
-            let (mut sender, _) = control1
-                .register(0, restrictive_quota, context.clone())
-                .await
-                .unwrap();
+            let (mut sender, _) = control1.register(0, restrictive_quota).await.unwrap();
             let mut control2 = oracle.control(pk2.clone());
-            let (_, mut receiver) = control2
-                .register(0, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             // Add bidirectional links
             let link = ingress::Link {

@@ -204,12 +204,12 @@ mod tests {
             // Create network senders for broadcasting votes and certificates
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -435,12 +435,12 @@ mod tests {
             // Create network senders for broadcasting votes and certificates
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -708,12 +708,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -878,12 +878,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1063,12 +1063,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1237,12 +1237,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1425,12 +1425,12 @@ mod tests {
             // Register network channels
             let (vote_sender, _) = oracle
                 .control(leader.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(leader.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1625,12 +1625,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1716,12 +1716,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(2, TEST_QUOTA, context.clone())
+                .register(2, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(3, TEST_QUOTA, context.clone())
+                .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1850,12 +1850,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -2007,12 +2007,12 @@ mod tests {
             let me = participants[0].clone();
             let (vote_sender, _vote_receiver) = oracle
                 .control(me.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             let (certificate_sender, _certificate_receiver) = oracle
                 .control(me.clone())
-                .register(1, TEST_QUOTA, context.clone())
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 

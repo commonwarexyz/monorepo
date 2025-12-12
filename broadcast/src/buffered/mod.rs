@@ -66,23 +66,13 @@ mod tests {
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
-    type Registrations = BTreeMap<
-        PublicKey,
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-    >;
+    type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
 
     async fn initialize_simulation(
         context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
-    ) -> (
-        Vec<PublicKey>,
-        Registrations,
-        Oracle<PublicKey, deterministic::Context>,
-    ) {
+    ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -103,7 +93,7 @@ mod tests {
         for peer in peers.iter() {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));

@@ -104,7 +104,7 @@ mod tests {
     };
     use tracing::debug;
 
-    type Registrations<P> = BTreeMap<P, (Sender<P, Context>, Receiver<P>)>;
+    type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -119,15 +119,14 @@ mod tests {
 
     /// Register all participants with the network oracle.
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey, Context>,
+        oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
-        context: Context,
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
@@ -137,7 +136,7 @@ mod tests {
 
     /// Establish network links between all participants.
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey, Context>,
+        oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
         link: Link,
     ) {
@@ -161,7 +160,7 @@ mod tests {
         shares_vec: &mut [Share],
         link: Link,
     ) -> (
-        Oracle<PublicKey, Context>,
+        Oracle<PublicKey>,
         Vec<(PublicKey, PrivateKey, Share)>,
         Vec<PublicKey>,
         Registrations<PublicKey>,
@@ -190,7 +189,7 @@ mod tests {
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_participants(&mut oracle, &pks, context.clone()).await;
+        let registrations = register_participants(&mut oracle, &pks).await;
         link_participants(&mut oracle, &pks, link).await;
         (oracle, validators, pks, registrations)
     }
@@ -205,7 +204,7 @@ mod tests {
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
-        oracle: &mut Oracle<PublicKey, Context>,
+        oracle: &mut Oracle<PublicKey>,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
     ) -> HashMap<PublicKey, mocks::Monitor> {

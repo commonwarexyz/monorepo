@@ -179,7 +179,7 @@ fn fuzz(input: FuzzInput) {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 

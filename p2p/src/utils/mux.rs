@@ -478,7 +478,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(10000));
 
     /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
+    fn start_network(context: deterministic::Context) -> Oracle<Pk> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -497,7 +497,7 @@ mod tests {
     }
 
     /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk, deterministic::Context>, a: Pk, b: Pk) {
+    async fn link_bidirectional(oracle: &mut Oracle<Pk>, a: Pk, b: Pk) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
@@ -505,7 +505,7 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
         Pk,
@@ -514,7 +514,7 @@ mod tests {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register(0, TEST_QUOTA, context.clone())
+            .register(0, TEST_QUOTA)
             .await
             .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
@@ -525,18 +525,18 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer_with_backup_and_global_sender(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
         Pk,
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
         mpsc::Receiver<BackupResponse<Pk>>,
-        GlobalSender<simulated::Sender<Pk, deterministic::Context>>,
+        GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register(0, TEST_QUOTA, context.clone())
+            .register(0, TEST_QUOTA)
             .await
             .unwrap();
         let (mux, handle, backup, global_sender) =

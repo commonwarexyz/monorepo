@@ -219,7 +219,7 @@ mod tests {
 
     async fn setup_validator(
         context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
+        oracle: &mut Oracle<K>,
         validator: K,
         scheme_provider: P,
     ) -> (
@@ -244,10 +244,7 @@ mod tests {
 
         // Create the resolver
         let mut control = oracle.control(validator.clone());
-        let backfill = control
-            .register(1, TEST_QUOTA, context.clone())
-            .await
-            .unwrap();
+        let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
@@ -274,10 +271,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control
-            .register(2, TEST_QUOTA, context.clone())
-            .await
-            .unwrap();
+        let network = control.register(2, TEST_QUOTA).await.unwrap();
         broadcast_engine.start(network);
 
         // Initialize finalizations by height
@@ -393,7 +387,7 @@ mod tests {
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,
-    ) -> Oracle<K, deterministic::Context> {
+    ) -> Oracle<K> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -406,11 +400,7 @@ mod tests {
         oracle
     }
 
-    async fn setup_network_links(
-        oracle: &mut Oracle<K, deterministic::Context>,
-        peers: &[K],
-        link: Link,
-    ) {
+    async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
                 if p2 == p1 {

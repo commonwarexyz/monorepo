@@ -64,10 +64,10 @@ fn extract_id_from_message(message: &Message) -> u32 {
 }
 
 /// All state for a given peer
-type PeerIdentity<C> = (
+type PeerIdentity = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
+    WrappedSender<Sender<ed25519::PublicKey>, Message>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
@@ -310,7 +310,7 @@ async fn run_simulation_logic<
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, distribution, context.clone()).await;
+    let identities = setup_network_identities(&mut oracle, distribution).await;
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
@@ -335,11 +335,10 @@ async fn run_simulation_logic<
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
+async fn setup_network_identities(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
     distribution: &Distribution,
-    context: C,
-) -> Vec<PeerIdentity<C>> {
+) -> Vec<PeerIdentity> {
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
@@ -350,7 +349,7 @@ async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA, context.clone())
+                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
@@ -373,9 +372,9 @@ async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links<C: GClock + Clone + Send + 'static>(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
-    identities: &[PeerIdentity<C>],
+async fn setup_network_links(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+    identities: &[PeerIdentity],
     latencies: &Latencies,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
@@ -402,7 +401,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock + GClock + Clone + Send + 'stati
     context: &C,
     proposer_idx: usize,
     peers: usize,
-    identities: Vec<PeerIdentity<C>>,
+    identities: Vec<PeerIdentity>,
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<Handle<PeerResult>> {
@@ -562,7 +561,7 @@ async fn process_command<C: Spawner + Clock + GClock + Clone + Send + 'static>(
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {

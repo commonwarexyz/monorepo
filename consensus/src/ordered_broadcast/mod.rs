@@ -92,30 +92,17 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
-    type Registrations<P> = BTreeMap<
-        P,
-        (
-            (Sender<P, Context>, Receiver<P>),
-            (Sender<P, Context>, Receiver<P>),
-        ),
-    >;
+    type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey, Context>,
+        oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
-        context: Context,
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control
-                .register(0, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
-            let (b1, b2) = control
-                .register(1, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
@@ -128,7 +115,7 @@ mod tests {
     }
 
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey, Context>,
+        oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -161,7 +148,7 @@ mod tests {
         num_validators: u32,
         shares_vec: &mut [Share],
     ) -> (
-        Oracle<PublicKey, Context>,
+        Oracle<PublicKey>,
         Vec<(PublicKey, PrivateKey, Share)>,
         Vec<PublicKey>,
         Registrations<PublicKey>,
@@ -190,7 +177,7 @@ mod tests {
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_participants(&mut oracle, &pks, context.clone()).await;
+        let registrations = register_participants(&mut oracle, &pks).await;
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
@@ -431,7 +418,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 let mut registrations =
-                    register_participants(&mut oracle, &pks, context.clone()).await;
+                    register_participants(&mut oracle, &pks).await;
                 let link = commonware_p2p::simulated::Link {
                     latency: Duration::from_millis(10),
                     jitter: Duration::from_millis(1),
@@ -831,7 +818,7 @@ mod tests {
 
             // Register all participants
             let mut registrations =
-                register_participants(&mut oracle, &participants, context.clone()).await;
+                register_participants(&mut oracle, &participants).await;
             let link = commonware_p2p::simulated::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),

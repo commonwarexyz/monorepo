@@ -85,18 +85,12 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey, deterministic::Context>,
+        Oracle<PublicKey>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
+            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
         )>,
     ) {
         let (network, oracle) = Network::new(
@@ -118,14 +112,8 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control
-                .register(0, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
-            let (sender2, receiver2) = control
-                .register(1, TEST_QUOTA, context.clone())
-                .await
-                .unwrap();
+            let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 
@@ -133,7 +121,7 @@ mod tests {
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -155,14 +143,8 @@ mod tests {
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
+            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,

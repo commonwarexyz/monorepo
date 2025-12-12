@@ -136,7 +136,7 @@ fn fuzz(input: FuzzInput) {
         let mut channels: HashMap<
             (usize, u8),
             (
-                commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
+                commonware_p2p::simulated::Sender<ed25519::PublicKey>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();
@@ -158,7 +158,7 @@ fn fuzz(input: FuzzInput) {
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
                         if let Ok((sender, receiver)) = oracle
                             .control(peer_pks[idx].clone())
-                            .register(channel_id as u64, TEST_QUOTA, context.clone())
+                            .register(channel_id as u64, TEST_QUOTA)
                             .await
                         {
                             e.insert((sender, receiver));

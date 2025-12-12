@@ -320,7 +320,7 @@ mod test {
         async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey, deterministic::Context>,
+            oracle: &mut Oracle<PublicKey>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
@@ -336,30 +336,22 @@ mod test {
             };
 
             let mut control = oracle.control(pk.clone());
-            let votes = control
-                .register(VOTE_CHANNEL, TEST_QUOTA, ctx.clone())
-                .await
-                .unwrap();
+            let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
-                .register(CERTIFICATE_CHANNEL, TEST_QUOTA, ctx.clone())
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
                 .await
                 .unwrap();
             let resolver = control
-                .register(RESOLVER_CHANNEL, TEST_QUOTA, ctx.clone())
+                .register(RESOLVER_CHANNEL, TEST_QUOTA)
                 .await
                 .unwrap();
             let broadcast = control
-                .register(BROADCASTER_CHANNEL, TEST_QUOTA, ctx.clone())
+                .register(BROADCASTER_CHANNEL, TEST_QUOTA)
                 .await
                 .unwrap();
-            let marshal = control
-                .register(MARSHAL_CHANNEL, TEST_QUOTA, ctx.clone())
-                .await
-                .unwrap();
-            let (dkg_sender, dkg_receiver) = control
-                .register(DKG_CHANNEL, TEST_QUOTA, ctx.clone())
-                .await
-                .unwrap();
+            let marshal = control.register(MARSHAL_CHANNEL, TEST_QUOTA).await.unwrap();
+            let (dkg_sender, dkg_receiver) =
+                control.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
             let dkg = (
                 dkg_sender,
                 FilteredReceiver {
@@ -368,7 +360,7 @@ mod test {
                 },
             );
             let orchestrator = control
-                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA, ctx.clone())
+                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -420,7 +412,7 @@ mod test {
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey, deterministic::Context>,
+            oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
         ) {

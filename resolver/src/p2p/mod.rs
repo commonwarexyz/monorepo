@@ -113,13 +113,10 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey, deterministic::Context>,
+        Oracle<PublicKey>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        )>,
+        Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
         let (network, oracle) = Network::new(
             context.with_label("network"),
@@ -143,7 +140,7 @@ mod tests {
         for peer in &peers {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register(0, TEST_QUOTA, context.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             connections.push((sender, receiver));
@@ -153,7 +150,7 @@ mod tests {
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -174,10 +171,7 @@ mod tests {
         manager: impl Manager<PublicKey = PublicKey>,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
+        connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {
