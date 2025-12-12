@@ -654,10 +654,12 @@ pub struct Sender<P: PublicKey, C: GClock> {
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
     rate_limiter: Arc<Mutex<RateLimiter<P, C>>>,
-    // Subscription receives (id, peers_in_set, all_tracked_peers); we only use the third element
+    // Subscription receives (id, peers_in_set, all_tracked_peers); we only use the third element.
+    // Only the original sender has a subscription; clones share the known_peers state.
     #[allow(clippy::type_complexity)]
     peer_subscription: Option<mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>>,
-    known_peers: Vec<P>,
+    // Shared across all clones so peer updates from the subscription are visible to everyone
+    known_peers: Arc<std::sync::RwLock<Vec<P>>>,
 }
 
 impl<P: PublicKey, C: GClock> Clone for Sender<P, C> {
@@ -669,9 +671,9 @@ impl<P: PublicKey, C: GClock> Clone for Sender<P, C> {
             high: self.high.clone(),
             low: self.low.clone(),
             rate_limiter: self.rate_limiter.clone(),
-            // Cloned senders start without a subscription; they'll get one lazily
+            // Clones don't get a subscription; they share known_peers with the original
             peer_subscription: None,
-            known_peers: Vec::new(),
+            known_peers: self.known_peers.clone(),
         }
     }
 }
@@ -741,7 +743,7 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
                 low,
                 rate_limiter,
                 peer_subscription: Some(peer_subscription),
-                known_peers: initial_peers.into_iter().collect(),
+                known_peers: Arc::new(std::sync::RwLock::new(initial_peers.into_iter().collect())),
             },
             processor,
         )
@@ -795,11 +797,12 @@ where
         let rate_limiter = self.rate_limiter.lock().await;
 
         // Update known peers from subscription (non-blocking)
-        // Subscription sends (id, peers_in_set, all_tracked_peers); we only use the third element
+        // Subscription sends (id, peers_in_set, all_tracked_peers); we only use the third element.
+        // Only the original sender has a subscription; clones share the known_peers state.
         if let Some(ref mut subscription) = self.peer_subscription {
             // Drain all pending updates, keeping the most recent
             while let Ok(Some((_, _, all_peers))) = subscription.try_next() {
-                self.known_peers = all_peers.into_iter().collect();
+                *self.known_peers.write().unwrap() = all_peers.into_iter().collect();
                 rate_limiter.retain_recent();
             }
         }
@@ -809,13 +812,19 @@ where
             Recipients::One(peer) => vec![peer],
             Recipients::Some(peers) => peers,
             Recipients::All => {
+                // Copy known peers while holding the lock briefly
+                let known: Vec<P> = self
+                    .known_peers
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .filter(|&p| p != &self.me)
+                    .cloned()
+                    .collect();
+
                 // If we have known peers, use them (allows rate limiting to work)
-                if !self.known_peers.is_empty() {
-                    self.known_peers
-                        .iter()
-                        .filter(|&p| p != &self.me)
-                        .cloned()
-                        .collect()
+                if !known.is_empty() {
+                    known
                 } else {
                     // If no peer sets are tracked, fall back to having the network
                     // resolve the peers. This bypasses rate limiting for Recipients::All
