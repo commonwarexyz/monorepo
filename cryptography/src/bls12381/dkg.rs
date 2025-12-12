@@ -262,7 +262,7 @@
 //!       dealer_logs.clone(),
 //!       1 // Increase this for parallelism.
 //!     )?;
-//!     println!("Player {:?} recovered: {}", player_pk, status.is_recovered());
+//!     println!("Player {:?} received share {:?}", player_pk, status);
 //!     let share: Share = status.into();
 //!     player_shares.insert(player_pk, share);
 //! }
@@ -329,17 +329,14 @@ pub enum Error {
     DkgFailed,
 }
 
-/// The status of a player's share after DKG finalization.
-///
-/// This indicates whether the player successfully participated in the DKG
-/// or had to recover their share from public reveals.
+/// Indicates whether the player safely recovered their share in the DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShareStatus {
     /// The player recovered their share with fewer than `max_faults` reveals.
     /// This means the player's share remains private.
     Recovered(Share),
     /// The player had `max_faults` or more reveals, meaning their share
-    /// was essentially public (any observer could compute it).
+    /// may be known by an adversary.
     Revealed(Share),
 }
 
@@ -347,18 +344,18 @@ impl ShareStatus {
     /// Returns a reference to the share, regardless of status.
     pub const fn share(&self) -> &Share {
         match self {
-            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
+            Self::Recovered(share) | Self::Revealed(share) => share,
         }
     }
 
     /// Returns true if the share was recovered (fewer than `max_faults` reveals).
     pub const fn is_recovered(&self) -> bool {
-        matches!(self, ShareStatus::Recovered(_))
+        matches!(self, Self::Recovered(_))
     }
 
     /// Returns true if the share was revealed (`max_faults` or more reveals).
     pub const fn is_revealed(&self) -> bool {
-        matches!(self, ShareStatus::Revealed(_))
+        matches!(self, Self::Revealed(_))
     }
 }
 
@@ -1464,19 +1461,15 @@ impl<V: Variant, S: Signer> Player<V, S> {
         Some(PlayerAck { sig })
     }
 
-    /// Finalize the player, producing an output, a share, and the number of reveals
-    /// that were used to recover the player's share components.
+    /// Finalize the player, producing an output, and a share.
     ///
     /// This should agree with [`observe`], in terms of `Ok` vs `Err` and the
     /// public output, so long as the logs agree. It's crucial that the players
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The returned [`ShareStatus`] indicates whether the player successfully
-    /// participated in the DKG (`Recovered`) or had too many reveals (`Revealed`).
-    /// `Recovered` means fewer than `max_faults` dealers had to reveal their
-    /// private message for this player. `Revealed` means `max_faults` or more
-    /// dealers revealed, so the player's share may be known by an adversary.
+    /// The returned [`ShareStatus`] indicates whether the player safely recovered their share in the DKG (`Recovered`)
+    /// or had to recover their share from more than `max_faults` public reveals (`Revealed`).
     ///
     /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
@@ -2122,7 +2115,6 @@ mod test_plan {
                         .finalize(dealer_logs.clone(), 1)
                         .expect("Player finalize should succeed");
                     let share: Share = status.into();
-
                     assert_eq!(
                         player_output, observer_output,
                         "Player output should match observer output"
