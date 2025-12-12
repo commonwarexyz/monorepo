@@ -1995,11 +1995,11 @@ where
     }
 }
 
-const OP2_DELETE_CONTEXT: u8 = 0xD1;
-const OP2_UPDATE_CONTEXT: u8 = 0xD2;
-const OP2_COMMIT_CONTEXT: u8 = 0xD3;
+const DELETE_CONTEXT: u8 = 0xD1;
+const UPDATE_CONTEXT: u8 = 0xD2;
+const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
+pub trait Update<K: Array, V: ValueEncoding>: Clone {
     /// Extract the key from an update.
     fn key(&self) -> &K;
 
@@ -2007,10 +2007,10 @@ pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);
 
-impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
+impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {
     fn key(&self) -> &K {
         &self.0.key
     }
@@ -2082,10 +2082,10 @@ impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> 
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
 
-impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
+impl<K: Array, V: ValueEncoding> Update<K, V> for UnorderedUpdate<K, V> {
     fn key(&self) -> &K {
         &self.0
     }
@@ -2142,10 +2142,10 @@ impl<K: Array, V: VariableValue> Read for UnorderedUpdate<K, VariableEncoding<V>
 type OrderedOperation<K, V> = Operation<OrderedUpdate<K, V>, K, V>;
 type UnorderedOperation<K, V> = Operation<UnorderedUpdate<K, V>, K, V>;
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Operation<S, K: Array, V: ValueEncoding>
 where
-    S: UpdateShape<K, V>,
+    S: Update<K, V>,
 {
     Delete(K),
     Update(S),
@@ -2154,7 +2154,7 @@ where
 
 impl<S, K, V> Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    S: Update<K, FixedEncoding<V>> + FixedSize,
     K: Array,
     V: FixedValue,
 {
@@ -2165,7 +2165,7 @@ where
 
 impl<S, K, V> FixedSize for Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    S: Update<K, FixedEncoding<V>> + FixedSize,
     K: Array,
     V: FixedValue,
 {
@@ -2185,24 +2185,24 @@ where
 
 impl<S, K, V> Write for Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize + Write,
+    S: Update<K, FixedEncoding<V>> + FixedSize + Write,
     K: Array + Codec,
     V: FixedValue,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
+                UPDATE_CONTEXT.write(buf);
                 p.write(buf);
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
             Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
+                COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
                     metadata.write(buf);
@@ -2218,7 +2218,7 @@ where
 
 impl<S, K, V> Read for Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
+    S: Update<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
     K: Array + Codec,
     V: FixedValue,
 {
@@ -2228,17 +2228,17 @@ where
         at_least(buf, Self::SIZE)?;
 
         match u8::read(buf)? {
-            OP2_UPDATE_CONTEXT => {
+            UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
                 Ok(Self::Update(payload))
             }
-            OP2_DELETE_CONTEXT => {
+            DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
                 Ok(Self::Delete(key))
             }
-            OP2_COMMIT_CONTEXT => {
+            COMMIT_CONTEXT => {
                 let is_some = bool::read(buf)?;
                 let metadata = if is_some {
                     Some(V::read_cfg(buf, cfg)?)
@@ -2263,7 +2263,7 @@ where
 
 impl<S, K, V> EncodeSize for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>> + EncodeSize,
+    S: Update<K, VariableEncoding<V>> + EncodeSize,
     K: Array,
     V: VariableValue,
 {
@@ -2278,22 +2278,22 @@ where
 
 impl<S, K, V> Write for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>> + Write,
+    S: Update<K, VariableEncoding<V>> + Write,
     K: Array + Codec,
     V: VariableValue,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
             Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
+                UPDATE_CONTEXT.write(buf);
                 p.write(buf);
             }
             Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
+                COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
                 UInt(**floor_loc).write(buf);
             }
@@ -2303,7 +2303,7 @@ where
 
 impl<S, K, V> Read for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
+    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
     K: Array + Codec,
     V: VariableValue,
 {
@@ -2311,15 +2311,15 @@ where
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            OP2_DELETE_CONTEXT => {
+            DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 Ok(Self::Delete(key))
             }
-            OP2_UPDATE_CONTEXT => {
+            UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
                 Ok(Self::Update(payload))
             }
-            OP2_COMMIT_CONTEXT => {
+            COMMIT_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
                 let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
@@ -2341,7 +2341,7 @@ where
 
 impl<S, K, V> crate::qmdb::operation::Operation for Operation<S, K, V>
 where
-    S: UpdateShape<K, V>,
+    S: Update<K, V>,
     K: Array,
     V: ValueEncoding,
     V::Value: Codec,
@@ -2374,7 +2374,7 @@ where
 
 impl<S, K, V> Committable for Operation<S, K, V>
 where
-    S: UpdateShape<K, V>,
+    S: Update<K, V>,
     K: Array,
     V: ValueEncoding,
     V::Value: Codec,
