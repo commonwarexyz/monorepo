@@ -11,8 +11,9 @@ use crate::{
     qmdb::{
         any::{
             ordered::KeyData,
+            update::Update,
             value::{ValueEncoding, VariableValue},
-            CleanAny, DirtyAny, OrderedOperation, OrderedUpdate, UnorderedOperation,
+            CleanAny, DirtyAny, Operation, OrderedOperation, OrderedUpdate, UnorderedOperation,
             UnorderedUpdate,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
@@ -145,13 +146,14 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: Contiguous<Item = OrderedOperation<K, V>>,
-        I: OrderedIndex<Value = Location>,
+        U: Update<K, V>,
+        C: Contiguous<Item = Operation<K, V, U>>,
+        I,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
+    > IndexedLog<E, Operation<K, V, U>, C, I, H, S>
 where
-    OrderedOperation<K, V>: Codec,
+    Operation<K, V, U>: Codec,
 {
     /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
     /// reading it from the last commit, which is assumed to be the last operation in the log.
@@ -165,7 +167,7 @@ where
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
             match log.read(last_commit_loc).await? {
-                OrderedOperation::CommitFloor(_, location) => Ok(location),
+                Operation::CommitFloor(_, location) => Ok(location),
                 _ => unreachable!("last commit is not a CommitFloor operation"),
             }
         } else {
@@ -173,6 +175,85 @@ where
         }
     }
 
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        match self.log.read(last_commit).await? {
+            Operation::CommitFloor(metadata, _) => Ok(metadata),
+            _ => unreachable!("last commit is not a CommitFloor operation"),
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: MutableContiguous<Item = Operation<K, V, U>>,
+        I: UnorderedIndex<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, Operation<K, V, U>, C, I, H>
+where
+    Operation<K, V, U>: Codec,
+{
+    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// building events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    pub async fn init_from_log<F>(
+        mut index: I,
+        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
+        known_inactivity_floor: Option<Location>,
+        mut callback: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // If the last-known inactivity floor is behind the current floor, then invoke the callback
+        // appropriately to report the inactive bits.
+        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
+        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
+            while known_inactivity_floor < inactivity_floor_loc {
+                callback(false, None);
+                known_inactivity_floor += 1;
+            }
+        }
+
+        // Build snapshot from the log
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
+
+        let last_commit = log.size().checked_sub(1);
+
+        Ok(Self {
+            log,
+            inactivity_floor_loc,
+            snapshot: index,
+            last_commit,
+            steps: 0,
+            active_keys,
+        })
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Contiguous<Item = OrderedOperation<K, V>>,
+        I: OrderedIndex<Value = Location>,
+        H: Hasher,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
+where
+    OrderedOperation<K, V>: Codec,
+{
     async fn get_update_op(
         log: &authenticated::Journal<E, C, H, S>,
         loc: Location,
@@ -290,18 +371,6 @@ where
             .await
             .map(|op| op.map(|(data, _)| data.value))
     }
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        match self.log.read(last_commit).await? {
-            OrderedOperation::CommitFloor(metadata, _) => Ok(metadata),
-            _ => unreachable!("last commit is not a CommitFloor operation"),
-        }
-    }
 }
 
 impl<
@@ -316,30 +385,6 @@ impl<
 where
     UnorderedOperation<K, V>: Codec,
 {
-    /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
-    /// reading it from the last commit, which is assumed to be the last operation in the log.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub(crate) async fn recover_inactivity_floor(
-        log: &authenticated::Journal<E, C, H, S>,
-    ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1);
-        if let Some(last_commit_loc) = last_commit_loc {
-            let last_commit = log.read(last_commit_loc).await?;
-            let inactivity_floor = match last_commit {
-                UnorderedOperation::CommitFloor(_, loc) => loc,
-                _ => {
-                    unreachable!("last commit is not a CommitFloor operation");
-                }
-            };
-            Ok(inactivity_floor)
-        } else {
-            Ok(Location::new_unchecked(0))
-        }
-    }
-
     /// Returns the value for `key` and its location, or None if the key is not active.
     pub(crate) async fn get_with_loc(
         &self,
@@ -366,19 +411,6 @@ where
         self.get_with_loc(key)
             .await
             .map(|op| op.map(|(value, _)| value))
-    }
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let op = self.log.read(last_commit).await?;
-        match op {
-            UnorderedOperation::CommitFloor(value, _) => Ok(value),
-            _ => unreachable!("last commit is not a CommitFloor operation"),
-        }
     }
 }
 
@@ -1151,59 +1183,6 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: MutableContiguous<Item = OrderedOperation<K, V>>,
-        I: OrderedIndex<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, OrderedOperation<K, V>, C, I, H>
-where
-    OrderedOperation<K, V>: Codec,
-{
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
-    /// building events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub async fn init_from_log<F>(
-        mut index: I,
-        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
-        }
-
-        // Build snapshot from the log
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
-
-        let last_commit = log.size().checked_sub(1);
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot: index,
-            last_commit,
-            steps: 0,
-            active_keys,
-        })
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
         C: MutableContiguous<Item = UnorderedOperation<K, V>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
@@ -1211,47 +1190,6 @@ impl<
 where
     UnorderedOperation<K, V>: Codec,
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
-    /// building events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub async fn init_from_log<F>(
-        mut index: I,
-        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
-        }
-
-        // Build snapshot from the log
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
-
-        let last_commit = log.size().checked_sub(1);
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot: index,
-            last_commit,
-            steps: 0,
-            active_keys,
-        })
-    }
-
     /// Returns an [IndexedLog] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last commit location is set to None and it is the responsibility of the
