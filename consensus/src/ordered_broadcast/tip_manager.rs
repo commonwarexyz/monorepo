@@ -57,148 +57,78 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey, Signature},
-        sha256::{Digest, Sha256},
+    use crate::ordered_broadcast::{
+        mocks::{self, fixtures::Fixture},
+        scheme::{
+            bls12381_multisig::Scheme as Bls12381MultisigScheme,
+            bls12381_threshold::Scheme as Bls12381ThresholdScheme,
+            ed25519::Scheme as Ed25519Scheme, OrderedBroadcastScheme,
+        },
+        types::Chunk,
     };
-    use commonware_utils::TryFromIterator;
-    use rand::SeedableRng;
+    use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        ed25519::PublicKey,
+        sha256::{Digest as Sha256Digest, Sha256},
+        Hasher as _, PrivateKeyExt as _, Signer as _,
+    };
+    use rand::{rngs::StdRng, SeedableRng};
 
-    // Dummy context for testing
-    #[derive(Clone, Debug)]
-    struct DummyContext;
-    impl crate::scheme::Context for DummyContext {
-        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-            (namespace.to_vec(), Vec::new())
-        }
+    // Helper to setup Ed25519 test fixture
+    fn setup_ed25519_fixture() -> Fixture<Ed25519Scheme> {
+        let mut rng = StdRng::seed_from_u64(0);
+        mocks::fixtures::ed25519(&mut rng, 4)
     }
 
-    // Dummy scheme for testing - just a placeholder
-    #[derive(Clone, Debug)]
-    struct DummyScheme {
-        participants: commonware_utils::ordered::Set<commonware_cryptography::ed25519::PublicKey>,
+    // Helper to setup BLS multisig test fixture
+    fn setup_bls_multisig_fixture<V: Variant>() -> Fixture<Bls12381MultisigScheme<PublicKey, V>> {
+        let mut rng = StdRng::seed_from_u64(0);
+        mocks::fixtures::bls12381_multisig(&mut rng, 4)
     }
 
-    impl Default for DummyScheme {
-        fn default() -> Self {
-            Self {
-                participants: commonware_utils::ordered::Set::try_from_iter(Vec::new()).unwrap(),
-            }
-        }
+    // Helper to setup BLS threshold test fixture
+    fn setup_bls_threshold_fixture<V: Variant>() -> Fixture<Bls12381ThresholdScheme<PublicKey, V>> {
+        let mut rng = StdRng::seed_from_u64(0);
+        mocks::fixtures::bls12381_threshold(&mut rng, 4)
     }
 
-    impl crate::scheme::Scheme for DummyScheme {
-        type Context<'a, D: commonware_cryptography::Digest> = DummyContext;
-        type PublicKey = commonware_cryptography::ed25519::PublicKey;
-        type Signature = ();
-        type Certificate = ();
+    /// Creates a node for testing with a given scheme.
+    fn create_node<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+        fixture: &Fixture<S>,
+        sequencer_idx: usize,
+        height: u64,
+        payload: &str,
+    ) -> Node<PublicKey, S, Sha256Digest> {
+        use crate::ordered_broadcast::types::chunk_namespace;
+        use commonware_codec::Encode;
 
-        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-            &self.participants
-        }
+        let sequencer = fixture.participants[sequencer_idx].clone();
+        let digest = Sha256::hash(payload.as_bytes());
+        let chunk = Chunk::new(sequencer, height, digest);
 
-        fn sign_vote<D: commonware_cryptography::Digest>(
-            &self,
-            _namespace: &[u8],
-            _context: Self::Context<'_, D>,
-        ) -> Option<crate::scheme::Signature<Self>> {
-            None
-        }
+        // Sign the chunk using a deterministic ed25519 key (since Node.signature is P::Signature,
+        // which is ed25519::Signature for our PublicKey type)
+        let mut rng = StdRng::seed_from_u64(sequencer_idx as u64);
+        let private_key = commonware_cryptography::ed25519::PrivateKey::from_rng(&mut rng);
+        let namespace = chunk_namespace(b"test");
+        let message = chunk.encode();
+        let signature = private_key.sign(namespace.as_ref(), &message);
 
-        fn verify_vote<D: commonware_cryptography::Digest>(
-            &self,
-            _namespace: &[u8],
-            _context: Self::Context<'_, D>,
-            _signature: &crate::scheme::Signature<Self>,
-        ) -> bool {
-            true
-        }
-
-        fn assemble_certificate<I>(&self, _signatures: I) -> Option<Self::Certificate>
-        where
-            I: IntoIterator<Item = crate::scheme::Signature<Self>>,
-        {
-            None
-        }
-
-        fn verify_certificate<
-            R: rand::Rng + rand::CryptoRng,
-            D: commonware_cryptography::Digest,
-        >(
-            &self,
-            _rng: &mut R,
-            _namespace: &[u8],
-            _context: Self::Context<'_, D>,
-            _certificate: &Self::Certificate,
-        ) -> bool {
-            true
-        }
-
-        fn is_attributable(&self) -> bool {
-            false
-        }
-
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {}
-
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
-        {
-        }
-
-        fn me(&self) -> Option<u32> {
-            None
-        }
+        Node::new(chunk, signature, None)
     }
 
-    /// Helper functions for TipManager tests.
-    mod helpers {
-        use super::*;
-        use crate::ordered_broadcast::types::Chunk;
-        use commonware_codec::{DecodeExt, FixedSize};
-        use commonware_cryptography::{Hasher as _, PrivateKeyExt as _, Signer as _};
-
-        /// Creates a dummy link for testing.
-        pub fn create_dummy_node(
-            sequencer: PublicKey,
-            height: u64,
-            payload: &str,
-        ) -> Node<PublicKey, DummyScheme, Digest> {
-            let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
-                Signature::decode(&mut data).unwrap()
-            };
-            Node::new(
-                Chunk::new(sequencer, height, Sha256::hash(payload.as_bytes())),
-                signature,
-                None,
-            )
-        }
-
-        /// Generates a deterministic public key for testing using the provided seed.
-        pub fn deterministic_public_key(seed: u64) -> PublicKey {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            PrivateKey::from_rng(&mut rng).public_key()
-        }
-
-        /// Inserts a tip into the given TipManager and returns the inserted node.
-        pub fn insert_tip(
-            manager: &mut TipManager<PublicKey, DummyScheme, Digest>,
-            key: PublicKey,
-            height: u64,
-            payload: &str,
-        ) -> Node<PublicKey, DummyScheme, Digest> {
-            let node = create_dummy_node(key, height, payload);
-            manager.put(&node);
-            node
-        }
+    /// Generates a deterministic public key for testing using the provided seed.
+    fn deterministic_public_key(seed: u64) -> PublicKey {
+        let mut rng = StdRng::seed_from_u64(seed);
+        commonware_cryptography::ed25519::PrivateKey::from_rng(&mut rng).public_key()
     }
 
-    /// Different payloads for the same sequencer and height produce distinct certificates.
-    #[test]
-    fn test_put_new_tip() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(1);
-        let node = helpers::create_dummy_node(key.clone(), 1, "payload");
+    // Generic test implementations
+
+    fn put_new_tip<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(fixture: &Fixture<S>) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node = create_node(fixture, 0, 1, "payload");
+        let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         let got = manager.get(&key).unwrap();
         assert_eq!(got.chunk, node.chunk);
@@ -206,12 +136,12 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    /// Inserting a tip with the same height and payload returns false.
-    #[test]
-    fn test_put_same_height_same_payload() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(2);
-        let node = helpers::create_dummy_node(key.clone(), 1, "payload");
+    fn put_same_height_same_payload<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+        fixture: &Fixture<S>,
+    ) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node = create_node(fixture, 0, 1, "payload");
+        let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         assert!(!manager.put(&node));
         let got = manager.get(&key).unwrap();
@@ -220,14 +150,12 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    /// Inserting a tip with a higher height updates the stored tip.
-    #[test]
-    fn test_put_higher_tip() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(3);
-        let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
+    fn put_higher_tip<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(fixture: &Fixture<S>) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node1 = create_node(fixture, 0, 1, "payload1");
+        let key = node1.chunk.sequencer.clone();
         assert!(manager.put(&node1));
-        let node2 = helpers::create_dummy_node(key.clone(), 2, "payload2");
+        let node2 = create_node(fixture, 0, 2, "payload2");
         assert!(manager.put(&node2));
         let got = manager.get(&key).unwrap();
         assert_eq!(got.chunk, node2.chunk);
@@ -235,46 +163,44 @@ mod tests {
         assert_eq!(got.parent, node2.parent);
     }
 
-    /// Inserting a tip with a lower height panics.
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(4);
-        let node1 = helpers::create_dummy_node(key.clone(), 2, "payload");
+    fn put_lower_tip_panics<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+        fixture: &Fixture<S>,
+    ) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node1 = create_node(fixture, 0, 2, "payload");
         assert!(manager.put(&node1));
-        let node2 = helpers::create_dummy_node(key, 1, "payload");
-        manager.put(&node2);
+        let node2 = create_node(fixture, 0, 1, "payload");
+        manager.put(&node2); // Should panic
     }
 
-    /// Inserting a tip with the same height but different payload panics.
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(5);
-        let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
+    fn put_same_height_different_payload_panics<
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+    >(
+        fixture: &Fixture<S>,
+    ) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node1 = create_node(fixture, 0, 1, "payload1");
         assert!(manager.put(&node1));
-        let node2 = helpers::create_dummy_node(key, 1, "payload2");
-        manager.put(&node2);
+        let node2 = create_node(fixture, 0, 1, "payload2");
+        manager.put(&node2); // Should panic
     }
 
-    /// Getting a tip for a nonexistent sequencer returns None.
-    #[test]
-    fn test_get_nonexistent() {
-        let manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(6);
+    fn get_nonexistent<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>() {
+        let manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let key = deterministic_public_key(6);
         assert!(manager.get(&key).is_none());
     }
 
-    /// Multiple sequencers are handled independently.
-    #[test]
-    fn test_multiple_sequencers() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key1 = helpers::deterministic_public_key(10);
-        let key2 = helpers::deterministic_public_key(20);
-        let node1 = helpers::insert_tip(&mut manager, key1.clone(), 1, "payload1");
-        let node2 = helpers::insert_tip(&mut manager, key2.clone(), 2, "payload2");
+    fn multiple_sequencers<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+        fixture: &Fixture<S>,
+    ) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node1 = create_node(fixture, 0, 1, "payload1");
+        let node2 = create_node(fixture, 1, 2, "payload2");
+        let key1 = node1.chunk.sequencer.clone();
+        let key2 = node2.chunk.sequencer.clone();
+        manager.put(&node1);
+        manager.put(&node2);
 
         let got1 = manager.get(&key1).unwrap();
         let got2 = manager.get(&key2).unwrap();
@@ -282,26 +208,29 @@ mod tests {
         assert_eq!(got2.chunk, node2.chunk);
     }
 
-    /// Multiple updates for the same sequencer yield the tip with the highest height.
-    #[test]
-    fn test_put_multiple_updates() {
-        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
-        let key = helpers::deterministic_public_key(7);
+    fn put_multiple_updates<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+        fixture: &Fixture<S>,
+    ) {
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.
-        let node1 = helpers::insert_tip(&mut manager, key.clone(), 1, "payload1");
+        let node1 = create_node(fixture, 0, 1, "payload1");
+        let key = node1.chunk.sequencer.clone();
+        manager.put(&node1);
         let got1 = manager.get(&key).unwrap();
         assert_eq!(got1.chunk.height, 1);
         assert_eq!(got1.chunk.payload, node1.chunk.payload);
 
         // Insert tip with height 2.
-        let node2 = helpers::insert_tip(&mut manager, key.clone(), 2, "payload2");
+        let node2 = create_node(fixture, 0, 2, "payload2");
+        manager.put(&node2);
         let got2 = manager.get(&key).unwrap();
         assert_eq!(got2.chunk.height, 2);
         assert_eq!(got2.chunk.payload, node2.chunk.payload);
 
         // Insert tip with height 3.
-        let node3 = helpers::insert_tip(&mut manager, key.clone(), 3, "payload3");
+        let node3 = create_node(fixture, 0, 3, "payload3");
+        manager.put(&node3);
         let got3 = manager.get(&key).unwrap();
         assert_eq!(got3.chunk.height, 3);
         assert_eq!(got3.chunk.payload, node3.chunk.payload);
@@ -310,9 +239,230 @@ mod tests {
         assert!(!manager.put(&node3));
 
         // Insert tip with height 4.
-        let node4 = helpers::insert_tip(&mut manager, key.clone(), 4, "payload4");
+        let node4 = create_node(fixture, 0, 4, "payload4");
+        manager.put(&node4);
         let got4 = manager.get(&key).unwrap();
         assert_eq!(got4.chunk.height, 4);
         assert_eq!(got4.chunk.payload, node4.chunk.payload);
+    }
+
+    // Test entry points for Ed25519
+
+    #[test]
+    fn test_put_new_tip_ed25519() {
+        put_new_tip(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    fn test_put_same_height_same_payload_ed25519() {
+        put_same_height_same_payload(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    fn test_put_higher_tip_ed25519() {
+        put_higher_tip(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    #[should_panic(expected = "Attempted to insert a lower-height tip")]
+    fn test_put_lower_tip_panics_ed25519() {
+        put_lower_tip_panics(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_put_same_height_different_payload_panics_ed25519() {
+        put_same_height_different_payload_panics(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    fn test_get_nonexistent_ed25519() {
+        get_nonexistent::<Ed25519Scheme>();
+    }
+
+    #[test]
+    fn test_multiple_sequencers_ed25519() {
+        multiple_sequencers(&setup_ed25519_fixture());
+    }
+
+    #[test]
+    fn test_put_multiple_updates_ed25519() {
+        put_multiple_updates(&setup_ed25519_fixture());
+    }
+
+    // Test entry points for BLS12-381 Multisig MinPk
+
+    #[test]
+    fn test_put_new_tip_bls_multisig_min_pk() {
+        put_new_tip(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_same_height_same_payload_bls_multisig_min_pk() {
+        put_same_height_same_payload(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_higher_tip_bls_multisig_min_pk() {
+        put_higher_tip(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    #[should_panic(expected = "Attempted to insert a lower-height tip")]
+    fn test_put_lower_tip_panics_bls_multisig_min_pk() {
+        put_lower_tip_panics(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_put_same_height_different_payload_panics_bls_multisig_min_pk() {
+        put_same_height_different_payload_panics(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_get_nonexistent_bls_multisig_min_pk() {
+        get_nonexistent::<Bls12381MultisigScheme<PublicKey, MinPk>>();
+    }
+
+    #[test]
+    fn test_multiple_sequencers_bls_multisig_min_pk() {
+        multiple_sequencers(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_multiple_updates_bls_multisig_min_pk() {
+        put_multiple_updates(&setup_bls_multisig_fixture::<MinPk>());
+    }
+
+    // Test entry points for BLS12-381 Multisig MinSig
+
+    #[test]
+    fn test_put_new_tip_bls_multisig_min_sig() {
+        put_new_tip(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_same_height_same_payload_bls_multisig_min_sig() {
+        put_same_height_same_payload(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_higher_tip_bls_multisig_min_sig() {
+        put_higher_tip(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    #[should_panic(expected = "Attempted to insert a lower-height tip")]
+    fn test_put_lower_tip_panics_bls_multisig_min_sig() {
+        put_lower_tip_panics(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_put_same_height_different_payload_panics_bls_multisig_min_sig() {
+        put_same_height_different_payload_panics(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_get_nonexistent_bls_multisig_min_sig() {
+        get_nonexistent::<Bls12381MultisigScheme<PublicKey, MinSig>>();
+    }
+
+    #[test]
+    fn test_multiple_sequencers_bls_multisig_min_sig() {
+        multiple_sequencers(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_multiple_updates_bls_multisig_min_sig() {
+        put_multiple_updates(&setup_bls_multisig_fixture::<MinSig>());
+    }
+
+    // Test entry points for BLS12-381 Threshold MinPk
+
+    #[test]
+    fn test_put_new_tip_bls_threshold_min_pk() {
+        put_new_tip(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_same_height_same_payload_bls_threshold_min_pk() {
+        put_same_height_same_payload(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_higher_tip_bls_threshold_min_pk() {
+        put_higher_tip(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    #[should_panic(expected = "Attempted to insert a lower-height tip")]
+    fn test_put_lower_tip_panics_bls_threshold_min_pk() {
+        put_lower_tip_panics(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_put_same_height_different_payload_panics_bls_threshold_min_pk() {
+        put_same_height_different_payload_panics(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_get_nonexistent_bls_threshold_min_pk() {
+        get_nonexistent::<Bls12381ThresholdScheme<PublicKey, MinPk>>();
+    }
+
+    #[test]
+    fn test_multiple_sequencers_bls_threshold_min_pk() {
+        multiple_sequencers(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    #[test]
+    fn test_put_multiple_updates_bls_threshold_min_pk() {
+        put_multiple_updates(&setup_bls_threshold_fixture::<MinPk>());
+    }
+
+    // Test entry points for BLS12-381 Threshold MinSig
+
+    #[test]
+    fn test_put_new_tip_bls_threshold_min_sig() {
+        put_new_tip(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_same_height_same_payload_bls_threshold_min_sig() {
+        put_same_height_same_payload(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_higher_tip_bls_threshold_min_sig() {
+        put_higher_tip(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    #[should_panic(expected = "Attempted to insert a lower-height tip")]
+    fn test_put_lower_tip_panics_bls_threshold_min_sig() {
+        put_lower_tip_panics(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_put_same_height_different_payload_panics_bls_threshold_min_sig() {
+        put_same_height_different_payload_panics(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_get_nonexistent_bls_threshold_min_sig() {
+        get_nonexistent::<Bls12381ThresholdScheme<PublicKey, MinSig>>();
+    }
+
+    #[test]
+    fn test_multiple_sequencers_bls_threshold_min_sig() {
+        multiple_sequencers(&setup_bls_threshold_fixture::<MinSig>());
+    }
+
+    #[test]
+    fn test_put_multiple_updates_bls_threshold_min_sig() {
+        put_multiple_updates(&setup_bls_threshold_fixture::<MinSig>());
     }
 }
