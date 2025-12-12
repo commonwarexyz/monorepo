@@ -10,9 +10,14 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{Location, journaled::Config as MmrConfig, mem::Clean},
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        Error, any::{UnorderedOperation, VariableConfig, VariableValue, todo::IndexedLog, value::VariableEncoding}, operation::Committable as _
+        any::{
+            db::IndexedLog, value::VariableEncoding, UnorderedOperation, VariableConfig,
+            VariableValue,
+        },
+        operation::Committable as _,
+        Error,
     },
     translator::Translator,
 };

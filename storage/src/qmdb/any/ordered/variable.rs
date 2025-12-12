@@ -14,7 +14,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
         any::{
-            todo::IndexedLog, value::VariableEncoding, OrderedOperation, VariableConfig,
+            db::IndexedLog, value::VariableEncoding, OrderedOperation, VariableConfig,
             VariableValue,
         },
         operation::Committable as _,

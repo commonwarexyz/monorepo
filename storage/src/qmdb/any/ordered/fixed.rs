@@ -10,7 +10,7 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log, todo::IndexedLog, value::FixedEncoding,
+            db::IndexedLog, init_fixed_authenticated_log, value::FixedEncoding,
             FixedConfig as Config, FixedValue, OrderedOperation,
         },
         Error,

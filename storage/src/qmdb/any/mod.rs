@@ -28,7 +28,7 @@ use std::{
 mod update;
 pub use update::{OrderedUpdate, UnorderedUpdate};
 
-mod todo;
+mod db;
 
 mod operation;
 pub use operation::Operation;

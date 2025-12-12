@@ -714,6 +714,213 @@ where
         self.delete_with_callback(key, |_, _| r = true).await?;
         Ok(r)
     }
+
+    /// Performs a batch update, invoking the callback for each resulting operation. The first
+    /// argument of the callback is the activity status of the operation, and the second argument is
+    /// the location of the operation it inactivates (if any).
+    pub(crate) async fn write_batch_with_callback<F>(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        mut callback: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // Collect all the possible matching `locations` for any referenced key, while retaining
+        // each item in the batch in a `mutations` map.
+        let mut mutations = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            mutations.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // A set of possible "next_key" values for any keys whose next_key value will need to be
+        // updated.
+        let mut possible_next = BTreeSet::new();
+        // A set of possible previous keys to any new or deleted keys.
+        let mut possible_previous = BTreeMap::new();
+
+        // We divide keys in the batch into three disjoint sets:
+        //   - `deleted`
+        //   - `created`
+        //   - `updated`
+        //
+        // Populate the the deleted and updated sets, and for deleted keys only, immediately update
+        // the log and snapshot.
+        let mut deleted = Vec::new();
+        let mut updated = BTreeMap::new();
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let OrderedOperation::Update(OrderedUpdate(key_data)) = op else {
+                unreachable!("updates should have key data");
+            };
+            let key = key_data.key.clone();
+            possible_previous.insert(key.clone(), (key_data.value, old_loc));
+            possible_next.insert(key_data.next_key);
+
+            let Some(update) = mutations.remove(&key) else {
+                // Due to translated key collisions, we may look up keys that aren't in the
+                // mutations set. Note that these could still end up next or previous keys to other
+                // keys in the batch, so they are still added to these sets above.
+                continue;
+            };
+
+            if let Some(value) = update {
+                // This is an update of an existing key.
+                updated.insert(key.clone(), (value, old_loc));
+            } else {
+                // This is a delete of an existing key.
+                deleted.push(key.clone());
+
+                // Update the log and snapshot.
+                delete_known_loc(&mut self.snapshot, &key, old_loc);
+                self.log.append(OrderedOperation::Delete(key)).await?;
+                callback(false, Some(old_loc));
+
+                // Each delete reduces the active key count by one and inactivates that key.
+                self.active_keys -= 1;
+                self.steps += 1;
+            }
+        }
+
+        // Any key remaining in `mutations` must be a new key so move it to the created map.
+        let mut created = BTreeMap::new();
+        for (key, value) in mutations {
+            let Some(value) = value else {
+                continue; // can happen from attempt to delete a non-existent key
+            };
+            created.insert(key.clone(), value);
+
+            // Any newly created key must be a next_key for some remaining key.
+            possible_next.insert(key);
+        }
+
+        // Complete the `possible_previous` and `possible_next` sets by including entries from the
+        // previous _translated_ key for any created or deleted key.
+        let mut locations = Vec::new();
+        for key in deleted.iter().chain(created.keys()) {
+            let iter = self.snapshot.prev_translated_key(key);
+            let Some(iter) = iter else {
+                continue;
+            };
+            locations.extend(iter.copied());
+        }
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let OrderedOperation::Update(OrderedUpdate(key_data)) = op else {
+                unreachable!("updates should have key data");
+            };
+            possible_next.insert(key_data.next_key);
+            possible_previous.insert(key_data.key, (key_data.value, old_loc));
+        }
+
+        // Remove deleted keys from the possible_* sets.
+        for key in deleted.iter() {
+            possible_previous.remove(key);
+            possible_next.remove(key);
+        }
+
+        // Apply the updates of existing keys.
+        let mut already_updated = BTreeSet::new();
+        for (key, (value, loc)) in updated {
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, &key, loc, new_loc);
+
+            let next_key = find_next_key(&key, &possible_next);
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
+                key: key.clone(),
+                value: value.clone(),
+                next_key,
+            }));
+            self.log.append(op).await?;
+            callback(true, Some(loc));
+
+            // Each update of an existing key inactivates its previous location.
+            self.steps += 1;
+            already_updated.insert(key);
+        }
+
+        // Create each new key, and update its previous key if it hasn't already been updated.
+        for (key, value) in created {
+            let new_loc = self.op_count();
+            self.snapshot.insert(&key, new_loc);
+            let next_key = find_next_key(&key, &possible_next);
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
+                key: key.clone(),
+                value: value.clone(),
+                next_key,
+            }));
+
+            // Each newly created key increases the active key count.
+            self.log.append(op).await?;
+            callback(true, None);
+            self.active_keys += 1;
+
+            // Update the next_key value of its previous key (unless there are no existing keys).
+            if possible_previous.is_empty() {
+                continue;
+            }
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(&key, &possible_previous);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
+                key: prev_key.clone(),
+                value: prev_value.clone(),
+                next_key,
+            }));
+            self.log.append(op).await?;
+            callback(true, Some(*prev_loc));
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        if possible_next.is_empty() || possible_previous.is_empty() {
+            return Ok(());
+        }
+
+        // Update the previous key of each deleted key if it hasn't already been updated.
+        for key in deleted.iter() {
+            let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &possible_previous);
+            if already_updated.contains(prev_key) {
+                continue;
+            }
+            already_updated.insert(prev_key.clone());
+
+            let new_loc = self.op_count();
+            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
+            let next_key = find_next_key(prev_key, &possible_next);
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
+                key: prev_key.clone(),
+                value: prev_value.clone(),
+                next_key,
+            }));
+            self.log.append(op).await?;
+            callback(true, Some(*prev_loc));
+
+            // Each key whose next-key value is updated inactivates its previous location.
+            self.steps += 1;
+        }
+
+        Ok(())
+    }
 }
 
 impl<
@@ -806,6 +1013,76 @@ where
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         Ok(self.delete_key(key).await?.is_some())
+    }
+
+    /// Performs a batch update, invoking the callback for each resulting operation. The first
+    /// argument of the callback is the activity status of the operation, and the second argument is
+    /// the location of the operation it inactivates (if any).
+    pub(crate) async fn write_batch_with_callback<F>(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        mut callback: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
+        let mut updates = BTreeMap::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        for (key, value) in iter {
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
+            updates.insert(key, value);
+        }
+
+        // Concurrently look up all possible matching locations.
+        locations.sort();
+        locations.dedup();
+        let futures = locations.iter().map(|loc| self.log.read(*loc));
+        let results = try_join_all(futures).await?;
+
+        // Process the deletes & updates of existing keys, which must appear in the results.
+        for (op, old_loc) in (results.into_iter()).zip(locations) {
+            let key = op.key().expect("updates should have a key");
+            let Some(update) = updates.remove(key) else {
+                continue; // translated key collision
+            };
+
+            let new_loc = self.op_count();
+            if let Some(value) = update {
+                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
+                self.log
+                    .append(UnorderedOperation::Update(UnorderedUpdate(
+                        key.clone(),
+                        value,
+                    )))
+                    .await?;
+                callback(true, Some(old_loc));
+            } else {
+                delete_known_loc(&mut self.snapshot, key, old_loc);
+                self.log
+                    .append(UnorderedOperation::Delete(key.clone()))
+                    .await?;
+                callback(false, Some(old_loc));
+                self.active_keys -= 1;
+            }
+            self.steps += 1;
+        }
+
+        // Process the creates.
+        for (key, value) in updates {
+            let Some(value) = value else {
+                continue; // attempt to delete a non-existent key
+            };
+            self.snapshot.insert(&key, self.op_count());
+            self.log
+                .append(UnorderedOperation::Update(UnorderedUpdate(key, value)))
+                .await?;
+            callback(true, None);
+            self.active_keys += 1;
+        }
+
+        Ok(())
     }
 }
 
