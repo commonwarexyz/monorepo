@@ -446,7 +446,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
-            (None, None) => Scalar::from_rand(&mut rng),
+            (None, None) => Scalar::random(&mut rng),
             (_, Some(x)) => x,
             (Some(_), None) => return Err(Error::MissingDealerShare),
         };
@@ -1837,7 +1837,7 @@ mod test_plan {
                         (Some(s), false) => Some(s.clone()),
                         (Some(_), true) => Some(Share {
                             index: i_dealer,
-                            private: Scalar::from_rand(&mut rng),
+                            private: Scalar::random(&mut rng),
                         }),
                     };
 
@@ -1898,7 +1898,7 @@ mod test_plan {
                             // Convert position to key index
                             let player_key_idx = round.players[i_player as usize];
                             if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                                priv_msg.share = Scalar::from_rand(&mut rng);
+                                priv_msg.share = Scalar::random(&mut rng);
                             }
                         }
                     }
@@ -1978,7 +1978,7 @@ mod test_plan {
                                     .get_value_mut(&player_pk)
                                     .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
                                     AckOrReveal::Reveal(DealerPrivMsg {
-                                        share: Scalar::from_rand(&mut rng),
+                                        share: Scalar::random(&mut rng),
                                     });
                             }
                         }

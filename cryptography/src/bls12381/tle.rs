@@ -353,6 +353,7 @@ mod tests {
         ops::{keypair, sign_message},
         variant::{MinPk, MinSig},
     };
+    use commonware_math::algebra::Random as _;
     use rand::thread_rng;
 
     #[test]
@@ -609,7 +610,7 @@ mod tests {
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
-        modified_u *= &Scalar::from_rand(&mut rng);
+        modified_u *= &Scalar::random(&mut rng);
         ciphertext.u = modified_u;
 
         // Try to decrypt - should fail

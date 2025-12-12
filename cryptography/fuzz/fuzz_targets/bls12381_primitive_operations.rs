@@ -8,7 +8,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, HashToGroup, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
     poly::Poly,
 };
 use libfuzzer_sys::fuzz_target;
@@ -480,10 +480,11 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::ScalarInverse { scalar } => {
-            if let Some(inv) = scalar.inverse() {
-                let mut check = scalar.clone();
-                check *= &inv;
-                assert_eq!(check, Scalar::one());
+            let inv = scalar.inv();
+            if scalar == Scalar::zero() {
+                assert_eq!(inv, Scalar::zero());
+            } else {
+                assert_eq!(scalar * &inv, Scalar::one());
             }
         }
 

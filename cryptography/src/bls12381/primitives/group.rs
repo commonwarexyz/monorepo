@@ -229,14 +229,6 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Generates a random scalar using the provided RNG.
-    pub fn from_rand<R: CryptoRngCore>(rng: &mut R) -> Self {
-        // Generate a random 64 byte buffer
-        let mut ikm = [0u8; 64];
-        rng.fill_bytes(&mut ikm);
-        Self::from_64_bytes(ikm)
-    }
-
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: DST, msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
@@ -290,24 +282,6 @@ impl Scalar {
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
         unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
         Self(ret)
-    }
-
-    /// Computes the inverse of the scalar.
-    pub fn inverse(&self) -> Option<Self> {
-        if *self == Self::zero() {
-            return None;
-        }
-        let mut ret = blst_fr::default();
-        // SAFETY: Input is non-zero (checked above); blst_fr_inverse is defined for non-zero.
-        unsafe { blst_fr_inverse(&mut ret, &self.0) };
-        Some(Self(ret))
-    }
-
-    /// Subtracts the provided scalar from self in-place.
-    pub fn sub(&mut self, rhs: &Self) {
-        let ptr = &raw mut self.0;
-        // SAFETY: blst_fr_sub supports in-place (ret==a). Raw pointer avoids aliased refs.
-        unsafe { blst_fr_sub(ptr, ptr, &rhs.0) }
     }
 
     /// Encodes the scalar into a slice.
@@ -435,7 +409,9 @@ impl<'a> Add<&'a Self> for Scalar {
 
 impl<'a> SubAssign<&'a Self> for Scalar {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        self.sub(rhs);
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_fr_sub supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe { blst_fr_sub(ptr, ptr, &rhs.0) }
     }
 }
 
@@ -496,13 +472,22 @@ impl Ring for Scalar {
 
 impl Field for Scalar {
     fn inv(&self) -> Self {
-        self.inverse().unwrap_or(<Self as Additive>::zero())
+        if *self == Self::zero() {
+            return Self::zero();
+        }
+        let mut ret = blst_fr::default();
+        // SAFETY: Input is non-zero (checked above); blst_fr_inverse is defined for non-zero.
+        unsafe { blst_fr_inverse(&mut ret, &self.0) };
+        Self(ret)
     }
 }
 
 impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        Self::from_rand(&mut rng)
+        // Generate a random 64 byte buffer
+        let mut ikm = [0u8; 64];
+        rng.fill_bytes(&mut ikm);
+        Self::from_64_bytes(ikm)
     }
 }
 
@@ -1191,7 +1176,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::from_rand(&mut thread_rng());
+        let s = Scalar::random(&mut thread_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1206,7 +1191,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::from_rand(&mut thread_rng());
+        let original = Scalar::random(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
@@ -1215,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::from_rand(&mut thread_rng());
+        let original = G1::generator() * &Scalar::random(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -1224,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::from_rand(&mut thread_rng());
+        let original = G2::generator() * &Scalar::random(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -1253,9 +1238,9 @@ mod tests {
 
         // Case 1: Random points and scalars
         let points_g1: Vec<G1> = (0..n)
-            .map(|_| G1::generator() * &Scalar::from_rand(&mut rng))
+            .map(|_| G1::generator() * &Scalar::random(&mut rng))
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars, 1);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -1330,9 +1315,9 @@ mod tests {
 
         // Case 8: Random points and scalars (big)
         let points_g1: Vec<G1> = (0..50_000)
-            .map(|_| G1::generator() * &Scalar::from_rand(&mut rng))
+            .map(|_| G1::generator() * &Scalar::random(&mut rng))
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars, 1);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -1345,9 +1330,9 @@ mod tests {
 
         // Case 1: Random points and scalars
         let points_g2: Vec<G2> = (0..n)
-            .map(|_| G2::generator() * &Scalar::from_rand(&mut rng))
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars, 1);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1422,9 +1407,9 @@ mod tests {
 
         // Case 8: Random points and scalars (big)
         let points_g2: Vec<G2> = (0..50_000)
-            .map(|_| G2::generator() * &Scalar::from_rand(&mut rng))
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars, 1);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1440,7 +1425,7 @@ mod tests {
         let mut g2_set = BTreeSet::new();
         let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
-            let scalar = Scalar::from_rand(&mut rng);
+            let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
             let g2 = G2::generator() * &scalar;
             let share = Share {

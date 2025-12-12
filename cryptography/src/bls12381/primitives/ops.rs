@@ -16,7 +16,7 @@ use crate::bls12381::primitives::{sharing::Sharing, variant::PartialSignature};
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random as _};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -44,7 +44,7 @@ pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: CryptoRngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
-    let private = group::Private::from_rand(rng);
+    let private = group::Private::random(rng);
     let public = compute_public::<V>(&private);
     (private, public)
 }
@@ -622,16 +622,12 @@ mod tests {
     use super::*;
     use crate::bls12381::{
         dkg,
-        primitives::{
-            sharing::Mode,
-            variant::{MinPk, MinSig},
-        },
+        primitives::variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
-    use commonware_math::algebra::{Ring, Space};
+    use commonware_math::algebra::{Field as _, Ring, Space};
     use commonware_utils::{from_hex_formatted, quorum, NZU32};
-    use core::num::NonZeroU32;
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
 
@@ -1449,7 +1445,7 @@ mod tests {
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::from_rand(&mut rand::thread_rng());
+        share.private = Private::random(&mut rand::thread_rng());
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1508,7 +1504,7 @@ mod tests {
 
         // Corrupt the second share's private key
         let corrupted_index = 1;
-        shares[corrupted_index].private = Private::from_rand(&mut rng);
+        shares[corrupted_index].private = Private::random(&mut rng);
 
         // Generate partial signatures
         let partials: Vec<_> = shares
@@ -1548,7 +1544,7 @@ mod tests {
         // Corrupt shares at indices 1 and 3
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            shares[idx].private = Private::from_rand(&mut rng);
+            shares[idx].private = Private::random(&mut rng);
         }
 
         // Generate partial signatures
@@ -1643,7 +1639,7 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
-        shares[0].private = Private::from_rand(&mut rng);
+        shares[0].private = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -1671,7 +1667,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        shares[corrupted_index as usize].private = Private::from_rand(&mut rng);
+        shares[corrupted_index as usize].private = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -2211,8 +2207,9 @@ mod tests {
                 den *= &diff;
             }
 
-            // The result is num / den
-            num *= &den.inverse().expect("should not have duplicate indices");
+            // The result is num / den.
+            // If den is 0 (which we don't expect to happen), this returns 0.
+            num *= &den.inv();
             num
         }
 

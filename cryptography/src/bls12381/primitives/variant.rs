@@ -17,7 +17,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_math::algebra::{Additive, HashToGroup, Space};
+use commonware_math::algebra::{Additive, HashToGroup, Random as _, Space};
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -160,7 +160,7 @@ impl Variant for MinPk {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
+                let scalar = Scalar::random(&mut *rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -311,7 +311,7 @@ impl Variant for MinSig {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
+                let scalar = Scalar::random(&mut *rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }

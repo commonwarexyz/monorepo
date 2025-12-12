@@ -80,7 +80,7 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
+    let bls_privates: Vec<_> = (0..n).map(|_| group::Private::random(&mut *rng)).collect();
     let bls_public: Vec<_> = bls_privates
         .iter()
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
