@@ -417,8 +417,7 @@ mod tests {
                     .map(|(pk, _, _)| pk.clone())
                     .collect::<Vec<_>>();
 
-                let mut registrations =
-                    register_participants(&mut oracle, &pks).await;
+                let mut registrations = register_participants(&mut oracle, &pks).await;
                 let link = commonware_p2p::simulated::Link {
                     latency: Duration::from_millis(10),
                     jitter: Duration::from_millis(1),
@@ -817,8 +816,7 @@ mod tests {
             network.start();
 
             // Register all participants
-            let mut registrations =
-                register_participants(&mut oracle, &participants).await;
+            let mut registrations = register_participants(&mut oracle, &participants).await;
             let link = commonware_p2p::simulated::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
