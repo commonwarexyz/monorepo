@@ -87,8 +87,8 @@ fix-features:
 
 # Test codec conformance
 test-conformance:
-    just test --features arbitrary --profile codec_conformance
+    just test --features arbitrary --profile conformance
 
 # Regenerate codec conformance fixtures
 regenerate-conformance:
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile codec_conformance
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance

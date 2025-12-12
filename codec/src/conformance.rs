@@ -162,7 +162,7 @@ macro_rules! conformance_tests {
     // Helper to emit a single test
     (@emit [$($counter:tt)*] $type:ty, $n_cases:expr) => {
         $crate::paste::paste! {
-            #[commonware_macros::test_group("codec_conformance")]
+            #[commonware_macros::test_group("conformance")]
             #[test]
             fn [<test_conformance_ $($counter)* x>]() {
                 $crate::conformance::run_conformance_test::<$type>(
