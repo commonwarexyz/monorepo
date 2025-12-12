@@ -2,7 +2,7 @@
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{deal, Output},
+        dkg::{deal, Output, ShareStatus},
         primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
@@ -44,7 +44,7 @@ pub struct ParticipantConfig {
     pub signing_key: PrivateKey,
     /// The validator's share, if active in the first epoch.
     #[serde(with = "serde_hex")]
-    pub share: Option<Share>,
+    pub share: Option<ShareStatus>,
 }
 
 impl ParticipantConfig {
@@ -244,7 +244,7 @@ fn generate_configs(
             bootstrappers: bootstrappers.clone(),
             output: output.map(|o| hex(o.encode().as_ref())),
             signing_key: signer.clone(),
-            share: share.clone(),
+            share: share.clone().map(ShareStatus::Recovered),
         };
         let config_file =
             File::create(&config_path).expect("failed to create participant config file");

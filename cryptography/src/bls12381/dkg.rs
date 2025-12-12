@@ -462,10 +462,9 @@ where
 /// Indicates whether the player safely recovered their share in the DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShareStatus {
-    /// The player recovered their share with fewer than `max_faults` reveals.
-    /// This means the player's share remains private.
+    /// The player recovered their share with at most `max_faults` reveals.
     Recovered(Share),
-    /// The player had `max_faults` or more reveals, meaning their share
+    /// The player had more than `max_faults` reveals, meaning their share
     /// may be known by an adversary.
     Revealed(Share),
 }
@@ -478,12 +477,12 @@ impl ShareStatus {
         }
     }
 
-    /// Returns true if the share was recovered (fewer than `max_faults` reveals).
+    /// Returns true if the share was recovered (at most `max_faults` reveals).
     pub const fn is_recovered(&self) -> bool {
         matches!(self, Self::Recovered(_))
     }
 
-    /// Returns true if the share was revealed (`max_faults` or more reveals).
+    /// Returns true if the share was revealed (more than `max_faults` reveals).
     pub const fn is_revealed(&self) -> bool {
         matches!(self, Self::Revealed(_))
     }
@@ -1585,7 +1584,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             index: self.index,
             private,
         };
-        let status = if reveal_count < max_faults {
+        let status = if reveal_count <= max_faults {
             ShareStatus::Recovered(share)
         } else {
             ShareStatus::Revealed(share)

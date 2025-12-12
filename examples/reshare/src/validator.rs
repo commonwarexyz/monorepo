@@ -161,8 +161,8 @@ mod test {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
-            dkg::{deal, Output},
-            primitives::{group::Share, variant::MinSig},
+            dkg::{deal, Output, ShareStatus},
+            primitives::variant::MinSig,
         },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
@@ -261,7 +261,7 @@ mod test {
     struct Team {
         peer_config: PeerConfig,
         output: Option<Output<MinSig, PublicKey>>,
-        participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
+        participants: BTreeMap<PublicKey, (PrivateKey, Option<ShareStatus>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
     }
@@ -271,7 +271,7 @@ mod test {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
-                    (sk.public_key(), (sk, None::<Share>))
+                    (sk.public_key(), (sk, None::<ShareStatus>))
                 })
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
@@ -282,7 +282,7 @@ mod test {
                 deal(&mut rng, peer_config.dealers(0)).expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
-                    *maybe_share = Some(share);
+                    *maybe_share = Some(ShareStatus::Recovered(share));
                 };
             }
             Self {
@@ -298,7 +298,7 @@ mod test {
             let participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
-                    (sk.public_key(), (sk, None::<Share>))
+                    (sk.public_key(), (sk, None::<ShareStatus>))
                 })
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
@@ -592,10 +592,10 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Check if a delayed participant got a private share after starting
+                                // Check if a delayed participant got a recovered after starting
                                 if delayed_pks.contains(&update.pk) {
                                     if let Some(ref status) = share {
-                                        let is_recovered= status.is_recovered();
+                                        let is_recovered = status.is_recovered();
                                         if is_recovered && !delayed_recovered {
                                             delayed_recovered = true;
                                         }
@@ -665,10 +665,10 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
-                                // Verify delayed participant got a private share after catching up
+                                // Verify delayed participant got a recovered after catching up
                                 if matches!(self.crash, Some(Crash::Delay { .. })) && !delayed_recovered {
                                     return Err(anyhow!(
-                                        "delayed participant never received a private share after starting"
+                                        "delayed participant never received a recovered after starting"
                                     ));
                                 }
                                 return Ok(PlanResult {
@@ -1211,7 +1211,27 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn reshare_with_delayed_start() {
+    fn dkg_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([0, 1]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay() {
         Plan {
             seed: 0,
             total: 5,
@@ -1222,6 +1242,26 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(5),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay_subset() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![4, 5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(8),
             crash: Some(Crash::Delay { count: 1, after: 2 }),
             failures: HashSet::from([3]),
         }

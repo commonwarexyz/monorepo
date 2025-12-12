@@ -16,8 +16,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::Output,
-        primitives::{group, variant::Variant},
+        dkg::{Output, ShareStatus},
+        primitives::variant::Variant,
     },
     Hasher, Signer,
 };
@@ -61,7 +61,7 @@ where
     pub blocker: B,
     pub namespace: Vec<u8>,
     pub output: Option<Output<V, C::PublicKey>>,
-    pub share: Option<group::Share>,
+    pub share: Option<ShareStatus>,
     pub peer_config: PeerConfig<C::PublicKey>,
     pub orchestrator_rate_limit: governor::Quota,
     pub dkg_rate_limit: governor::Quota,

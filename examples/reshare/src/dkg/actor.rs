@@ -18,7 +18,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck, ShareStatus},
-        primitives::{group::Share, variant::Variant},
+        primitives::variant::Variant,
     },
     transcript::Summary,
     Digest as _, Hasher, PublicKey, Signer,
@@ -152,7 +152,7 @@ where
     pub fn start(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
-        share: Option<Share>,
+        share: Option<ShareStatus>,
         orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
@@ -172,7 +172,7 @@ where
     async fn run(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
-        share: Option<Share>,
+        share: Option<ShareStatus>,
         mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
@@ -195,7 +195,7 @@ where
                 round: 0,
                 rng_seed: Summary::random(&mut self.context),
                 output,
-                share: share.map(ShareStatus::Recovered),
+                share,
             };
             storage.append_epoch(initial_state).await;
         }
