@@ -1,6 +1,6 @@
-//! Recover threshold signatures over an externally synchronized sequencer of items.
+//! Recover quorum certificates over an externally synchronized sequencer of items.
 //!
-//! This module allows a dynamic set of participants to collectively produce threshold signatures
+//! This module allows a dynamic set of participants to collectively produce quorum certificates
 //! for any ordered sequence of items.
 //!
 //! The primary use case for this primitive is to allow blockchain validators to agree on a series
@@ -8,16 +8,30 @@
 //! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
 //! over the output of consensus to support state sync and client balance proofs.
 //!
-//! _For applications that want to collect threshold signatures over concurrent, sequencer-driven broadcast,
-//! _check out [crate::ordered_broadcast]._
+//! _For applications that want to collect quorum certificates over concurrent, sequencer-driven broadcast,
+//! check out [crate::ordered_broadcast]._
+//!
+//! # Pluggable Cryptography
+//!
+//! The aggregation module is generic over the signing scheme, allowing users to choose the
+//! cryptographic scheme best suited for their requirements:
+//!
+//! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
+//! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
+//!   verification. Produces compact certificates while preserving signer attribution.
+//!
+//! - [`bls12381_threshold`][scheme::bls12381_threshold]: Non-attributable threshold signatures.
+//!   Produces succinct constant-size certificates. Requires trusted setup (DKG).
 //!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
 //! - Requesting externally synchronized [commonware_cryptography::Digest]s
-//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
-//! - Multicasting partial signatures to other validators
-//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Signing said digests with the configured scheme's signature type
+//! - Multicasting signatures/shares to other validators
+//! - Assembling certificates from a quorum of signatures
 //! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
@@ -28,22 +42,22 @@
 //!
 //! # Design Decisions
 //!
-//! ## Missing Signature Resolution
+//! ## Missing Certificate Resolution
 //!
-//! The engine does not try to "fill gaps" when threshold signatures are missing. When validators
+//! The engine does not try to "fill gaps" when certificates are missing. When validators
 //! fall behind or miss signatures for certain indices, the tip may skip ahead and those
-//! signatures may never be emitted by the local engine. Before skipping ahead, we ensure that
-//! at-least-one honest validator has the threshold signature for any skipped index.
+//! certificates may never be emitted by the local engine. Before skipping ahead, we ensure that
+//! at-least-one honest validator has the certificate for any skipped index.
 //!
 //! Like other consensus primitives, aggregation's design prioritizes doing useful work at tip and
 //! minimal complexity over providing a comprehensive recovery mechanism. As a result, applications that need
 //! to build a complete history of all formed [types::Certificate]s must implement their own mechanism to synchronize
 //! historical results.
 //!
-//! ## Recovering Threshold Signatures
+//! ## Recovering Certificates
 //!
-//! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [types::TipAck]s
-//! with partial signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
+//! In aggregation, participants never gossip recovered certificates. Rather, they gossip [types::TipAck]s
+//! with signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
 //! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
 //! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest

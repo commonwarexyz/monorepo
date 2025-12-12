@@ -7,26 +7,40 @@
 //! can handle reconfiguration of these sets across different epochs.
 //!
 //! Sequencers broadcast data. The smallest unit of data is a `chunk`. Sequencers broadcast `node`s
-//! that contain a chunk and a threshold signature over the previous chunk, forming a linked chain
+//! that contain a chunk and a certificate over the previous chunk, forming a linked chain
 //! of nodes from each sequencer.
 //!
-//! Validators verify and sign chunks using partial signatures. These can be combined to recover a
-//! threshold signature, ensuring a quorum verifies each chunk. The threshold signature allows
-//! external parties to confirm that the chunk was reliably broadcast.
+//! Validators verify and sign chunks. These signatures can be combined to form a quorum
+//! certificate, ensuring a quorum verifies each chunk. The certificate allows external parties
+//! to confirm that the chunk was reliably broadcast.
 //!
 //! Network participants persist any new nodes to a journal. This enables recovery from crashes and
 //! ensures that sequencers do not broadcast conflicting chunks and that validators do not sign
 //! them. "Conflicting" chunks are chunks from the same sequencer at the same height with different
 //! payloads.
 //!
+//! # Pluggable Cryptography
+//!
+//! The ordered broadcast module is generic over the signing scheme, allowing users to choose the
+//! cryptographic scheme best suited for their requirements:
+//!
+//! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
+//! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
+//!   verification. Produces compact certificates while preserving signer attribution.
+//!
+//! - [`bls12381_threshold`][scheme::bls12381_threshold]: Non-attributable threshold signatures.
+//!   Produces succinct constant-size certificates. Requires trusted setup (DKG).
+//!
 //! # Design
 //!
 //! The core of the module is the [Engine]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
-//! - Tracking the latest chunk in each sequencer’s chain
-//! - Recovering threshold signatures from partial signatures for each chunk
-//! - Notifying other actors of new chunks and threshold signatures
+//! - Tracking the latest chunk in each sequencer's chain
+//! - Assembling certificates from a quorum of signatures
+//! - Notifying other actors of new chunks and certificates
 //!
 //! # Acknowledgements
 //!
