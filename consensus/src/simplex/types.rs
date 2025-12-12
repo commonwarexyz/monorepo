@@ -3098,7 +3098,6 @@ mod tests {
         type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
 
         commonware_codec::conformance_tests! {
-            Signature<Scheme>,
             Vote<Scheme, Sha256Digest>,
             Certificate<Scheme, Sha256Digest>,
             Artifact<Scheme, Sha256Digest>,

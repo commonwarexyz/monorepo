@@ -291,3 +291,31 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(dead_code)]
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::super::*;
+
+        /// Test context type for generic scheme tests.
+        #[derive(Clone, Debug)]
+        pub struct TestContext<'a> {
+            pub message: &'a [u8],
+        }
+
+        impl<'a> Context for TestContext<'a> {
+            fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+                (namespace.to_vec(), self.message.to_vec())
+            }
+        }
+
+        // Use the macro to generate the test scheme
+        impl_ed25519_scheme!(TestContext<'a>);
+
+        commonware_codec::conformance_tests! {
+            Signature<Scheme>,
+        }
+    }
+}

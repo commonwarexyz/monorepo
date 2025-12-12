@@ -1070,4 +1070,13 @@ mod tests {
             &certificate,
         ));
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+
+        commonware_codec::conformance_tests! {
+            Certificate,
+        }
+    }
 }
