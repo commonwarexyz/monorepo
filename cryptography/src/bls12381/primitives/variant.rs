@@ -406,15 +406,11 @@ impl<V: Variant> EncodeSize for PartialSignature<V> {
 #[cfg(feature = "arbitrary")]
 impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        use commonware_math::algebra::HashToGroup;
-        use rand::SeedableRng;
+        use commonware_math::algebra::CryptoGroup;
 
-        let index: u32 = u.int_in_range(0..=99)?;
         Ok(Self {
-            index,
-            value: V::Signature::rand_to_group(&mut rand::rngs::StdRng::seed_from_u64(
-                u.arbitrary()?,
-            )),
+            index: u.arbitrary()?,
+            value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
         })
     }
 }
