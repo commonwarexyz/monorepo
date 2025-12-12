@@ -16,6 +16,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
 * [collector](./collector/README.md): Collect responses to committable requests.
+* [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
@@ -24,7 +25,6 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
-* [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 
 ## Examples
 

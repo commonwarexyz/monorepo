@@ -35,7 +35,7 @@ use rand_chacha::ChaCha8Rng;
 use std::{fmt::Debug, marker::PhantomData, path::Path};
 
 /// Default number of test cases when not explicitly specified.
-pub const DEFAULT_N_CASES: usize = 65536;
+pub const DEFAULT_CASES: usize = 65536;
 
 /// Size of the random buffer used for generating arbitrary values.
 ///
@@ -190,13 +190,13 @@ macro_rules! conformance_tests {
 
     // Case: Type, rest...
     (@internal [$($counter:tt)*] $type:ty, $($rest:tt)*) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_N_CASES);
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_CASES);
         $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
     };
 
     // Case: Type (no trailing comma, last item with default)
     (@internal [$($counter:tt)*] $type:ty) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_N_CASES);
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::conformance::DEFAULT_CASES);
     };
 
     // Entrypoint
