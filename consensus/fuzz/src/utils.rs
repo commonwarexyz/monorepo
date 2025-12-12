@@ -1,7 +1,11 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use std::collections::HashMap;
+use governor::Quota;
+use std::{collections::HashMap, num::NonZeroU32};
+
+/// Default rate limit set high enough to not interfere with normal operation
+const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 #[derive(Clone)]
 pub enum Action {
@@ -107,9 +111,9 @@ pub async fn register<P: PublicKey>(
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
         let mut control = oracle.control(validator.clone());
-        let pending = control.register(0).await.unwrap();
-        let recovered = control.register(1).await.unwrap();
-        let resolver = control.register(2).await.unwrap();
+        let pending = control.register(0, TEST_QUOTA).await.unwrap();
+        let recovered = control.register(1, TEST_QUOTA).await.unwrap();
+        let resolver = control.register(2, TEST_QUOTA).await.unwrap();
         registrations.insert(validator.clone(), (pending, recovered, resolver));
     }
     registrations

@@ -72,10 +72,12 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use std::{sync::Arc, time::Duration};
+    use governor::Quota;
+    use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     fn build_notarization<S: Scheme>(
         schemes: &[S],
@@ -200,10 +202,16 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Run the actor
             actor.start(batcher, resolver, vote_sender, certificate_sender);
@@ -425,10 +433,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             actor.start(
@@ -692,10 +706,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -856,9 +876,16 @@ mod tests {
 
             // Register network channels
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the voter
             voter.start(
@@ -1034,8 +1061,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _) = oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             voter.start(
                 batcher_mailbox,
@@ -1200,8 +1235,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _) = oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             voter.start(
                 batcher_mailbox,
@@ -1380,9 +1423,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
-            let (vote_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(leader.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(leader.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(leader.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the voter
             voter.start(
@@ -1573,10 +1623,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             let handle = voter.start(
@@ -1658,10 +1714,16 @@ mod tests {
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(2).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(3).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -1786,10 +1848,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -1937,10 +2005,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(

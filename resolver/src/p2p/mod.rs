@@ -87,10 +87,11 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use std::{collections::HashMap, time::Duration};
+    use governor::Quota;
+    use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
-    const RATE_LIMIT: u32 = 10;
+    const RATE_LIMIT: NonZeroU32 = NZU32!(10);
     const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -134,7 +135,11 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register(0, Quota::per_second(RATE_LIMIT))
+                .await
+                .unwrap();
             connections.push((sender, receiver));
         }
 
@@ -178,7 +183,7 @@ mod tests {
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
                     me: Some(public_key),
-                    rate_limit: governor::Quota::per_second(NZU32!(RATE_LIMIT)),
+                    rate_limit: Quota::per_second(RATE_LIMIT),
                     initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                 },

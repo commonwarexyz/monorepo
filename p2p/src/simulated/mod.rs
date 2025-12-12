@@ -62,6 +62,8 @@
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_utils::NZU32;
+//! use governor::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -79,6 +81,9 @@
 //!     tracked_peer_sets: Some(3),
 //! };
 //!
+//! // Rate limit quota (1000 messages per second per peer)
+//! let quota = Quota::per_second(NZU32!(1000));
+//!
 //! // Start context
 //! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
@@ -92,8 +97,8 @@
 //!     let mut manager = oracle.manager();
 //!     manager.update(0, peers.clone().try_into().unwrap()).await;
 //!
-//!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0).await.unwrap();
-//!     let (sender2, receiver2) = oracle.control(peers[1].clone()).register(0).await.unwrap();
+//!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0, quota).await.unwrap();
+//!     let (sender2, receiver2) = oracle.control(peers[1].clone()).register(0, quota).await.unwrap();
 //!
 //!     // Set bandwidth limits
 //!     // peer[0]: 10KB/s egress, unlimited ingress
@@ -190,14 +195,19 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::ordered::Map;
+    use commonware_utils::{ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
+    use governor::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         net::SocketAddr,
+        num::NonZeroU32,
         time::Duration,
     };
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -220,7 +230,11 @@ mod tests {
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = PrivateKey::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, mut receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 context
@@ -337,7 +351,11 @@ mod tests {
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = PrivateKey::from_seed(i as u64).public_key();
-                let (sender, _) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, _) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 agents.insert(pk, sender);
             }
 
@@ -377,7 +395,11 @@ mod tests {
 
             // Register agents
             let pk = PrivateKey::from_seed(0).public_key();
-            oracle.control(pk.clone()).register(0).await.unwrap();
+            oracle
+                .control(pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Attempt to link self
             let result = oracle
@@ -443,10 +465,16 @@ mod tests {
                 .unwrap();
 
             // Register channels
-            let (mut my_sender, mut my_receiver) =
-                oracle.control(my_pk.clone()).register(0).await.unwrap();
-            let (mut other_sender, mut other_receiver) =
-                oracle.control(other_pk.clone()).register(0).await.unwrap();
+            let (mut my_sender, mut my_receiver) = oracle
+                .control(my_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut other_sender, mut other_receiver) = oracle
+                .control(other_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Send messages
             let msg = Bytes::from("hello");
@@ -466,8 +494,11 @@ mod tests {
             assert_eq!(message, msg);
 
             // Update channel
-            let (mut my_sender_2, mut my_receiver_2) =
-                oracle.control(my_pk.clone()).register(0).await.unwrap();
+            let (mut my_sender_2, mut my_receiver_2) = oracle
+                .control(my_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Send message
             let msg = Bytes::from("hello again");
@@ -522,8 +553,16 @@ mod tests {
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
-            oracle.control(pk1.clone()).register(0).await.unwrap();
-            oracle.control(pk2.clone()).register(0).await.unwrap();
+            oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Attempt to link with invalid success rate
             let result = oracle
@@ -583,8 +622,16 @@ mod tests {
                 .unwrap();
 
             // Register channels
-            let (mut sender1, _receiver1) = oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (_, mut receiver2) = oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender1, _receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Send message
             let msg1 = Bytes::from("link-before-register-1");
@@ -618,14 +665,28 @@ mod tests {
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender2, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register unused channels
-            let _ = oracle.control(pk1.clone()).register(1).await.unwrap();
-            let _ = oracle.control(pk2.clone()).register(2).await.unwrap();
+            let _ = oracle
+                .control(pk1.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let _ = oracle
+                .control(pk2.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Link agents
             oracle
@@ -695,8 +756,16 @@ mod tests {
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
-            let (mut sender1, _) = oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (_, mut receiver2) = oracle.control(pk2.clone()).register(1).await.unwrap();
+            let (mut sender1, _) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Link agents
             oracle
@@ -749,10 +818,16 @@ mod tests {
             // Define agents
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender2, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Link agents
             oracle
@@ -822,10 +897,16 @@ mod tests {
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender2, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Send messages
             let msg1 = Bytes::from("attempt 1: hello from pk1");
@@ -940,8 +1021,16 @@ mod tests {
         // Create two agents
         let pk1 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
         let pk2 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
-        let (mut sender, _) = oracle.control(pk1.clone()).register(0).await.unwrap();
-        let (_, mut receiver) = oracle.control(pk2.clone()).register(0).await.unwrap();
+        let (mut sender, _) = oracle
+            .control(pk1.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (_, mut receiver) = oracle
+            .control(pk2.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
 
         // Set bandwidth limits
         oracle
@@ -1112,7 +1201,11 @@ mod tests {
             // Create the main peer (index 0) and 100 other peers
             for i in 0..=NUM_PEERS {
                 let pk = PrivateKey::from_seed(i as u64).public_key();
-                let (sender, receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 peers.push(pk);
                 senders.push(sender);
                 receivers.push(receiver);
@@ -1253,8 +1346,16 @@ mod tests {
             // Register agents
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let (mut sender, _) = oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (_, mut receiver) = oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender, _) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Link agents with high jitter to create variable delays
             oracle
@@ -1311,8 +1412,8 @@ mod tests {
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let (mut sender, _) = oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (_, mut receiver) = oracle.control(pk2.clone()).register(0).await.unwrap();
+            let (mut sender, _) = oracle.control(pk1.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver) = oracle.control(pk2.clone()).register(0, TEST_QUOTA).await.unwrap();
 
             const BPS: usize = 1_000;
             oracle
@@ -1422,7 +1523,11 @@ mod tests {
             for i in 0..10 {
                 let sender = ed25519::PrivateKey::from_seed(i).public_key();
                 senders.push(sender.clone());
-                let (tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
+                let (tx, _) = oracle
+                    .control(sender.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 sender_txs.push(tx);
 
                 // Each sender has 10KB/s egress
@@ -1433,7 +1538,11 @@ mod tests {
             }
 
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
-            let (_, mut receiver_rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+            let (_, mut receiver_rx) = oracle
+                .control(receiver.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Receiver has 100KB/s ingress
             oracle
@@ -1502,7 +1611,11 @@ mod tests {
 
             // Create fast sender
             let sender = ed25519::PrivateKey::from_seed(0).public_key();
-            let (sender_tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
+            let (sender_tx, _) = oracle
+                .control(sender.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Sender has 100KB/s egress
             oracle
@@ -1516,7 +1629,11 @@ mod tests {
             for i in 0..10 {
                 let receiver = ed25519::PrivateKey::from_seed(i + 1).public_key();
                 receivers.push(receiver.clone());
-                let (_, rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+                let (_, rx) = oracle
+                    .control(receiver.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 receiver_rxs.push(rx);
 
                 // Each receiver has 10KB/s ingress
@@ -1591,7 +1708,11 @@ mod tests {
             for i in 0..10 {
                 let sender = ed25519::PrivateKey::from_seed(i).public_key();
                 senders.push(sender.clone());
-                let (tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
+                let (tx, _) = oracle
+                    .control(sender.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 sender_txs.push(tx);
 
                 // Each sender has 1KB/s egress (slow)
@@ -1603,7 +1724,11 @@ mod tests {
 
             // Create fast receiver
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
-            let (_, mut receiver_rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+            let (_, mut receiver_rx) = oracle
+                .control(receiver.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Receiver has 10KB/s ingress (can handle all 10 senders at full speed)
             oracle
@@ -1682,7 +1807,11 @@ mod tests {
             for i in 0..3 {
                 let sender = ed25519::PrivateKey::from_seed(i).public_key();
                 senders.push(sender.clone());
-                let (tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
+                let (tx, _) = oracle
+                    .control(sender.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 sender_txs.push(tx);
 
                 // Each sender has 30KB/s egress
@@ -1694,7 +1823,11 @@ mod tests {
 
             // Create receiver with 30KB/s ingress
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
-            let (_, mut receiver_rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+            let (_, mut receiver_rx) = oracle
+                .control(receiver.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
@@ -1823,7 +1956,11 @@ mod tests {
             for i in 0..3 {
                 let sender = ed25519::PrivateKey::from_seed(i).public_key();
                 senders.push(sender.clone());
-                let (tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
+                let (tx, _) = oracle
+                    .control(sender.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 sender_txs.push(tx);
 
                 // Each sender has unlimited egress
@@ -1835,7 +1972,11 @@ mod tests {
 
             // Create receiver with 30KB/s ingress
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
-            let (_, mut receiver_rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+            let (_, mut receiver_rx) = oracle
+                .control(receiver.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
@@ -1917,8 +2058,16 @@ mod tests {
             let sender = PrivateKey::from_seed(1).public_key();
             let receiver = PrivateKey::from_seed(2).public_key();
 
-            let (sender_tx, _) = oracle.control(sender.clone()).register(0).await.unwrap();
-            let (_, mut receiver_rx) = oracle.control(receiver.clone()).register(0).await.unwrap();
+            let (sender_tx, _) = oracle
+                .control(sender.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver_rx) = oracle
+                .control(receiver.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Set bandwidth: 1000 B/s (1 byte per millisecond)
             oracle
@@ -2015,10 +2164,14 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (mut sender_tx, _) = oracle.control(pk_sender.clone()).register(0).await.unwrap();
+            let (mut sender_tx, _) = oracle
+                .control(pk_sender.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             let (_, mut receiver_rx) = oracle
                 .control(pk_receiver.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             oracle
@@ -2106,10 +2259,14 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (mut sender_tx, _) = oracle.control(pk_sender.clone()).register(0).await.unwrap();
+            let (mut sender_tx, _) = oracle
+                .control(pk_sender.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             let (_, mut receiver_rx) = oracle
                 .control(pk_receiver.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             oracle
@@ -2182,10 +2339,14 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (mut sender_tx, _) = oracle.control(pk_sender.clone()).register(0).await.unwrap();
+            let (mut sender_tx, _) = oracle
+                .control(pk_sender.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             let (_, mut receiver_rx) = oracle
                 .control(pk_receiver.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             oracle
@@ -2346,10 +2507,26 @@ mod tests {
                 .await;
 
             // Register channels for all peers
-            let (mut sender1, _receiver1) = oracle.control(pk1.clone()).register(0).await.unwrap();
-            let (mut sender2, _receiver2) = oracle.control(pk2.clone()).register(0).await.unwrap();
-            let (mut sender3, _receiver3) = oracle.control(pk3.clone()).register(0).await.unwrap();
-            let (_mut_sender4, _receiver4) = oracle.control(pk4.clone()).register(0).await.unwrap();
+            let (mut sender1, _receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender2, _receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender3, _receiver3) = oracle
+                .control(pk3.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_mut_sender4, _receiver4) = oracle
+                .control(pk4.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Create bidirectional links between all peers
             for peer_a in &[pk1.clone(), pk2.clone(), pk3.clone(), pk4.clone()] {
@@ -2470,10 +2647,14 @@ mod tests {
             assert_eq!(id, 1);
 
             // Register channels
-            let (mut sender, _) = oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (mut sender, _) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -2714,7 +2895,11 @@ mod tests {
             let other_pk = PrivateKey::from_seed(1).public_key();
 
             // Register a channel for self (this creates the peer in the network)
-            let (_sender, _receiver) = oracle.control(self_pk.clone()).register(0).await.unwrap();
+            let (_sender, _receiver) = oracle
+                .control(self_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Subscribe to peer set updates
             let mut manager = oracle.manager();
@@ -2783,6 +2968,89 @@ mod tests {
                 all.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
+        });
+    }
+
+    #[test]
+    fn test_rate_limiting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network.start();
+
+            // Create two public keys
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register the peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register with a very restrictive quota: 1 message per second
+            let restrictive_quota = Quota::per_second(NZU32!(1));
+            let mut control1 = oracle.control(pk1.clone());
+            let (mut sender, _) = control1.register(0, restrictive_quota).await.unwrap();
+            let mut control2 = oracle.control(pk2.clone());
+            let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
+
+            // Add bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle.add_link(pk2.clone(), pk1, link).await.unwrap();
+
+            // First message should succeed immediately
+            let msg1 = Bytes::from_static(b"message1");
+            let result1 = sender
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result1.len(), 1, "first message should be sent");
+
+            // Verify first message is received
+            let (_, received1) = receiver.recv().await.unwrap();
+            assert_eq!(received1, msg1);
+
+            // Second message should be rate-limited (quota is 1/sec, no time has passed)
+            let msg2 = Bytes::from_static(b"message2");
+            let result2 = sender
+                .send(Recipients::One(pk2.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                result2.len(),
+                0,
+                "second message should be rate-limited (skipped)"
+            );
+
+            // Advance time by 1 second to allow the rate limiter to reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Third message should succeed after waiting
+            let msg3 = Bytes::from_static(b"message3");
+            let result3 = sender
+                .send(Recipients::One(pk2.clone()), msg3.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result3.len(), 1, "third message should be sent after wait");
+
+            // Verify third message is received
+            let (_, received3) = receiver.recv().await.unwrap();
+            assert_eq!(received3, msg3);
         });
     }
 }

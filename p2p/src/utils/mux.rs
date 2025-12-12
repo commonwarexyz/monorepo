@@ -461,7 +461,8 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
-    use std::time::Duration;
+    use governor::Quota;
+    use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
@@ -471,6 +472,9 @@ mod tests {
         success_rate: 1.0,
     };
     const CAPACITY: usize = 5usize;
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
@@ -498,8 +502,8 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -507,15 +511,19 @@ mod tests {
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer_with_backup_and_global_sender<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer_with_backup_and_global_sender(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -525,7 +533,11 @@ mod tests {
         GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()

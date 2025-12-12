@@ -215,6 +215,7 @@ mod tests {
         jitter: Duration::from_millis(50),
         success_rate: 0.7,
     };
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -243,7 +244,7 @@ mod tests {
 
         // Create the resolver
         let mut control = oracle.control(validator.clone());
-        let backfill = control.register(1).await.unwrap();
+        let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
@@ -270,7 +271,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2).await.unwrap();
+        let network = control.register(2, TEST_QUOTA).await.unwrap();
         broadcast_engine.start(network);
 
         // Initialize finalizations by height

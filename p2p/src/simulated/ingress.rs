@@ -6,6 +6,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use governor::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
@@ -13,6 +14,7 @@ pub enum Message<P: PublicKey> {
     Register {
         channel: Channel,
         public_key: P,
+        quota: Quota,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
@@ -236,7 +238,7 @@ impl<P: PublicKey> Oracle<P> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Manager<P: PublicKey> {
     /// The oracle to send messages to.
     oracle: Oracle<P>,
@@ -270,7 +272,7 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
 /// Because [SocketAddr]s are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all [SocketAddr]s to be valid.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.
     oracle: Oracle<P>,
@@ -308,12 +310,22 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
+    ///
+    /// # Rate Limiting
+    ///
+    /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
+    /// Recipients that exceed their rate limit will be skipped when sending.
+    pub async fn register(
+        &mut self,
+        channel: Channel,
+        quota: Quota,
+    ) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
+                quota,
                 result: tx,
             })
             .await

@@ -988,6 +988,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
+ "governor",
  "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
@@ -1005,6 +1006,8 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
+ "governor",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]

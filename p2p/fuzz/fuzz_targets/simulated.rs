@@ -8,10 +8,12 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
     collections::{hash_map, HashMap, HashSet, VecDeque},
+    num::NonZeroU32,
     time::Duration,
 };
 
@@ -20,6 +22,9 @@ const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+
+/// Default rate limit set high enough to not interfere with normal operation
+const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 /// Operations that can be performed on the simulated p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -127,6 +132,7 @@ fn fuzz(input: FuzzInput) {
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation
         // The receiver gets messages from ALL senders on that channel, not per-sender streams
+        #[allow(clippy::type_complexity)]
         let mut channels: HashMap<
             (usize, u8),
             (
@@ -150,8 +156,10 @@ fn fuzz(input: FuzzInput) {
 
                     // Only register if not already registered
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
-                        if let Ok((sender, receiver)) =
-                            oracle.control(peer_pks[idx].clone()).register(channel_id as u64).await
+                        if let Ok((sender, receiver)) = oracle
+                            .control(peer_pks[idx].clone())
+                            .register(channel_id as u64, TEST_QUOTA)
+                            .await
                         {
                             e.insert((sender, receiver));
                         }

@@ -61,8 +61,13 @@ mod tests {
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZU32;
     use futures::StreamExt;
+    use governor::Quota;
     use std::time::Duration;
+
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     const MAILBOX_SIZE: usize = 1024;
     const LINK: Link = Link {
@@ -107,8 +112,8 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register(0).await.unwrap();
-            let (sender2, receiver2) = control.register(1).await.unwrap();
+            let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 

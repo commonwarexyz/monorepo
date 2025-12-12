@@ -78,10 +78,11 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU32};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -89,6 +90,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
@@ -99,8 +101,8 @@ mod tests {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register(0).await.unwrap();
-            let (b1, b2) = control.register(1).await.unwrap();
+            let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations

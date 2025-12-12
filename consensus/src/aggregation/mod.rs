@@ -94,10 +94,11 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NonZeroDuration, NZU32};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -107,6 +108,9 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -124,7 +128,7 @@ mod tests {
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
