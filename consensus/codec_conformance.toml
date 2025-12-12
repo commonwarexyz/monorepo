@@ -54,9 +54,13 @@ hash = "9d2ee4f3c6bf86521c09f8858683de48d6310a987643ee379c143480fc7e9a34"
 n_cases = 65536
 hash = "300d04d83f33581f5bce771224f35a4f41a50887e6f83648a43013d8e8292815"
 
-["commonware_consensus::scheme::ed25519::simplex_tests::conformance::Certificate"]
+["commonware_consensus::scheme::ed25519::tests::conformance::Certificate"]
 n_cases = 65536
 hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
+
+["commonware_consensus::scheme::tests::conformance::Signature<Scheme>"]
+n_cases = 65536
+hash = "dcbe92d97768657dc0c779e2058b44669a985dd8a1dbbf94427237f0fb4b78d2"
 
 ["commonware_consensus::scheme::utils::tests::conformance::Signers"]
 n_cases = 65536
@@ -133,10 +137,6 @@ hash = "6f852b6ad6e5dd77804d80781b03c808e186e7e7c5611752f124c625c5c3ee17"
 ["commonware_consensus::simplex::types::tests::conformance::Response<Scheme, Sha256Digest>"]
 n_cases = 65536
 hash = "37c0c4f2dd328ed18a8f29fb73ca7c82c4008e49ea00243ffb3e024873a5b565"
-
-["commonware_consensus::simplex::types::tests::conformance::Signature<Scheme>"]
-n_cases = 65536
-hash = "4cc8b67162e04fbfbc90d730bbc0eed9774dfb882f2644fe49dd42df9a5305a6"
 
 ["commonware_consensus::simplex::types::tests::conformance::Vote<Scheme, Sha256Digest>"]
 n_cases = 65536
