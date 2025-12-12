@@ -549,6 +549,7 @@ mod tests {
             dkg,
             primitives::{
                 group::Element,
+                ops::partial_sign_message,
                 poly::{self, Public},
                 variant::{MinPk, MinSig, Variant},
             },
@@ -1132,5 +1133,56 @@ mod tests {
     #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn certificate_decode_rejects_length_mismatch<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 65);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let mut encoded = certificate.encode();
+        encoded.truncate(encoded.len() - 1);
+        assert!(V::Signature::decode(encoded).is_err());
+    }
+
+    #[test]
+    fn test_certificate_decode_rejects_length_mismatch_variants() {
+        certificate_decode_rejects_length_mismatch::<MinPk>();
+        certificate_decode_rejects_length_mismatch::<MinSig>();
+    }
+
+    fn sign_vote_partial_matches_share<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 66);
+        let scheme = &schemes[0];
+
+        let signature = scheme
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .unwrap();
+
+        // Verify the partial signature matches what we'd get from direct signing
+        let share = match &scheme.raw {
+            Bls12381Threshold::Signer { share, .. } => share,
+            _ => panic!("expected signer"),
+        };
+
+        let expected = partial_sign_message::<V>(share, Some(NAMESPACE), MESSAGE);
+
+        assert_eq!(signature.signer, share.index);
+        assert_eq!(signature.signature, expected.value);
+    }
+
+    #[test]
+    fn test_sign_vote_partial_matches_share_variants() {
+        sign_vote_partial_matches_share::<MinPk>();
+        sign_vote_partial_matches_share::<MinSig>();
     }
 }
