@@ -78,10 +78,11 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU32};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota as GQuota;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -90,17 +91,34 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
+    type Registrations<P> = BTreeMap<
+        P,
+        (
+            (Sender<P, Context>, Receiver<P>),
+            (Sender<P, Context>, Receiver<P>),
+        ),
+    >;
+
+    fn test_quota() -> GQuota {
+        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+    }
 
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, Context>,
         participants: &[PublicKey],
+        context: Context,
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register(0).await.unwrap();
-            let (b1, b2) = control.register(1).await.unwrap();
+            let (a1, a2) = control
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+            let (b1, b2) = control
+                .register(1, test_quota(), context.clone())
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
@@ -113,7 +131,7 @@ mod tests {
     }
 
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, Context>,
         participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -146,7 +164,7 @@ mod tests {
         num_validators: u32,
         shares_vec: &mut [Share],
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, Context>,
         Vec<(PublicKey, PrivateKey, Share)>,
         Vec<PublicKey>,
         Registrations<PublicKey>,
@@ -175,7 +193,7 @@ mod tests {
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_participants(&mut oracle, &pks).await;
+        let registrations = register_participants(&mut oracle, &pks, context.clone()).await;
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
@@ -415,7 +433,8 @@ mod tests {
                     .map(|(pk, _, _)| pk.clone())
                     .collect::<Vec<_>>();
 
-                let mut registrations = register_participants(&mut oracle, &pks).await;
+                let mut registrations =
+                    register_participants(&mut oracle, &pks, context.clone()).await;
                 let link = commonware_p2p::simulated::Link {
                     latency: Duration::from_millis(10),
                     jitter: Duration::from_millis(1),
@@ -814,7 +833,8 @@ mod tests {
             network.start();
 
             // Register all participants
-            let mut registrations = register_participants(&mut oracle, &participants).await;
+            let mut registrations =
+                register_participants(&mut oracle, &participants, context.clone()).await;
             let link = commonware_p2p::simulated::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),

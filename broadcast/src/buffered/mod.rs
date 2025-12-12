@@ -42,11 +42,12 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        simulated::{Link, Network, Oracle, Quota, Receiver, Sender},
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use std::{collections::BTreeMap, time::Duration};
+    use governor::Quota as GQuota;
+    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -61,13 +62,27 @@ mod tests {
     // Enough time for a message to propagate through the network
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
-    type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
+    fn test_quota() -> Quota {
+        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+    }
+
+    type Registrations = BTreeMap<
+        PublicKey,
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+    >;
 
     async fn initialize_simulation(
         context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
-    ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
+    ) -> (
+        Vec<PublicKey>,
+        Registrations,
+        Oracle<PublicKey, deterministic::Context>,
+    ) {
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -86,7 +101,11 @@ mod tests {
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
-            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));
         }
 

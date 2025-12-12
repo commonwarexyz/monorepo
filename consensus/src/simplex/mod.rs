@@ -321,7 +321,7 @@ mod tests {
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -331,19 +331,33 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
+    fn test_quota() -> Quota {
+        Quota::per_second(NonZeroU32::new(1_000_000).unwrap())
+    }
+
     /// Register a validator with the oracle.
     async fn register_validator<P: PublicKey>(
-        oracle: &mut Oracle<P>,
+        oracle: &mut Oracle<P, deterministic::Context>,
         validator: P,
+        context: deterministic::Context,
     ) -> (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
     ) {
         let mut control = oracle.control(validator.clone());
-        let (vote_sender, vote_receiver) = control.register(0).await.unwrap();
-        let (certificate_sender, certificate_receiver) = control.register(1).await.unwrap();
-        let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
+        let (vote_sender, vote_receiver) = control
+            .register(0, test_quota(), context.clone())
+            .await
+            .unwrap();
+        let (certificate_sender, certificate_receiver) = control
+            .register(1, test_quota(), context.clone())
+            .await
+            .unwrap();
+        let (resolver_sender, resolver_receiver) = control
+            .register(2, test_quota(), context.clone())
+            .await
+            .unwrap();
         (
             (vote_sender, vote_receiver),
             (certificate_sender, certificate_receiver),
@@ -353,19 +367,20 @@ mod tests {
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: PublicKey>(
-        oracle: &mut Oracle<P>,
+        oracle: &mut Oracle<P, deterministic::Context>,
         validators: &[P],
+        context: deterministic::Context,
     ) -> HashMap<
         P,
         (
-            (Sender<P>, Receiver<P>),
-            (Sender<P>, Receiver<P>),
-            (Sender<P>, Receiver<P>),
+            (Sender<P, deterministic::Context>, Receiver<P>),
+            (Sender<P, deterministic::Context>, Receiver<P>),
+            (Sender<P, deterministic::Context>, Receiver<P>),
         ),
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let registration = register_validator(oracle, validator.clone()).await;
+            let registration = register_validator(oracle, validator.clone(), context.clone()).await;
             registrations.insert(validator.clone(), registration);
         }
         registrations
@@ -384,7 +399,7 @@ mod tests {
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
     async fn link_validators<P: PublicKey>(
-        oracle: &mut Oracle<P>,
+        oracle: &mut Oracle<P, deterministic::Context>,
         validators: &[P],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -458,7 +473,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -714,7 +730,8 @@ mod tests {
             let mut all_validators = participants.clone();
             all_validators.push(public_key_observer.clone());
             all_validators.sort();
-            let mut registrations = register_validators(&mut oracle, &all_validators).await;
+            let mut registrations =
+                register_validators(&mut oracle, &all_validators, context.clone()).await;
 
             // Link all peers (including observer)
             let link = Link {
@@ -880,7 +897,8 @@ mod tests {
                 network.start();
 
                 // Register participants
-                let mut registrations = register_validators(&mut oracle, &participants).await;
+                let mut registrations =
+                    register_validators(&mut oracle, &participants, context.clone()).await;
 
                 // Link all validators
                 let link = Link {
@@ -1053,7 +1071,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators except first
             let link = Link {
@@ -1307,7 +1326,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators except first
             let link = Link {
@@ -1563,7 +1583,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -1745,7 +1766,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -1952,7 +1974,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -2152,7 +2175,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let degraded_link = Link {
@@ -2353,7 +2377,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -2536,7 +2561,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -2702,7 +2728,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -2869,7 +2896,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -3001,7 +3029,7 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             let (pending, recovered, resolver) =
-                register_validator(&mut oracle, validator.clone()).await;
+                register_validator(&mut oracle, validator.clone(), context.clone()).await;
             reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -3113,7 +3141,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -3279,7 +3308,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -3455,7 +3485,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -3612,7 +3643,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -3775,7 +3807,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link the single validator to itself (no-ops for completeness)
             let link = Link {
@@ -3939,7 +3972,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -4163,7 +4197,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // ========== Create engines ==========
 
@@ -4300,7 +4335,7 @@ mod tests {
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
-                .register(1)
+                .register(1, test_quota(), context.clone())
                 .await
                 .unwrap();
 
@@ -4500,7 +4535,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -4647,7 +4683,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
 
             // Link all validators
             let link = Link {
@@ -4766,7 +4803,7 @@ mod tests {
 
                 // Start engine
                 let (pending, recovered, resolver) =
-                    register_validator(&mut oracle, validator.clone()).await;
+                    register_validator(&mut oracle, validator.clone(), context.clone()).await;
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -4998,7 +5035,8 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
             let participants: Arc<[_]> = participants.into();
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let mut registrations =
+                register_validators(&mut oracle, &participants, context.clone()).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest

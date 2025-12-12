@@ -5,12 +5,18 @@ use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
+    simulated::{Config, Link, Network, Quota, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };
+use governor::{clock::Clock as GClock, Quota as GQuota};
+use std::num::NonZeroU32;
+
+const fn default_quota() -> Quota {
+    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+}
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
@@ -59,10 +65,10 @@ fn extract_id_from_message(message: &Message) -> u32 {
 }
 
 /// All state for a given peer
-type PeerIdentity = (
+type PeerIdentity<C> = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
@@ -285,7 +291,9 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<
+    C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore + GClock,
+>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -303,7 +311,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, distribution).await;
+    let identities = setup_network_identities(&mut oracle, distribution, context.clone()).await;
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
@@ -328,10 +336,11 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
-) -> Vec<PeerIdentity> {
+    context: C,
+) -> Vec<PeerIdentity<C>> {
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
@@ -342,7 +351,7 @@ async fn setup_network_identities(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL)
+                .register(DEFAULT_CHANNEL, default_quota(), context.clone())
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
@@ -365,9 +374,9 @@ async fn setup_network_identities(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    identities: &[PeerIdentity],
+async fn setup_network_links<C: GClock + Clone + Send + 'static>(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
+    identities: &[PeerIdentity<C>],
     latencies: &Latencies,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
@@ -390,11 +399,11 @@ async fn setup_network_links(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock + GClock + Clone + Send + 'static>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
-    identities: Vec<PeerIdentity>,
+    identities: Vec<PeerIdentity<C>>,
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<Handle<PeerResult>> {
@@ -549,12 +558,12 @@ async fn process_single_command_check<C: Spawner + Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Spawner + Clock>(
+async fn process_command<C: Spawner + Clock + GClock + Clone + Send + 'static>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {

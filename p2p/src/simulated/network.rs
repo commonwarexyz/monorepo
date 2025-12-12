@@ -12,21 +12,27 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork,
+    RateLimiter, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{ordered::Set, TryCollect};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
+    future,
+    lock::Mutex,
+    SinkExt, StreamExt,
 };
+use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -97,7 +103,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
+pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
@@ -113,7 +119,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
-    ingress: mpsc::UnboundedReceiver<ingress::Message<P>>,
+    ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -146,17 +152,20 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
 
+    // Sender peer subscriptions - notified when the combined peer set changes
+    sender_peer_subscriptions: Vec<mpsc::UnboundedSender<Set<P>>>,
+
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P>) {
+    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -187,6 +196,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
+                sender_peer_subscriptions: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -223,7 +233,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    async fn handle_ingress(&mut self, message: ingress::Message<P>) {
+    async fn handle_ingress(&mut self, message: ingress::Message<P, E>) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -296,26 +306,42 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let notification = (id, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
+
+                // Notify sender subscriptions about the peer set change
+                self.notify_sender_subscriptions();
             }
             ingress::Message::Register {
                 channel,
                 public_key,
+                quota,
+                clock,
                 result,
             } => {
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
-                let peer = self.peers.get_mut(&public_key).unwrap();
+
+                // Create a subscription for peer updates
+                let (peer_sub_sender, peer_sub_receiver) = mpsc::unbounded();
+                self.sender_peer_subscriptions.push(peer_sub_sender);
+
+                // Get the current set of all tracked peers
+                let initial_peers = self.all_tracked_peers();
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let (sender, handle) = Sender::new(
                     self.context.with_label("sender"),
-                    public_key,
+                    public_key.clone(),
                     channel,
                     self.max_size,
                     self.sender.clone(),
+                    quota,
+                    clock,
+                    peer_sub_receiver,
+                    initial_peers,
                 );
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
+                let peer = self.peers.get_mut(&public_key).unwrap();
                 let receiver = match peer.register(channel, handle).await {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => return send_result(result, Err(err)),
@@ -448,9 +474,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .try_collect()
             .expect("BTreeMap keys are unique")
     }
+
+    /// Notify all sender subscriptions of the current peer set.
+    fn notify_sender_subscriptions(&mut self) {
+        let all_peers = self.all_tracked_peers();
+        self.sender_peer_subscriptions
+            .retain(|sender| sender.unbounded_send(all_peers.clone()).is_ok());
+    }
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
@@ -628,23 +661,59 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 }
 
 /// Implementation of a [crate::Sender] for the simulated network.
-#[derive(Clone, Debug)]
-pub struct Sender<P: PublicKey> {
+pub struct Sender<P: PublicKey, C: GClock> {
     me: P,
     channel: Channel,
     max_size: usize,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
+    rate_limiter: Arc<Mutex<RateLimiter<P, C>>>,
+    peer_subscription: Option<mpsc::UnboundedReceiver<Set<P>>>,
+    known_peers: Vec<P>,
 }
 
-impl<P: PublicKey> Sender<P> {
+impl<P: PublicKey, C: GClock> Clone for Sender<P, C> {
+    fn clone(&self) -> Self {
+        Self {
+            me: self.me.clone(),
+            channel: self.channel,
+            max_size: self.max_size,
+            high: self.high.clone(),
+            low: self.low.clone(),
+            rate_limiter: self.rate_limiter.clone(),
+            // Cloned senders start without a subscription; they'll get one lazily
+            peer_subscription: None,
+            known_peers: Vec::new(),
+        }
+    }
+}
+
+impl<P: PublicKey, C: GClock> Debug for Sender<P, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender")
+            .field("me", &self.me)
+            .field("channel", &self.channel)
+            .field("max_size", &self.max_size)
+            .finish()
+    }
+}
+
+impl<P: PublicKey, C: GClock> Sender<P, C> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task<P>>,
+        quota: Quota,
+        clock: C,
+        peer_subscription: mpsc::UnboundedReceiver<Set<P>>,
+        initial_peers: Set<P>,
     ) -> (Self, Handle<()>) {
+        // Create rate limiter for this sender
+        let rate_limiter = Arc::new(Mutex::new(RateLimiter::hashmap_with_clock(quota, clock)));
+
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
@@ -682,6 +751,9 @@ impl<P: PublicKey> Sender<P> {
                 max_size,
                 high,
                 low,
+                rate_limiter,
+                peer_subscription: Some(peer_subscription),
+                known_peers: initial_peers.into_iter().collect(),
             },
             processor,
         )
@@ -691,7 +763,7 @@ impl<P: PublicKey> Sender<P> {
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
-    ) -> (SplitSender<P, F>, SplitSender<P, F>) {
+    ) -> (SplitSender<P, C, F>, SplitSender<P, C, F>) {
         (
             SplitSender {
                 replica: SplitOrigin::Primary,
@@ -707,10 +779,20 @@ impl<P: PublicKey> Sender<P> {
     }
 }
 
-impl<P: PublicKey> crate::Sender for Sender<P> {
+impl<P, C> crate::Sender for Sender<P, C>
+where
+    P: PublicKey,
+    C: GClock + Clone + Send + 'static,
+{
     type Error = Error;
     type PublicKey = P;
 
+    /// Sends a message to a set of recipients.
+    ///
+    /// # Rate Limiting
+    ///
+    /// Recipients that exceed their rate limit will be skipped. The message is still sent to
+    /// non-limited recipients. Check the returned vector to see which peers were sent the message.
     async fn send(
         &mut self,
         recipients: Recipients<P>,
@@ -722,26 +804,96 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
             return Err(Error::MessageTooLarge(message.len()));
         }
 
+        // Update known peers from subscription (non-blocking)
+        if let Some(ref mut subscription) = self.peer_subscription {
+            // Drain all pending updates, keeping the most recent
+            while let Ok(Some(peers)) = subscription.try_next() {
+                self.known_peers = peers.into_iter().collect();
+            }
+        }
+
+        // Get the concrete list of peers to send to
+        let peers: Vec<P> = match recipients {
+            Recipients::One(peer) => vec![peer],
+            Recipients::Some(peers) => peers,
+            Recipients::All => {
+                // If we have known peers, use them (allows rate limiting to work)
+                if !self.known_peers.is_empty() {
+                    self.known_peers
+                        .iter()
+                        .filter(|&p| p != &self.me)
+                        .cloned()
+                        .collect()
+                } else {
+                    // If no peer sets are tracked, fall back to having the network
+                    // resolve the peers. This bypasses rate limiting for Recipients::All
+                    // when peer sets are not explicitly configured.
+                    let (sender, receiver) = oneshot::channel();
+                    let channel = if priority { &self.high } else { &self.low };
+                    channel
+                        .unbounded_send((
+                            self.channel,
+                            self.me.clone(),
+                            Recipients::All,
+                            message,
+                            sender,
+                        ))
+                        .map_err(|_| Error::NetworkClosed)?;
+                    return receiver.await.map_err(|_| Error::NetworkClosed);
+                }
+            }
+        };
+
+        // Filter peers by rate limit, consuming rate tokens only for allowed peers
+        let rate_limiter = self.rate_limiter.lock().await;
+        let allowed_peers: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| rate_limiter.check_key(peer).is_ok())
+            .collect();
+        // Clean up rate limiter state periodically
+        rate_limiter.shrink_to_fit();
+        drop(rate_limiter);
+
+        // If no recipients are allowed, short-circuit and signal that no peers could
+        // be sent the message.
+        if allowed_peers.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Send message
         let (sender, receiver) = oneshot::channel();
-        let mut channel = if priority { &self.high } else { &self.low };
+        let channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.channel, self.me.clone(), recipients, message, sender))
-            .await
+            .unbounded_send((
+                self.channel,
+                self.me.clone(),
+                Recipients::Some(allowed_peers),
+                message,
+                sender,
+            ))
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
-#[derive(Clone)]
-pub struct SplitSender<P: PublicKey, F: SplitForwarder<P>> {
+pub struct SplitSender<P: PublicKey, C: GClock, F: SplitForwarder<P>> {
     replica: SplitOrigin,
-    inner: Sender<P>,
+    inner: Sender<P, C>,
     forwarder: F,
 }
 
-impl<P: PublicKey, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, F> {
+impl<P: PublicKey, C: GClock, F: SplitForwarder<P>> Clone for SplitSender<P, C, F> {
+    fn clone(&self) -> Self {
+        Self {
+            replica: self.replica,
+            inner: self.inner.clone(),
+            forwarder: self.forwarder.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, C: GClock, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, C, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SplitSender")
             .field("replica", &self.replica)
@@ -750,7 +902,12 @@ impl<P: PublicKey, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, F> {
     }
 }
 
-impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
+impl<P, C, F> crate::Sender for SplitSender<P, C, F>
+where
+    P: PublicKey,
+    C: GClock + Clone + Send + 'static,
+    F: SplitForwarder<P>,
+{
     type Error = Error;
     type PublicKey = P;
 
@@ -1078,8 +1235,14 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZU32;
     use futures::FutureExt;
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    fn test_quota() -> Quota {
+        Quota::per_second(NZU32!(10000))
+    }
 
     #[test]
     fn test_register_and_link() {
@@ -1104,14 +1267,29 @@ mod tests {
                 .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
             let mut control = oracle.control(pk1.clone());
-            control.register(0).await.unwrap();
-            control.register(1).await.unwrap();
+            control
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+            control
+                .register(1, test_quota(), context.clone())
+                .await
+                .unwrap();
             let mut control = oracle.control(pk2.clone());
-            control.register(0).await.unwrap();
-            control.register(1).await.unwrap();
+            control
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+            control
+                .register(1, test_quota(), context.clone())
+                .await
+                .unwrap();
 
             // Overwrite if registering again
-            control.register(1).await.unwrap();
+            control
+                .register(1, test_quota(), context.clone())
+                .await
+                .unwrap();
 
             // Add link
             let link = ingress::Link {
@@ -1162,18 +1340,27 @@ mod tests {
                 .await;
 
             // Register normal peers
-            let (mut peer_a_sender, mut peer_a_recv) =
-                oracle.control(peer_a.clone()).register(0).await.unwrap();
-            let (mut peer_b_sender, mut peer_b_recv) =
-                oracle.control(peer_b.clone()).register(0).await.unwrap();
+            let (mut peer_a_sender, mut peer_a_recv) = oracle
+                .control(peer_a.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+            let (mut peer_b_sender, mut peer_b_recv) = oracle
+                .control(peer_b.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
 
             // Register and split the twin's channel:
             // - Primary sends only to peer_a
             // - Secondary sends only to peer_b
             // - Messages from peer_a go to primary receiver
             // - Messages from peer_b go to secondary receiver
-            let (twin_sender, twin_receiver) =
-                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (twin_sender, twin_receiver) = oracle
+                .control(twin.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             let peer_a_for_router = peer_a.clone();
             let peer_b_for_router = peer_b.clone();
             let (mut twin_primary_sender, mut twin_secondary_sender) =
@@ -1283,12 +1470,18 @@ mod tests {
                 .await;
 
             // Register normal peer
-            let (mut peer_c_sender, _peer_c_recv) =
-                oracle.control(peer_c.clone()).register(0).await.unwrap();
+            let (mut peer_c_sender, _peer_c_recv) = oracle
+                .control(peer_c.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
-            let (twin_sender, twin_receiver) =
-                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (twin_sender, twin_receiver) = oracle
+                .control(twin.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             let (_twin_primary_sender, _twin_secondary_sender) =
                 twin_sender.split_with(|_origin, recipients, _| Some(recipients.clone()));
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
@@ -1352,12 +1545,18 @@ mod tests {
                 .await;
 
             // Register normal peer
-            let (mut peer_c_sender, _peer_c_recv) =
-                oracle.control(peer_c.clone()).register(0).await.unwrap();
+            let (mut peer_c_sender, _peer_c_recv) = oracle
+                .control(peer_c.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
-            let (twin_sender, twin_receiver) =
-                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (twin_sender, twin_receiver) = oracle
+                .control(twin.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             let (mut twin_primary_sender, mut twin_secondary_sender) =
                 twin_sender.split_with(|_origin, _, _| None);
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
@@ -1516,11 +1715,14 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
-            let (mut sender, _sender_recv) =
-                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (mut sender, _sender_recv) = oracle
+                .control(sender_pk.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register(0)
+                .register(0, test_quota(), context.clone())
                 .await
                 .unwrap();
 
@@ -1594,16 +1796,19 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
-            let (mut sender, _recv_sender) =
-                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (mut sender, _recv_sender) = oracle
+                .control(sender_pk.clone())
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
-                .register(0)
+                .register(0, test_quota(), context.clone())
                 .await
                 .unwrap();
             let (_sender3, mut recv_b) = oracle
                 .control(recipient_b.clone())
-                .register(0)
+                .register(0, test_quota(), context.clone())
                 .await
                 .unwrap();
 
@@ -1657,6 +1862,95 @@ mod tests {
             drop(oracle);
             drop(sender);
             network_handle.abort();
+        });
+    }
+
+    #[test]
+    fn test_rate_limiting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create two public keys
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register the peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register with a very restrictive quota: 1 message per second
+            let restrictive_quota = Quota::per_second(NZU32!(1));
+            let mut control1 = oracle.control(pk1.clone());
+            let (mut sender, _) = control1
+                .register(0, restrictive_quota, context.clone())
+                .await
+                .unwrap();
+            let mut control2 = oracle.control(pk2.clone());
+            let (_, mut receiver) = control2
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+
+            // Add bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle.add_link(pk2.clone(), pk1, link).await.unwrap();
+
+            // First message should succeed immediately
+            let msg1 = Bytes::from_static(b"message1");
+            let result1 = sender
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result1.len(), 1, "first message should be sent");
+
+            // Verify first message is received
+            let (_, received1) = receiver.recv().await.unwrap();
+            assert_eq!(received1, msg1);
+
+            // Second message should be rate-limited (quota is 1/sec, no time has passed)
+            let msg2 = Bytes::from_static(b"message2");
+            let result2 = sender
+                .send(Recipients::One(pk2.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                result2.len(),
+                0,
+                "second message should be rate-limited (skipped)"
+            );
+
+            // Advance time by 1 second to allow the rate limiter to reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Third message should succeed after waiting
+            let msg3 = Bytes::from_static(b"message3");
+            let result3 = sender
+                .send(Recipients::One(pk2.clone()), msg3.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result3.len(), 1, "third message should be sent after wait");
+
+            // Verify third message is received
+            let (_, received3) = receiver.recv().await.unwrap();
+            assert_eq!(received3, msg3);
         });
     }
 }

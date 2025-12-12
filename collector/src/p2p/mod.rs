@@ -57,10 +57,16 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        simulated::{Link, Network, Oracle, Quota, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use governor::Quota as GQuota;
+    use std::num::NonZeroU32;
+
+    fn test_quota() -> Quota {
+        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+    }
     use futures::StreamExt;
     use std::time::Duration;
 
@@ -80,12 +86,18 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         )>,
     ) {
         let (network, oracle) = Network::new(
@@ -107,8 +119,14 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register(0).await.unwrap();
-            let (sender2, receiver2) = control.register(1).await.unwrap();
+            let (sender1, receiver1) = control
+                .register(0, test_quota(), context.clone())
+                .await
+                .unwrap();
+            let (sender2, receiver2) = control
+                .register(1, test_quota(), context.clone())
+                .await
+                .unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 
@@ -116,7 +134,7 @@ mod tests {
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -138,8 +156,14 @@ mod tests {
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,

@@ -12,8 +12,17 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
+use commonware_p2p::{
+    simulated::{Network, Quota},
+    Recipients,
+};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use governor::Quota as GQuota;
+use std::num::NonZeroU32;
+
+fn test_quota() -> Quota {
+    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+}
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, time::Duration};
@@ -174,7 +183,7 @@ fn fuzz(input: FuzzInput) {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
-                .register(0)
+                .register(0, test_quota(), context.clone())
                 .await
                 .unwrap();
 

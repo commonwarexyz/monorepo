@@ -8,6 +8,12 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use governor::Quota as GQuota;
+use std::num::NonZeroU32;
+
+fn test_quota() -> simulated::Quota {
+    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+}
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -127,10 +133,11 @@ fn fuzz(input: FuzzInput) {
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation
         // The receiver gets messages from ALL senders on that channel, not per-sender streams
+        #[allow(clippy::type_complexity)]
         let mut channels: HashMap<
             (usize, u8),
             (
-                commonware_p2p::simulated::Sender<ed25519::PublicKey>,
+                commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();
@@ -150,8 +157,10 @@ fn fuzz(input: FuzzInput) {
 
                     // Only register if not already registered
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
-                        if let Ok((sender, receiver)) =
-                            oracle.control(peer_pks[idx].clone()).register(channel_id as u64).await
+                        if let Ok((sender, receiver)) = oracle
+                            .control(peer_pks[idx].clone())
+                            .register(channel_id as u64, test_quota(), context.clone())
+                            .await
                         {
                             e.insert((sender, receiver));
                         }

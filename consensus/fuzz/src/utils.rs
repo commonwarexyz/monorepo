@@ -1,7 +1,9 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use std::collections::HashMap;
+use commonware_runtime::deterministic;
+use governor::Quota as GQuota;
+use std::{collections::HashMap, num::NonZeroU32};
 
 #[derive(Clone)]
 pub enum Action {
@@ -59,7 +61,7 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
 }
 
 pub async fn link_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+    oracle: &mut Oracle<P, deterministic::Context>,
     validators: &[P],
     action: Action,
     filter: Option<fn(usize, usize, usize) -> bool>,
@@ -93,23 +95,37 @@ pub async fn link_peers<P: PublicKey>(
     }
 }
 
+fn test_quota() -> GQuota {
+    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
+}
+
 pub async fn register<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+    oracle: &mut Oracle<P, deterministic::Context>,
     validators: &[P],
+    context: deterministic::Context,
 ) -> HashMap<
     P,
     (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
+        (Sender<P, deterministic::Context>, Receiver<P>),
     ),
 > {
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
         let mut control = oracle.control(validator.clone());
-        let pending = control.register(0).await.unwrap();
-        let recovered = control.register(1).await.unwrap();
-        let resolver = control.register(2).await.unwrap();
+        let pending = control
+            .register(0, test_quota(), context.clone())
+            .await
+            .unwrap();
+        let recovered = control
+            .register(1, test_quota(), context.clone())
+            .await
+            .unwrap();
+        let resolver = control
+            .register(2, test_quota(), context.clone())
+            .await
+            .unwrap();
         registrations.insert(validator.clone(), (pending, recovered, resolver));
     }
     registrations

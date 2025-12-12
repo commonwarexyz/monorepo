@@ -169,7 +169,7 @@ mod test {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{self, Link, Network, Oracle},
+        simulated::{self, Link, Network, Oracle, Quota as SimQuota},
         utils::mux,
         Message, Receiver,
     };
@@ -188,10 +188,15 @@ mod test {
     use std::{
         collections::{BTreeMap, HashSet},
         future::Future,
+        num::NonZeroU32,
         pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
+
+    fn test_quota() -> SimQuota {
+        Quota::per_second(NonZeroU32::new(1_000_000).unwrap())
+    }
 
     #[derive(Debug)]
     struct FilteredReceiver<R> {
@@ -317,7 +322,7 @@ mod test {
         async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
@@ -333,12 +338,30 @@ mod test {
             };
 
             let mut control = oracle.control(pk.clone());
-            let votes = control.register(VOTE_CHANNEL).await.unwrap();
-            let certificates = control.register(CERTIFICATE_CHANNEL).await.unwrap();
-            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-            let (dkg_sender, dkg_receiver) = control.register(DKG_CHANNEL).await.unwrap();
+            let votes = control
+                .register(VOTE_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
+            let certificates = control
+                .register(CERTIFICATE_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
+            let resolver = control
+                .register(RESOLVER_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
+            let broadcast = control
+                .register(BROADCASTER_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
+            let marshal = control
+                .register(MARSHAL_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
+            let (dkg_sender, dkg_receiver) = control
+                .register(DKG_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
             let dkg = (
                 dkg_sender,
                 FilteredReceiver {
@@ -346,7 +369,10 @@ mod test {
                     failures: self.failures.clone(),
                 },
             );
-            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+            let orchestrator = control
+                .register(ORCHESTRATOR_CHANNEL, test_quota(), ctx.clone())
+                .await
+                .unwrap();
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
@@ -396,7 +422,7 @@ mod test {
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
         ) {

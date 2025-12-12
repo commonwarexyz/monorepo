@@ -158,7 +158,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             verifier: _,
         } = P::fixture(&mut context, n);
 
-        let mut registrations = register(&mut oracle, &participants).await;
+        let mut registrations = register(&mut oracle, &participants, context.clone()).await;
 
         let link = Link {
             latency: Duration::from_millis(10),

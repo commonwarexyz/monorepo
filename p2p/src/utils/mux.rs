@@ -454,13 +454,14 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle},
+        simulated::{self, Link, Network, Oracle, Quota},
         Recipients,
     };
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_utils::NZU32;
     use std::time::Duration;
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
@@ -472,8 +473,13 @@ mod tests {
     };
     const CAPACITY: usize = 5usize;
 
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    fn test_quota() -> Quota {
+        Quota::per_second(NZU32!(10000))
+    }
+
     /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<Pk> {
+    fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -492,40 +498,48 @@ mod tests {
     }
 
     /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk>, a: Pk, b: Pk) {
+    async fn link_bidirectional(oracle: &mut Oracle<Pk, deterministic::Context>, a: Pk, b: Pk) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner + Metrics>(
-        context: &E,
-        oracle: &mut Oracle<Pk>,
+    async fn create_peer(
+        context: &deterministic::Context,
+        oracle: &mut Oracle<Pk, deterministic::Context>,
         seed: u64,
     ) -> (
         Pk,
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, test_quota(), context.clone())
+            .await
+            .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer_with_backup_and_global_sender<E: Spawner + Metrics>(
-        context: &E,
-        oracle: &mut Oracle<Pk>,
+    async fn create_peer_with_backup_and_global_sender(
+        context: &deterministic::Context,
+        oracle: &mut Oracle<Pk, deterministic::Context>,
         seed: u64,
     ) -> (
         Pk,
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
         mpsc::Receiver<BackupResponse<Pk>>,
-        GlobalSender<simulated::Sender<Pk>>,
+        GlobalSender<simulated::Sender<Pk, deterministic::Context>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, test_quota(), context.clone())
+            .await
+            .unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()
