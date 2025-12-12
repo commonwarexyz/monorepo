@@ -70,6 +70,11 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// * `share` - local threshold share for signing
     pub fn signer(participants: Set<P>, polynomial: &Public<V>, share: Share) -> Option<Self> {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -103,6 +108,11 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Set<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -526,5 +536,601 @@ mod macros {
                 }
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{impl_bls12381_threshold_scheme, scheme::Scheme as _};
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg,
+            primitives::{
+                group::Element,
+                poly::{self, Public},
+                variant::{MinPk, MinSig, Variant},
+            },
+        },
+        ed25519::{self, PrivateKey as Ed25519PrivateKey},
+        sha256::Digest as Sha256Digest,
+        PrivateKeyExt, Signer as _,
+    };
+    use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+
+    const NAMESPACE: &[u8] = b"test-bls12381-threshold";
+    const MESSAGE: &[u8] = b"test message";
+
+    /// Test context type for generic scheme tests.
+    #[derive(Clone, Debug)]
+    pub struct TestContext<'a> {
+        pub message: &'a [u8],
+    }
+
+    impl<'a> Context for TestContext<'a> {
+        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+            (namespace.to_vec(), self.message.to_vec())
+        }
+    }
+
+    // Use the macro to generate the test scheme
+    impl_bls12381_threshold_scheme!(TestContext<'a>);
+
+    #[allow(clippy::type_complexity)]
+    fn setup_signers<V: Variant>(
+        n: u32,
+        seed: u64,
+    ) -> (
+        Vec<Scheme<ed25519::PublicKey, V>>,
+        Scheme<ed25519::PublicKey, V>,
+        Public<V>,
+    ) {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Generate identity keys (ed25519)
+        let identity_keys: Vec<_> = (0..n)
+            .map(|_| Ed25519PrivateKey::from_rng(&mut rng))
+            .collect();
+        let participants: Set<ed25519::PublicKey> = identity_keys
+            .iter()
+            .map(|sk| sk.public_key())
+            .try_collect()
+            .unwrap();
+
+        // Generate threshold polynomial and shares using DKG
+        let (polynomial, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(n));
+
+        let signers = shares
+            .into_iter()
+            .map(|share| Scheme::signer(participants.clone(), &polynomial, share).unwrap())
+            .collect();
+
+        let verifier = Scheme::verifier(participants, &polynomial);
+
+        (signers, verifier, polynomial)
+    }
+
+    fn test_sign_vote_roundtrip<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 42);
+        let scheme = &schemes[0];
+
+        let signature = scheme
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .unwrap();
+        assert!(scheme.verify_vote::<Sha256Digest>(
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &signature
+        ));
+    }
+
+    #[test]
+    fn test_sign_vote_roundtrip_variants() {
+        test_sign_vote_roundtrip::<MinPk>();
+        test_sign_vote_roundtrip::<MinSig>();
+    }
+
+    fn test_verifier_cannot_sign<V: Variant + Send + Sync>() {
+        let (_, verifier, _) = setup_signers::<V>(4, 43);
+        assert!(verifier
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .is_none());
+    }
+
+    #[test]
+    fn test_verifier_cannot_sign_variants() {
+        test_verifier_cannot_sign::<MinPk>();
+        test_verifier_cannot_sign::<MinSig>();
+    }
+
+    fn test_verify_votes_filters_invalid<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(5, 44);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let mut rng = StdRng::seed_from_u64(45);
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            signatures.clone(),
+        );
+        assert!(result.invalid_signers.is_empty());
+        assert_eq!(result.verified.len(), quorum);
+
+        // Test: Corrupt one vote - invalid signer index
+        let mut votes_corrupted = signatures.clone();
+        votes_corrupted[0].signer = 999;
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            votes_corrupted,
+        );
+        assert_eq!(result.invalid_signers, vec![999]);
+        assert_eq!(result.verified.len(), quorum - 1);
+
+        // Test: Corrupt one vote - invalid signature
+        let mut votes_corrupted = signatures;
+        votes_corrupted[0].signature = votes_corrupted[1].signature;
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            votes_corrupted,
+        );
+        assert_eq!(result.invalid_signers.len(), 1);
+        assert_eq!(result.verified.len(), quorum - 1);
+    }
+
+    #[test]
+    fn test_verify_votes_filters_invalid_variants() {
+        test_verify_votes_filters_invalid::<MinPk>();
+        test_verify_votes_filters_invalid::<MinSig>();
+    }
+
+    fn test_assemble_certificate<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 46);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+
+        // Verify the assembled certificate
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_assemble_certificate_variants() {
+        test_assemble_certificate::<MinPk>();
+        test_assemble_certificate::<MinSig>();
+    }
+
+    fn test_verify_certificate<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 48);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(49);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_variants() {
+        test_verify_certificate::<MinPk>();
+        test_verify_certificate::<MinSig>();
+    }
+
+    fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 50);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+
+        // Valid certificate passes
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
+
+        // Corrupted certificate fails
+        let corrupted = V::Signature::zero();
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &corrupted
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_detects_corruption_variants() {
+        test_verify_certificate_detects_corruption::<MinPk>();
+        test_verify_certificate_detects_corruption::<MinSig>();
+    }
+
+    fn test_certificate_codec_roundtrip<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 51);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let encoded = certificate.encode();
+        let decoded = V::Signature::decode(encoded).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_certificate_codec_roundtrip_variants() {
+        test_certificate_codec_roundtrip::<MinPk>();
+        test_certificate_codec_roundtrip::<MinSig>();
+    }
+
+    fn test_certificate_rejects_sub_quorum<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 52);
+        let sub_quorum = 2; // Less than quorum (3)
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(sub_quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        assert!(schemes[0].assemble_certificate(signatures).is_none());
+    }
+
+    #[test]
+    fn test_certificate_rejects_sub_quorum_variants() {
+        test_certificate_rejects_sub_quorum::<MinPk>();
+        test_certificate_rejects_sub_quorum::<MinSig>();
+    }
+
+    fn test_verify_certificates_batch<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 56);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let signatures: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| {
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                        .unwrap()
+                })
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
+        }
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+
+        let mut rng = StdRng::seed_from_u64(57);
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
+    }
+
+    #[test]
+    fn test_verify_certificates_batch_variants() {
+        test_verify_certificates_batch::<MinPk>();
+        test_verify_certificates_batch::<MinSig>();
+    }
+
+    fn test_verify_certificates_batch_detects_failure<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 58);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let signatures: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| {
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                        .unwrap()
+                })
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
+        }
+
+        // Corrupt second certificate
+        certificates[1] = V::Signature::zero();
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+
+        let mut rng = StdRng::seed_from_u64(59);
+        assert!(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
+        );
+    }
+
+    #[test]
+    fn test_verify_certificates_batch_detects_failure_variants() {
+        test_verify_certificates_batch_detects_failure::<MinPk>();
+        test_verify_certificates_batch_detects_failure::<MinSig>();
+    }
+
+    fn test_certificate_verifier<V: Variant + Send + Sync>() {
+        let (schemes, _, polynomial) = setup_signers::<V>(4, 60);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let signatures: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+
+        // Create a certificate-only verifier using the identity from the polynomial
+        let identity = *poly::public::<V>(&polynomial);
+        let cert_verifier = Scheme::<ed25519::PublicKey, V>::certificate_verifier(identity);
+
+        // Should be able to verify certificates
+        assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
+
+        // Should not be able to sign
+        assert!(cert_verifier
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .is_none());
+    }
+
+    #[test]
+    fn test_certificate_verifier_variants() {
+        test_certificate_verifier::<MinPk>();
+        test_certificate_verifier::<MinSig>();
+    }
+
+    fn test_is_not_attributable<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 61);
+
+        // Threshold signatures are non-attributable
+        assert!(!schemes[0].is_attributable());
+        assert!(!verifier.is_attributable());
+    }
+
+    #[test]
+    fn test_is_not_attributable_variants() {
+        test_is_not_attributable::<MinPk>();
+        test_is_not_attributable::<MinSig>();
+    }
+
+    fn test_verifier_accepts_votes<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 62);
+
+        let vote = schemes[1]
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .unwrap();
+        assert!(verifier.verify_vote::<Sha256Digest>(
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &vote
+        ));
+    }
+
+    #[test]
+    fn test_verifier_accepts_votes_variants() {
+        test_verifier_accepts_votes::<MinPk>();
+        test_verifier_accepts_votes::<MinSig>();
+    }
+
+    fn test_scheme_clone_and_verifier<V: Variant + Send + Sync>() {
+        let (schemes, verifier, _) = setup_signers::<V>(4, 63);
+
+        // Clone a signer
+        let signer = schemes[0].clone();
+        assert!(
+            signer
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .is_some(),
+            "signer should produce votes"
+        );
+
+        // A verifier cannot produce votes
+        assert!(
+            verifier
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .is_none(),
+            "verifier should not produce votes"
+        );
+    }
+
+    #[test]
+    fn test_scheme_clone_and_verifier_variants() {
+        test_scheme_clone_and_verifier::<MinPk>();
+        test_scheme_clone_and_verifier::<MinSig>();
+    }
+
+    fn certificate_verifier_panics_on_vote<V: Variant + Send + Sync>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 37);
+        let certificate_verifier = Bls12381Threshold::<ed25519::PublicKey, V>::certificate_verifier(
+            *schemes[0].raw.identity(),
+        );
+
+        let vote = schemes[1]
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .unwrap();
+
+        // CertificateVerifier should panic when trying to verify a vote
+        certificate_verifier.verify_vote::<Scheme<ed25519::PublicKey, V>, Sha256Digest>(
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &vote,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "can only be called for signer and verifier")]
+    fn test_certificate_verifier_panics_on_vote_min_pk() {
+        certificate_verifier_panics_on_vote::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "can only be called for signer and verifier")]
+    fn test_certificate_verifier_panics_on_vote_min_sig() {
+        certificate_verifier_panics_on_vote::<MinSig>();
+    }
+
+    fn signer_shares_must_match_participant_indices<V: Variant + Send + Sync>() {
+        let mut rng = StdRng::seed_from_u64(64);
+
+        // Generate identity keys (ed25519)
+        let identity_keys: Vec<_> = (0..4)
+            .map(|_| Ed25519PrivateKey::from_rng(&mut rng))
+            .collect();
+        let participants: Set<ed25519::PublicKey> = identity_keys
+            .iter()
+            .map(|sk| sk.public_key())
+            .try_collect()
+            .unwrap();
+
+        let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(4));
+        shares[0].index = 999;
+        Scheme::<ed25519::PublicKey, V>::signer(participants, &polynomial, shares[0].clone());
+    }
+
+    #[test]
+    #[should_panic(expected = "share index must match participant index")]
+    fn test_signer_shares_must_match_participant_indices_min_pk() {
+        signer_shares_must_match_participant_indices::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "share index must match participant index")]
+    fn test_signer_shares_must_match_participant_indices_min_sig() {
+        signer_shares_must_match_participant_indices::<MinSig>();
+    }
+
+    fn make_participants<R: rand::RngCore + rand::CryptoRng>(
+        rng: &mut R,
+        n: u32,
+    ) -> Set<ed25519::PublicKey> {
+        (0..n)
+            .map(|_| Ed25519PrivateKey::from_rng(rng).public_key())
+            .try_collect()
+            .expect("participants are unique")
+    }
+
+    fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = make_participants(&mut rng, 5);
+        // Create a polynomial with threshold 4, but quorum of 5 participants is 4
+        // so this should succeed. Let's use threshold 2 to make it fail.
+        // quorum(5) = 4, but polynomial.required() = 2, so this should panic
+        let (polynomial, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(2));
+        Bls12381Threshold::<ed25519::PublicKey, V>::signer(
+            participants,
+            &polynomial,
+            shares[0].clone(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_signer_polynomial_threshold_must_equal_quorum_min_pk() {
+        signer_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_signer_polynomial_threshold_must_equal_quorum_min_sig() {
+        signer_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = make_participants(&mut rng, 5);
+        // Create a polynomial with threshold 2, but quorum of 5 participants is 4
+        // quorum(5) = 4, but polynomial.required() = 2, so this should panic
+        let (polynomial, _) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(2));
+        Bls12381Threshold::<ed25519::PublicKey, V>::verifier(participants, &polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 }

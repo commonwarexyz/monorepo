@@ -505,6 +505,7 @@ mod macros {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{impl_ed25519_scheme, scheme::Scheme as _};
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -513,14 +514,14 @@ mod tests {
     };
     use commonware_utils::{ordered::Set, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
-    use std::marker::PhantomData;
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
 
+    /// Test context type for generic scheme tests.
     #[derive(Clone, Debug)]
-    struct TestContext<'a> {
-        message: &'a [u8],
+    pub struct TestContext<'a> {
+        pub message: &'a [u8],
     }
 
     impl<'a> Context for TestContext<'a> {
@@ -529,127 +530,10 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct TestScheme {
-        raw: super::Ed25519,
-        _pd: PhantomData<()>,
-    }
+    // Use the macro to generate the test scheme
+    impl_ed25519_scheme!(TestContext<'a>);
 
-    impl TestScheme {
-        fn signer(participants: Set<PublicKey>, private_key: PrivateKey) -> Option<Self> {
-            Some(Self {
-                raw: super::Ed25519::signer(participants, private_key)?,
-                _pd: PhantomData,
-            })
-        }
-
-        fn verifier(participants: Set<PublicKey>) -> Self {
-            Self {
-                raw: super::Ed25519::verifier(participants),
-                _pd: PhantomData,
-            }
-        }
-    }
-
-    impl Scheme for TestScheme {
-        type Context<'a, D: commonware_cryptography::Digest> = TestContext<'a>;
-        type PublicKey = PublicKey;
-        type Signature = commonware_cryptography::ed25519::Signature;
-        type Certificate = Certificate;
-
-        fn me(&self) -> Option<u32> {
-            self.raw.me()
-        }
-
-        fn participants(&self) -> &Set<Self::PublicKey> {
-            &self.raw.participants
-        }
-
-        fn sign_vote<D: commonware_cryptography::Digest>(
-            &self,
-            namespace: &[u8],
-            context: Self::Context<'_, D>,
-        ) -> Option<Signature<Self>> {
-            self.raw.sign_vote::<Self, D>(namespace, context)
-        }
-
-        fn verify_vote<D: commonware_cryptography::Digest>(
-            &self,
-            namespace: &[u8],
-            context: Self::Context<'_, D>,
-            signature: &Signature<Self>,
-        ) -> bool {
-            self.raw
-                .verify_vote::<Self, D>(namespace, context, signature)
-        }
-
-        fn verify_votes<R, D, I>(
-            &self,
-            rng: &mut R,
-            namespace: &[u8],
-            context: Self::Context<'_, D>,
-            signatures: I,
-        ) -> SignatureVerification<Self>
-        where
-            R: rand::Rng + rand::CryptoRng,
-            D: commonware_cryptography::Digest,
-            I: IntoIterator<Item = Signature<Self>>,
-        {
-            self.raw
-                .verify_votes::<Self, R, D, I>(rng, namespace, context, signatures)
-        }
-
-        fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
-        where
-            I: IntoIterator<Item = Signature<Self>>,
-        {
-            self.raw.assemble_certificate::<Self, I>(signatures)
-        }
-
-        fn verify_certificate<
-            R: rand::Rng + rand::CryptoRng,
-            D: commonware_cryptography::Digest,
-        >(
-            &self,
-            rng: &mut R,
-            namespace: &[u8],
-            context: Self::Context<'_, D>,
-            certificate: &Self::Certificate,
-        ) -> bool {
-            self.raw
-                .verify_certificate::<Self, D, R>(rng, namespace, context, certificate)
-        }
-
-        fn verify_certificates<'a, R, D, I>(
-            &self,
-            rng: &mut R,
-            namespace: &[u8],
-            certificates: I,
-        ) -> bool
-        where
-            R: rand::Rng + rand::CryptoRng,
-            D: commonware_cryptography::Digest,
-            I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
-        {
-            self.raw
-                .verify_certificates::<Self, D, R, I>(rng, namespace, certificates)
-        }
-
-        fn is_attributable(&self) -> bool {
-            self.raw.is_attributable()
-        }
-
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-            self.raw.certificate_codec_config()
-        }
-
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
-        {
-            super::Ed25519::certificate_codec_config_unbounded()
-        }
-    }
-
-    fn setup_signers(n: u32, seed: u64) -> (Vec<TestScheme>, TestScheme) {
+    fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
         let participants: Set<PublicKey> = private_keys
@@ -660,10 +544,10 @@ mod tests {
 
         let signers = private_keys
             .into_iter()
-            .map(|sk| TestScheme::signer(participants.clone(), sk).unwrap())
+            .map(|sk| Scheme::signer(participants.clone(), sk).unwrap())
             .collect();
 
-        let verifier = TestScheme::verifier(participants);
+        let verifier = Scheme::verifier(participants);
 
         (signers, verifier)
     }
@@ -1023,387 +907,47 @@ mod tests {
             !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
         );
     }
-}
-
-#[cfg(test)]
-mod simplex_tests {
-    use super::*;
-    use crate::{
-        scheme::Scheme as SchemeTrait,
-        simplex::{
-            mocks::fixtures::{ed25519, Fixture},
-            scheme::ed25519::Scheme,
-            types::{Proposal, Subject},
-        },
-        types::Round,
-    };
-    use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
-    use commonware_utils::quorum;
-    use rand::{
-        rngs::{OsRng, StdRng},
-        thread_rng, SeedableRng,
-    };
-
-    const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
-
-    fn setup_signers(
-        n: u32,
-        seed: u64,
-    ) -> (
-        Vec<Scheme>,
-        Set<commonware_cryptography::ed25519::PublicKey>,
-    ) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = ed25519(&mut rng, n);
-
-        (schemes, participants.try_into().unwrap())
-    }
-
-    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
-        use crate::types::{Epoch, View};
-        Proposal::new(
-            Round::new(Epoch::new(round), View::new(view)),
-            View::new(view.saturating_sub(1)),
-            Sha256::hash(&[tag]),
-        )
-    }
 
     #[test]
-    fn test_sign_vote_roundtrip_for_each_context() {
-        let (schemes, _) = setup_signers(4, 42);
-        let scheme = &schemes[0];
-
-        let proposal = sample_proposal(0, 2, 1);
-        let signature = scheme
-            .sign_vote(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .unwrap();
-        assert!(scheme.verify_vote(
-            NAMESPACE,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-            &signature
-        ));
-
-        let signature = scheme
-            .sign_vote::<Sha256Digest>(
-                NAMESPACE,
-                Subject::Nullify {
-                    round: proposal.round,
-                },
-            )
-            .unwrap();
-        assert!(scheme.verify_vote::<Sha256Digest>(
-            NAMESPACE,
-            Subject::Nullify {
-                round: proposal.round,
-            },
-            &signature
-        ));
-
-        let signature = scheme
-            .sign_vote(
-                NAMESPACE,
-                Subject::Finalize {
-                    proposal: &proposal,
-                },
-            )
-            .unwrap();
-        assert!(scheme.verify_vote(
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &signature
-        ));
-    }
-
-    #[test]
-    fn test_verify_votes_filters_bad_signers() {
-        let (schemes, _) = setup_signers(5, 42);
-        let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 5, 3);
-
-        let mut signatures: Vec<_> = schemes
-            .iter()
-            .take(quorum)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let scheme = &schemes[0];
-        let verification = scheme.verify_votes(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-            signatures.clone(),
-        );
-        assert!(verification.invalid_signers.is_empty());
-        assert_eq!(verification.verified.len(), quorum);
-
-        // Invalid signer index should be detected.
-        signatures[0].signer = 999;
-        let verification = scheme.verify_votes(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-            signatures.clone(),
-        );
-        assert_eq!(verification.invalid_signers, vec![999]);
-        assert_eq!(verification.verified.len(), quorum - 1);
-
-        // Invalid signature should be detected.
-        signatures[0].signer = 0;
-        signatures[0].signature = signatures[1].signature.clone();
-        let verification = scheme.verify_votes(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-            signatures,
-        );
-        assert_eq!(verification.invalid_signers, vec![0]);
-        assert_eq!(verification.verified.len(), quorum - 1);
-    }
-
-    #[test]
-    fn test_assemble_certificate_sorts_signers() {
-        let (schemes, _) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 7, 4);
-
-        let signatures = [
-            schemes[2]
-                .sign_vote(
-                    NAMESPACE,
-                    Subject::Finalize {
-                        proposal: &proposal,
-                    },
-                )
-                .unwrap(),
-            schemes[0]
-                .sign_vote(
-                    NAMESPACE,
-                    Subject::Finalize {
-                        proposal: &proposal,
-                    },
-                )
-                .unwrap(),
-            schemes[1]
-                .sign_vote(
-                    NAMESPACE,
-                    Subject::Finalize {
-                        proposal: &proposal,
-                    },
-                )
-                .unwrap(),
-        ];
-
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-        assert_eq!(
-            certificate.signers.iter().collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-    }
-
-    #[test]
-    fn test_assemble_certificate_requires_quorum() {
-        let (schemes, _) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 9, 5);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(2)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        assert!(schemes[0].assemble_certificate(signatures).is_none());
-    }
-
-    #[test]
-    fn test_assemble_certificate_rejects_out_of_range_signer() {
-        let (schemes, _) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 13, 7);
-
-        let mut signatures: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-        signatures[0].signer = 42;
-
-        assert!(schemes[0].assemble_certificate(signatures).is_none());
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate signer index: 2")]
+    #[should_panic(expected = "duplicate signer index")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 25, 13);
+        let (schemes, _) = setup_signers(4, 60);
 
         let mut signatures: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
+        // Add a duplicate of the last vote
         signatures.push(signatures.last().unwrap().clone());
 
+        // This should panic due to duplicate signer
         schemes[0].assemble_certificate(signatures);
     }
 
     #[test]
-    fn test_verify_certificate_detects_corruption() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 15, 8);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-
-        let verifier = Scheme::verifier(participants);
-        assert!(verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &certificate,
-        ));
-
-        let mut corrupted = certificate;
-        corrupted.signatures[0] = corrupted.signatures[1].clone();
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &corrupted,
-        ));
-    }
-
-    #[test]
-    fn test_certificate_codec_roundtrip() {
-        let (schemes, _) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 17, 9);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-        let encoded = certificate.encode();
-        let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
-        assert_eq!(decoded, certificate);
-    }
-
-    #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let signer = schemes[0].clone();
-        let proposal = sample_proposal(0, 21, 11);
+        let (schemes, _) = setup_signers(4, 61);
+        let participants = schemes[0].participants().clone();
 
+        // Clone a signer
+        let signer = schemes[0].clone();
         assert!(
             signer
-                .sign_vote(
-                    NAMESPACE,
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                 .is_some(),
             "signer should produce votes"
         );
 
+        // A verifier cannot produce votes
         let verifier = Scheme::verifier(participants);
         assert!(
             verifier
-                .sign_vote(
-                    NAMESPACE,
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                 .is_none(),
             "verifier should not produce votes"
         );
@@ -1411,334 +955,118 @@ mod simplex_tests {
 
     #[test]
     fn test_certificate_decode_validation() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 19, 10);
+        let (schemes, _) = setup_signers(4, 62);
+        let participants_len = schemes.len();
 
         let signatures: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
-        // Well-formed certificate decodes successfully.
+        // Well-formed certificate decodes successfully
         let encoded = certificate.encode();
-        let mut cursor = &encoded[..];
         let decoded =
-            Certificate::read_cfg(&mut cursor, &participants.len()).expect("decode certificate");
+            Certificate::decode_cfg(encoded, &participants_len).expect("decode certificate");
         assert_eq!(decoded, certificate);
 
-        // Certificate with no signers is rejected.
+        // Certificate with no signers is rejected
         let empty = Certificate {
-            signers: Signers::from(participants.len(), std::iter::empty::<u32>()),
+            signers: Signers::from(participants_len, std::iter::empty::<u32>()),
             signatures: Vec::new(),
         };
-        assert!(Certificate::decode_cfg(empty.encode(), &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(empty.encode(), &participants_len).is_err());
 
-        // Certificate with mismatched signature count is rejected.
+        // Certificate with mismatched signature count is rejected
         let mismatched = Certificate {
-            signers: Signers::from(participants.len(), [0u32, 1]),
+            signers: Signers::from(participants_len, [0u32, 1]),
             signatures: vec![certificate.signatures[0].clone()],
         };
-        assert!(Certificate::decode_cfg(mismatched.encode(), &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(mismatched.encode(), &participants_len).is_err());
 
-        // Certificate containing more signers than the participant set is rejected.
+        // Certificate containing more signers than the participant set is rejected
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
-        signers.push(participants.len() as u32);
-        let mut signatures = certificate.signatures.clone();
-        signatures.push(certificate.signatures[0].clone());
+        signers.push(participants_len as u32);
+        let mut sigs = certificate.signatures.clone();
+        sigs.push(certificate.signatures[0].clone());
         let extended = Certificate {
-            signers: Signers::from(participants.len() + 1, signers),
-            signatures,
+            signers: Signers::from(participants_len + 1, signers),
+            signatures: sigs,
         };
-        assert!(Certificate::decode_cfg(extended.encode(), &participants.len()).is_err());
-    }
-
-    #[test]
-    fn test_verify_certificate() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 21, 11);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(quorum(schemes.len() as u32) as usize)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-
-        let verifier = Scheme::verifier(participants);
-        assert!(verifier.verify_certificate(
-            &mut OsRng,
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &certificate,
-        ));
-    }
-
-    #[test]
-    fn test_verify_certificate_rejects_sub_quorum() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 23, 12);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-
-        let mut truncated = certificate;
-        let mut signers: Vec<u32> = truncated.signers.iter().collect();
-        signers.pop();
-        truncated.signers = Signers::from(participants.len(), signers);
-        truncated.signatures.pop();
-
-        let verifier = Scheme::verifier(participants);
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &truncated,
-        ));
+        assert!(Certificate::decode_cfg(extended.encode(), &participants_len).is_err());
     }
 
     #[test]
     fn test_verify_certificate_rejects_unknown_signer() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 25, 13);
+        let (schemes, verifier) = setup_signers(4, 63);
+        let participants_len = schemes.len();
 
         let signatures: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
+        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
+        // Add an unknown signer (out of range)
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
-        signers.push(participants.len() as u32);
-        certificate.signers = Signers::from(participants.len() + 1, signers);
+        signers.push(participants_len as u32);
+        certificate.signers = Signers::from(participants_len + 1, signers);
         certificate
             .signatures
             .push(certificate.signatures[0].clone());
 
-        let verifier = Scheme::verifier(participants);
-        assert!(!verifier.verify_certificate(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
+            TestContext { message: MESSAGE },
             &certificate,
         ));
     }
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 26, 14);
+        let (schemes, verifier) = setup_signers(4, 64);
+        let participants_len = schemes.len();
 
         let signatures: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
+        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
 
-        // The certificate is valid
-        let verifier = Scheme::verifier(participants.clone());
-        assert!(verifier.verify_certificate(
+        // Valid certificate passes
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
+            TestContext { message: MESSAGE },
             &certificate,
         ));
 
-        // Make the signers bitmap size smaller
+        // Make the signers bitmap size larger (mismatched with participants)
         let signers: Vec<u32> = certificate.signers.iter().collect();
-        certificate.signers = Signers::from(participants.len() - 1, signers);
+        certificate.signers = Signers::from(participants_len + 1, signers);
 
-        // The certificate verification should fail
-        assert!(!verifier.verify_certificate(
+        // Certificate verification should fail due to size mismatch
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
+            TestContext { message: MESSAGE },
             &certificate,
         ));
-    }
-
-    #[test]
-    fn test_verify_certificate_rejects_mismatched_signature_count() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal = sample_proposal(0, 27, 14);
-
-        let signatures: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let mut certificate = schemes[0]
-            .assemble_certificate(signatures)
-            .expect("assemble certificate");
-        certificate.signatures.pop();
-
-        let verifier = Scheme::verifier(participants);
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &certificate,
-        ));
-    }
-
-    #[test]
-    fn test_verify_certificates_batch_detects_failure() {
-        let (schemes, participants) = setup_signers(4, 42);
-        let proposal_a = sample_proposal(0, 23, 12);
-        let proposal_b = sample_proposal(1, 24, 13);
-
-        let signatures_a: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal_a,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-        let signatures_b: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal_b,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let certificate_a = schemes[0]
-            .assemble_certificate(signatures_a)
-            .expect("assemble certificate");
-        let mut bad_certificate = schemes[0]
-            .assemble_certificate(signatures_b)
-            .expect("assemble certificate");
-        bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
-
-        let verifier = Scheme::verifier(participants);
-        let mut iter = [
-            (
-                Subject::Notarize {
-                    proposal: &proposal_a,
-                },
-                &certificate_a,
-            ),
-            (
-                Subject::Finalize {
-                    proposal: &proposal_b,
-                },
-                &bad_certificate,
-            ),
-        ]
-        .into_iter();
-
-        assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-
-        commonware_codec::conformance_tests! {
-            Certificate
-        }
     }
 }
