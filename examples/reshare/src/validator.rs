@@ -629,7 +629,7 @@ mod test {
                         // Check if it's time to start delayed participants
                         if !delayed_started {
                             if let Some(Crash::Delay { after, .. }) = &self.crash {
-                                if epoch.get()+1 >= *after {
+                                if epoch.get() >= *after - 1 {
                                     for pk in &delayed_pks {
                                         team.start_participant(
                                             &ctx,
