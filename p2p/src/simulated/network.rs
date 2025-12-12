@@ -150,7 +150,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
 
     // Rate limiters for each (sender, channel) pair
-    rate_limiters: HashMap<(P, Channel), RateLimiter<P, ContextCell<E>>>,
+    rate_limiters: HashMap<(P, Channel), RateLimiter<P, E>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -314,8 +314,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 self.ensure_peer_exists(&public_key).await;
 
                 // Create rate limiter for this (sender, channel) pair
-                let rate_limiter =
-                    RateLimiter::hashmap_with_clock(quota, self.context.with_label("rate_limiter"));
+                let clock = self
+                    .context
+                    .with_label(&format!("rate_limiter_{channel}_{public_key}"))
+                    .take();
+                let rate_limiter = RateLimiter::hashmap_with_clock(quota, clock);
                 self.rate_limiters
                     .insert((public_key.clone(), channel), rate_limiter);
 
@@ -655,23 +658,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 }
 
 /// Implementation of a [crate::Sender] for the simulated network.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
-}
-
-impl<P: PublicKey> Debug for Sender<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sender")
-            .field("me", &self.me)
-            .field("channel", &self.channel)
-            .field("max_size", &self.max_size)
-            .finish()
-    }
 }
 
 impl<P: PublicKey> Sender<P> {
