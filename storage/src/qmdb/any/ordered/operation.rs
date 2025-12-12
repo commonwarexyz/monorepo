@@ -3,6 +3,7 @@ use crate::{
     qmdb::{
         any::{
             ordered::KeyData,
+            todo::{Operation2, OrderedUpdate},
             value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
             COMMIT_FLOOR_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT,
         },
@@ -19,9 +20,11 @@ use commonware_codec::{
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
-pub type FixedOperation<K, V> = Operation<K, FixedEncoding<V>>;
-pub type VariableOperation<K, V> = Operation<K, VariableEncoding<V>>;
+pub type FixedOperation<K, V> = Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>;
+pub type VariableOperation<K, V> =
+    Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>;
 
+/*
 /// An ordered operation.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: ValueEncoding> {
@@ -468,3 +471,4 @@ mod tests {
         );
     }
 }
+*/

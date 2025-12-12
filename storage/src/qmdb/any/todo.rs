@@ -42,7 +42,7 @@ use std::{
 };
 use tracing::debug;
 
-type OrderedOperation<K, V> = ordered::Operation<K, V>;
+type OrderedOperation<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
 type UnorderedOperation<K, V> = unordered::Operation<K, V>;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
@@ -2005,10 +2005,11 @@ const OP2_DELETE_CONTEXT: u8 = 0xD1;
 const OP2_UPDATE_CONTEXT: u8 = 0xD2;
 const OP2_COMMIT_CONTEXT: u8 = 0xD3;
 
-pub trait UpdateShape<K: Array, V: ValueEncoding> {
+pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
     type UpdatePayload;
 }
 
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct OrderedUpdate<K: Array, V: ValueEncoding>(KeyData<K, V::Value>);
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
     type UpdatePayload = KeyData<K, V::Value>;
@@ -2071,6 +2072,8 @@ impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> 
         }))
     }
 }
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(K, V::Value);
 
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
@@ -2134,6 +2137,7 @@ where
 }
 
 pub type OrderedOperation2<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
+
 pub type UnorderedOperation2<K, V> = Operation2<UnorderedUpdate<K, V>, K, V>;
 
 impl<K: Array, V: FixedValue> Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
@@ -2179,7 +2183,7 @@ impl<K: Array, V: FixedValue> Write
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::DELETE_OP_SIZE - K::SIZE);
+                buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Operation2::Update(p) => {
                 OP2_UPDATE_CONTEXT.write(buf);
