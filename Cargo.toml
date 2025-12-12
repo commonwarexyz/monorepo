@@ -56,6 +56,9 @@ use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
 undocumented_unsafe_blocks = "deny"
+# This generates false positives for methods that are correct, and the contortions
+# to avoid triggering this method make the code worse.
+suspicious_op_assign_impl = "allow"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }

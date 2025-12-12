@@ -562,6 +562,21 @@ impl G1 {
         slice
     }
 
+    /// Like [`std::ops::Neg::neg`], except operating in place.
+    ///
+    /// This function exists in order to avoid an extra copy when implement
+    /// subtraction. Basically, the compiler (including LLVM) aren't smart
+    /// enough to eliminate a copy that happens if you implement subtraction
+    /// as `x += &-*rhs`. So, instead, we copy rhs, negate it in place, and then
+    /// add it, to avoid a copy.
+    fn neg_in_place(&mut self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: ptr is valid.
+        unsafe {
+            blst_p1_cneg(ptr, true);
+        }
+    }
+
     /// Converts the G1 point to its affine representation.
     pub(crate) fn as_blst_p1_affine(&self) -> blst_p1_affine {
         let mut affine = blst_p1_affine::default();
@@ -679,18 +694,16 @@ impl Neg for G1 {
     type Output = Self;
 
     fn neg(mut self) -> Self::Output {
-        let ptr = &raw mut self.0;
-        // SAFETY: ptr is valid.
-        unsafe {
-            blst_p1_cneg(ptr, true);
-        }
+        self.neg_in_place();
         self
     }
 }
 
 impl<'a> SubAssign<&'a Self> for G1 {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self += &-*rhs;
+        let mut rhs_cp = *rhs;
+        rhs_cp.neg_in_place();
+        *self += &rhs_cp;
     }
 }
 
@@ -839,6 +852,15 @@ impl G2 {
         slice
     }
 
+    /// c.f. [G1::neg_in_place].
+    fn neg_in_place(&mut self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: ptr is valid.
+        unsafe {
+            blst_p2_cneg(ptr, true);
+        }
+    }
+
     /// Converts the G2 point to its affine representation.
     pub(crate) fn as_blst_p2_affine(&self) -> blst_p2_affine {
         let mut affine = blst_p2_affine::default();
@@ -956,18 +978,16 @@ impl Neg for G2 {
     type Output = Self;
 
     fn neg(mut self) -> Self::Output {
-        let ptr = &raw mut self.0;
-        // SAFETY: ptr is valid.
-        unsafe {
-            blst_p2_cneg(ptr, true);
-        }
+        self.neg_in_place();
         self
     }
 }
 
 impl<'a> SubAssign<&'a Self> for G2 {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self += &-*rhs;
+        let mut rhs_cp = *rhs;
+        rhs_cp.neg_in_place();
+        *self += &rhs_cp;
     }
 }
 
