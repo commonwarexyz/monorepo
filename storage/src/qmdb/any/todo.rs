@@ -12,23 +12,33 @@ use crate::{
         any::{
             ordered::{self, KeyData},
             unordered::{self},
-            CleanAny, DirtyAny, ValueEncoding, VariableValue,
+            value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
+            CleanAny, DirtyAny,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::Operation,
+        operation::{Committable, Operation},
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper,
     },
     AuthenticatedBitMap,
 };
+use bytes::{Buf, BufMut};
 use commonware_codec::Codec;
+use commonware_codec::{
+    util::{at_least, ensure_zeros},
+    FixedSize,
+};
+use commonware_codec::{varint::UInt, CodecFixed};
+use commonware_codec::{Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{hex, Array};
+use core::fmt;
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
     ops::Bound,
 };
 use tracing::debug;
@@ -1989,5 +1999,570 @@ where
         }
 
         Ok(())
+    }
+}
+
+const OP2_DELETE_CONTEXT: u8 = 0xD1;
+const OP2_UPDATE_CONTEXT: u8 = 0xD2;
+const OP2_COMMIT_CONTEXT: u8 = 0xD3;
+
+/*
+/// Helper to route value encode/decode by encoding flavor.
+trait ValueEncodingOps: ValueEncoding {
+    fn value_size(value: &Self::Value) -> usize;
+    fn write_value(value: &Self::Value, buf: &mut impl BufMut);
+    fn read_value(
+        buf: &mut impl Buf,
+        cfg: &<Self::Value as Read>::Cfg,
+    ) -> Result<Self::Value, CodecError>;
+}
+
+impl<V: FixedValue> ValueEncodingOps for FixedEncoding<V> {
+    fn value_size(_value: &Self::Value) -> usize {
+        V::SIZE
+    }
+
+    fn write_value(value: &Self::Value, buf: &mut impl BufMut) {
+        value.write(buf);
+    }
+
+    fn read_value(
+        buf: &mut impl Buf,
+        cfg: &<Self::Value as Read>::Cfg,
+    ) -> Result<Self::Value, CodecError> {
+        V::read_cfg(buf, cfg)
+    }
+}
+
+impl<V: VariableValue> ValueEncodingOps for VariableEncoding<V> {
+    fn value_size(value: &Self::Value) -> usize {
+        value.encode_size()
+    }
+
+    fn write_value(value: &Self::Value, buf: &mut impl BufMut) {
+        value.write(buf);
+    }
+
+    fn read_value(
+        buf: &mut impl Buf,
+        cfg: &<Self::Value as Read>::Cfg,
+    ) -> Result<Self::Value, CodecError> {
+        V::read_cfg(buf, cfg)
+    }
+}
+*/
+
+pub trait UpdateShape<K: Array, V: ValueEncoding> {
+    type UpdatePayload;
+}
+
+pub struct OrderedShape<K: Array, V: ValueEncoding>(KeyData<K, V::Value>);
+impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedShape<K, V> {
+    type UpdatePayload = KeyData<K, V::Value>;
+}
+
+impl<K: Array, V: FixedValue> FixedSize for OrderedShape<K, FixedEncoding<V>> {
+    const SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
+}
+
+impl<K: Array, V: FixedValue> Write for OrderedShape<K, FixedEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        OP2_UPDATE_CONTEXT.write(buf);
+        self.0.key.write(buf);
+        self.0.value.write(buf);
+        self.0.next_key.write(buf);
+    }
+}
+
+impl<K: Array, V: FixedValue> Read for OrderedShape<K, FixedEncoding<V>> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        let next_key = K::read(buf)?;
+        Ok(Self(KeyData {
+            key,
+            value,
+            next_key,
+        }))
+    }
+}
+
+pub struct UnorderedShape<K: Array, V: ValueEncoding>(K, V::Value);
+
+impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedShape<K, V> {
+    type UpdatePayload = (K, V::Value);
+}
+
+impl<K: Array, V: FixedValue> FixedSize for UnorderedShape<K, FixedEncoding<V>> {
+    const SIZE: usize = 1 + K::SIZE + V::SIZE;
+}
+
+impl<K: Array, V: FixedValue> Write for UnorderedShape<K, FixedEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        OP2_UPDATE_CONTEXT.write(buf);
+        self.0.write(buf);
+        self.1.write(buf);
+    }
+}
+
+impl<K: Array, V: FixedValue> Read for UnorderedShape<K, FixedEncoding<V>> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        Ok(Self(key, value))
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum Operation2<S, K: Array, V: ValueEncoding>
+where
+    S: UpdateShape<K, V>,
+{
+    Delete(K),
+    Update(S::UpdatePayload),
+    CommitFloor(Option<V::Value>, Location),
+}
+
+pub type OrderedOperation2<K, V> = Operation2<OrderedShape<K, V>, K, V>;
+pub type UnorderedOperation2<K, V> = Operation2<UnorderedShape<K, V>, K, V>;
+
+impl<K: Array, V: FixedValue> Operation2<OrderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
+    const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+
+    const fn padding_for_update<K2: Array, V2: FixedValue>() -> usize {
+        Self::SIZE::<K2, V2>() - Self::UPDATE_OP_SIZE
+    }
+
+    const fn padding_for_delete<K2: Array, V2: FixedValue>() -> usize {
+        Self::SIZE::<K2, V2>() - Self::DELETE_OP_SIZE
+    }
+
+    const fn padding_for_commit<V2: FixedValue>() -> usize {
+        Self::SIZE::<K, V2>() - Self::COMMIT_OP_SIZE
+    }
+
+    const fn SIZE<K2: Array, V2: FixedValue>() -> usize {
+        let max1 = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+            Self::UPDATE_OP_SIZE
+        } else {
+            Self::COMMIT_OP_SIZE
+        };
+        if max1 > Self::DELETE_OP_SIZE {
+            max1
+        } else {
+            Self::DELETE_OP_SIZE
+        }
+    }
+}
+
+impl<K: Array, V: FixedValue> Operation2<UnorderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
+    const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE;
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+
+    const fn padding_for_update<K2: Array, V2: FixedValue>() -> usize {
+        Self::SIZE::<K2, V2>() - Self::UPDATE_OP_SIZE
+    }
+
+    const fn padding_for_delete<K2: Array, V2: FixedValue>() -> usize {
+        Self::SIZE::<K2, V2>() - Self::DELETE_OP_SIZE
+    }
+
+    const fn padding_for_commit<V2: FixedValue>() -> usize {
+        Self::SIZE::<K, V2>() - Self::COMMIT_OP_SIZE
+    }
+
+    const fn SIZE<K2: Array, V2: FixedValue>() -> usize {
+        let max1 = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+            Self::UPDATE_OP_SIZE
+        } else {
+            Self::COMMIT_OP_SIZE
+        };
+        if max1 > Self::DELETE_OP_SIZE {
+            max1
+        } else {
+            Self::DELETE_OP_SIZE
+        }
+    }
+}
+
+impl<K: Array, V: FixedValue> FixedSize
+    for Operation2<OrderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    const SIZE: usize = Self::SIZE::<K, V>();
+}
+
+impl<K: Array, V: FixedValue> FixedSize
+    for Operation2<UnorderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    const SIZE: usize = Self::SIZE::<K, V>();
+}
+
+/*
+// Fixed-size variants automatically get EncodeSize from the FixedSize blanket impl.
+// They will automatically implement CodecFixed = Codec + FixedSize.
+
+// Variable-size variants need an explicit EncodeSize impl (no FixedSize available).
+// They will only implement Codec, not CodecFixed.
+impl<S, K, V> EncodeSize for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    K: Array,
+    V: VariableValue,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(_) => K::SIZE,
+            Self::Update(p) => S::encode_size_update(p),
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+        }
+    }
+}
+
+impl<K, V> Write for Operation2<OrderedShape, K, FixedEncoding<V>>
+where
+    K: Array + Codec,
+    V: FixedValue,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+                buf.put_bytes(0, Self::padding_for_delete::<K, V>());
+            }
+            Self::Update(p) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                OrderedShape::write_update(p, buf);
+                buf.put_bytes(0, Self::padding_for_update::<K, V>());
+            }
+            Self::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                if let Some(metadata) = metadata {
+                    true.write(buf);
+                    metadata.write(buf);
+                } else {
+                    buf.put_bytes(0, V::SIZE + 1);
+                }
+                buf.put_slice(&floor_loc.to_be_bytes());
+                buf.put_bytes(0, Self::padding_for_commit::<V>());
+            }
+        }
+    }
+}
+
+impl<K, V> Write for Operation2<UnorderedShape, K, FixedEncoding<V>>
+where
+    K: Array + Codec,
+    V: FixedValue,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+                buf.put_bytes(0, Self::padding_for_delete::<K, V>());
+            }
+            Self::Update(p) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                UnorderedShape::write_update(p, buf);
+                buf.put_bytes(0, Self::padding_for_update::<K, V>());
+            }
+            Self::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                if let Some(metadata) = metadata {
+                    true.write(buf);
+                    metadata.write(buf);
+                } else {
+                    buf.put_bytes(0, V::SIZE + 1);
+                }
+                buf.put_slice(&floor_loc.to_be_bytes());
+                buf.put_bytes(0, Self::padding_for_commit::<V>());
+            }
+        }
+    }
+}
+
+impl<S, K, V> Write for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    K: Array + Codec,
+    V: VariableValue,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+            }
+            Self::Update(p) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                S::write_update(p, buf);
+            }
+            Self::CommitFloor(v, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                v.write(buf);
+                UInt(**floor_loc).write(buf);
+            }
+        }
+    }
+}
+
+impl<K, V> Read for Operation2<OrderedShape, K, FixedEncoding<V>>
+where
+    K: Array + Codec,
+    V: FixedValue,
+{
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE::<K, V>())?;
+
+        match u8::read(buf)? {
+            OP2_UPDATE_CONTEXT => {
+                let payload = OrderedShape::read_update(buf, cfg)?;
+                ensure_zeros(buf, Self::padding_for_update::<K, V>())?;
+                Ok(Self::Update(payload))
+            }
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                ensure_zeros(buf, Self::padding_for_delete::<K, V>())?;
+                Ok(Self::Delete(key))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let is_some = bool::read(buf)?;
+                let metadata = if is_some {
+                    Some(V::read_cfg(buf, cfg)?)
+                } else {
+                    ensure_zeros(buf, V::SIZE)?;
+                    None
+                };
+                let floor_loc = u64::read(buf)?;
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::todo::Operation2",
+                        "commit floor location overflow",
+                    )
+                })?;
+                ensure_zeros(buf, Self::padding_for_commit::<V>())?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            other => Err(CodecError::InvalidEnum(other)),
+        }
+    }
+}
+
+impl<K, V> Read for Operation2<UnorderedShape, K, FixedEncoding<V>>
+where
+    K: Array + Codec,
+    V: FixedValue,
+{
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE::<K, V>())?;
+
+        match u8::read(buf)? {
+            OP2_UPDATE_CONTEXT => {
+                let payload = UnorderedShape::read_update(buf, cfg)?;
+                ensure_zeros(buf, Self::padding_for_update::<K, V>())?;
+                Ok(Self::Update(payload))
+            }
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                ensure_zeros(buf, Self::padding_for_delete::<K, V>())?;
+                Ok(Self::Delete(key))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let is_some = bool::read(buf)?;
+                let metadata = if is_some {
+                    Some(V::read_cfg(buf, cfg)?)
+                } else {
+                    ensure_zeros(buf, V::SIZE)?;
+                    None
+                };
+                let floor_loc = u64::read(buf)?;
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::todo::Operation2",
+                        "commit floor location overflow",
+                    )
+                })?;
+                ensure_zeros(buf, Self::padding_for_commit::<V>())?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            other => Err(CodecError::InvalidEnum(other)),
+        }
+    }
+}
+
+impl<S, K, V> Read for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    K: Array + Codec,
+    V: VariableValue,
+{
+    type Cfg = <V as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                Ok(Self::Delete(key))
+            }
+            OP2_UPDATE_CONTEXT => {
+                let payload = S::read_update(buf, cfg)?;
+                Ok(Self::Update(payload))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let metadata = Option::<V>::read_cfg(buf, cfg)?;
+                let floor_loc = UInt::read(buf)?;
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::todo::Operation2",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            other => Err(CodecError::InvalidEnum(other)),
+        }
+    }
+}
+    */
+
+impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
+    for Operation2<OrderedShape<K, V>, K, V>
+where
+    V::Value: Codec,
+{
+    type Key = K;
+
+    fn key(&self) -> Option<&Self::Key> {
+        match self {
+            Self::Delete(k) => Some(k),
+            Self::Update(p) => Some(&p.key),
+            Self::CommitFloor(_, _) => None,
+        }
+    }
+
+    fn is_update(&self) -> bool {
+        matches!(self, Self::Update(_))
+    }
+
+    fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete(_))
+    }
+
+    fn has_floor(&self) -> Option<Location> {
+        match self {
+            Self::CommitFloor(_, loc) => Some(*loc),
+            _ => None,
+        }
+    }
+}
+
+impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
+    for Operation2<UnorderedShape<K, V>, K, V>
+where
+    V::Value: Codec,
+{
+    type Key = K;
+
+    fn key(&self) -> Option<&Self::Key> {
+        match self {
+            Self::Delete(k) => Some(k),
+            Self::Update((k, _)) => Some(k),
+            Self::CommitFloor(_, _) => None,
+        }
+    }
+
+    fn is_update(&self) -> bool {
+        matches!(self, Self::Update(_))
+    }
+
+    fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete(_))
+    }
+
+    fn has_floor(&self) -> Option<Location> {
+        match self {
+            Self::CommitFloor(_, loc) => Some(*loc),
+            _ => None,
+        }
+    }
+}
+
+impl<S, K, V> Committable for Operation2<S, K, V>
+where
+    S: UpdateShape<K, V>,
+    K: Array,
+    V: ValueEncoding,
+    V::Value: Codec,
+{
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_, _))
+    }
+}
+
+impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<OrderedShape<K, V>, K, V>
+where
+    K: Array + fmt::Display,
+    V: ValueEncoding,
+    V::Value: Codec,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Update(payload) => write!(
+                f,
+                "[key:{} value:{} next_key:{}]",
+                payload.key,
+                hex(&payload.value.encode()),
+                payload.next_key
+            ),
+            Self::CommitFloor(value, loc) => {
+                if let Some(value) = value {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
+        }
+    }
+}
+
+impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<UnorderedShape<K, V>, K, V>
+where
+    K: Array + fmt::Display,
+    V: ValueEncoding,
+    V::Value: Codec + fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Update((key, value)) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::CommitFloor(value, loc) => {
+                if let Some(value) = value {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
+        }
     }
 }
