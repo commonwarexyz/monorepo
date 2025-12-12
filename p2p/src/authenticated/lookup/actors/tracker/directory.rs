@@ -2,16 +2,13 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
     TryCollect,
 };
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
+use governor::{clock::Clock as GClock, Quota};
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
@@ -48,8 +45,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
-    #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<C, E>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.

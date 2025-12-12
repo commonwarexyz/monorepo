@@ -126,8 +126,6 @@ pub async fn run<S>(
             namespace: union(namespace::APPLICATION, b"_ENGINE"),
             output,
             share: config.share,
-            orchestrator_rate_limit: orchestrator_limit,
-            dkg_rate_limit: dkg_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
@@ -375,8 +373,6 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
