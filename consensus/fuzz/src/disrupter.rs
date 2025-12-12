@@ -19,6 +19,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(500);
+const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
 
 /// Which fields to mutate when creating a malformed proposal.
 #[derive(Debug, Clone, Arbitrary)]
@@ -126,8 +127,15 @@ where
             }
         };
 
-        // Remove oldest proposal to prevent unbounded growth
-        if self.latest_proposals.len() > 100 {
+        // Keep only proposals in the active range [last_finalized, max(last_notarized, last_vote)]
+        let active_range_size = self
+            .last_notarized
+            .max(self.last_vote)
+            .saturating_sub(self.last_finalized);
+
+        // Remove oldest proposals to keep only active_range_size elements
+        let keep_count = active_range_size.max(LATEST_PROPOSALS_MIN_LEN) as usize;
+        while self.latest_proposals.len() > keep_count {
             self.latest_proposals.pop_front();
         }
 
@@ -137,8 +145,8 @@ where
     fn new_proposal(&self, old: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
-            old.parent.clone(),
-            old.payload.clone(),
+            old.parent,
+            old.payload,
         )
     }
 
