@@ -181,7 +181,7 @@
 //! ```
 //! use commonware_cryptography::bls12381::{
 //!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
-//!     primitives::variant::MinSig,
+//!     primitives::{group::Share, variant::MinSig},
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 //! use commonware_utils::{ordered::Set, TryCollect};
