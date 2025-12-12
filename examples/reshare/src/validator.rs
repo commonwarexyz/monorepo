@@ -90,7 +90,7 @@ pub async fn run<S>(
     let broadcaster_limit = Quota::per_second(NZU32!(8));
     let broadcaster = network.register(BROADCASTER_CHANNEL, broadcaster_limit, MESSAGE_BACKLOG);
 
-    let marshal_limit = Quota::per_second(NZU32!(8));
+    let marshal_limit = Quota::per_second(NZU32!(32));
     let marshal = network.register(MARSHAL_CHANNEL, marshal_limit, MESSAGE_BACKLOG);
 
     let orchestrator_limit = Quota::per_second(NZU32!(1));
@@ -104,7 +104,7 @@ pub async fn run<S>(
         public_key: config.signing_key.public_key(),
         manager: oracle.clone(),
         blocker: oracle.clone(),
-        mailbox_size: 200,
+        mailbox_size: 1024,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
             rate_limit: marshal_limit,
@@ -1213,24 +1213,10 @@ mod test {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn reshare_with_delayed_start() {
-        // Delay participant at index 3 (one of 4 total).
-        // Use per_round: vec![4] so ALL participants are dealers every epoch.
-        // This ensures the delayed participant is guaranteed to be a dealer
-        // (and receive a share) in epochs after they start.
-        //
-        // Timeline:
-        // - Epoch 0: Only participants 0,1,2 are online (3 is delayed)
-        //   DKG still succeeds with 3 of 4 dealers (meets 2f+1 threshold with f=1)
-        // - After epoch 0 succeeds: participant 3 starts and begins syncing
-        // - Epochs 1+: participant 3 should eventually catch up and participate
-        //   with 0 reveals in at least one epoch
-        //
-        // We run 8 epochs to give the delayed participant enough time to sync
-        // and have at least one full epoch where they participate from the start.
         Plan {
             seed: 0,
-            total: 4,
-            per_round: vec![4],
+            total: 5,
+            per_round: vec![5],
             link: Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
@@ -1238,10 +1224,10 @@ mod test {
             },
             mode: Mode::Reshare(8),
             crash: None,
-            failures: HashSet::new(),
+            failures: HashSet::from([4]),
             delayed_start: Some(DelayedStart {
                 participant_index: 3,
-                after_epochs: 1,
+                after_epochs: 2,
             }),
         }
         .run()
