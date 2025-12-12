@@ -240,6 +240,28 @@ where
             active_keys,
         })
     }
+
+    /// Returns an [IndexedLog] initialized directly from the given components. The log is
+    /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
+    /// inactivity floor. The last commit location is set to None and it is the responsibility of the
+    /// caller to ensure it is set correctly.
+    pub(crate) async fn from_components(
+        inactivity_floor_loc: Location,
+        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
+        mut snapshot: I,
+    ) -> Result<Self, Error> {
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        Ok(Self {
+            log,
+            inactivity_floor_loc,
+            snapshot,
+            last_commit: None,
+            steps: 0,
+            active_keys,
+        })
+    }
 }
 
 impl<
@@ -1176,40 +1198,6 @@ impl<
         self.steps = 0;
 
         Ok(self.inactivity_floor_loc)
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = UnorderedOperation<K, V>>,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, UnorderedOperation<K, V>, C, I, H>
-where
-    UnorderedOperation<K, V>: Codec,
-{
-    /// Returns an [IndexedLog] initialized directly from the given components. The log is
-    /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
-    /// inactivity floor. The last commit location is set to None and it is the responsibility of the
-    /// caller to ensure it is set correctly.
-    pub(crate) async fn from_components(
-        inactivity_floor_loc: Location,
-        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
-        mut snapshot: I,
-    ) -> Result<Self, Error> {
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot,
-            last_commit: None,
-            steps: 0,
-            active_keys,
-        })
     }
 }
 
