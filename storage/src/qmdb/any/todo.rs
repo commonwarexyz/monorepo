@@ -2000,46 +2000,42 @@ const OP2_UPDATE_CONTEXT: u8 = 0xD2;
 const OP2_COMMIT_CONTEXT: u8 = 0xD3;
 
 pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
-    type UpdatePayload;
+    /// Extract the key from an update.
+    fn key(&self) -> &K;
 
-    /// Extract the key from an update payload.
-    fn key(payload: &Self::UpdatePayload) -> &K;
-
-    /// Compute the size of the update payload when value is fixed-size (excludes context byte).
+    /// Compute the size of the update when value is fixed-size (excludes context byte).
     fn update_encode_size_fixed<V2: FixedValue>() -> usize;
 
-    /// Compute the size of the update payload when value is variable-size (excludes context byte).
-    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize;
+    /// Compute the size of the update when value is variable-size (excludes context byte).
+    fn update_encode_size_variable(&self) -> usize;
 
-    /// Format the update payload for display.
-    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    /// Format the update for display.
+    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);
 
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
-    type UpdatePayload = Self;
-
-    fn key(payload: &Self::UpdatePayload) -> &K {
-        &payload.0.key
+    fn key(&self) -> &K {
+        &self.0.key
     }
 
     fn update_encode_size_fixed<V2: FixedValue>() -> usize {
         K::SIZE + V2::SIZE + K::SIZE
     }
 
-    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize {
-        K::SIZE + payload.0.value.encode_size() + K::SIZE
+    fn update_encode_size_variable(&self) -> usize {
+        K::SIZE + self.0.value.encode_size() + K::SIZE
     }
 
-    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "[key:{} next_key:{} value:{}]",
-            payload.0.key,
-            payload.0.next_key,
-            hex(&payload.0.value.encode())
+            self.0.key,
+            self.0.next_key,
+            hex(&self.0.value.encode())
         )
     }
 }
@@ -2104,22 +2100,20 @@ impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> 
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
 
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
-    type UpdatePayload = Self;
-
-    fn key(payload: &Self::UpdatePayload) -> &K {
-        &payload.0
+    fn key(&self) -> &K {
+        &self.0
     }
 
     fn update_encode_size_fixed<V2: FixedValue>() -> usize {
         K::SIZE + V2::SIZE
     }
 
-    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize {
-        K::SIZE + payload.1.encode_size()
+    fn update_encode_size_variable(&self) -> usize {
+        K::SIZE + self.1.encode_size()
     }
 
-    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[key:{} value:{}]", payload.0, hex(&payload.1.encode()))
+    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[key:{} value:{}]", self.0, hex(&self.1.encode()))
     }
 }
 
@@ -2176,7 +2170,7 @@ where
     S: UpdateShape<K, V>,
 {
     Delete(K),
-    Update(S::UpdatePayload),
+    Update(S),
     CommitFloor(Option<V::Value>, Location),
 }
 
@@ -2213,8 +2207,7 @@ where
 
 impl<S, K, V> Write for Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
-    S::UpdatePayload: Write,
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize + Write,
     K: Array + Codec,
     V: FixedValue,
 {
@@ -2247,8 +2240,7 @@ where
 
 impl<S, K, V> Read for Operation<S, K, FixedEncoding<V>>
 where
-    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
-    S::UpdatePayload: Read<Cfg = ()>,
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
     K: Array + Codec,
     V: FixedValue,
 {
@@ -2259,7 +2251,7 @@ where
 
         match u8::read(buf)? {
             OP2_UPDATE_CONTEXT => {
-                let payload = S::UpdatePayload::read_cfg(buf, cfg)?;
+                let payload = S::read_cfg(buf, cfg)?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
                 Ok(Self::Update(payload))
             }
@@ -2293,8 +2285,7 @@ where
 
 impl<S, K, V> EncodeSize for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    S::UpdatePayload: EncodeSize,
+    S: UpdateShape<K, VariableEncoding<V>> + EncodeSize,
     K: Array,
     V: VariableValue,
 {
@@ -2309,8 +2300,7 @@ where
 
 impl<S, K, V> Write for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    S::UpdatePayload: Write,
+    S: UpdateShape<K, VariableEncoding<V>> + Write,
     K: Array + Codec,
     V: VariableValue,
 {
@@ -2335,8 +2325,7 @@ where
 
 impl<S, K, V> Read for Operation<S, K, VariableEncoding<V>>
 where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    S::UpdatePayload: Read<Cfg = <V as Read>::Cfg>,
+    S: UpdateShape<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
     K: Array + Codec,
     V: VariableValue,
 {
@@ -2349,7 +2338,7 @@ where
                 Ok(Self::Delete(key))
             }
             OP2_UPDATE_CONTEXT => {
-                let payload = S::UpdatePayload::read_cfg(buf, cfg)?;
+                let payload = S::read_cfg(buf, cfg)?;
                 Ok(Self::Update(payload))
             }
             OP2_COMMIT_CONTEXT => {
@@ -2384,7 +2373,7 @@ where
     fn key(&self) -> Option<&Self::Key> {
         match self {
             Self::Delete(k) => Some(k),
-            Self::Update(p) => Some(S::key(p)),
+            Self::Update(p) => Some(p.key()),
             Self::CommitFloor(_, _) => None,
         }
     }
@@ -2427,7 +2416,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(payload) => S::fmt_update(payload, f),
+            Self::Update(payload) => payload.fmt_update(f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
                     write!(
