@@ -5,18 +5,13 @@ use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Quota, Receiver, Sender},
+    simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };
-use governor::{clock::Clock as GClock, Quota as GQuota};
-use std::num::NonZeroU32;
-
-const fn default_quota() -> Quota {
-    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-}
+use commonware_utils::NZU32;
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
@@ -26,12 +21,16 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
+use governor::{clock::Clock as GClock, Quota};
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime},
 };
 use tracing::debug;
+
+/// Default rate limit quota (high enough to not interfere with normal operation)
+const DEFAULT_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;
@@ -351,7 +350,7 @@ async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL, default_quota(), context.clone())
+                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA, context.clone())
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());

@@ -156,7 +156,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU32, NZU64};
     use futures::StreamExt;
     use governor::Quota;
     use rand::{
@@ -215,10 +215,7 @@ mod tests {
         jitter: Duration::from_millis(50),
         success_rate: 0.7,
     };
-
-    fn test_quota() -> Quota {
-        Quota::per_second(NonZeroU32::new(1_000_000).unwrap())
-    }
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -248,7 +245,7 @@ mod tests {
         // Create the resolver
         let mut control = oracle.control(validator.clone());
         let backfill = control
-            .register(1, test_quota(), context.clone())
+            .register(1, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         let resolver_cfg = resolver::Config {
@@ -278,7 +275,7 @@ mod tests {
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = control
-            .register(2, test_quota(), context.clone())
+            .register(2, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         broadcast_engine.start(network);

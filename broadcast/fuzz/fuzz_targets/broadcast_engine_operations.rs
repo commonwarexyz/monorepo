@@ -12,20 +12,16 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
 };
-use commonware_p2p::{
-    simulated::{Network, Quota},
-    Recipients,
-};
+use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota as GQuota;
-use std::num::NonZeroU32;
-
-fn test_quota() -> Quota {
-    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-}
+use commonware_utils::NZU32;
+use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, time::Duration};
+
+/// Default rate limit quota for tests (high enough to not interfere with normal operation)
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -183,7 +179,7 @@ fn fuzz(input: FuzzInput) {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 

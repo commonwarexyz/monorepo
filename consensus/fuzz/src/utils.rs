@@ -2,8 +2,11 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::deterministic;
-use governor::Quota as GQuota;
-use std::{collections::HashMap, num::NonZeroU32};
+use commonware_utils::NZU32;
+use governor::Quota;
+use std::collections::HashMap;
+
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 #[derive(Clone)]
 pub enum Action {
@@ -95,10 +98,6 @@ pub async fn link_peers<P: PublicKey>(
     }
 }
 
-fn test_quota() -> GQuota {
-    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-}
-
 pub async fn register<P: PublicKey>(
     oracle: &mut Oracle<P, deterministic::Context>,
     validators: &[P],
@@ -115,15 +114,15 @@ pub async fn register<P: PublicKey>(
     for validator in validators.iter() {
         let mut control = oracle.control(validator.clone());
         let pending = control
-            .register(0, test_quota(), context.clone())
+            .register(0, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         let recovered = control
-            .register(1, test_quota(), context.clone())
+            .register(1, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         let resolver = control
-            .register(2, test_quota(), context.clone())
+            .register(2, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         registrations.insert(validator.clone(), (pending, recovered, resolver));

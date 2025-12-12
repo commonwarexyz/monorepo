@@ -57,18 +57,17 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Quota, Receiver, Sender},
+        simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use governor::Quota as GQuota;
-    use std::num::NonZeroU32;
-
-    fn test_quota() -> Quota {
-        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-    }
+    use commonware_utils::NZU32;
     use futures::StreamExt;
+    use governor::Quota;
     use std::time::Duration;
+
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     const MAILBOX_SIZE: usize = 1024;
     const LINK: Link = Link {
@@ -120,11 +119,11 @@ mod tests {
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
             let (sender1, receiver1) = control
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (sender2, receiver2) = control
-                .register(1, test_quota(), context.clone())
+                .register(1, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));

@@ -8,12 +8,8 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota as GQuota;
-use std::num::NonZeroU32;
-
-fn test_quota() -> simulated::Quota {
-    GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-}
+use commonware_utils::NZU32;
+use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -26,6 +22,9 @@ const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+
+/// Default rate limit quota for tests (high enough to not interfere with normal operation)
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 /// Operations that can be performed on the simulated p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -159,7 +158,7 @@ fn fuzz(input: FuzzInput) {
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
                         if let Ok((sender, receiver)) = oracle
                             .control(peer_pks[idx].clone())
-                            .register(channel_id as u64, test_quota(), context.clone())
+                            .register(channel_id as u64, TEST_QUOTA, context.clone())
                             .await
                         {
                             e.insert((sender, receiver));

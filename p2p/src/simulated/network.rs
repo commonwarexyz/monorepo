@@ -804,11 +804,14 @@ where
             return Err(Error::MessageTooLarge(message.len()));
         }
 
+        let rate_limiter = self.rate_limiter.lock().await;
+
         // Update known peers from subscription (non-blocking)
         if let Some(ref mut subscription) = self.peer_subscription {
             // Drain all pending updates, keeping the most recent
             while let Ok(Some(peers)) = subscription.try_next() {
                 self.known_peers = peers.into_iter().collect();
+                rate_limiter.retain_recent();
             }
         }
 
@@ -845,13 +848,10 @@ where
         };
 
         // Filter peers by rate limit, consuming rate tokens only for allowed peers
-        let rate_limiter = self.rate_limiter.lock().await;
         let allowed_peers: Vec<_> = peers
             .into_iter()
             .filter(|peer| rate_limiter.check_key(peer).is_ok())
             .collect();
-        // Clean up rate limiter state periodically
-        rate_limiter.shrink_to_fit();
         drop(rate_limiter);
 
         // If no recipients are allowed, short-circuit and signal that no peers could
@@ -1240,9 +1240,7 @@ mod tests {
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    fn test_quota() -> Quota {
-        Quota::per_second(NZU32!(10000))
-    }
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(10000));
 
     #[test]
     fn test_register_and_link() {
@@ -1268,26 +1266,26 @@ mod tests {
                 .await;
             let mut control = oracle.control(pk1.clone());
             control
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             control
-                .register(1, test_quota(), context.clone())
+                .register(1, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let mut control = oracle.control(pk2.clone());
             control
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             control
-                .register(1, test_quota(), context.clone())
+                .register(1, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
             // Overwrite if registering again
             control
-                .register(1, test_quota(), context.clone())
+                .register(1, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
@@ -1342,12 +1340,12 @@ mod tests {
             // Register normal peers
             let (mut peer_a_sender, mut peer_a_recv) = oracle
                 .control(peer_a.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (mut peer_b_sender, mut peer_b_recv) = oracle
                 .control(peer_b.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
@@ -1358,7 +1356,7 @@ mod tests {
             // - Messages from peer_b go to secondary receiver
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let peer_a_for_router = peer_a.clone();
@@ -1472,14 +1470,14 @@ mod tests {
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
                 .control(peer_c.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (_twin_primary_sender, _twin_secondary_sender) =
@@ -1547,14 +1545,14 @@ mod tests {
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
                 .control(peer_c.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
             // Register and split the twin's channel with a router that sends to Both
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (mut twin_primary_sender, mut twin_secondary_sender) =
@@ -1717,12 +1715,12 @@ mod tests {
                 .await;
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
@@ -1798,17 +1796,17 @@ mod tests {
                 .await;
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             let (_sender3, mut recv_b) = oracle
                 .control(recipient_b.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 
@@ -1897,7 +1895,7 @@ mod tests {
                 .unwrap();
             let mut control2 = oracle.control(pk2.clone());
             let (_, mut receiver) = control2
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
 

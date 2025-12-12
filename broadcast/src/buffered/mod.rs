@@ -42,12 +42,13 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Quota, Receiver, Sender},
+        simulated::{Link, Network, Oracle, Receiver, Sender},
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use governor::Quota as GQuota;
-    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+    use commonware_utils::NZU32;
+    use governor::Quota;
+    use std::{collections::BTreeMap, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -62,9 +63,8 @@ mod tests {
     // Enough time for a message to propagate through the network
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
-    fn test_quota() -> Quota {
-        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-    }
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     type Registrations = BTreeMap<
         PublicKey,
@@ -103,7 +103,7 @@ mod tests {
         for peer in peers.iter() {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));

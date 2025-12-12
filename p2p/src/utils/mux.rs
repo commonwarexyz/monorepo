@@ -454,7 +454,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle, Quota},
+        simulated::{self, Link, Network, Oracle},
         Recipients,
     };
     use bytes::Bytes;
@@ -462,6 +462,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
     use commonware_utils::NZU32;
+    use governor::Quota;
     use std::time::Duration;
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
@@ -474,9 +475,7 @@ mod tests {
     const CAPACITY: usize = 5usize;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    fn test_quota() -> Quota {
-        Quota::per_second(NZU32!(10000))
-    }
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(10000));
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
@@ -515,7 +514,7 @@ mod tests {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register(0, test_quota(), context.clone())
+            .register(0, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
@@ -537,7 +536,7 @@ mod tests {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register(0, test_quota(), context.clone())
+            .register(0, TEST_QUOTA, context.clone())
             .await
             .unwrap();
         let (mux, handle, backup, global_sender) =

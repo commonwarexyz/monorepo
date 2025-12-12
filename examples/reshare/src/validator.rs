@@ -169,7 +169,7 @@ mod test {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{self, Link, Network, Oracle, Quota as SimQuota},
+        simulated::{self, Link, Network, Oracle},
         utils::mux,
         Message, Receiver,
     };
@@ -177,7 +177,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect};
+    use commonware_utils::{union, TryCollect, NZU32};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -188,15 +188,13 @@ mod test {
     use std::{
         collections::{BTreeMap, HashSet},
         future::Future,
-        num::NonZeroU32,
         pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
 
-    fn test_quota() -> SimQuota {
-        Quota::per_second(NonZeroU32::new(1_000_000).unwrap())
-    }
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     #[derive(Debug)]
     struct FilteredReceiver<R> {
@@ -339,27 +337,27 @@ mod test {
 
             let mut control = oracle.control(pk.clone());
             let votes = control
-                .register(VOTE_CHANNEL, test_quota(), ctx.clone())
+                .register(VOTE_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let certificates = control
-                .register(CERTIFICATE_CHANNEL, test_quota(), ctx.clone())
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let resolver = control
-                .register(RESOLVER_CHANNEL, test_quota(), ctx.clone())
+                .register(RESOLVER_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let broadcast = control
-                .register(BROADCASTER_CHANNEL, test_quota(), ctx.clone())
+                .register(BROADCASTER_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let marshal = control
-                .register(MARSHAL_CHANNEL, test_quota(), ctx.clone())
+                .register(MARSHAL_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let (dkg_sender, dkg_receiver) = control
-                .register(DKG_CHANNEL, test_quota(), ctx.clone())
+                .register(DKG_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
             let dkg = (
@@ -370,7 +368,7 @@ mod test {
                 },
             );
             let orchestrator = control
-                .register(ORCHESTRATOR_CHANNEL, test_quota(), ctx.clone())
+                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA, ctx.clone())
                 .await
                 .unwrap();
 

@@ -94,11 +94,11 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NonZeroDuration, NZU32};
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota as GQuota;
+    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -108,6 +108,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -115,10 +116,6 @@ mod tests {
         jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
-
-    fn test_quota() -> GQuota {
-        GQuota::per_second(NonZeroU32::new(1_000_000).unwrap())
-    }
 
     /// Register all participants with the network oracle.
     async fn register_participants(
@@ -130,7 +127,7 @@ mod tests {
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0, test_quota(), context.clone())
+                .register(0, TEST_QUOTA, context.clone())
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
