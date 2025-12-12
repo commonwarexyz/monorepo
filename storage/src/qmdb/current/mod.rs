@@ -18,7 +18,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -80,6 +80,19 @@ impl<T: Translator> Config<T> {
             buffer_pool: self.buffer_pool,
         }
     }
+}
+
+/// A proof that a specific operation is currently active in the database.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct OperationProof<D: Digest, const N: usize> {
+    /// The location of the operation in the db.
+    pub loc: Location,
+
+    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    pub chunk: [u8; N],
+
+    /// The MMR digest material required to verify the proof.
+    pub proof: Proof<D>,
 }
 
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
@@ -209,58 +222,60 @@ where
     status.merkleize(&mut grafter).await.map_err(Into::into)
 }
 
-/// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
-/// and only if the operation at location `loc` was active and has the value `element` in the
-/// Current db with the given `root`.
-fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
+/// Verify that the operation proof proves that `operation` is active in the database with the given
+/// `root`.
+pub fn verify_operation_proof<H: CHasher, O: Codec, const N: usize>(
     hasher: &mut H,
     grafting_height: u32,
-    proof: &Proof<H::Digest>,
-    loc: Location,
-    chunk: &[u8; N],
+    operation: O,
+    proof: OperationProof<H::Digest, N>,
     root: &H::Digest,
-    element: E,
 ) -> bool {
-    let Ok(op_count) = Location::try_from(proof.size) else {
+    let Ok(op_count) = Location::try_from(proof.proof.size) else {
         debug!("verification failed, invalid proof size");
         return false;
     };
 
     // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
     // the operation is indeed active).
-    if !CleanBitMap::<H::Digest, N>::get_bit_from_chunk(chunk, *loc) {
+    if !CleanBitMap::<H::Digest, N>::get_bit_from_chunk(&proof.chunk, *proof.loc) {
         debug!(
-            loc = ?loc,
+            ?proof.loc,
             "proof verification failed, operation is inactive"
         );
         return false;
     }
 
-    let num = *loc / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
-    let mut verifier =
-        Verifier::<H>::new(grafting_height, Location::new_unchecked(num), vec![chunk]);
+    let num = *proof.loc / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let mut verifier = Verifier::<H>::new(
+        grafting_height,
+        Location::new_unchecked(num),
+        vec![&proof.chunk],
+    );
 
-    let element = element.encode();
+    let element = operation.encode();
     let next_bit = *op_count % CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
     if next_bit == 0 {
-        return proof.verify_element_inclusion(&mut verifier, &element, loc, root);
+        return proof
+            .proof
+            .verify_element_inclusion(&mut verifier, &element, proof.loc, root);
     }
 
     // The proof must contain the partial chunk digest as its last hash.
-    if proof.digests.is_empty() {
+    if proof.proof.digests.is_empty() {
         debug!("proof has no digests");
         return false;
     }
 
     let mut proof = proof.clone();
-    let last_chunk_digest = proof.digests.pop().unwrap();
+    let last_chunk_digest = proof.proof.digests.pop().unwrap();
 
     // If the proof is over an operation in the partial chunk, we need to verify the last chunk
     // digest from the proof matches the digest of chunk, since these bits are not part of the mmr.
-    if *loc / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS
+    if *proof.loc / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS
         == *op_count / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS
     {
-        let expected_last_chunk_digest = verifier.digest(chunk);
+        let expected_last_chunk_digest = verifier.digest(&proof.chunk);
         if last_chunk_digest != expected_last_chunk_digest {
             debug!("last chunk digest does not match expected value");
             return false;
@@ -268,7 +283,10 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
     }
 
     // Reconstruct the MMR root.
-    let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], loc) {
+    let mmr_root = match proof
+        .proof
+        .reconstruct_root(&mut verifier, &[element], proof.loc)
+    {
         Ok(root) => root,
         Err(error) => {
             debug!(error = ?error, "invalid proof input");
@@ -289,7 +307,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
 /// the log with the provided root.
 pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &mut H,
     grafting_height: u32,
     proof: &Proof<H::Digest>,
     start_loc: Location,
@@ -346,7 +364,7 @@ pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
     };
 
     let reconstructed_root = CleanBitMap::<H::Digest, N>::partial_chunk_root(
-        hasher.inner(),
+        hasher,
         &mmr_root,
         next_bit,
         &last_chunk_digest,

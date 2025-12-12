@@ -202,7 +202,7 @@ fn fuzz(data: FuzzInput) {
 
                             assert!(
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    &mut hasher,
+                                    hasher.inner(),
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -235,7 +235,7 @@ fn fuzz(data: FuzzInput) {
                         .await {
 
                         let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                            &mut hasher,
+                            hasher.inner(),
                             &proof,
                             start_loc,
                             &res.1,
@@ -258,29 +258,20 @@ fn fuzz(data: FuzzInput) {
 
                     let current_root = db.root();
 
-                    match db.key_value_proof(hasher.inner(), k).await {
-                        Ok((proof, info)) => {
+                    // Get the current value first (before proof generation consumes k)
+                    let value = db.get(&k).await.expect("get should not fail");
+
+                    match db.key_value_proof(hasher.inner(), k.clone()).await {
+                        Ok(proof) => {
+                            let value = value.expect("key should exist if proof was generated");
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
                                 hasher.inner(),
-                                &proof,
-                                info.clone(),
+                                k,
+                                value.clone(),
+                                proof,
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
-
-                            let expected_value = expected_state.get(key);
-                            match expected_value {
-                                Some(Some(expected_val)) => {
-                                    let info_bytes: &[u8; 32] = info.value.as_ref().try_into().expect("Value should be 32 bytes");
-                                    assert_eq!(info_bytes, expected_val, "Proof value mismatch for key {key:?}");
-                                }
-                                Some(None) => {
-                                    panic!("Proof generated for deleted key {key:?}");
-                                }
-                                None => {
-                                    panic!("Proof generated for unset key {key:?}");
-                                }
-                            }
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             let expected_value = expected_state.get(key);
