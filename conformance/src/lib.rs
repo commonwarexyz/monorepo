@@ -1,4 +1,4 @@
-//! Utilities for conformance testing across commonware primitives.
+//! Automatically assert the stability of encoding and mechanisms over time.
 //!
 //! This crate provides a unified infrastructure for verifying that
 //! implementations maintain backward compatibility by comparing output

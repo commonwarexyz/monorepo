@@ -1,6 +1,6 @@
 # commonware-conformance
 
-Utilities for conformance testing across commonware primitives.
+Automatically assert the stability of encoding and mechanisms over time.
 
 ## Status
 
