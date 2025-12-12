@@ -29,7 +29,10 @@ mod update;
 pub use update::{OrderedUpdate, UnorderedUpdate};
 
 mod todo;
-pub use todo::Operation;
+
+mod operation;
+pub use operation::Operation;
+pub(super) use operation::{OrderedOperation, UnorderedOperation};
 
 mod value;
 pub(crate) use value::{FixedValue, VariableValue};
