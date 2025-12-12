@@ -3070,12 +3070,40 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_equivocator() {
+    fn test_equivocator_bls12381_threshold_min_pk() {
         for seed in 0..5 {
             equivocator(seed, bls12381_threshold::<MinPk, _>);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_bls12381_threshold_min_sig() {
+        for seed in 0..5 {
             equivocator(seed, bls12381_threshold::<MinSig, _>);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_bls12381_multisig_min_pk() {
+        for seed in 0..5 {
             equivocator(seed, bls12381_multisig::<MinPk, _>);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_bls12381_multisig_min_sig() {
+        for seed in 0..5 {
             equivocator(seed, bls12381_multisig::<MinSig, _>);
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_ed25519() {
+        for seed in 0..5 {
             equivocator(seed, ed25519);
         }
     }
