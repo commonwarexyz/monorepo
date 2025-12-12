@@ -3,7 +3,6 @@ use crate::{
         Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
     },
     types::{Finalization, Notarization, Nullification, ReplicaState},
-    MAX_REQUIRED_CONTAINERS, MIN_REQUIRED_CONTAINERS,
 };
 use commonware_consensus::simplex::signing_scheme;
 use commonware_cryptography::{
@@ -51,14 +50,6 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
-
-    // Test invariant: finalized_views is in the test range
-    if let Some(max) = finalized_views.keys().max() {
-        assert!(
-            (&MIN_REQUIRED_CONTAINERS..=&MAX_REQUIRED_CONTAINERS).contains(&max),
-            "Invariant violation: max finalized view {max} is not in the test range"
-        );
-    }
 
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
