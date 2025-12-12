@@ -95,3 +95,103 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qmdb::any::{
+        ordered::KeyData,
+        value::{FixedEncoding, VariableEncoding},
+    };
+    use commonware_codec::{Codec, RangeCfg, Read};
+    use commonware_utils::sequence::FixedBytes;
+
+    fn roundtrip<T>(value: &T, cfg: &<T as Read>::Cfg)
+    where
+        T: Codec + PartialEq + std::fmt::Debug,
+    {
+        let encoded = value.encode().freeze();
+        let decoded = T::decode_cfg(encoded.clone(), cfg).expect("decode");
+        assert_eq!(decoded, *value);
+        let encoded2 = decoded.encode();
+        assert_eq!(encoded, encoded2.freeze());
+    }
+
+    #[test]
+    fn ordered_fixed_roundtrip() {
+        type K = FixedBytes<4>;
+        type V = u64;
+        type Op = OrderedOperation<K, FixedEncoding<V>>;
+
+        let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
+        let update = Op::Update(OrderedUpdate(KeyData {
+            key: FixedBytes::from([4, 3, 2, 1]),
+            value: 0xdead_beef_u64,
+            next_key: FixedBytes::from([9, 9, 9, 9]),
+        }));
+        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
+
+        roundtrip(&delete, &());
+        roundtrip(&update, &());
+        roundtrip(&commit_some, &());
+        roundtrip(&commit_none, &());
+    }
+
+    #[test]
+    fn unordered_fixed_roundtrip() {
+        type K = FixedBytes<4>;
+        type V = u64;
+        type Op = UnorderedOperation<K, FixedEncoding<V>>;
+
+        let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
+        let update = Op::Update(UnorderedUpdate(FixedBytes::from([9, 8, 7, 6]), 77u64));
+        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
+
+        roundtrip(&delete, &());
+        roundtrip(&update, &());
+        roundtrip(&commit, &());
+    }
+
+    #[test]
+    fn ordered_variable_roundtrip() {
+        type K = FixedBytes<4>;
+        type V = Vec<u8>;
+        type Op = OrderedOperation<K, VariableEncoding<V>>;
+        let cfg = (RangeCfg::from(..), ());
+
+        let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
+        let update = Op::Update(OrderedUpdate(KeyData {
+            key: FixedBytes::from([2, 2, 2, 2]),
+            value: vec![1, 2, 3, 4, 5],
+            next_key: FixedBytes::from([3, 3, 3, 3]),
+        }));
+        let commit_some =
+            Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));
+
+        roundtrip(&delete, &cfg);
+        roundtrip(&update, &cfg);
+        roundtrip(&commit_some, &cfg);
+        roundtrip(&commit_none, &cfg);
+    }
+
+    #[test]
+    fn unordered_variable_roundtrip() {
+        type K = FixedBytes<4>;
+        type V = Vec<u8>;
+        type Op = UnorderedOperation<K, VariableEncoding<V>>;
+        let cfg = (RangeCfg::from(..), ());
+
+        let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
+        let update = Op::Update(UnorderedUpdate(
+            FixedBytes::from([5, 5, 5, 5]),
+            vec![7, 7, 7, 7],
+        ));
+        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12));
+
+        roundtrip(&delete, &cfg);
+        roundtrip(&update, &cfg);
+        roundtrip(&commit, &cfg);
+    }
+}
