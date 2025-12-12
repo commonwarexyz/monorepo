@@ -34,6 +34,10 @@ hash = "aec33e38ce0e3e2be9e5343ee3d416519738d9283b49ce6a70325af926ce0326"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
+["commonware_cryptography::bls12381::dkg::test::conformance::ShareStatus"]
+n_cases = 65536
+hash = "f0b784fabbb9f475ac14ebfe133396ba236e4ca6fdf83250e4fdd113ae19f997"
+
 ["commonware_cryptography::bls12381::dkg::test::conformance::SignedDealerLog<MinPk, ed25519::PrivateKey>"]
 n_cases = 65536
 hash = "701ef97491885b06d40c051cb924dc4bfd975cc7f25315f8576525689bb849bc"
