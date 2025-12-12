@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::{self, KeyData},
+            ordered::KeyData,
             unordered::{self},
             value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
             CleanAny, DirtyAny,
@@ -23,18 +23,15 @@ use crate::{
     AuthenticatedBitMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::varint::UInt;
-use commonware_codec::Codec;
 use commonware_codec::{
     util::{at_least, ensure_zeros},
-    FixedSize,
+    varint::UInt,
+    Codec, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_codec::{Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{hex, Array};
-use core::fmt;
-use core::{num::NonZeroU64, ops::Range};
+use core::{fmt, num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2136,10 +2133,6 @@ where
     CommitFloor(Option<V::Value>, Location),
 }
 
-pub type OrderedOperation2<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
-
-pub type UnorderedOperation2<K, V> = Operation2<UnorderedUpdate<K, V>, K, V>;
-
 impl<K: Array, V: FixedValue> Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
     // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
@@ -2179,13 +2172,13 @@ impl<K: Array, V: FixedValue> Write
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Operation2::Delete(k) => {
+            Self::Delete(k) => {
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
-            Operation2::Update(p) => {
+            Self::Update(p) => {
                 OP2_UPDATE_CONTEXT.write(buf);
                 p.key.write(buf);
                 p.value.write(buf);
@@ -2193,7 +2186,7 @@ impl<K: Array, V: FixedValue> Write
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
-            Operation2::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc) => {
                 OP2_COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
@@ -2214,17 +2207,17 @@ impl<K: Array, V: VariableValue> Write
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Operation2::Delete(k) => {
+            Self::Delete(k) => {
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
-            Operation2::Update(p) => {
+            Self::Update(p) => {
                 OP2_UPDATE_CONTEXT.write(buf);
                 p.key.write(buf);
                 p.value.write(buf);
                 p.next_key.write(buf);
             }
-            Operation2::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc) => {
                 OP2_COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
                 UInt(**floor_loc).write(buf);
@@ -2362,20 +2355,20 @@ impl<K: Array, V: FixedValue> Write
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Operation2::Delete(k) => {
+            Self::Delete(k) => {
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::DELETE_OP_SIZE - K::SIZE);
             }
-            Operation2::Update((k, v)) => {
+            Self::Update((k, v)) => {
                 OP2_UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
-            Operation2::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc) => {
                 OP2_COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
@@ -2396,16 +2389,16 @@ impl<K: Array, V: VariableValue> Write
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Operation2::Delete(k) => {
+            Self::Delete(k) => {
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
-            Operation2::Update((k, v)) => {
+            Self::Update((k, v)) => {
                 OP2_UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
-            Operation2::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc) => {
                 OP2_COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
                 UInt(**floor_loc).write(buf);
@@ -2492,239 +2485,6 @@ impl<K: Array, V: VariableValue> Read
     }
 }
 
-/*
-// Fixed-size variants automatically get EncodeSize from the FixedSize blanket impl.
-// They will automatically implement CodecFixed = Codec + FixedSize.
-
-// Variable-size variants need an explicit EncodeSize impl (no FixedSize available).
-// They will only implement Codec, not CodecFixed.
-impl<S, K, V> EncodeSize for Operation2<S, K, VariableEncoding<V>>
-where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    K: Array,
-    V: VariableValue,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(_) => K::SIZE,
-            Self::Update(p) => S::encode_size_update(p),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
-
-impl<K, V> Write for Operation2<OrderedShape, K, FixedEncoding<V>>
-where
-    K: Array + Codec,
-    V: FixedValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
-                k.write(buf);
-                buf.put_bytes(0, Self::padding_for_delete::<K, V>());
-            }
-            Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
-                OrderedShape::write_update(p, buf);
-                buf.put_bytes(0, Self::padding_for_update::<K, V>());
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
-                if let Some(metadata) = metadata {
-                    true.write(buf);
-                    metadata.write(buf);
-                } else {
-                    buf.put_bytes(0, V::SIZE + 1);
-                }
-                buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, Self::padding_for_commit::<V>());
-            }
-        }
-    }
-}
-
-impl<K, V> Write for Operation2<UnorderedShape, K, FixedEncoding<V>>
-where
-    K: Array + Codec,
-    V: FixedValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
-                k.write(buf);
-                buf.put_bytes(0, Self::padding_for_delete::<K, V>());
-            }
-            Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
-                UnorderedShape::write_update(p, buf);
-                buf.put_bytes(0, Self::padding_for_update::<K, V>());
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
-                if let Some(metadata) = metadata {
-                    true.write(buf);
-                    metadata.write(buf);
-                } else {
-                    buf.put_bytes(0, V::SIZE + 1);
-                }
-                buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, Self::padding_for_commit::<V>());
-            }
-        }
-    }
-}
-
-impl<S, K, V> Write for Operation2<S, K, VariableEncoding<V>>
-where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    K: Array + Codec,
-    V: VariableValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
-                S::write_update(p, buf);
-            }
-            Self::CommitFloor(v, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
-                v.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
-        }
-    }
-}
-
-impl<K, V> Read for Operation2<OrderedShape, K, FixedEncoding<V>>
-where
-    K: Array + Codec,
-    V: FixedValue,
-{
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        at_least(buf, Self::SIZE::<K, V>())?;
-
-        match u8::read(buf)? {
-            OP2_UPDATE_CONTEXT => {
-                let payload = OrderedShape::read_update(buf, cfg)?;
-                ensure_zeros(buf, Self::padding_for_update::<K, V>())?;
-                Ok(Self::Update(payload))
-            }
-            OP2_DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                ensure_zeros(buf, Self::padding_for_delete::<K, V>())?;
-                Ok(Self::Delete(key))
-            }
-            OP2_COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let metadata = if is_some {
-                    Some(V::read_cfg(buf, cfg)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor_loc = u64::read(buf)?;
-                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::any::todo::Operation2",
-                        "commit floor location overflow",
-                    )
-                })?;
-                ensure_zeros(buf, Self::padding_for_commit::<V>())?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
-            }
-            other => Err(CodecError::InvalidEnum(other)),
-        }
-    }
-}
-
-impl<K, V> Read for Operation2<UnorderedShape, K, FixedEncoding<V>>
-where
-    K: Array + Codec,
-    V: FixedValue,
-{
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        at_least(buf, Self::SIZE::<K, V>())?;
-
-        match u8::read(buf)? {
-            OP2_UPDATE_CONTEXT => {
-                let payload = UnorderedShape::read_update(buf, cfg)?;
-                ensure_zeros(buf, Self::padding_for_update::<K, V>())?;
-                Ok(Self::Update(payload))
-            }
-            OP2_DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                ensure_zeros(buf, Self::padding_for_delete::<K, V>())?;
-                Ok(Self::Delete(key))
-            }
-            OP2_COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let metadata = if is_some {
-                    Some(V::read_cfg(buf, cfg)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor_loc = u64::read(buf)?;
-                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::any::todo::Operation2",
-                        "commit floor location overflow",
-                    )
-                })?;
-                ensure_zeros(buf, Self::padding_for_commit::<V>())?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
-            }
-            other => Err(CodecError::InvalidEnum(other)),
-        }
-    }
-}
-
-impl<S, K, V> Read for Operation2<S, K, VariableEncoding<V>>
-where
-    S: UpdateShape<K, VariableEncoding<V>>,
-    K: Array + Codec,
-    V: VariableValue,
-{
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            OP2_DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                Ok(Self::Delete(key))
-            }
-            OP2_UPDATE_CONTEXT => {
-                let payload = S::read_update(buf, cfg)?;
-                Ok(Self::Update(payload))
-            }
-            OP2_COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, cfg)?;
-                let floor_loc = UInt::read(buf)?;
-                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::any::todo::Operation2",
-                        "commit floor location overflow",
-                    )
-                })?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
-            }
-            other => Err(CodecError::InvalidEnum(other)),
-        }
-    }
-}
-    */
-
 impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
     for Operation2<OrderedUpdate<K, V>, K, V>
 where
@@ -2810,10 +2570,10 @@ where
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Self::Update(payload) => write!(
                 f,
-                "[key:{} value:{} next_key:{}]",
+                "[key:{} next_key:{} value:{}]",
                 payload.key,
-                hex(&payload.value.encode()),
-                payload.next_key
+                payload.next_key,
+                hex(&payload.value.encode())
             ),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
