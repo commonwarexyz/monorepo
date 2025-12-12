@@ -6,8 +6,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log, todo::IndexedLog, unordered::FixedOperation as Operation,
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, todo::IndexedLog, FixedConfig as Config, FixedEncoding,
+            FixedValue, UnorderedOperation,
         },
         Error,
     },
@@ -16,6 +16,8 @@ use crate::{
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -65,7 +67,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            any::{unordered::FixedOperation as Operation, UnorderedUpdate},
+            any::UnorderedUpdate,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -84,6 +86,8 @@ pub(super) mod test {
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;
+
+    type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
     pub(crate) fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {

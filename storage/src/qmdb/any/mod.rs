@@ -32,10 +32,10 @@ mod todo;
 
 mod operation;
 pub use operation::Operation;
-pub(super) use operation::{OrderedOperation, UnorderedOperation};
+pub use operation::{OrderedOperation, UnorderedOperation};
 
 mod value;
-pub(crate) use value::{FixedEncoding, FixedValue, VariableValue};
+pub use value::{FixedEncoding, FixedValue, VariableEncoding, VariableValue};
 
 mod ext;
 pub mod ordered;

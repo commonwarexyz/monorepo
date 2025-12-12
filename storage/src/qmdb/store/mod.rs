@@ -90,7 +90,7 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
-        any::{unordered::VariableOperation as Operation, VariableValue},
+        any::{UnorderedOperation, VariableEncoding, VariableValue},
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
         update_key, Error, FloorHelper,
@@ -109,6 +109,8 @@ mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 pub use batch::{Batch, Batchable, Getter};
+
+type Operation<K, V> = UnorderedOperation<K, VariableEncoding<V>>;
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]

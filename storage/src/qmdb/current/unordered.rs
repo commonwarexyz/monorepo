@@ -11,8 +11,8 @@ use crate::{
     },
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
-            CleanAny, DirtyAny, FixedValue,
+            unordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue,
+            UnorderedOperation,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -27,6 +27,8 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
+
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.

@@ -1,6 +1,3 @@
-mod operation;
-pub use operation::{FixedOperation, VariableOperation};
-
 pub mod fixed;
 pub mod sync;
 pub mod variable;

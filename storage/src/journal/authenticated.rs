@@ -640,7 +640,7 @@ mod tests {
             Location,
         },
         qmdb::{
-            any::{unordered::FixedOperation as Operation, UnorderedUpdate},
+            any::{FixedEncoding, UnorderedOperation, UnorderedUpdate},
             operation::Committable,
         },
     };
@@ -657,6 +657,8 @@ mod tests {
 
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;
+
+    type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
     /// Create MMR configuration for tests.
     fn mmr_config(suffix: &str) -> MmrConfig {

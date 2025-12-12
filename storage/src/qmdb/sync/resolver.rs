@@ -3,8 +3,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
-            FixedValue, VariableValue,
+            unordered::fixed::Any, FixedEncoding, FixedValue, UnorderedOperation, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
         store::CleanStore as _,
@@ -16,6 +15,8 @@ use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
+
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// Result from a fetch operation
 pub struct FetchResult<Op, D: Digest> {
@@ -70,7 +71,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
+    type Op = Operation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -102,7 +103,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
+    type Op = Operation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -205,7 +206,7 @@ pub(crate) mod tests {
         V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = FixedOperation<K, V>;
+        type Op = Operation<K, V>;
         type Error = qmdb::Error;
 
         async fn get_operations(

@@ -2,13 +2,9 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     qmdb::{
         self,
-        any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
-            FixedValue,
-        },
+        any::{unordered::fixed::Any, FixedEncoding, FixedValue, UnorderedOperation},
     },
     translator::Translator,
 };
@@ -21,6 +17,9 @@ use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
+
+// TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
 where
@@ -267,15 +266,12 @@ mod tests {
         qmdb::{
             self,
             any::{
-                unordered::{
-                    fixed::{
-                        test::{
-                            any_db_config, apply_ops, create_test_config, create_test_db,
-                            create_test_ops, AnyTest,
-                        },
-                        Any,
+                unordered::fixed::{
+                    test::{
+                        any_db_config, apply_ops, create_test_config, create_test_db,
+                        create_test_ops, AnyTest,
                     },
-                    FixedOperation as Operation,
+                    Any,
                 },
                 UnorderedUpdate,
             },
@@ -313,6 +309,8 @@ mod tests {
     // Janky sizes to test boundary conditions.
     const PAGE_SIZE: usize = 99;
     const PAGE_CACHE_SIZE: usize = 3;
+
+    type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
     fn test_digest(value: u64) -> Digest {
         Sha256::hash(&value.to_be_bytes())

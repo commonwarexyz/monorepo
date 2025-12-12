@@ -8,8 +8,8 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
-            FixedConfig as Config, UnorderedUpdate,
+            unordered::fixed::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation,
+            UnorderedUpdate,
         },
         store::CleanStore,
     },
@@ -21,7 +21,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = UnorderedOperation<Key, FixedEncoding<Value>>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {

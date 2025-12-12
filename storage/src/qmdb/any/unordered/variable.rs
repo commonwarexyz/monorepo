@@ -4,18 +4,15 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
-use super::operation::VariableOperation as Operation;
 use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    mmr::{Location, journaled::Config as MmrConfig, mem::Clean},
     qmdb::{
-        any::{todo::IndexedLog, VariableConfig, VariableValue},
-        operation::Committable as _,
-        Error,
+        Error, any::{UnorderedOperation, VariableConfig, VariableValue, todo::IndexedLog, value::VariableEncoding}, operation::Committable as _
     },
     translator::Translator,
 };
@@ -23,6 +20,8 @@ use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+
+type Operation<K, V> = UnorderedOperation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
