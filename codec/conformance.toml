@@ -1,135 +1,135 @@
-["commonware_codec::types::btree_map::tests::conformance::BTreeMap<u32, u32>"]
+["commonware_codec::types::btree_map::tests::conformance::CodecConformance<BTreeMap<u32, u32>>"]
 n_cases = 65536
 hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
-["commonware_codec::types::btree_set::tests::conformance::BTreeSet<u8>"]
+["commonware_codec::types::btree_set::tests::conformance::CodecConformance<BTreeSet<u8>>"]
 n_cases = 65536
 hash = "7160fdb6ba4817a5d266a9cf9e6ff3433887aabb1c6f2b713e2befa05959ae8c"
 
-["commonware_codec::types::bytes::tests::conformance::Bytes"]
+["commonware_codec::types::bytes::tests::conformance::CodecConformance<Bytes>"]
 n_cases = 65536
 hash = "7f034c22d0f258e8bf599ba629b66476a608566941eace272901021013b5b72c"
 
-["commonware_codec::types::hash_map::tests::conformance::HashMap<u32, u32>"]
+["commonware_codec::types::hash_map::tests::conformance::CodecConformance<HashMap<u32, u32>>"]
 n_cases = 65536
 hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
-["commonware_codec::types::hash_set::tests::conformance::HashSet<u32>"]
+["commonware_codec::types::hash_set::tests::conformance::CodecConformance<HashSet<u32>>"]
 n_cases = 65536
 hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
 
-["commonware_codec::types::net::test::conformance::Ipv4Addr"]
+["commonware_codec::types::net::test::conformance::CodecConformance<Ipv4Addr>"]
 n_cases = 65536
 hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
-["commonware_codec::types::net::test::conformance::Ipv6Addr"]
+["commonware_codec::types::net::test::conformance::CodecConformance<Ipv6Addr>"]
 n_cases = 65536
 hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
-["commonware_codec::types::net::test::conformance::SocketAddr"]
+["commonware_codec::types::net::test::conformance::CodecConformance<SocketAddr>"]
 n_cases = 65536
 hash = "6894dbe4156b39696419a5cc84f7a4e9940dd9d6697cffebe58fffba14c85e96"
 
-["commonware_codec::types::net::test::conformance::SocketAddrV4"]
+["commonware_codec::types::net::test::conformance::CodecConformance<SocketAddrV4>"]
 n_cases = 65536
 hash = "30198593b8f0d278a49a0b1c1ee0556235933604e560cd2d44aeb8e3d32daeed"
 
-["commonware_codec::types::net::test::conformance::SocketAddrV6"]
+["commonware_codec::types::net::test::conformance::CodecConformance<SocketAddrV6>"]
 n_cases = 65536
 hash = "47690f612a06889add1b8c3e908aef0a7acfc6ab7f9f1382017ae91a8ef843dc"
 
-["commonware_codec::types::primitives::tests::conformance::()"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<()>"]
 n_cases = 65536
 hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
 
-["commonware_codec::types::primitives::tests::conformance::Option<u64>"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<Option<u64>>"]
 n_cases = 65536
 hash = "56298a7f298dfae99947dbdb5691aea48e3a183733d93964b53de858d448ecd2"
 
-["commonware_codec::types::primitives::tests::conformance::[u8; 32]"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<[u8; 32]>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
-["commonware_codec::types::primitives::tests::conformance::bool"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<bool>"]
 n_cases = 65536
 hash = "c5bcd1910d08e48db3680f38884d5ba0e86836ea68edb1d4fb4aac4f9ecbd063"
 
-["commonware_codec::types::primitives::tests::conformance::f32"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<f32>"]
 n_cases = 65536
 hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
-["commonware_codec::types::primitives::tests::conformance::f64"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<f64>"]
 n_cases = 65536
 hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
-["commonware_codec::types::primitives::tests::conformance::i128"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<i128>"]
 n_cases = 65536
 hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
-["commonware_codec::types::primitives::tests::conformance::i16"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<i16>"]
 n_cases = 65536
 hash = "4a04a9bff6d8af290367a97f234f03769ad97aabeeca361b68c0e9822bf82ccb"
 
-["commonware_codec::types::primitives::tests::conformance::i32"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<i32>"]
 n_cases = 65536
 hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
-["commonware_codec::types::primitives::tests::conformance::i64"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<i64>"]
 n_cases = 65536
 hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
-["commonware_codec::types::primitives::tests::conformance::i8"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<i8>"]
 n_cases = 65536
 hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
-["commonware_codec::types::primitives::tests::conformance::u128"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<u128>"]
 n_cases = 65536
 hash = "69537f4589001655cb01342b7b583d344b87b3086feb894a08750b23a8481a03"
 
-["commonware_codec::types::primitives::tests::conformance::u16"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<u16>"]
 n_cases = 65536
 hash = "4a04a9bff6d8af290367a97f234f03769ad97aabeeca361b68c0e9822bf82ccb"
 
-["commonware_codec::types::primitives::tests::conformance::u32"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<u32>"]
 n_cases = 65536
 hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
 
-["commonware_codec::types::primitives::tests::conformance::u64"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<u64>"]
 n_cases = 65536
 hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
-["commonware_codec::types::primitives::tests::conformance::u8"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<u8>"]
 n_cases = 65536
 hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
-["commonware_codec::types::tuple::tests::conformance::(u32, u32)"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32)>"]
 n_cases = 65536
 hash = "9f3fbde186c4164d91b0b3cabba62b5bdbcb6113a2c8dd836dccb730f116066e"
 
-["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32)"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32)>"]
 n_cases = 65536
 hash = "41068be34f5a7e4271763103477b34cb2e04c00004061383cf4f057c09417046"
 
-["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32)"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32)>"]
 n_cases = 65536
 hash = "cc5c7bc39d9dc4605d1ad63548dcb23e42cec0becb847563f7b5454f3c355961"
 
-["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32)"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32, u32)>"]
 n_cases = 65536
 hash = "001a3dc913afa87be11bd4f4bdd98cf8571a89d19548af5efcfa9290f4f3773d"
 
-["commonware_codec::types::tuple::tests::conformance::(u32, u32, u32, u32, u32, u32)"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32, u32, u32)>"]
 n_cases = 65536
 hash = "c0d2818d6db2e34cc531ab8f161eaf7109163c65c533927aa37b0483ab0ddf31"
 
-["commonware_codec::types::vec::tests::conformance::Vec<u16>"]
+["commonware_codec::types::vec::tests::conformance::CodecConformance<Vec<u16>>"]
 n_cases = 65536
 hash = "1b3fceee1effb6a3d71edbb3cc2ad69b318b2edec7eb0e1d6822211959abdb50"
 
-["commonware_codec::types::vec::tests::conformance::Vec<u32>"]
+["commonware_codec::types::vec::tests::conformance::CodecConformance<Vec<u32>>"]
 n_cases = 65536
 hash = "dcb27e675ccce4ba82dd6979036b04198235bec00d3cefbc8e25a639ab4a162e"
 
-["commonware_codec::types::vec::tests::conformance::Vec<u8>"]
+["commonware_codec::types::vec::tests::conformance::CodecConformance<Vec<u8>>"]
 n_cases = 65536
 hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"

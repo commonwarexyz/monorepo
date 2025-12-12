@@ -35,6 +35,7 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 - **codec**: Serialize structured data.
 - **coding**: Encode data to enable recovery from a subset of fragments.
 - **collector**: Collect responses to committable requests.
+- **conformance**: Automatically assert the stability of encoding and mechanisms over time.
 - **consensus**: Order opaque messages in a Byzantine environment.
 - **cryptography**: Generate keys, sign arbitrary messages, and deterministically verify signatures.
 - **deployer**: Deploy infrastructure across cloud providers.
@@ -473,25 +474,25 @@ fn test_storage_conformance() {
 such an error. Callers must not use a database after a mutable method returns an error. Reviews
 need not comment the database being in an inconsistent state after such an error.
 
-## Codec Conformance Testing
+## Conformance Testing
 
-Codec conformance tests verify that codec implementations maintain backward compatibility by comparing encoded output against known-good hash values stored in TOML files. This prevents accidental breaking changes to wire formats.
+Conformance tests verify that implementations maintain backward compatibility by comparing output against known-good hash values stored in TOML files. The `conformance` crate provides a unified infrastructure that can be used across different domains (codec, storage, network, etc.).
 
 ### Running Conformance Tests
 
 ```bash
-# Run all codec conformance tests
+# Run all conformance tests
 just test-conformance
 
 # Regenerate fixtures (use only for INTENTIONAL format changes)
 just regenerate-conformance
 ```
 
-**WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking codec change. Only use this when you have intentionally changed the wire format and have verified that the change is correct. This will update the hash values in `codec_conformance.toml` files throughout the repository.
+**WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking change. Only use this when you have intentionally changed the format and have verified that the change is correct. This will update the hash values in `conformance.toml` files throughout the repository.
 
-### Adding Conformance Tests for New Types
+### Adding Codec Conformance Tests for New Types
 
-When creating a new type that implements `Write` (the codec trait), add conformance tests:
+When creating a new type that implements `Encode` (the codec trait), add conformance tests:
 
 #### Step 1: Add `Arbitrary` Implementation
 
@@ -520,27 +521,27 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            MyType, // default # of cases
-            MyType2 => 1024, // custom # of cases
+        commonware_conformance::conformance_tests! {
+            CodecConformance<MyType>, // default # of cases
+            CodecConformance<MyType2> => 1024, // custom # of cases
         }
     }
 }
 ```
 
-The number (1024) is the number of test cases to generate and hash together.
+The number (1024) is the number of test cases to generate and hash together. The `CodecConformance<T>` wrapper bridges types that implement `Encode + Arbitrary` with the `Conformance` trait.
 
 #### Step 3: Run Tests to Generate Fixtures
 
-Run `just test-conformance` to generate the initial hash values. The test framework will automatically add new types to the appropriate `codec_conformance.toml` file.
+Run `just test-conformance` to generate the initial hash values. The test framework will automatically add new types to the appropriate `conformance.toml` file.
 
 ### How It Works
 
 1. Tests generate deterministic values using seeded RNG + `arbitrary`
-2. Each value is encoded and all encodings are hashed together with SHA-256
-3. The hash is compared against the stored value in `codec_conformance.toml`
+2. Each value is committed (e.g., encoded for codec) and all bytes are hashed together with SHA-256
+3. The hash is compared against the stored value in `conformance.toml`
 4. Hash mismatches cause test failures (format changed)
 5. Missing types are automatically added to the TOML file
 

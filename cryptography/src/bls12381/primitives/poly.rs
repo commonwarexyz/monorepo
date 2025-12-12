@@ -599,10 +599,11 @@ pub mod tests {
     #[cfg(feature = "arbitrary")]
     mod arbitrary_tests {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Eval<Scalar>,
-            Poly<Scalar>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Eval<Scalar>>,
+            CodecConformance<Poly<Scalar>>,
         }
     }
 }

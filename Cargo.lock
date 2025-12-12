@@ -1036,14 +1036,11 @@ version = "0.0.63"
 dependencies = [
  "arbitrary",
  "bytes",
- "commonware-macros",
+ "commonware-conformance",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "serde",
- "sha2 0.10.9",
  "thiserror 2.0.17",
- "toml",
 ]
 
 [[package]]
@@ -1130,6 +1127,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-conformance"
+version = "0.0.63"
+dependencies = [
+ "commonware-macros",
+ "futures",
+ "paste",
+ "serde",
+ "sha2 0.10.9",
+ "toml",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.63"
 dependencies = [
@@ -1138,6 +1147,7 @@ dependencies = [
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1188,6 +1198,7 @@ dependencies = [
  "cfg-if",
  "chacha20poly1305",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-macros",
  "commonware-utils",
  "criterion",

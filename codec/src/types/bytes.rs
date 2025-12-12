@@ -85,6 +85,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::conformance::CodecConformance;
         use arbitrary::Arbitrary;
 
         /// Newtype wrapper to implement Arbitrary for [super::Bytes].
@@ -123,8 +124,8 @@ mod tests {
             }
         }
 
-        crate::conformance_tests! {
-            Bytes,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Bytes>
         }
     }
 }

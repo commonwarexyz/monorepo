@@ -43,6 +43,7 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
+commonware-conformance.workspace = true
 criterion.workspace = true
 rstest.workspace = true
 

@@ -92,8 +92,9 @@ impl SecretKey {
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
+    use commonware_codec::conformance::CodecConformance;
 
-    commonware_codec::conformance_tests! {
-        EphemeralPublicKey,
+    commonware_conformance::conformance_tests! {
+        CodecConformance<EphemeralPublicKey>,
     }
 }
