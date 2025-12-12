@@ -249,6 +249,23 @@ impl<K: Array, V: ValueEncoding> Display for Operation<K, V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: ValueEncoding> arbitrary::Arbitrary<'_> for Operation<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::Delete(u.arbitrary()?)),
+            1 => Ok(Self::Update(u.arbitrary()?, u.arbitrary()?)),
+            2 => Ok(Self::CommitFloor(u.arbitrary()?, u.arbitrary()?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +421,16 @@ mod tests {
             commit_some,
             VarOp::read_cfg(&mut commit_some.encode(), &(RangeCfg::new(..), ())).unwrap()
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<FixedOperation<U64, U64>>,
+            CodecConformance<VariableOperation<U64, Vec<u8>>>,
+        }
     }
 }

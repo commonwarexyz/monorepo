@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-utils"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
@@ -33,6 +34,7 @@ version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
 rstest.workspace = true
@@ -52,6 +54,12 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",
+]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"dep:arbitrary",
+	"num-bigint?/arbitrary",
+	"std",
 ]
 
 [lib]

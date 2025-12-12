@@ -12,6 +12,7 @@ pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 6
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Position(u64);
 
 impl Position {
@@ -163,7 +164,7 @@ impl From<Position> for u64 {
 /// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
 ///
-/// // Invalid locations return error  
+/// // Invalid locations return error
 /// assert!(Location::new(MAX_LOCATION + 1).is_none());
 /// ```
 impl TryFrom<Location> for Position {

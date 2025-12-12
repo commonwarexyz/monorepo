@@ -48,6 +48,19 @@ impl<D: Digest> Read for Target<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Target<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            root: u.arbitrary()?,
+            range: u.arbitrary()?,
+        })
+    }
+}
+
 /// Validate a target update against the current target
 pub fn validate_update<U, D>(
     old_target: &Target<D>,
@@ -200,6 +213,16 @@ mod tests {
                 ) => {}
                 _ => panic!("Error type mismatch: got {actual_err:?}, expected {expected_err:?}"),
             },
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Target<sha256::Digest>>,
         }
     }
 }

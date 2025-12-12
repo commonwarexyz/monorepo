@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-coding"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
@@ -32,10 +33,21 @@ thiserror.workspace = true
 bench = false
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-storage/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+]
 
 [[bench]]
 name = "coding_scheme_times"

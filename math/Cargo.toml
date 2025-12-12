@@ -11,8 +11,13 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
 [features]
-arbitrary = [ "commonware-codec/arbitrary", "dep:arbitrary", "std" ]
-default = [ "arbitrary", "std" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"std",
+]
+default = [ "std" ]
 test_strategies = [ "dep:proptest", "std" ]
 std = [
 	"bytes/std",
@@ -32,6 +37,7 @@ rand_core.workspace = true
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

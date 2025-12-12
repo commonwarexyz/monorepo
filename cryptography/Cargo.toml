@@ -59,6 +59,7 @@ parallel = [ "blake3/rayon", "rayon", "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-math/arbitrary",
+	"commonware-utils/arbitrary",
 	"dep:anyhow",
 	"dep:arbitrary",
 	"std",

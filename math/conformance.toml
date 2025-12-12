@@ -1,0 +1,19 @@
+["commonware_math::fields::goldilocks::test::conformance::CodecConformance<F>"]
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
+
+["commonware_math::ntt::test::conformance::CodecConformance<Matrix>"]
+n_cases = 65536
+hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
+
+["commonware_math::poly::test::conformance::CodecConformance<Poly<F>>"]
+n_cases = 65536
+hash = "f727e3c0e5c29828d9821a08f6eba25c1aa2aad0604eddeaa2508d4192925236"
+
+["commonware_math::test::test::conformance::CodecConformance<F>"]
+n_cases = 65536
+hash = "94dd2831d555fe832ef6cd897230db53efbcfe248ec71b8f52c7d8503df4a9cf"
+
+["commonware_math::test::test::conformance::CodecConformance<G>"]
+n_cases = 65536
+hash = "ada757c61874a554cc6915dc30953af19f2ea35ad176380f2f465d467eb3f210"

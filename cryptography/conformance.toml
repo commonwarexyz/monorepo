@@ -112,11 +112,11 @@ hash = "b3fde3da5266e1c7eab5ae245257494e658c6c351a99809ca6011d8190bbf456"
 
 ["commonware_cryptography::secp256r1::recoverable::tests::conformance::CodecConformance<Signature>"]
 n_cases = 65536
-hash = "68c8cb64495f2720508aad881b192b24e00e5260780c3ea7c5109ef9097bee30"
+hash = "83631a20ba9524a5b13b43ad764fb43b43bf70bcaa267282651519ceecbf9f84"
 
 ["commonware_cryptography::secp256r1::standard::tests::conformance::CodecConformance<Signature>"]
 n_cases = 65536
-hash = "05880099d66c9e04ab2d4bf5dfa3fecfc4fb114264ca3b4a0c3b4816332414b9"
+hash = "8321c5030b6c1201fefa81b1a82f9fc77a4533f7ce506f1a98fcf980060993b8"
 
 ["commonware_cryptography::sha256::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536

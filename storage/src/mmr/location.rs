@@ -48,6 +48,7 @@ pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 /// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
 /// can be safely converted to [Position]. Values beyond this are considered invalid.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Location(u64);
 
 impl Location {

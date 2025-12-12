@@ -385,6 +385,19 @@ impl<const N: usize> EncodeSize for Prunable<N> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<const N: usize> arbitrary::Arbitrary<'_> for Prunable<N> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut bitmap = Self {
+            bitmap: BitMap::<N>::arbitrary(u)?,
+            pruned_chunks: 0,
+        };
+        let prune_to = u.int_in_range(0..=bitmap.len())?;
+        bitmap.prune_to_bit(prune_to);
+        Ok(bitmap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,5 +1234,15 @@ mod tests {
             prunable.pop();
         }
         assert!(prunable.is_chunk_aligned()); // 0 bits
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Prunable<16>>,
+        }
     }
 }

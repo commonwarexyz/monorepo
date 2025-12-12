@@ -59,6 +59,21 @@ impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(
+            u.arbitrary::<u64>()?,
+            u.arbitrary::<K>()?,
+            u.arbitrary::<V>()?,
+        ))
+    }
+}
+
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
@@ -378,5 +393,16 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_utils::sequence::U64;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<U64, Vec<u8>>>
     }
 }

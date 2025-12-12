@@ -133,3 +133,11 @@ hash = "dcb27e675ccce4ba82dd6979036b04198235bec00d3cefbc8e25a639ab4a162e"
 ["commonware_codec::types::vec::tests::conformance::CodecConformance<Vec<u8>>"]
 n_cases = 65536
 hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<SInt<i16>>"]
+n_cases = 65536
+hash = "c2e6da214e9447b09327dfe6356eb765d753c4faa5430920b01ee0dab6870514"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u16>>"]
+n_cases = 65536
+hash = "aa339ca7dadc09fed8de62561dfad318b44d0c43a7348d5f73dd0db286ec6658"

@@ -384,6 +384,22 @@ impl<H: Hasher> Read for Shard<H> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Shard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            data_bytes: u.arbitrary::<u32>()? as usize,
+            root: u.arbitrary()?,
+            inclusion_proof: u.arbitrary()?,
+            rows: u.arbitrary()?,
+            checksum: Arc::new(u.arbitrary()?),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
     inclusion_proof: Proof<H::Digest>,
@@ -424,6 +440,19 @@ impl<H: Hasher> Read for ReShard<H> {
             // Worst case: every row is one data element, and the sample size is all rows.
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for ReShard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            inclusion_proof: u.arbitrary()?,
+            shard: u.arbitrary()?,
         })
     }
 }
@@ -839,6 +868,17 @@ mod tests {
                 assert!(actual < expected);
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Shard<Sha256>>,
+            CodecConformance<ReShard<Sha256>>,
         }
     }
 }
