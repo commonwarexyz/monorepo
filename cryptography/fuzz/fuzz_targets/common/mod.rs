@@ -3,9 +3,7 @@ use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::{
-            Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, SCALAR_LENGTH,
-        },
+        group::{Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH},
         variant::{MinPk, MinSig, PartialSignature, Variant},
     },
     tle::{Block, Ciphertext},
@@ -102,11 +100,7 @@ pub fn arbitrary_bytes(
 
 #[allow(unused)]
 pub fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    let bytes: [u8; SCALAR_LENGTH] = u.arbitrary()?;
-    match Scalar::read(&mut bytes.as_slice()) {
-        Ok(s) => Ok(s),
-        Err(_) => Ok(Scalar::from_index(u.int_in_range(0..=u32::MAX)?)),
-    }
+    u.arbitrary()
 }
 
 #[allow(unused)]

@@ -279,7 +279,7 @@ impl Scalar {
     }
 
     /// Creates a new scalar from the provided integer.
-    fn from_u64(i: u64) -> Self {
+    pub(crate) fn from_u64(i: u64) -> Self {
         // Create a new scalar
         let mut ret = blst_fr::default();
 
@@ -290,19 +290,6 @@ impl Scalar {
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
         unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
         Self(ret)
-    }
-
-    /// Creates a new scalar from the provided index (a scalar offset by 1).
-    ///
-    /// This is important, because when doing polynomial secret sharing,
-    /// `f(0)` is the secret, and `f(x_0), f(x_1), ...` are the shares, for
-    /// particular points `x_i`.
-    ///
-    /// One simple method of choosing the points is this method, which
-    /// maps `0` to `1`, `1` to `2`, etc. ensuring that none of the points
-    /// collide with `0`, which would reveal the secret.
-    pub fn from_index(i: u32) -> Self {
-        Self::from_u64(i as u64 + 1)
     }
 
     /// Computes the inverse of the scalar.

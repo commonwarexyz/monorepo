@@ -30,7 +30,10 @@ impl Mode {
             return None;
         }
         match self {
-            Self::NonZeroCounter => Some(Scalar::from_index(i)),
+            Self::NonZeroCounter => {
+                // Adding 1 is critical, because f(0) will contain the secret.
+                Some(Scalar::from_u64(i as u64 + 1))
+            }
         }
     }
 
