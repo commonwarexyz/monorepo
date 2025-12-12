@@ -418,7 +418,7 @@ mod test {
             oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
-            exclude: &HashSet<PublicKey>,
+            delayed: &HashSet<PublicKey>,
         ) {
             // Add links between all participants
             for v1 in self.participants.keys() {
@@ -433,10 +433,10 @@ mod test {
                 }
             }
 
-            // Start all participants (even if not active at first), except excluded ones
+            // Start participants that aren't delayed
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                if exclude.contains(&pk) {
-                    info!(pk = ?pk, "excluding participant from initial start");
+                if delayed.contains(&pk) {
+                    info!(pk = ?pk, "delayed participant");
                     continue;
                 }
                 self.start_participant(ctx, oracle, updates.clone(), pk)
@@ -667,9 +667,9 @@ mod test {
                             if successes >= target {
                                 // Verify delayed participant got a private share after catching up
                                 if matches!(self.crash, Some(Crash::Delay { .. })) && !delayed_recovered {
-                                            return Err(anyhow!(
-                                                "delayed participant never received a private share after starting"
-                                            ));
+                                    return Err(anyhow!(
+                                        "delayed participant never received a private share after starting"
+                                    ));
                                 }
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
@@ -689,7 +689,7 @@ mod test {
                         team.start_participant(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     },
                     _ = crash_receiver.next() => {
-                        // Crash ticker fired (only for Random crashes)
+                        // Crash ticker fired
                         if let Some(Crash::Random { count, downtime, .. }) = &self.crash {
                             // Pick multiple random participants to crash
                             let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
@@ -703,14 +703,16 @@ mod test {
                                     info!(pk = ?pk, "crashed participant");
 
                                     // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = *downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
+                                    ctx.clone().spawn({
+                                        let mut restart_sender = restart_sender.clone();
+                                        let pk_clone = pk.clone();
+                                        let downtime = *downtime;
+                                        move |ctx| async move {
+                                            if downtime > Duration::ZERO {
+                                                ctx.sleep(downtime).await;
+                                            }
+                                            let _ = restart_sender.send(pk_clone).await;
                                         }
-                                        let _ = restart_sender.send(pk_clone).await;
                                     });
                                 } else {
                                     debug!(pk = ?pk, "participant already crashed");
@@ -1041,6 +1043,30 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
+    fn dkg_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 4,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
     fn reshare_four_epochs_with_many_crashes() {
         Plan {
             seed: 0,
@@ -1065,6 +1091,30 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
+    fn reshare_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
+                count: 4,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
     fn reshare_with_forced_failure() {
         Plan {
             seed: 0,
@@ -1076,7 +1126,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(1),
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0]),
         }
         .run()
@@ -1096,7 +1150,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(3),
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0, 2, 3]),
         }
         .run()
@@ -1116,7 +1174,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0]),
         }
         .run()
@@ -1136,7 +1198,11 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: None,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 1,
+            }),
             failures: HashSet::from([0, 1]),
         }
         .run()
@@ -1157,30 +1223,6 @@ mod test {
             },
             mode: Mode::Reshare(5),
             crash: Some(Crash::Delay { count: 1, after: 2 }),
-            failures: HashSet::from([3]),
-        }
-        .run()
-        .unwrap();
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn reshare_with_total_shutdown() {
-        Plan {
-            seed: 0,
-            total: 4,
-            per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
-            mode: Mode::Reshare(4),
-            crash: Some(Crash::Random {
-                frequency: Duration::from_secs(4),
-                downtime: Duration::from_secs(1),
-                count: 4,
-            }),
             failures: HashSet::from([3]),
         }
         .run()
