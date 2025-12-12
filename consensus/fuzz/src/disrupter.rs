@@ -72,6 +72,17 @@ where
         }
     }
 
+    fn sample_inclusive(&mut self, lo: u64, hi: u64) -> u64 {
+        if hi < lo {
+            return lo;
+        }
+        if lo == 0 && hi == u64::MAX {
+            return self.fuzz_input.random_u64();
+        }
+        let width = hi.saturating_sub(lo).saturating_add(1);
+        lo.saturating_add(self.fuzz_input.random_u64() % width)
+    }
+
     fn mutation(&mut self) -> Mutation {
         match self.fuzz_input.random_byte() % 4 {
             0 => Mutation::Payload,
@@ -171,7 +182,7 @@ where
             // Active band: [last_finalized, min(last_notarized, current_view)]
             0 => {
                 let hi = last_notarized.min(current_view).max(last_finalized);
-                last_finalized + (self.fuzz_input.random_u64() % (hi - last_finalized + 1))
+                self.sample_inclusive(last_finalized, hi)
             }
             1 => current_view,
             2 => current_view + 1,
@@ -193,7 +204,7 @@ where
                 if last_finalized == 0 {
                     last_finalized
                 } else {
-                    self.fuzz_input.random_u64() % last_finalized
+                    self.sample_inclusive(0, last_finalized.saturating_sub(1))
                 }
             }
             // Active past: [last_finalized, current_view]
@@ -201,14 +212,13 @@ where
                 if current_view <= last_finalized {
                     last_finalized
                 } else {
-                    last_finalized
-                        + (self.fuzz_input.random_u64() % (current_view - last_finalized + 1))
+                    self.sample_inclusive(last_finalized, current_view)
                 }
             }
             // Active band: [last_finalized, min(last_notarized, current_view)]
             2 => {
                 let hi = last_notarized.min(current_view).max(last_finalized);
-                last_finalized + (self.fuzz_input.random_u64() % (hi - last_finalized + 1))
+                self.sample_inclusive(last_finalized, hi)
             }
             // Near future: [current_view+1, current_view+4]
             3 => current_view + 1 + (self.fuzz_input.random_byte() as u64 % 4),
