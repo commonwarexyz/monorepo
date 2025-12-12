@@ -258,11 +258,12 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize(
+//!     let (output, status) = player.finalize(
 //!       dealer_logs.clone(),
 //!       1 // Increase this for parallelism.
 //!     )?;
-//!     println!("Player {:?} got share at index {}", player_pk, share.index);
+//!     println!("Player {:?} recovered: {}", player_pk, status.is_recovered());
+//!     let share: Share = status.into();
 //!     player_shares.insert(player_pk, share);
 //! }
 //!
@@ -326,6 +327,47 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
+}
+
+/// The status of a player's share after DKG finalization.
+///
+/// This indicates whether the player successfully participated in the DKG
+/// or had to recover their share from public reveals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareStatus {
+    /// The player recovered their share with fewer than `max_faults` reveals.
+    /// This means the player's share remains private.
+    Recovered(Share),
+    /// The player had `max_faults` or more reveals, meaning their share
+    /// was essentially public (any observer could compute it).
+    Revealed(Share),
+}
+
+impl ShareStatus {
+    /// Returns a reference to the share, regardless of status.
+    pub const fn share(&self) -> &Share {
+        match self {
+            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
+        }
+    }
+
+    /// Returns true if the share was recovered (fewer than `max_faults` reveals).
+    pub const fn is_recovered(&self) -> bool {
+        matches!(self, ShareStatus::Recovered(_))
+    }
+
+    /// Returns true if the share was revealed (`max_faults` or more reveals).
+    pub const fn is_revealed(&self) -> bool {
+        matches!(self, ShareStatus::Revealed(_))
+    }
+}
+
+impl From<ShareStatus> for Share {
+    fn from(status: ShareStatus) -> Self {
+        match status {
+            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
+        }
+    }
 }
 
 /// Recover public polynomial by interpolating coefficient-wise all
@@ -1430,19 +1472,21 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The returned `usize` indicates how many dealers had to reveal their private
-    /// message because this player didn't acknowledge in time. A value of 0 means
-    /// the player participated fully (sent acks to all selected dealers).
+    /// The returned [`ShareStatus`] indicates whether the player successfully
+    /// participated in the DKG (`Recovered`) or had too many reveals (`Revealed`).
+    /// `Recovered` means fewer than `max_faults` dealers had to reveal their
+    /// private message for this player. `Revealed` means `max_faults` or more
+    /// dealers revealed, so the player's share may be known by an adversary.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    #[allow(clippy::type_complexity)]
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         concurrency: usize,
-    ) -> Result<(Output<V, S::PublicKey>, Share, usize), Error> {
+    ) -> Result<(Output<V, S::PublicKey>, ShareStatus), Error> {
         let selected = select(&self.info, logs)?;
-        let mut reveal_count = 0;
+        let max_faults = self.info.max_reveals();
+        let mut reveal_count = 0u32;
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
@@ -1493,7 +1537,12 @@ impl<V: Variant, S: Signer> Player<V, S> {
             index: self.index,
             private,
         };
-        Ok((output, share, reveal_count))
+        let status = if reveal_count < max_faults {
+            ShareStatus::Recovered(share)
+        } else {
+            ShareStatus::Revealed(share)
+        };
+        Ok((output, status))
     }
 }
 
@@ -2069,9 +2118,10 @@ mod test_plan {
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
-                    let (player_output, share, _reveals) = player
+                    let (player_output, status) = player
                         .finalize(dealer_logs.clone(), 1)
                         .expect("Player finalize should succeed");
+                    let share: Share = status.into();
 
                     assert_eq!(
                         player_output, observer_output,

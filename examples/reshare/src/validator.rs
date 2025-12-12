@@ -592,20 +592,21 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Check if a delayed participant fully participated (0 reveals)
+                                // Check if a delayed participant fully participated (recovered)
                                 if delayed_pks.contains(&update.pk) {
-                                    if let Some((_, reveals)) = share {
+                                    if let Some(ref status) = share {
                                         let is_post_start = delayed_started_at_epoch
                                             .is_some_and(|start| epoch >= start);
+                                        let recovered = status.is_recovered();
                                         info!(
                                             epoch = ?epoch,
-                                            reveals,
+                                            recovered,
                                             is_post_start,
                                             pk = ?update.pk,
                                             "delayed participant received share"
                                         );
                                         if is_post_start
-                                            && reveals == 0
+                                            && recovered
                                             && delayed_fully_participated.is_none()
                                         {
                                             delayed_fully_participated = Some(epoch);
@@ -701,12 +702,12 @@ mod test {
                                         Some(epoch) => {
                                             info!(
                                                 epoch = ?epoch,
-                                                "delayed participant fully participated (0 reveals)"
+                                                "delayed participant fully participated (recovered)"
                                             );
                                         }
                                         None => {
                                             return Err(anyhow!(
-                                                "delayed participant never fully participated (0 reveals) after starting"
+                                                "delayed participant never fully participated (recovered) after starting"
                                             ));
                                         }
                                     }

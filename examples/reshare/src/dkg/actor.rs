@@ -453,16 +453,19 @@ where
 
                             // Finalize the round before acknowledging
                             let logs = storage.logs(epoch);
-                            let (success, next_round, next_output, next_share, reveal_count) =
+                            let (success, next_round, next_output, next_share, share_status) =
                                 if let Some(ps) = player_state.take() {
                                     match ps.finalize(logs, 1) {
-                                        Ok((new_output, new_share, reveals)) => (
-                                            true,
-                                            epoch_state.round + 1,
-                                            Some(new_output),
-                                            Some(new_share),
-                                            Some(reveals),
-                                        ),
+                                        Ok((new_output, status)) => {
+                                            let share: Share = status.clone().into();
+                                            (
+                                                true,
+                                                epoch_state.round + 1,
+                                                Some(new_output),
+                                                Some(share),
+                                                Some(status),
+                                            )
+                                        }
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
@@ -507,10 +510,7 @@ where
                                 Update::Success {
                                     epoch,
                                     output: next_output.expect("ceremony output exists"),
-                                    share: next_share
-                                        .clone()
-                                        .zip(reveal_count)
-                                        .map(|(s, r)| (s, r)),
+                                    share: share_status,
                                 }
                             } else {
                                 Update::Failure { epoch }

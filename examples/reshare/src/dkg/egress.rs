@@ -1,7 +1,7 @@
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
-    dkg::Output,
-    primitives::{group::Share, variant::Variant},
+    dkg::{Output, ShareStatus},
+    primitives::variant::Variant,
 };
 use std::{future::Future, pin::Pin};
 
@@ -15,13 +15,10 @@ pub enum Update<V: Variant, P> {
         epoch: Epoch,
         /// The public output, shared by all parties.
         output: Output<V, P>,
-        /// The player's share and the number of reveals used to derive it.
+        /// The player's share status.
         ///
         /// `None` if the player was only an observer.
-        /// The `usize` indicates how many dealers had to reveal their private
-        /// message because this player didn't acknowledge in time. A value of 0
-        /// means the player participated fully (sent acks to all selected dealers).
-        share: Option<(Share, usize)>,
+        share: Option<ShareStatus>,
     },
 }
 
