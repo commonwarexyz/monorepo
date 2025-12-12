@@ -2003,14 +2003,8 @@ pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
     /// Extract the key from an update.
     fn key(&self) -> &K;
 
-    /// Compute the size of the update when value is fixed-size (excludes context byte).
-    fn update_encode_size_fixed<V2: FixedValue>() -> usize;
-
-    /// Compute the size of the update when value is variable-size (excludes context byte).
-    fn update_encode_size_variable(&self) -> usize;
-
     /// Format the update for display.
-    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -2021,15 +2015,7 @@ impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
         &self.0.key
     }
 
-    fn update_encode_size_fixed<V2: FixedValue>() -> usize {
-        K::SIZE + V2::SIZE + K::SIZE
-    }
-
-    fn update_encode_size_variable(&self) -> usize {
-        K::SIZE + self.0.value.encode_size() + K::SIZE
-    }
-
-    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "[key:{} next_key:{} value:{}]",
@@ -2104,15 +2090,7 @@ impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
         &self.0
     }
 
-    fn update_encode_size_fixed<V2: FixedValue>() -> usize {
-        K::SIZE + V2::SIZE
-    }
-
-    fn update_encode_size_variable(&self) -> usize {
-        K::SIZE + self.1.encode_size()
-    }
-
-    fn fmt_update(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[key:{} value:{}]", self.0, hex(&self.1.encode()))
     }
 }
@@ -2406,9 +2384,8 @@ where
     }
 }
 
-impl<S, K, V> fmt::Display for Operation<S, K, V>
+impl<K, V> fmt::Display for Operation<OrderedUpdate<K, V>, K, V>
 where
-    S: UpdateShape<K, V>,
     K: Array + fmt::Display,
     V: ValueEncoding,
     V::Value: Codec,
@@ -2416,7 +2393,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(payload) => payload.fmt_update(f),
+            Self::Update(payload) => payload.fmt(f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
                     write!(
