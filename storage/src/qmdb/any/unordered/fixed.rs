@@ -65,7 +65,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            any::unordered::FixedOperation as Operation,
+            any::{unordered::FixedOperation as Operation, UnorderedUpdate},
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -149,7 +149,7 @@ pub(super) mod test {
                 ops.push(Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update((key, value)));
+                ops.push(Operation::Update(UnorderedUpdate(key, value)));
                 prev_key = key;
             }
         }
@@ -160,7 +160,7 @@ pub(super) mod test {
     pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update((key, value)) => {
+                Operation::Update(UnorderedUpdate(key, value)) => {
                     db.update(key, value).await.unwrap();
                 }
                 Operation::Delete(key) => {
@@ -513,7 +513,10 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update((Sha256::hash(b"key1"), Sha256::hash(b"value1")));
+                ops[0] = Operation::Update(UnorderedUpdate(
+                    Sha256::hash(b"key1"),
+                    Sha256::hash(b"value1"),
+                ));
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
@@ -525,7 +528,7 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update((
+                ops.push(Operation::Update(UnorderedUpdate(
                     Sha256::hash(b"key1"),
                     Sha256::hash(b"value1"),
                 )));

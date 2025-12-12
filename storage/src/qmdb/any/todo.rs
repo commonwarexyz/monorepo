@@ -187,7 +187,7 @@ where
         loc: Location,
     ) -> Result<KeyData<K, V::Value>, Error> {
         match log.read(loc).await? {
-            OrderedOperation::Update(key_data) => Ok(key_data),
+            OrderedOperation::Update(OrderedUpdate(key_data)) => Ok(key_data),
             _ => unreachable!("expected update operation at location {}", loc),
         }
     }
@@ -283,7 +283,7 @@ where
                 "location does not reference update operation. loc={loc}"
             );
             if op.key().expect("update operation must have key") == key {
-                let OrderedOperation::Update(data) = op else {
+                let OrderedOperation::Update(OrderedUpdate(data)) = op else {
                     unreachable!("expected update operation");
                 };
                 return Ok(Some((data, loc)));
@@ -358,7 +358,7 @@ where
         for &loc in iter {
             let op = self.log.read(loc).await?;
             match &op {
-                UnorderedOperation::Update((k, value)) => {
+                UnorderedOperation::Update(UnorderedUpdate(k, value)) => {
                     if k == key {
                         return Ok(Some((value.clone(), loc)));
                     }
@@ -524,11 +524,11 @@ where
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: key.clone(),
                 value,
                 next_key: key.clone(),
-            });
+            }));
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -536,27 +536,27 @@ where
         }
         let res = self.update_loc(&key, false, next_loc, callback).await?;
         let op = match res {
-            UpdateLocResult::Exists(next_key) => OrderedOperation::Update(KeyData {
+            UpdateLocResult::Exists(next_key) => OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: key.clone(),
                 value,
                 next_key,
-            }),
+            })),
             UpdateLocResult::NotExists(prev_data) => {
                 self.active_keys += 1;
                 self.log
-                    .append(OrderedOperation::Update(KeyData {
+                    .append(OrderedOperation::Update(OrderedUpdate(KeyData {
                         key: key.clone(),
                         value,
                         next_key: prev_data.next_key,
-                    }))
+                    })))
                     .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
-                OrderedOperation::Update(KeyData {
+                OrderedOperation::Update(OrderedUpdate(KeyData {
                     key: prev_data.key,
                     value: prev_data.value,
                     next_key: key,
-                })
+                }))
             }
         };
 
@@ -581,11 +581,11 @@ where
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: key.clone(),
                 value,
                 next_key: key.clone(),
-            });
+            }));
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -598,16 +598,16 @@ where
             }
             UpdateLocResult::NotExists(prev_data) => {
                 self.active_keys += 1;
-                let value_update_op = OrderedOperation::Update(KeyData {
+                let value_update_op = OrderedOperation::Update(OrderedUpdate(KeyData {
                     key: key.clone(),
                     value,
                     next_key: prev_data.next_key,
-                });
-                let next_key_update_op = OrderedOperation::Update(KeyData {
+                }));
+                let next_key_update_op = OrderedOperation::Update(OrderedUpdate(KeyData {
                     key: prev_data.key,
                     value: prev_data.value,
                     next_key: key,
-                });
+                }));
                 self.log.append(value_update_op).await?;
                 self.log.append(next_key_update_op).await?;
             }
@@ -691,11 +691,11 @@ where
         callback(true, Some(prev_key.0));
         update_known_loc(&mut self.snapshot, &prev_key.1, prev_key.0, loc);
 
-        let op = OrderedOperation::Update(KeyData {
+        let op = OrderedOperation::Update(OrderedUpdate(KeyData {
             key: prev_key.1,
             value: prev_key.2,
             next_key,
-        });
+        }));
         self.log.append(op).await?;
         self.steps += 1;
 
@@ -761,7 +761,7 @@ where
         let res = self.update_loc(&key, new_loc).await?;
 
         self.log
-            .append(UnorderedOperation::Update((key, value)))
+            .append(UnorderedOperation::Update(UnorderedUpdate(key, value)))
             .await?;
         if res.is_some() {
             self.steps += 1;
@@ -780,7 +780,7 @@ where
         }
 
         self.log
-            .append(UnorderedOperation::Update((key, value)))
+            .append(UnorderedOperation::Update(UnorderedUpdate(key, value)))
             .await?;
         self.active_keys += 1;
 
@@ -1769,7 +1769,7 @@ where
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let OrderedOperation::Update(key_data) = op else {
+            let OrderedOperation::Update(OrderedUpdate(key_data)) = op else {
                 unreachable!("updates should have key data");
             };
             let key = key_data.key.clone();
@@ -1828,7 +1828,7 @@ where
         let results = try_join_all(futures).await?;
 
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let OrderedOperation::Update(key_data) = op else {
+            let OrderedOperation::Update(OrderedUpdate(key_data)) = op else {
                 unreachable!("updates should have key data");
             };
             possible_next.insert(key_data.next_key);
@@ -1848,11 +1848,11 @@ where
             update_known_loc(&mut self.snapshot, &key, loc, new_loc);
 
             let next_key = find_next_key(&key, &possible_next);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: key.clone(),
                 value: value.clone(),
                 next_key,
-            });
+            }));
             self.log.append(op).await?;
 
             // Each update of an existing key inactivates its previous location.
@@ -1865,11 +1865,11 @@ where
             let new_loc = self.op_count();
             self.snapshot.insert(&key, new_loc);
             let next_key = find_next_key(&key, &possible_next);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: key.clone(),
                 value: value.clone(),
                 next_key,
-            });
+            }));
 
             // Each newly created key increases the active key count.
             self.log.append(op).await?;
@@ -1888,11 +1888,11 @@ where
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: prev_key.clone(),
                 value: prev_value.clone(),
                 next_key,
-            });
+            }));
             self.log.append(op).await?;
 
             // Each key whose next-key value is updated inactivates its previous location.
@@ -1914,11 +1914,11 @@ where
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
-            let op = OrderedOperation::Update(KeyData {
+            let op = OrderedOperation::Update(OrderedUpdate(KeyData {
                 key: prev_key.clone(),
                 value: prev_value.clone(),
                 next_key,
-            });
+            }));
             self.log.append(op).await?;
 
             // Each key whose next-key value is updated inactivates its previous location.
@@ -1969,7 +1969,10 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(UnorderedOperation::Update((key.clone(), value)))
+                    .append(UnorderedOperation::Update(UnorderedUpdate(
+                        key.clone(),
+                        value,
+                    )))
                     .await?;
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
@@ -1988,7 +1991,7 @@ where
             };
             self.snapshot.insert(&key, self.op_count());
             self.log
-                .append(UnorderedOperation::Update((key, value)))
+                .append(UnorderedOperation::Update(UnorderedUpdate(key, value)))
                 .await?;
             self.active_keys += 1;
         }
@@ -2003,27 +2006,61 @@ const OP2_COMMIT_CONTEXT: u8 = 0xD3;
 
 pub trait UpdateShape<K: Array, V: ValueEncoding>: Clone {
     type UpdatePayload;
+
+    /// Extract the key from an update payload.
+    fn key(payload: &Self::UpdatePayload) -> &K;
+
+    /// Compute the size of the update payload when value is fixed-size (excludes context byte).
+    fn update_encode_size_fixed<V2: FixedValue>() -> usize;
+
+    /// Compute the size of the update payload when value is variable-size (excludes context byte).
+    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize;
+
+    /// Format the update payload for display.
+    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct OrderedUpdate<K: Array, V: ValueEncoding>(KeyData<K, V::Value>);
+pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);
+
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
-    type UpdatePayload = KeyData<K, V::Value>;
+    type UpdatePayload = Self;
+
+    fn key(payload: &Self::UpdatePayload) -> &K {
+        &payload.0.key
+    }
+
+    fn update_encode_size_fixed<V2: FixedValue>() -> usize {
+        K::SIZE + V2::SIZE + K::SIZE
+    }
+
+    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize {
+        K::SIZE + payload.0.value.encode_size() + K::SIZE
+    }
+
+    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[key:{} next_key:{} value:{}]",
+            payload.0.key,
+            payload.0.next_key,
+            hex(&payload.0.value.encode())
+        )
+    }
 }
 
 impl<K: Array, V: FixedValue> FixedSize for OrderedUpdate<K, FixedEncoding<V>> {
-    const SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
+    const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
 }
 
 impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
-        1 + K::SIZE + self.0.value.encode_size() + K::SIZE
+        K::SIZE + self.0.value.encode_size() + K::SIZE
     }
 }
 
 impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
-        OP2_UPDATE_CONTEXT.write(buf);
         self.0.key.write(buf);
         self.0.value.write(buf);
         self.0.next_key.write(buf);
@@ -2032,7 +2069,6 @@ impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
 
 impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
-        OP2_UPDATE_CONTEXT.write(buf);
         self.0.key.write(buf);
         self.0.value.write(buf);
         self.0.next_key.write(buf);
@@ -2070,25 +2106,40 @@ impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> 
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(K, V::Value);
+pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
 
 impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
-    type UpdatePayload = (K, V::Value);
+    type UpdatePayload = Self;
+
+    fn key(payload: &Self::UpdatePayload) -> &K {
+        &payload.0
+    }
+
+    fn update_encode_size_fixed<V2: FixedValue>() -> usize {
+        K::SIZE + V2::SIZE
+    }
+
+    fn update_encode_size_variable(payload: &Self::UpdatePayload) -> usize {
+        K::SIZE + payload.1.encode_size()
+    }
+
+    fn fmt_update(payload: &Self::UpdatePayload, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[key:{} value:{}]", payload.0, hex(&payload.1.encode()))
+    }
 }
 
 impl<K: Array, V: FixedValue> FixedSize for UnorderedUpdate<K, FixedEncoding<V>> {
-    const SIZE: usize = 1 + K::SIZE + V::SIZE;
+    const SIZE: usize = K::SIZE + V::SIZE;
 }
 
 impl<K: Array, V: VariableValue> EncodeSize for UnorderedUpdate<K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
-        1 + K::SIZE + self.1.encode_size()
+        K::SIZE + self.1.encode_size()
     }
 }
 
 impl<K: Array, V: FixedValue> Write for UnorderedUpdate<K, FixedEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
-        OP2_UPDATE_CONTEXT.write(buf);
         self.0.write(buf);
         self.1.write(buf);
     }
@@ -2096,7 +2147,6 @@ impl<K: Array, V: FixedValue> Write for UnorderedUpdate<K, FixedEncoding<V>> {
 
 impl<K: Array, V: VariableValue> Write for UnorderedUpdate<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
-        OP2_UPDATE_CONTEXT.write(buf);
         self.0.write(buf);
         self.1.write(buf);
     }
@@ -2132,57 +2182,54 @@ where
     CommitFloor(Option<V::Value>, Location),
 }
 
-impl<K: Array, V: FixedValue> Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
-    // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
+impl<S, K, V> Operation2<S, K, FixedEncoding<V>>
+where
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    K: Array,
+    V: FixedValue,
+{
+    const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
-
-    // Update op has a context byte, a key, a value, and a next key.
-    const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
-
-    // Delete op has a context byte and a key.
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<K: Array, V: FixedValue> FixedSize
-    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+impl<S, K, V> FixedSize for Operation2<S, K, FixedEncoding<V>>
+where
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    K: Array,
+    V: FixedValue,
 {
-    // Make sure operation array is large enough to hold the maximum of all ops.
-    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-        Self::UPDATE_OP_SIZE
-    } else {
-        Self::COMMIT_OP_SIZE
+    const SIZE: usize = {
+        let max = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+            Self::UPDATE_OP_SIZE
+        } else {
+            Self::COMMIT_OP_SIZE
+        };
+        if max > Self::DELETE_OP_SIZE {
+            max
+        } else {
+            Self::DELETE_OP_SIZE
+        }
     };
 }
 
-impl<K: Array, V: VariableValue> EncodeSize
-    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(_) => K::SIZE,
-            Self::Update(p) => K::SIZE + p.value.encode_size() + K::SIZE,
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
-
-impl<K: Array, V: FixedValue> Write
-    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+impl<S, K, V> Write for Operation2<S, K, FixedEncoding<V>>
+where
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    S::UpdatePayload: Write,
+    K: Array + Codec,
+    V: FixedValue,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Delete(k) => {
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
-                // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Self::Update(p) => {
                 OP2_UPDATE_CONTEXT.write(buf);
-                p.key.write(buf);
-                p.value.write(buf);
-                p.next_key.write(buf);
-                // Pad with 0 up to [Self::SIZE]
+                p.write(buf);
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
             Self::CommitFloor(metadata, floor_loc) => {
@@ -2194,39 +2241,18 @@ impl<K: Array, V: FixedValue> Write
                     buf.put_bytes(0, V::SIZE + 1);
                 }
                 buf.put_slice(&floor_loc.to_be_bytes());
-                // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
             }
         }
     }
 }
 
-impl<K: Array, V: VariableValue> Write
-    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(p) => {
-                OP2_UPDATE_CONTEXT.write(buf);
-                p.key.write(buf);
-                p.value.write(buf);
-                p.next_key.write(buf);
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
-        }
-    }
-}
-
-impl<K: Array, V: FixedValue> Read
-    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+impl<S, K, V> Read for Operation2<S, K, FixedEncoding<V>>
+where
+    S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
+    S::UpdatePayload: Read<Cfg = ()>,
+    K: Array + Codec,
+    V: FixedValue,
 {
     type Cfg = ();
 
@@ -2235,21 +2261,13 @@ impl<K: Array, V: FixedValue> Read
 
         match u8::read(buf)? {
             OP2_UPDATE_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
-                let next_key = K::read(buf)?;
+                let payload = S::UpdatePayload::read_cfg(buf, cfg)?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-
-                Ok(Self::Update(KeyData {
-                    key,
-                    value,
-                    next_key,
-                }))
+                Ok(Self::Update(payload))
             }
             OP2_DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
-
                 Ok(Self::Delete(key))
             }
             OP2_COMMIT_CONTEXT => {
@@ -2263,12 +2281,11 @@ impl<K: Array, V: FixedValue> Read
                 let floor_loc = u64::read(buf)?;
                 let floor_loc = Location::new(floor_loc).ok_or_else(|| {
                     CodecError::Invalid(
-                        "storage::qmdb::operation::ordered::Operation",
+                        "storage::qmdb::any::todo::Operation2",
                         "commit floor location overflow",
                     )
                 })?;
                 ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
-
                 Ok(Self::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -2276,115 +2293,28 @@ impl<K: Array, V: FixedValue> Read
     }
 }
 
-impl<K: Array, V: VariableValue> Read
-    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
-{
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            OP2_DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                Ok(Self::Delete(key))
-            }
-            OP2_UPDATE_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
-                let next_key = K::read(buf)?;
-                Ok(Self::Update(KeyData {
-                    key,
-                    value,
-                    next_key,
-                }))
-            }
-            OP2_COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, cfg)?;
-                let floor_loc = UInt::read(buf)?;
-                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::operation::ordered::Operation",
-                        "commit floor location overflow",
-                    )
-                })?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
-            }
-            e => Err(CodecError::InvalidEnum(e)),
-        }
-    }
-}
-
-impl<K: Array, V: FixedValue>
-    Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
-{
-    // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
-
-    // Update op has a context byte, a key, and a value.
-    const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE;
-
-    // Delete op has a context byte and a key.
-    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
-}
-
-impl<K: Array, V: FixedValue> FixedSize
-    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
-{
-    // Make sure operation array is large enough to hold the maximum of all ops.
-    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-        Self::UPDATE_OP_SIZE
-    } else {
-        Self::COMMIT_OP_SIZE
-    };
-}
-
-impl<K: Array, V: VariableValue> EncodeSize
-    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+impl<S, K, V> EncodeSize for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    S::UpdatePayload: EncodeSize,
+    K: Array,
+    V: VariableValue,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Delete(_) => K::SIZE,
-            Self::Update((_, v)) => K::SIZE + v.encode_size(),
+            Self::Update(p) => p.encode_size(),
             Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
     }
 }
 
-impl<K: Array, V: FixedValue> Write
-    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                OP2_DELETE_CONTEXT.write(buf);
-                k.write(buf);
-                // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
-            }
-            Self::Update((k, v)) => {
-                OP2_UPDATE_CONTEXT.write(buf);
-                k.write(buf);
-                v.write(buf);
-                // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                OP2_COMMIT_CONTEXT.write(buf);
-                if let Some(metadata) = metadata {
-                    true.write(buf);
-                    metadata.write(buf);
-                } else {
-                    buf.put_bytes(0, V::SIZE + 1);
-                }
-                buf.put_slice(&floor_loc.to_be_bytes());
-                // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
-            }
-        }
-    }
-}
-
-impl<K: Array, V: VariableValue> Write
-    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+impl<S, K, V> Write for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    S::UpdatePayload: Write,
+    K: Array + Codec,
+    V: VariableValue,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -2392,10 +2322,9 @@ impl<K: Array, V: VariableValue> Write
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
-            Self::Update((k, v)) => {
+            Self::Update(p) => {
                 OP2_UPDATE_CONTEXT.write(buf);
-                k.write(buf);
-                v.write(buf);
+                p.write(buf);
             }
             Self::CommitFloor(metadata, floor_loc) => {
                 OP2_COMMIT_CONTEXT.write(buf);
@@ -2406,54 +2335,12 @@ impl<K: Array, V: VariableValue> Write
     }
 }
 
-impl<K: Array, V: FixedValue> Read
-    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
-{
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        at_least(buf, Self::SIZE)?;
-
-        match u8::read(buf)? {
-            OP2_UPDATE_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
-                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-
-                Ok(Self::Update((key, value)))
-            }
-            OP2_DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
-
-                Ok(Self::Delete(key))
-            }
-            OP2_COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let metadata = if is_some {
-                    Some(V::read_cfg(buf, cfg)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor_loc = u64::read(buf)?;
-                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::operation::ordered::Operation",
-                        "commit floor location overflow",
-                    )
-                })?;
-                ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
-
-                Ok(Self::CommitFloor(metadata, floor_loc))
-            }
-            e => Err(CodecError::InvalidEnum(e)),
-        }
-    }
-}
-
-impl<K: Array, V: VariableValue> Read
-    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+impl<S, K, V> Read for Operation2<S, K, VariableEncoding<V>>
+where
+    S: UpdateShape<K, VariableEncoding<V>>,
+    S::UpdatePayload: Read<Cfg = <V as Read>::Cfg>,
+    K: Array + Codec,
+    V: VariableValue,
 {
     type Cfg = <V as Read>::Cfg;
 
@@ -2464,16 +2351,15 @@ impl<K: Array, V: VariableValue> Read
                 Ok(Self::Delete(key))
             }
             OP2_UPDATE_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
-                Ok(Self::Update((key, value)))
+                let payload = S::UpdatePayload::read_cfg(buf, cfg)?;
+                Ok(Self::Update(payload))
             }
             OP2_COMMIT_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
                 let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
                     CodecError::Invalid(
-                        "storage::qmdb::operation::ordered::Operation",
+                        "storage::qmdb::any::todo::Operation2",
                         "commit floor location overflow",
                     )
                 })?;
@@ -2484,9 +2370,15 @@ impl<K: Array, V: VariableValue> Read
     }
 }
 
-impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
-    for Operation2<OrderedUpdate<K, V>, K, V>
+// ============================================================================
+// GENERIC TRAIT IMPLEMENTATIONS
+// ============================================================================
+
+impl<S, K, V> crate::qmdb::operation::Operation for Operation2<S, K, V>
 where
+    S: UpdateShape<K, V>,
+    K: Array,
+    V: ValueEncoding,
     V::Value: Codec,
 {
     type Key = K;
@@ -2494,38 +2386,7 @@ where
     fn key(&self) -> Option<&Self::Key> {
         match self {
             Self::Delete(k) => Some(k),
-            Self::Update(p) => Some(&p.key),
-            Self::CommitFloor(_, _) => None,
-        }
-    }
-
-    fn is_update(&self) -> bool {
-        matches!(self, Self::Update(_))
-    }
-
-    fn is_delete(&self) -> bool {
-        matches!(self, Self::Delete(_))
-    }
-
-    fn has_floor(&self) -> Option<Location> {
-        match self {
-            Self::CommitFloor(_, loc) => Some(*loc),
-            _ => None,
-        }
-    }
-}
-
-impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
-    for Operation2<UnorderedUpdate<K, V>, K, V>
-where
-    V::Value: Codec,
-{
-    type Key = K;
-
-    fn key(&self) -> Option<&Self::Key> {
-        match self {
-            Self::Delete(k) => Some(k),
-            Self::Update((k, _)) => Some(k),
+            Self::Update(p) => Some(S::key(p)),
             Self::CommitFloor(_, _) => None,
         }
     }
@@ -2558,8 +2419,9 @@ where
     }
 }
 
-impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<OrderedUpdate<K, V>, K, V>
+impl<S, K, V> fmt::Display for Operation2<S, K, V>
 where
+    S: UpdateShape<K, V>,
     K: Array + fmt::Display,
     V: ValueEncoding,
     V::Value: Codec,
@@ -2567,38 +2429,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(payload) => write!(
-                f,
-                "[key:{} next_key:{} value:{}]",
-                payload.key,
-                payload.next_key,
-                hex(&payload.value.encode())
-            ),
-            Self::CommitFloor(value, loc) => {
-                if let Some(value) = value {
-                    write!(
-                        f,
-                        "[commit {} with inactivity floor: {loc}]",
-                        hex(&value.encode())
-                    )
-                } else {
-                    write!(f, "[commit with inactivity floor: {loc}]")
-                }
-            }
-        }
-    }
-}
-
-impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<UnorderedUpdate<K, V>, K, V>
-where
-    K: Array + fmt::Display,
-    V: ValueEncoding,
-    V::Value: Codec + fmt::Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update((key, value)) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::Update(payload) => S::fmt_update(payload, f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
                     write!(
