@@ -11,7 +11,6 @@ use commonware_p2p::{
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };
-use commonware_utils::NZU32;
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
@@ -25,12 +24,13 @@ use governor::{clock::Clock as GClock, Quota};
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
 
-/// Default rate limit quota (high enough to not interfere with normal operation)
-const DEFAULT_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+/// Default rate limit set high enough to not interfere with normal operation
+const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;

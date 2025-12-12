@@ -58,12 +58,13 @@ mod tests {
         Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{quorum, NZU32};
+    use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
-    use std::time::Duration;
+    use std::{num::NonZeroU32, time::Duration};
 
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     fn build_notarization<S: Scheme>(
         schemes: &[S],

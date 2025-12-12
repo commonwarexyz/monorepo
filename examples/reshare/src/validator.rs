@@ -177,7 +177,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect, NZU32};
+    use commonware_utils::{union, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -188,13 +188,14 @@ mod test {
     use std::{
         collections::{BTreeMap, HashSet},
         future::Future,
+        num::NonZeroU32,
         pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
 
-    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     #[derive(Debug)]
     struct FilteredReceiver<R> {

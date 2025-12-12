@@ -156,7 +156,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZUsize, NZU32, NZU64};
+    use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
     use governor::Quota;
     use rand::{
@@ -215,7 +215,7 @@ mod tests {
         jitter: Duration::from_millis(50),
         success_rate: 0.7,
     };
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     async fn setup_validator(
         context: deterministic::Context,

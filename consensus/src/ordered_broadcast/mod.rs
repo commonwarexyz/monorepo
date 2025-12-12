@@ -82,6 +82,7 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
+        num::NonZeroU32,
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -90,7 +91,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
