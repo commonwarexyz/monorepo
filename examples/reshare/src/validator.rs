@@ -592,7 +592,7 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Check if a delayed participant got a recovered after starting
+                                // Check if a delayed participant got a recovered share after starting
                                 if delayed_pks.contains(&update.pk) {
                                     if let Some(ref status) = share {
                                         let is_recovered = status.is_recovered();
@@ -665,10 +665,10 @@ mod test {
 
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
-                                // Verify delayed participant got a recovered after catching up
+                                // Verify delayed participant got a recovered share after catching up
                                 if matches!(self.crash, Some(Crash::Delay { .. })) && !delayed_recovered {
                                     return Err(anyhow!(
-                                        "delayed participant never received a recovered after starting"
+                                        "delayed participant never received a recovered share after starting"
                                     ));
                                 }
                                 return Ok(PlanResult {
