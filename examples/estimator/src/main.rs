@@ -397,7 +397,7 @@ async fn setup_network_links(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock + GClock + Clone + Send + 'static>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock + Clone + Send + 'static>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
@@ -490,7 +490,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock + GClock + Clone + Send + 'stati
 }
 
 /// Check if a single command would succeed without executing side effects
-async fn process_single_command_check<C: Spawner + Clock>(
+async fn process_single_command_check<C: Clock>(
     ctx: &C,
     command_ctx: &CommandContext,
     command: &(usize, Command),
@@ -556,7 +556,7 @@ async fn process_single_command_check<C: Spawner + Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Spawner + Clock + GClock + Clone + Send + 'static>(
+async fn process_command<C: Clock>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
