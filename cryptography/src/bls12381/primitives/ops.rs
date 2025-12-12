@@ -622,12 +622,16 @@ mod tests {
     use super::*;
     use crate::bls12381::{
         dkg,
-        primitives::variant::{MinPk, MinSig},
+        primitives::{
+            sharing::Mode,
+            variant::{MinPk, MinSig},
+        },
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
     use commonware_math::algebra::{Ring, Space};
     use commonware_utils::{from_hex_formatted, quorum, NZU32};
+    use core::num::NonZeroU32;
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
 
@@ -2177,14 +2181,14 @@ mod tests {
 
     fn threshold_derive_missing_partials<V: Variant>() {
         // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a specific point `eval_at_x`.
-        fn lagrange_coeff(eval_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
+        fn lagrange_coeff(scalars: &[Scalar], eval_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
             // Initialize the numerator and denominator.
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
             // Initialize the evaluation point and the index.
-            let eval_x = Scalar::from_index(eval_x);
-            let xi = Scalar::from_index(i_x);
+            let eval_x = scalars[eval_x as usize].clone();
+            let xi = scalars[i_x as usize].clone();
 
             // Compute the Lagrange coefficients.
             for &j_x in x_coords {
@@ -2194,7 +2198,7 @@ mod tests {
                 }
 
                 // Initialize the other index.
-                let xj = Scalar::from_index(j_x);
+                let xj = scalars[j_x as usize].clone();
 
                 // Numerator: product over j!=i of (eval_x - x_j)
                 let mut term = eval_x.clone();
@@ -2214,8 +2218,9 @@ mod tests {
 
         // Generate the public polynomial and the private shares for n participants.
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (5, quorum(5));
-        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (n, t) = (NZU32!(5), quorum(5));
+        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), n);
+        let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
 
         // Produce partial signatures for every participant.
         let namespace = Some(&b"test"[..]);
@@ -2238,14 +2243,16 @@ mod tests {
             let target = target.index;
 
             // Compute the Lagrange coefficients (the scalars) for this combination.
-            let scalars: Vec<Scalar> = recovery_indices
+            let weights: Vec<Scalar> = recovery_indices
                 .iter()
-                .map(|&recovery_index| lagrange_coeff(target, recovery_index, &recovery_indices))
+                .map(|&recovery_index| {
+                    lagrange_coeff(&scalars, target, recovery_index, &recovery_indices)
+                })
                 .collect();
 
             // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
-            let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &scalars, 1);
+            let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, 1);
             let derived = PartialSignature {
                 index: target,
                 value: derived,
