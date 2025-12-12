@@ -438,24 +438,25 @@ mod test {
         }
     }
 
-    /// Configuration for simulating participant crashes during a test.
+    /// Configuration for simulating participant unavailability during a test.
     #[derive(Clone)]
-    struct Crash {
-        /// How often to trigger crashes.
-        frequency: Duration,
-        /// How long crashed participants stay offline before restarting.
-        downtime: Duration,
-        /// Number of participants to crash each time.
-        count: usize,
-    }
-
-    /// Configuration for a single delayed validator start.
-    #[derive(Clone)]
-    struct DelayedStart {
-        /// Index of the participant to delay (from the participant list).
-        participant_index: usize,
-        /// Number of successful epochs to wait before starting the delayed participant.
-        after_epochs: u64,
+    enum Crash {
+        /// Randomly crash participants periodically.
+        Random {
+            /// How often to trigger crashes.
+            frequency: Duration,
+            /// How long crashed participants stay offline before restarting.
+            downtime: Duration,
+            /// Number of participants to crash each time.
+            count: usize,
+        },
+        /// Delay some participants from starting until after N successful epochs.
+        Delay {
+            /// Number of participants to delay.
+            count: usize,
+            /// Number of successful epochs to wait before starting delayed participants.
+            after_epochs: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -480,12 +481,10 @@ mod test {
         link: Link,
         /// Whether to run in DKG or reshare mode.
         mode: Mode,
-        /// Optional crash simulation configuration.
+        /// Optional crash/delay simulation configuration.
         crash: Option<Crash>,
         /// Epochs where DKG should be forced to fail by dropping all DKG messages.
         failures: HashSet<u64>,
-        /// Optional delayed start configuration.
-        delayed_start: Option<DelayedStart>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -524,24 +523,23 @@ mod test {
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
 
-            // Determine which participant should have a delayed start
-            let delayed_pk: Option<PublicKey> = if let Some(ref delayed) = self.delayed_start {
+            // Determine which participants should have a delayed start
+            let delayed_pks: HashSet<PublicKey> = if let Some(Crash::Delay {
+                count,
+                after_epochs,
+            }) = &self.crash
+            {
                 let all_pks: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                let pk = all_pks
-                    .get(delayed.participant_index)
-                    .cloned()
-                    .expect("delayed participant index out of bounds");
-                info!(
-                    ?pk,
-                    after_epochs = delayed.after_epochs,
-                    "participant with delayed start"
-                );
-                Some(pk)
+                let delayed: Vec<PublicKey> =
+                    all_pks.choose_multiple(&mut ctx, *count).cloned().collect();
+                for pk in &delayed {
+                    info!(?pk, after_epochs, "participant with delayed start");
+                }
+                delayed.into_iter().collect()
             } else {
-                None
+                HashSet::new()
             };
-            let delayed_pks: HashSet<PublicKey> = delayed_pk.iter().cloned().collect();
-            let mut delayed_started = false;
+            let mut delayed_started = delayed_pks.is_empty();
 
             team.start(
                 &ctx,
@@ -559,13 +557,13 @@ mod test {
             let mut successes = 0u64;
             let mut failures = 0u64;
 
-            // Track whether the delayed participant ever fully participated (0 reveals) after starting
+            // Track whether delayed participants ever fully participated (0 reveals) after starting
             let mut delayed_fully_participated: Option<Epoch> = None;
-            // The epoch when the delayed participant was started
+            // The epoch when delayed participants were started
             let mut delayed_started_at_epoch: Option<Epoch> = None;
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
-            if let Some(crash) = &self.crash {
-                let frequency = crash.frequency;
+            if let Some(Crash::Random { frequency, .. }) = &self.crash {
+                let frequency = *frequency;
                 let mut crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
@@ -594,24 +592,23 @@ mod test {
                                 let has_share = share.is_some();
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
-                                // Check if the delayed participant fully participated (0 reveals)
-                                if let Some(ref delayed_pk) = delayed_pk {
+                                // Check if a delayed participant fully participated (0 reveals)
+                                if delayed_pks.contains(&update.pk) {
                                     if let Some((_, reveals)) = share {
-                                        if &update.pk == delayed_pk {
-                                            let is_post_start = delayed_started_at_epoch
-                                                .is_some_and(|start| epoch >= start);
-                                            info!(
-                                                epoch = ?epoch,
-                                                reveals,
-                                                is_post_start,
-                                                "delayed participant received share"
-                                            );
-                                            if is_post_start
-                                                && reveals == 0
-                                                && delayed_fully_participated.is_none()
-                                            {
-                                                delayed_fully_participated = Some(epoch);
-                                            }
+                                        let is_post_start = delayed_started_at_epoch
+                                            .is_some_and(|start| epoch >= start);
+                                        info!(
+                                            epoch = ?epoch,
+                                            reveals,
+                                            is_post_start,
+                                            pk = ?update.pk,
+                                            "delayed participant received share"
+                                        );
+                                        if is_post_start
+                                            && reveals == 0
+                                            && delayed_fully_participated.is_none()
+                                        {
+                                            delayed_fully_participated = Some(epoch);
                                         }
                                     }
                                 }
@@ -642,11 +639,11 @@ mod test {
 
                         // Check if it's time to start delayed participants
                         if !delayed_started {
-                            if let Some(ref delayed) = self.delayed_start {
-                                if successes >= delayed.after_epochs {
+                            if let Some(Crash::Delay { after_epochs, .. }) = &self.crash {
+                                if successes >= *after_epochs {
                                     info!(
                                         successes,
-                                        after_epochs = delayed.after_epochs,
+                                        after_epochs,
                                         start_epoch = ?epoch.next(),
                                         "starting delayed participants"
                                     );
@@ -699,7 +696,7 @@ mod test {
                         if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= target {
                                 // Verify delayed participant fully participated in at least one epoch
-                                if self.delayed_start.is_some() {
+                                if matches!(self.crash, Some(Crash::Delay { .. })) {
                                     match delayed_fully_participated {
                                         Some(epoch) => {
                                             info!(
@@ -736,11 +733,11 @@ mod test {
                         }
                     },
                     _ = crash_receiver.next() => {
-                        // Crash ticker fired
-                        if let Some(crash) = &self.crash {
+                        // Crash ticker fired (only for Random crashes)
+                        if let Some(Crash::Random { count, downtime, .. }) = &self.crash {
                             // Pick multiple random participants to crash
                             let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
+                            let crash_count = (*count).min(all_participants.len());
                             let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
 
                             for pk in to_crash {
@@ -751,7 +748,7 @@ mod test {
 
                                     // Schedule restart after downtime
                                     let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
+                                    let downtime = *downtime;
                                     let pk_clone = pk.clone();
                                     ctx.clone().spawn(move |ctx| async move {
                                         if downtime > Duration::ZERO {
@@ -803,7 +800,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -837,7 +833,6 @@ mod test {
             mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         };
         for seed in 0..3 {
             let res0 = Plan {
@@ -871,7 +866,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -892,7 +886,6 @@ mod test {
             mode: Mode::Reshare(1),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -913,7 +906,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -934,7 +926,6 @@ mod test {
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -955,7 +946,6 @@ mod test {
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -976,7 +966,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -997,7 +986,6 @@ mod test {
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1018,7 +1006,6 @@ mod test {
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1037,13 +1024,12 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1062,13 +1048,12 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
             }),
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1087,13 +1072,12 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1112,13 +1096,12 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
             failures: HashSet::new(),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1139,7 +1122,6 @@ mod test {
             mode: Mode::Reshare(1),
             crash: None,
             failures: HashSet::from([0]),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1160,7 +1142,6 @@ mod test {
             mode: Mode::Reshare(3),
             crash: None,
             failures: HashSet::from([0, 2, 3]),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1181,7 +1162,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0]),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1202,7 +1182,6 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0, 1]),
-            delayed_start: None,
         }
         .run()
         .unwrap();
@@ -1220,13 +1199,12 @@ mod test {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            mode: Mode::Reshare(8),
-            crash: None,
-            failures: HashSet::from([4]),
-            delayed_start: Some(DelayedStart {
-                participant_index: 3,
+            mode: Mode::Reshare(5),
+            crash: Some(Crash::Delay {
+                count: 1,
                 after_epochs: 2,
             }),
+            failures: HashSet::from([3]),
         }
         .run()
         .unwrap();
