@@ -22,6 +22,12 @@ use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+/// Maximum sleep duration in milliseconds for fuzz tests.
+///
+/// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
+/// and can only represent durations up to ~584 years.
+const MAX_SLEEP_DURATION: u64 = 1000;
+
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
     All,
@@ -74,7 +80,7 @@ impl commonware_codec::Read for FuzzMessage {
     }
 }
 
-#[derive(Clone, Debug, Arbitrary)]
+#[derive(Clone, Debug)]
 enum BroadcastAction {
     SendMessage {
         peer_index: usize,
@@ -96,6 +102,34 @@ enum BroadcastAction {
     Sleep {
         duration_ms: u64,
     },
+}
+
+impl<'a> Arbitrary<'a> for BroadcastAction {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let variant = u.int_in_range(0..=3)?;
+        match variant {
+            0 => Ok(BroadcastAction::SendMessage {
+                peer_index: u.arbitrary()?,
+                recipients: u.arbitrary()?,
+                message: u.arbitrary()?,
+            }),
+            1 => Ok(BroadcastAction::Subscribe {
+                peer_index: u.arbitrary()?,
+                sender: u.arbitrary()?,
+                commitment: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            2 => Ok(BroadcastAction::Get {
+                peer_index: u.arbitrary()?,
+                sender: u.arbitrary()?,
+                commitment: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            _ => Ok(BroadcastAction::Sleep {
+                duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION)?,
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
