@@ -85,7 +85,7 @@ mod tests {
         Blocker, Manager,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZU32;
+    use commonware_utils::{non_empty_vec, NZU32};
     use futures::StreamExt;
     use std::{collections::HashMap, time::Duration};
 
@@ -915,7 +915,10 @@ mod tests {
             // When peer 2 returns invalid data, only peer 2 should be removed from targets
             // Peer 3 should still be tried as a target and succeed
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
                 .await;
 
             // Should eventually succeed from peer 3
@@ -1013,7 +1016,10 @@ mod tests {
             // Start fetch with targets for peers 2 and 3 (both don't have data)
             // Peer 4 has data but is NOT a target - it should NEVER be tried
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
                 .await;
 
             // Wait enough time for targets to fail and retry multiple times
@@ -1119,8 +1125,8 @@ mod tests {
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
             mailbox1
                 .fetch_all_targeted(vec![
-                    (key1.clone(), vec![peers[1].clone()]), // peer 2 has key1
-                    (key2.clone(), vec![peers[3].clone()]), // peer 4 has key2
+                    (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
+                    (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
                 ])
                 .await;
             mailbox1.fetch(key3.clone()).await; // no targeting for key3
@@ -1211,7 +1217,7 @@ mod tests {
 
             // Start fetch with target for peer 2 only (who doesn't have data)
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone()])
+                .fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()])
                 .await;
 
             // Wait for the targeted fetch to fail a few times

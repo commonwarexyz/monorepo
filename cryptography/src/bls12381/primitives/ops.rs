@@ -481,6 +481,10 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
+    if many_evals.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // Process first set of evaluations
     let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
     let evals = prepare_evaluations(threshold, evals)?;

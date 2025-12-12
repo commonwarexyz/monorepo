@@ -7,6 +7,7 @@ use commonware_cryptography::bls12381::primitives::{
     poly::{Eval, Poly, Weight},
     variant::{MinPk, MinSig},
 };
+use commonware_utils::non_empty_vec;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -342,10 +343,9 @@ fn fuzz(op: FuzzOperation) {
                 let public_poly = match public.first() {
                     Some((_idx, _)) => {
                         let degree = public.len() as u32 - 1;
-                        let coeffs = vec![
-                            arbitrary_g1(&mut Unstructured::new(&[]))
-                                .unwrap_or(G1::one());
-                            (degree + 1) as usize
+                        let coeffs = non_empty_vec![
+                            arbitrary_g1(&mut Unstructured::new(&[])).unwrap_or(G1::one());
+                            NZUsize!((degree + 1) as usize)
                         ];
                         Poly::from(coeffs)
                     }
@@ -377,10 +377,9 @@ fn fuzz(op: FuzzOperation) {
                 let public_poly = match public.first() {
                     Some((_idx, _)) => {
                         let degree = public.len() as u32 - 1;
-                        let coeffs = vec![
-                            arbitrary_g2(&mut Unstructured::new(&[]))
-                                .unwrap_or(G2::one());
-                            (degree + 1) as usize
+                        let coeffs = non_empty_vec![
+                            arbitrary_g2(&mut Unstructured::new(&[])).unwrap_or(G2::one());
+                            NZUsize!((degree + 1) as usize)
                         ];
                         Poly::from(coeffs)
                     }

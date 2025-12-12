@@ -12,6 +12,7 @@ use commonware_cryptography::bls12381::{
     },
     tle::{Block, Ciphertext},
 };
+use commonware_utils::vec::NonEmptyVec;
 use std::collections::BTreeMap;
 
 #[allow(unused)]
@@ -119,7 +120,7 @@ pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> 
 pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
+    Ok(Poly::from(NonEmptyVec::try_from(coeffs).unwrap()))
 }
 
 #[allow(unused)]
