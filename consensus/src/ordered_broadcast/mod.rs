@@ -82,8 +82,7 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        num::NonZeroU32,
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
