@@ -1,6 +1,6 @@
 //! BLS12-381 threshold signature scheme implementation.
 //!
-//! This module provides both the raw BLS12-381 threshold implementation and a macro to generate
+//! This module provides both the generic BLS12-381 threshold implementation and a macro to generate
 //! protocol-specific wrappers.
 //!
 //! Unlike multi-signature schemes, threshold signatures:
@@ -29,13 +29,17 @@ use commonware_utils::{
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
-/// BLS12-381 threshold implementation of the [`Scheme`] trait.
+/// Generic BLS12-381 threshold signature implementation.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
+/// This enum contains the core cryptographic operations without protocol-specific
+/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
+/// by wrapping it with protocol-specific trait implementations via the macro.
+///
+/// A node can play one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
-pub enum Bls12381Threshold<P: PublicKey, V: Variant> {
+pub enum Generic<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
         participants: BiMap<P, V::Public>,
@@ -56,7 +60,7 @@ pub enum Bls12381Threshold<P: PublicKey, V: Variant> {
     },
 }
 
-impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
+impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -392,7 +396,7 @@ mod macros {
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > {
-                raw: $crate::scheme::bls12381_threshold::Bls12381Threshold<P, V>,
+                generic: $crate::scheme::bls12381_threshold::Generic<P, V>,
             }
 
             impl<
@@ -406,7 +410,7 @@ mod macros {
                     share: commonware_cryptography::bls12381::primitives::group::Share,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::signer(
+                        generic: $crate::scheme::bls12381_threshold::Generic::signer(
                             participants,
                             polynomial,
                             share,
@@ -420,7 +424,7 @@ mod macros {
                     polynomial: &commonware_cryptography::bls12381::primitives::poly::Public<V>,
                 ) -> Self {
                     Self {
-                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::verifier(
+                        generic: $crate::scheme::bls12381_threshold::Generic::verifier(
                             participants,
                             polynomial,
                         ),
@@ -430,10 +434,20 @@ mod macros {
                 /// Creates a lightweight verifier that only checks recovered certificates.
                 pub const fn certificate_verifier(identity: V::Public) -> Self {
                     Self {
-                        raw: $crate::scheme::bls12381_threshold::Bls12381Threshold::certificate_verifier(
+                        generic: $crate::scheme::bls12381_threshold::Generic::certificate_verifier(
                             identity,
                         ),
                     }
+                }
+
+                /// Returns the public identity of the committee (constant across reshares).
+                pub const fn identity(&self) -> &V::Public {
+                    self.generic.identity()
+                }
+
+                /// Returns the local share if this instance can generate partial signatures.
+                pub const fn share(&self) -> Option<&commonware_cryptography::bls12381::primitives::group::Share> {
+                    self.generic.share()
                 }
             }
 
@@ -447,11 +461,11 @@ mod macros {
                 type Certificate = V::Signature;
 
                 fn me(&self) -> Option<u32> {
-                    self.raw.me()
+                    self.generic.me()
                 }
 
                 fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    self.raw.participants()
+                    self.generic.participants()
                 }
 
                 fn sign_vote<D: commonware_cryptography::Digest>(
@@ -459,7 +473,7 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                 ) -> Option<$crate::scheme::Signature<Self>> {
-                    self.raw.sign_vote::<_, D>(namespace, context)
+                    self.generic.sign_vote::<_, D>(namespace, context)
                 }
 
                 fn verify_vote<D: commonware_cryptography::Digest>(
@@ -468,7 +482,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote::<_, D>(namespace, context, signature)
+                    self.generic.verify_vote::<_, D>(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -483,14 +497,14 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
+                    self.generic.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(signatures)
+                    self.generic.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<
@@ -503,7 +517,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
-                    self.raw.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
+                    self.generic.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
                 }
 
                 fn verify_certificates<'a, R, D, I>(
@@ -517,22 +531,22 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
                 {
-                    self.raw.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
+                    self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
                 fn is_attributable(&self) -> bool {
-                    self.raw.is_attributable()
+                    self.generic.is_attributable()
                 }
 
                 fn certificate_codec_config(
                     &self,
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.raw.certificate_codec_config()
+                    self.generic.certificate_codec_config()
                 }
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::scheme::bls12381_threshold::Bls12381Threshold::<P, V>::certificate_codec_config_unbounded()
+                    $crate::scheme::bls12381_threshold::Generic::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -1020,16 +1034,15 @@ mod tests {
 
     fn certificate_verifier_panics_on_vote<V: Variant + Send + Sync>() {
         let (schemes, _, _) = setup_signers::<V>(4, 37);
-        let certificate_verifier = Bls12381Threshold::<ed25519::PublicKey, V>::certificate_verifier(
-            *schemes[0].raw.identity(),
-        );
+        let certificate_verifier =
+            Scheme::<ed25519::PublicKey, V>::certificate_verifier(*schemes[0].identity());
 
         let vote = schemes[1]
             .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
             .unwrap();
 
         // CertificateVerifier should panic when trying to verify a vote
-        certificate_verifier.verify_vote::<Scheme<ed25519::PublicKey, V>, Sha256Digest>(
+        certificate_verifier.verify_vote::<Sha256Digest>(
             NAMESPACE,
             TestContext { message: MESSAGE },
             &vote,
@@ -1095,11 +1108,7 @@ mod tests {
         // so this should succeed. Let's use threshold 2 to make it fail.
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(2));
-        Bls12381Threshold::<ed25519::PublicKey, V>::signer(
-            participants,
-            &polynomial,
-            shares[0].clone(),
-        );
+        Scheme::<ed25519::PublicKey, V>::signer(participants, &polynomial, shares[0].clone());
     }
 
     #[test]
@@ -1120,7 +1129,7 @@ mod tests {
         // Create a polynomial with threshold 2, but quorum of 5 participants is 4
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, _) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(2));
-        Bls12381Threshold::<ed25519::PublicKey, V>::verifier(participants, &polynomial);
+        Scheme::<ed25519::PublicKey, V>::verifier(participants, &polynomial);
     }
 
     #[test]
@@ -1169,10 +1178,7 @@ mod tests {
             .unwrap();
 
         // Verify the partial signature matches what we'd get from direct signing
-        let share = match &scheme.raw {
-            Bls12381Threshold::Signer { share, .. } => share,
-            _ => panic!("expected signer"),
-        };
+        let share = scheme.share().expect("expected signer");
 
         let expected = partial_sign_message::<V>(share, Some(NAMESPACE), MESSAGE);
 

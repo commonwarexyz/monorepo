@@ -1,4 +1,4 @@
-//! Utilities for simplex signing schemes.
+//! Utilities for signing schemes.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, Write};

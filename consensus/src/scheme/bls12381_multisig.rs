@@ -1,6 +1,6 @@
 //! BLS12-381 multi-signature signing scheme implementation.
 //!
-//! This module provides both the raw BLS12-381 multisig implementation and a macro to generate
+//! This module provides both the generic BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
 use crate::scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
@@ -21,16 +21,20 @@ use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
-/// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
+/// Generic BLS12-381 multi-signature implementation.
+///
+/// This struct contains the core cryptographic operations without protocol-specific
+/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
+/// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
-pub struct Bls12381Multisig<P: PublicKey, V: Variant> {
+pub struct Generic<P: PublicKey, V: Variant> {
     /// Participants in the committee.
     pub participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
     pub signer: Option<(u32, Private)>,
 }
 
-impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
+impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Creates a new scheme instance with the provided key material.
     ///
     /// Participants have both an identity key and a consensus key. The identity key
@@ -367,7 +371,7 @@ mod macros {
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > {
-                raw: $crate::scheme::bls12381_multisig::Bls12381Multisig<P, V>,
+                generic: $crate::scheme::bls12381_multisig::Generic<P, V>,
             }
 
             impl<
@@ -380,7 +384,7 @@ mod macros {
                     private_key: commonware_cryptography::bls12381::primitives::group::Private,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::scheme::bls12381_multisig::Bls12381Multisig::signer(
+                        generic: $crate::scheme::bls12381_multisig::Generic::signer(
                             participants,
                             private_key,
                         )?,
@@ -392,7 +396,7 @@ mod macros {
                     participants: commonware_utils::ordered::BiMap<P, V::Public>,
                 ) -> Self {
                     Self {
-                        raw: $crate::scheme::bls12381_multisig::Bls12381Multisig::verifier(
+                        generic: $crate::scheme::bls12381_multisig::Generic::verifier(
                             participants,
                         ),
                     }
@@ -409,11 +413,11 @@ mod macros {
                 type Certificate = $crate::scheme::bls12381_multisig::Certificate<V>;
 
                 fn me(&self) -> Option<u32> {
-                    self.raw.me()
+                    self.generic.me()
                 }
 
                 fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    self.raw.participants()
+                    self.generic.participants()
                 }
 
                 fn sign_vote<D: commonware_cryptography::Digest>(
@@ -421,7 +425,7 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                 ) -> Option<$crate::scheme::Signature<Self>> {
-                    self.raw.sign_vote::<_, D>(namespace, context)
+                    self.generic.sign_vote::<_, D>(namespace, context)
                 }
 
                 fn verify_vote<D: commonware_cryptography::Digest>(
@@ -430,7 +434,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote::<_, D>(namespace, context, signature)
+                    self.generic.verify_vote::<_, D>(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -445,14 +449,14 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
+                    self.generic.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(signatures)
+                    self.generic.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<
@@ -465,7 +469,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
-                    self.raw.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
+                    self.generic.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
                 }
 
                 fn verify_certificates<'a, R, D, I>(
@@ -479,21 +483,21 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
                 {
-                    self.raw.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
+                    self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
                 fn is_attributable(&self) -> bool {
-                    self.raw.is_attributable()
+                    self.generic.is_attributable()
                 }
 
                 fn certificate_codec_config(
                     &self,
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.raw.certificate_codec_config()
+                    self.generic.certificate_codec_config()
                 }
 
                 fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::scheme::bls12381_multisig::Bls12381Multisig::<P, V>::certificate_codec_config_unbounded()
+                    $crate::scheme::bls12381_multisig::Generic::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -992,8 +996,7 @@ mod tests {
     }
 
     fn test_scheme_clone_and_verifier<V: Variant + Send + Sync>() {
-        let (schemes, _) = setup_signers::<V>(4, 60);
-        let participants = schemes[0].raw.participants.clone();
+        let (schemes, verifier) = setup_signers::<V>(4, 60);
 
         // Clone a signer
         let signer = schemes[0].clone();
@@ -1005,7 +1008,6 @@ mod tests {
         );
 
         // A verifier cannot produce votes
-        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
         assert!(
             verifier
                 .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })

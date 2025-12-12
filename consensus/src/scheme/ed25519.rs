@@ -1,6 +1,6 @@
 //! Ed25519 signing scheme implementation.
 //!
-//! This module provides both the raw Ed25519 implementation and a macro to generate
+//! This module provides both the generic Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
 use crate::scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
 use bytes::{Buf, BufMut};
@@ -13,22 +13,21 @@ use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
-/// Raw Ed25519 signing scheme that operates on raw bytes.
+/// Generic Ed25519 signing scheme implementation.
 ///
-/// This module contains the core cryptographic operations without protocol-specific
+/// This struct contains the core cryptographic operations without protocol-specific
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
-/// by wrapping it with protocol-specific trait implementations.
-/// Core Ed25519 signing scheme implementation.
+/// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
-pub struct Ed25519 {
+pub struct Generic {
     /// Participants in the committee.
     pub participants: Set<ed25519::PublicKey>,
     /// Key used for generating signatures.
     pub signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
-impl Ed25519 {
-    /// Creates a new raw Ed25519 scheme instance.
+impl Generic {
+    /// Creates a new generic Ed25519 scheme instance.
     pub fn signer(
         participants: Set<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
@@ -363,7 +362,7 @@ mod macros {
             /// Ed25519 signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme {
-                raw: $crate::scheme::ed25519::Ed25519,
+                generic: $crate::scheme::ed25519::Generic,
             }
 
             impl Scheme {
@@ -383,7 +382,10 @@ mod macros {
                     private_key: commonware_cryptography::ed25519::PrivateKey,
                 ) -> Option<Self> {
                     Some(Self {
-                        raw: $crate::scheme::ed25519::Ed25519::signer(participants, private_key)?,
+                        generic: $crate::scheme::ed25519::Generic::signer(
+                            participants,
+                            private_key,
+                        )?,
                     })
                 }
 
@@ -396,7 +398,7 @@ mod macros {
                     >,
                 ) -> Self {
                     Self {
-                        raw: $crate::scheme::ed25519::Ed25519::verifier(participants),
+                        generic: $crate::scheme::ed25519::Generic::verifier(participants),
                     }
                 }
             }
@@ -408,11 +410,11 @@ mod macros {
                 type Certificate = $crate::scheme::ed25519::Certificate;
 
                 fn me(&self) -> Option<u32> {
-                    self.raw.me()
+                    self.generic.me()
                 }
 
                 fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    &self.raw.participants
+                    &self.generic.participants
                 }
 
                 fn sign_vote<D: commonware_cryptography::Digest>(
@@ -420,7 +422,7 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                 ) -> Option<$crate::scheme::Signature<Self>> {
-                    self.raw.sign_vote::<_, D>(namespace, context)
+                    self.generic.sign_vote::<_, D>(namespace, context)
                 }
 
                 fn verify_vote<D: commonware_cryptography::Digest>(
@@ -429,7 +431,8 @@ mod macros {
                     context: Self::Context<'_, D>,
                     signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote::<_, D>(namespace, context, signature)
+                    self.generic
+                        .verify_vote::<_, D>(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -444,7 +447,7 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw
+                    self.generic
                         .verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
                 }
 
@@ -452,7 +455,7 @@ mod macros {
                 where
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.assemble_certificate(signatures)
+                    self.generic.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<
@@ -465,8 +468,12 @@ mod macros {
                     context: Self::Context<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
-                    self.raw
-                        .verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
+                    self.generic.verify_certificate::<Self, _, D>(
+                        rng,
+                        namespace,
+                        context,
+                        certificate,
+                    )
                 }
 
                 fn verify_certificates<'a, R, D, I>(
@@ -480,23 +487,23 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
                 {
-                    self.raw
+                    self.generic
                         .verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
                 fn is_attributable(&self) -> bool {
-                    self.raw.is_attributable()
+                    self.generic.is_attributable()
                 }
 
                 fn certificate_codec_config(
                     &self,
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.raw.certificate_codec_config()
+                    self.generic.certificate_codec_config()
                 }
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::scheme::ed25519::Ed25519::certificate_codec_config_unbounded()
+                    $crate::scheme::ed25519::Generic::certificate_codec_config_unbounded()
                 }
             }
         };
