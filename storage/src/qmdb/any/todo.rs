@@ -15,7 +15,7 @@ use crate::{
             CleanAny, DirtyAny,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Operation},
+        operation::{Committable, Operation as OperationTrait},
         store::{Batchable, LogStore},
         update_key, update_known_loc, Error, FloorHelper,
     },
@@ -37,11 +37,6 @@ use std::{
     ops::Bound,
 };
 use tracing::debug;
-
-type OrderedOperation<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
-type UnorderedOperation<K, V> = Operation2<UnorderedUpdate<K, V>, K, V>;
-
-type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, KeyData<K, V>)>;
@@ -71,7 +66,7 @@ pub struct IndexedLog<
     /// # Invariants
     ///
     /// - The log is never pruned beyond the inactivity floor.
-    pub(crate) log: AuthenticatedLog<E, C, H, S>,
+    pub(crate) log: authenticated::Journal<E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -169,7 +164,7 @@ where
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, H, S>,
+        log: &authenticated::Journal<E, C, H, S>,
     ) -> Result<Location, Error> {
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
@@ -183,7 +178,7 @@ where
     }
 
     async fn get_update_op(
-        log: &AuthenticatedLog<E, C, H, S>,
+        log: &authenticated::Journal<E, C, H, S>,
         loc: Location,
     ) -> Result<KeyData<K, V::Value>, Error> {
         match log.read(loc).await? {
@@ -332,7 +327,7 @@ where
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, H, S>,
+        log: &authenticated::Journal<E, C, H, S>,
     ) -> Result<Location, Error> {
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
@@ -820,7 +815,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Operation + Codec,
+        Op: OperationTrait + Codec,
         C: MutableContiguous<Item = Op>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
@@ -829,7 +824,7 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    ) -> FloorHelper<'_, I, authenticated::Journal<E, C, H, Clean<H::Digest>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -898,7 +893,7 @@ where
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub async fn init_from_log<F>(
         mut index: I,
-        log: AuthenticatedLog<E, C, H>,
+        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
         known_inactivity_floor: Option<Location>,
         mut callback: F,
     ) -> Result<Self, Error>
@@ -951,7 +946,7 @@ where
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub async fn init_from_log<F>(
         mut index: I,
-        log: AuthenticatedLog<E, C, H>,
+        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
         known_inactivity_floor: Option<Location>,
         mut callback: F,
     ) -> Result<Self, Error>
@@ -990,7 +985,7 @@ where
     /// caller to ensure it is set correctly.
     pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, H>,
+        log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
         let active_keys =
@@ -2172,8 +2167,11 @@ impl<K: Array, V: VariableValue> Read for UnorderedUpdate<K, VariableEncoding<V>
     }
 }
 
+type OrderedOperation<K, V> = Operation<OrderedUpdate<K, V>, K, V>;
+type UnorderedOperation<K, V> = Operation<UnorderedUpdate<K, V>, K, V>;
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation2<S, K: Array, V: ValueEncoding>
+pub enum Operation<S, K: Array, V: ValueEncoding>
 where
     S: UpdateShape<K, V>,
 {
@@ -2182,7 +2180,7 @@ where
     CommitFloor(Option<V::Value>, Location),
 }
 
-impl<S, K, V> Operation2<S, K, FixedEncoding<V>>
+impl<S, K, V> Operation<S, K, FixedEncoding<V>>
 where
     S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
     K: Array,
@@ -2193,7 +2191,7 @@ where
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<S, K, V> FixedSize for Operation2<S, K, FixedEncoding<V>>
+impl<S, K, V> FixedSize for Operation<S, K, FixedEncoding<V>>
 where
     S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
     K: Array,
@@ -2213,7 +2211,7 @@ where
     };
 }
 
-impl<S, K, V> Write for Operation2<S, K, FixedEncoding<V>>
+impl<S, K, V> Write for Operation<S, K, FixedEncoding<V>>
 where
     S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
     S::UpdatePayload: Write,
@@ -2247,7 +2245,7 @@ where
     }
 }
 
-impl<S, K, V> Read for Operation2<S, K, FixedEncoding<V>>
+impl<S, K, V> Read for Operation<S, K, FixedEncoding<V>>
 where
     S: UpdateShape<K, FixedEncoding<V>> + FixedSize,
     S::UpdatePayload: Read<Cfg = ()>,
@@ -2293,7 +2291,7 @@ where
     }
 }
 
-impl<S, K, V> EncodeSize for Operation2<S, K, VariableEncoding<V>>
+impl<S, K, V> EncodeSize for Operation<S, K, VariableEncoding<V>>
 where
     S: UpdateShape<K, VariableEncoding<V>>,
     S::UpdatePayload: EncodeSize,
@@ -2309,7 +2307,7 @@ where
     }
 }
 
-impl<S, K, V> Write for Operation2<S, K, VariableEncoding<V>>
+impl<S, K, V> Write for Operation<S, K, VariableEncoding<V>>
 where
     S: UpdateShape<K, VariableEncoding<V>>,
     S::UpdatePayload: Write,
@@ -2335,7 +2333,7 @@ where
     }
 }
 
-impl<S, K, V> Read for Operation2<S, K, VariableEncoding<V>>
+impl<S, K, V> Read for Operation<S, K, VariableEncoding<V>>
 where
     S: UpdateShape<K, VariableEncoding<V>>,
     S::UpdatePayload: Read<Cfg = <V as Read>::Cfg>,
@@ -2374,7 +2372,7 @@ where
 // GENERIC TRAIT IMPLEMENTATIONS
 // ============================================================================
 
-impl<S, K, V> crate::qmdb::operation::Operation for Operation2<S, K, V>
+impl<S, K, V> crate::qmdb::operation::Operation for Operation<S, K, V>
 where
     S: UpdateShape<K, V>,
     K: Array,
@@ -2407,7 +2405,7 @@ where
     }
 }
 
-impl<S, K, V> Committable for Operation2<S, K, V>
+impl<S, K, V> Committable for Operation<S, K, V>
 where
     S: UpdateShape<K, V>,
     K: Array,
@@ -2419,7 +2417,7 @@ where
     }
 }
 
-impl<S, K, V> fmt::Display for Operation2<S, K, V>
+impl<S, K, V> fmt::Display for Operation<S, K, V>
 where
     S: UpdateShape<K, V>,
     K: Array + fmt::Display,

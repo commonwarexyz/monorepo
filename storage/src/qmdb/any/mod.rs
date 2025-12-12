@@ -26,7 +26,7 @@ use std::{
 };
 
 mod todo;
-pub use todo::{Operation2, OrderedUpdate, UnorderedUpdate};
+pub use todo::{Operation, OrderedUpdate, UnorderedUpdate};
 
 mod value;
 pub(crate) use value::{FixedValue, VariableValue};

@@ -3,13 +3,13 @@
 use crate::qmdb::any::{
     todo::UnorderedUpdate,
     value::{FixedEncoding, VariableEncoding},
-    Operation2,
+    Operation,
 };
 
 pub type FixedOperation<K, V> =
-    Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>;
+    Operation<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>;
 pub type VariableOperation<K, V> =
-    Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>;
+    Operation<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>;
 
 /*
 #[cfg(test)]
