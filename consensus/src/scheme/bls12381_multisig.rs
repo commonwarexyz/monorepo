@@ -421,7 +421,7 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                 ) -> Option<$crate::scheme::Signature<Self>> {
-                    self.raw.sign_vote(namespace, context)
+                    self.raw.sign_vote::<_, D>(namespace, context)
                 }
 
                 fn verify_vote<D: commonware_cryptography::Digest>(
@@ -430,7 +430,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     signature: &$crate::scheme::Signature<Self>,
                 ) -> bool {
-                    self.raw.verify_vote(namespace, context, signature)
+                    self.raw.verify_vote::<_, D>(namespace, context, signature)
                 }
 
                 fn verify_votes<R, D, I>(
@@ -445,7 +445,7 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
                 {
-                    self.raw.verify_votes(rng, namespace, context, signatures)
+                    self.raw.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
@@ -465,7 +465,7 @@ mod macros {
                     context: Self::Context<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
-                    self.raw.verify_certificate::<Self, _, _>(rng, namespace, context, certificate)
+                    self.raw.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
                 }
 
                 fn verify_certificates<'a, R, D, I>(
@@ -479,7 +479,7 @@ mod macros {
                     D: commonware_cryptography::Digest,
                     I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
                 {
-                    self.raw.verify_certificates::<Self, _, _, _>(rng, namespace, certificates)
+                    self.raw.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
                 fn is_attributable(&self) -> bool {
