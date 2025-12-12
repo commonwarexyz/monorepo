@@ -130,6 +130,18 @@ impl<D: Digest> Context for &Item<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Item<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary::<u64>()?;
+        let digest = u.arbitrary::<D>()?;
+        Ok(Self { index, digest })
+    }
+}
+
 /// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a certificate for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -322,18 +334,6 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
     fn encode_size(&self) -> usize {
         self.item.encode_size() + self.certificate.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Item<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let index = u.arbitrary::<u64>()?;
-        let digest = u.arbitrary::<D>()?;
-        Ok(Self { index, digest })
     }
 }
 

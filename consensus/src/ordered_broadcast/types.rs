@@ -244,6 +244,24 @@ impl<P: PublicKey, D: Digest> EncodeSize for Chunk<P, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Chunk<P, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let sequencer = P::arbitrary(u)?;
+        let height = u.arbitrary::<u64>()?;
+        let payload = D::arbitrary(u)?;
+        Ok(Self {
+            sequencer,
+            height,
+            payload,
+        })
+    }
+}
+
 /// Context for signing/verifying validator acknowledgments.
 ///
 /// This is used as the context type for `Scheme` implementations for validators.
@@ -285,6 +303,20 @@ pub struct Parent<S: Scheme, D: Digest> {
     pub certificate: S::Certificate,
 }
 
+impl<S: Scheme, D: Digest> Parent<S, D> {
+    /// Create a new parent with the given digest, epoch, and signature.
+    ///
+    /// The parent links a chunk to its predecessor in the chain and provides
+    /// the certificate that proves the predecessor was reliably broadcast.
+    pub const fn new(digest: D, epoch: Epoch, certificate: S::Certificate) -> Self {
+        Self {
+            digest,
+            epoch,
+            certificate,
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> PartialEq for Parent<S, D>
 where
     S::Certificate: PartialEq,
@@ -306,20 +338,6 @@ where
         self.digest.hash(state);
         self.epoch.hash(state);
         self.certificate.hash(state);
-    }
-}
-
-impl<S: Scheme, D: Digest> Parent<S, D> {
-    /// Create a new parent with the given digest, epoch, and signature.
-    ///
-    /// The parent links a chunk to its predecessor in the chain and provides
-    /// the certificate that proves the predecessor was reliably broadcast.
-    pub const fn new(digest: D, epoch: Epoch, certificate: S::Certificate) -> Self {
-        Self {
-            digest,
-            epoch,
-            certificate,
-        }
     }
 }
 
@@ -349,6 +367,24 @@ impl<S: Scheme, D: Digest> Read for Parent<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Parent<S, D> {
     fn encode_size(&self) -> usize {
         self.digest.encode_size() + self.epoch.encode_size() + self.certificate.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Parent<S, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let digest = u.arbitrary::<D>()?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let certificate = u.arbitrary::<S::Certificate>()?;
+        Ok(Self {
+            digest,
+            epoch,
+            certificate,
+        })
     }
 }
 
@@ -546,6 +582,24 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     }
 }
 
+impl<P: PublicKey, S: Scheme, D: Digest> Hash for Node<P, S, D> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.chunk.hash(state);
+        self.signature.hash(state);
+        self.parent.hash(state);
+    }
+}
+
+impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunk == other.chunk
+            && self.signature == other.signature
+            && self.parent == other.parent
+    }
+}
+
+impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
+
 impl<P: PublicKey, S: Scheme, D: Digest> Write for Node<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
@@ -585,24 +639,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Node<P, S, D> {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
-
-impl<P: PublicKey, S: Scheme, D: Digest> Hash for Node<P, S, D> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.chunk.hash(state);
-        self.signature.hash(state);
-        self.parent.hash(state);
-    }
-}
-
-impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.chunk == other.chunk
-            && self.signature == other.signature
-            && self.parent == other.parent
-    }
-}
-
-impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 
 #[cfg(feature = "arbitrary")]
 impl<C: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Node<C, S, D>
@@ -856,6 +892,22 @@ impl<P: PublicKey, D: Digest> Proposal<P, D> {
     }
 }
 
+impl<P: PublicKey, D: Digest> Hash for Proposal<P, D> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.chunk.hash(state);
+        self.signature.hash(state);
+    }
+}
+
+impl<P: PublicKey, D: Digest> PartialEq for Proposal<P, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunk == other.chunk && self.signature == other.signature
+    }
+}
+
+/// This is needed to implement `Eq` for `Proposal`.
+impl<P: PublicKey, D: Digest> Eq for Proposal<P, D> {}
+
 impl<P: PublicKey, D: Digest> Write for Proposal<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
@@ -879,21 +931,18 @@ impl<P: PublicKey, D: Digest> EncodeSize for Proposal<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> Hash for Proposal<P, D> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.chunk.hash(state);
-        self.signature.hash(state);
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Proposal<C, D>
+where
+    Chunk<C, D>: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<C, D>::arbitrary(u)?;
+        let signature = C::Signature::arbitrary(u)?;
+        Ok(Self { chunk, signature })
     }
 }
-
-impl<P: PublicKey, D: Digest> PartialEq for Proposal<P, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.chunk == other.chunk && self.signature == other.signature
-    }
-}
-
-/// This is needed to implement `Eq` for `Proposal`.
-impl<P: PublicKey, D: Digest> Eq for Proposal<P, D> {}
 
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 ///
@@ -975,55 +1024,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Lock<P, S, D> {
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.epoch.encode_size() + self.certificate.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Chunk<P, D>
-where
-    P: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let sequencer = P::arbitrary(u)?;
-        let height = u.arbitrary::<u64>()?;
-        let payload = D::arbitrary(u)?;
-        Ok(Self {
-            sequencer,
-            height,
-            payload,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Parent<S, D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let digest = u.arbitrary::<D>()?;
-        let epoch = u.arbitrary::<Epoch>()?;
-        let certificate = u.arbitrary::<S::Certificate>()?;
-        Ok(Self {
-            digest,
-            epoch,
-            certificate,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<C: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Proposal<C, D>
-where
-    Chunk<C, D>: for<'a> arbitrary::Arbitrary<'a>,
-    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let chunk = Chunk::<C, D>::arbitrary(u)?;
-        let signature = C::Signature::arbitrary(u)?;
-        Ok(Self { chunk, signature })
     }
 }
 
