@@ -58,38 +58,30 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::{self, fixtures::Fixture},
+        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
         scheme::{
-            bls12381_multisig::Scheme as Bls12381MultisigScheme,
-            bls12381_threshold::Scheme as Bls12381ThresholdScheme,
-            ed25519::Scheme as Ed25519Scheme, OrderedBroadcastScheme,
+            bls12381_multisig as bls12381_multisig_scheme,
+            bls12381_threshold as bls12381_threshold_scheme, ed25519 as ed25519_scheme,
+            OrderedBroadcastScheme,
         },
         types::Chunk,
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use rand::{rngs::StdRng, SeedableRng};
+    use std::panic::catch_unwind;
 
-    // Helper to setup Ed25519 test fixture
-    fn setup_ed25519_fixture() -> Fixture<Ed25519Scheme> {
+    /// Generate a fixture using the provided generator function.
+    fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
+    where
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
         let mut rng = StdRng::seed_from_u64(0);
-        mocks::fixtures::ed25519(&mut rng, 4)
-    }
-
-    // Helper to setup BLS multisig test fixture
-    fn setup_bls_multisig_fixture<V: Variant>() -> Fixture<Bls12381MultisigScheme<PublicKey, V>> {
-        let mut rng = StdRng::seed_from_u64(0);
-        mocks::fixtures::bls12381_multisig(&mut rng, 4)
-    }
-
-    // Helper to setup BLS threshold test fixture
-    fn setup_bls_threshold_fixture<V: Variant>() -> Fixture<Bls12381ThresholdScheme<PublicKey, V>> {
-        let mut rng = StdRng::seed_from_u64(0);
-        mocks::fixtures::bls12381_threshold(&mut rng, 4)
+        fixture(&mut rng, num_validators)
     }
 
     /// Creates a node for testing with a given scheme.
@@ -123,11 +115,14 @@ mod tests {
         commonware_cryptography::ed25519::PrivateKey::from_rng(&mut rng).public_key()
     }
 
-    // Generic test implementations
-
-    fn put_new_tip<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(fixture: &Fixture<S>) {
+    fn put_new_tip<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node = create_node(fixture, 0, 1, "payload");
+        let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         let got = manager.get(&key).unwrap();
@@ -136,11 +131,23 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    fn put_same_height_same_payload<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
-        fixture: &Fixture<S>,
-    ) {
+    #[test]
+    fn test_put_new_tip() {
+        put_new_tip(ed25519);
+        put_new_tip(bls12381_multisig::<MinPk, _>);
+        put_new_tip(bls12381_multisig::<MinSig, _>);
+        put_new_tip(bls12381_threshold::<MinPk, _>);
+        put_new_tip(bls12381_threshold::<MinSig, _>);
+    }
+
+    fn put_same_height_same_payload<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node = create_node(fixture, 0, 1, "payload");
+        let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         assert!(!manager.put(&node));
@@ -150,12 +157,26 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    fn put_higher_tip<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(fixture: &Fixture<S>) {
+    #[test]
+    fn test_put_same_height_same_payload() {
+        put_same_height_same_payload(ed25519);
+        put_same_height_same_payload(bls12381_multisig::<MinPk, _>);
+        put_same_height_same_payload(bls12381_multisig::<MinSig, _>);
+        put_same_height_same_payload(bls12381_threshold::<MinPk, _>);
+        put_same_height_same_payload(bls12381_threshold::<MinSig, _>);
+    }
+
+    fn put_higher_tip<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, 1, "payload1");
         let key = node1.chunk.sequencer.clone();
         assert!(manager.put(&node1));
-        let node2 = create_node(fixture, 0, 2, "payload2");
+        let node2 = create_node(&fixture, 0, 2, "payload2");
         assert!(manager.put(&node2));
         let got = manager.get(&key).unwrap();
         assert_eq!(got.chunk, node2.chunk);
@@ -163,40 +184,98 @@ mod tests {
         assert_eq!(got.parent, node2.parent);
     }
 
-    fn put_lower_tip_panics<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
-        fixture: &Fixture<S>,
-    ) {
-        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(fixture, 0, 2, "payload");
-        assert!(manager.put(&node1));
-        let node2 = create_node(fixture, 0, 1, "payload");
-        manager.put(&node2); // Should panic
+    #[test]
+    fn test_put_higher_tip() {
+        put_higher_tip(ed25519);
+        put_higher_tip(bls12381_multisig::<MinPk, _>);
+        put_higher_tip(bls12381_multisig::<MinSig, _>);
+        put_higher_tip(bls12381_threshold::<MinPk, _>);
+        put_higher_tip(bls12381_threshold::<MinSig, _>);
     }
 
-    fn put_same_height_different_payload_panics<
+    fn put_lower_tip_panics<S, F>(fixture: F)
+    where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-    >(
-        fixture: &Fixture<S>,
-    ) {
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, 2, "payload");
         assert!(manager.put(&node1));
-        let node2 = create_node(fixture, 0, 1, "payload2");
+        let node2 = create_node(&fixture, 0, 1, "payload");
         manager.put(&node2); // Should panic
     }
 
-    fn get_nonexistent<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>() {
+    #[test]
+    fn test_put_lower_tip_panics() {
+        assert!(catch_unwind(|| put_lower_tip_panics(ed25519)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_multisig::<MinPk, _>)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_multisig::<MinSig, _>)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_threshold::<MinPk, _>)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_threshold::<MinSig, _>)).is_err());
+    }
+
+    fn put_same_height_different_payload_panics<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
+        let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
+        let node1 = create_node(&fixture, 0, 1, "payload1");
+        assert!(manager.put(&node1));
+        let node2 = create_node(&fixture, 0, 1, "payload2");
+        manager.put(&node2); // Should panic
+    }
+
+    #[test]
+    fn test_put_same_height_different_payload_panics() {
+        assert!(catch_unwind(|| put_same_height_different_payload_panics(ed25519)).is_err());
+        assert!(catch_unwind(|| put_same_height_different_payload_panics(
+            bls12381_multisig::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| put_same_height_different_payload_panics(
+            bls12381_multisig::<MinSig, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| put_same_height_different_payload_panics(
+            bls12381_threshold::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| put_same_height_different_payload_panics(
+            bls12381_threshold::<MinSig, _>
+        ))
+        .is_err());
+    }
+
+    fn get_nonexistent<S>()
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+    {
         let manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let key = deterministic_public_key(6);
         assert!(manager.get(&key).is_none());
     }
 
-    fn multiple_sequencers<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
-        fixture: &Fixture<S>,
-    ) {
+    #[test]
+    fn test_get_nonexistent() {
+        get_nonexistent::<ed25519_scheme::Scheme>();
+        get_nonexistent::<bls12381_multisig_scheme::Scheme<PublicKey, MinPk>>();
+        get_nonexistent::<bls12381_multisig_scheme::Scheme<PublicKey, MinSig>>();
+        get_nonexistent::<bls12381_threshold_scheme::Scheme<PublicKey, MinPk>>();
+        get_nonexistent::<bls12381_threshold_scheme::Scheme<PublicKey, MinSig>>();
+    }
+
+    fn multiple_sequencers<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(fixture, 0, 1, "payload1");
-        let node2 = create_node(fixture, 1, 2, "payload2");
+        let node1 = create_node(&fixture, 0, 1, "payload1");
+        let node2 = create_node(&fixture, 1, 2, "payload2");
         let key1 = node1.chunk.sequencer.clone();
         let key2 = node2.chunk.sequencer.clone();
         manager.put(&node1);
@@ -208,13 +287,25 @@ mod tests {
         assert_eq!(got2.chunk, node2.chunk);
     }
 
-    fn put_multiple_updates<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
-        fixture: &Fixture<S>,
-    ) {
+    #[test]
+    fn test_multiple_sequencers() {
+        multiple_sequencers(ed25519);
+        multiple_sequencers(bls12381_multisig::<MinPk, _>);
+        multiple_sequencers(bls12381_multisig::<MinSig, _>);
+        multiple_sequencers(bls12381_threshold::<MinPk, _>);
+        multiple_sequencers(bls12381_threshold::<MinSig, _>);
+    }
+
+    fn put_multiple_updates<S, F>(fixture: F)
+    where
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.
-        let node1 = create_node(fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, 1, "payload1");
         let key = node1.chunk.sequencer.clone();
         manager.put(&node1);
         let got1 = manager.get(&key).unwrap();
@@ -222,14 +313,14 @@ mod tests {
         assert_eq!(got1.chunk.payload, node1.chunk.payload);
 
         // Insert tip with height 2.
-        let node2 = create_node(fixture, 0, 2, "payload2");
+        let node2 = create_node(&fixture, 0, 2, "payload2");
         manager.put(&node2);
         let got2 = manager.get(&key).unwrap();
         assert_eq!(got2.chunk.height, 2);
         assert_eq!(got2.chunk.payload, node2.chunk.payload);
 
         // Insert tip with height 3.
-        let node3 = create_node(fixture, 0, 3, "payload3");
+        let node3 = create_node(&fixture, 0, 3, "payload3");
         manager.put(&node3);
         let got3 = manager.get(&key).unwrap();
         assert_eq!(got3.chunk.height, 3);
@@ -239,230 +330,19 @@ mod tests {
         assert!(!manager.put(&node3));
 
         // Insert tip with height 4.
-        let node4 = create_node(fixture, 0, 4, "payload4");
+        let node4 = create_node(&fixture, 0, 4, "payload4");
         manager.put(&node4);
         let got4 = manager.get(&key).unwrap();
         assert_eq!(got4.chunk.height, 4);
         assert_eq!(got4.chunk.payload, node4.chunk.payload);
     }
 
-    // Test entry points for Ed25519
-
     #[test]
-    fn test_put_new_tip_ed25519() {
-        put_new_tip(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    fn test_put_same_height_same_payload_ed25519() {
-        put_same_height_same_payload(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    fn test_put_higher_tip_ed25519() {
-        put_higher_tip(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics_ed25519() {
-        put_lower_tip_panics(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics_ed25519() {
-        put_same_height_different_payload_panics(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    fn test_get_nonexistent_ed25519() {
-        get_nonexistent::<Ed25519Scheme>();
-    }
-
-    #[test]
-    fn test_multiple_sequencers_ed25519() {
-        multiple_sequencers(&setup_ed25519_fixture());
-    }
-
-    #[test]
-    fn test_put_multiple_updates_ed25519() {
-        put_multiple_updates(&setup_ed25519_fixture());
-    }
-
-    // Test entry points for BLS12-381 Multisig MinPk
-
-    #[test]
-    fn test_put_new_tip_bls_multisig_min_pk() {
-        put_new_tip(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_same_height_same_payload_bls_multisig_min_pk() {
-        put_same_height_same_payload(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_higher_tip_bls_multisig_min_pk() {
-        put_higher_tip(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics_bls_multisig_min_pk() {
-        put_lower_tip_panics(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics_bls_multisig_min_pk() {
-        put_same_height_different_payload_panics(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_get_nonexistent_bls_multisig_min_pk() {
-        get_nonexistent::<Bls12381MultisigScheme<PublicKey, MinPk>>();
-    }
-
-    #[test]
-    fn test_multiple_sequencers_bls_multisig_min_pk() {
-        multiple_sequencers(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_multiple_updates_bls_multisig_min_pk() {
-        put_multiple_updates(&setup_bls_multisig_fixture::<MinPk>());
-    }
-
-    // Test entry points for BLS12-381 Multisig MinSig
-
-    #[test]
-    fn test_put_new_tip_bls_multisig_min_sig() {
-        put_new_tip(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_same_height_same_payload_bls_multisig_min_sig() {
-        put_same_height_same_payload(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_higher_tip_bls_multisig_min_sig() {
-        put_higher_tip(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics_bls_multisig_min_sig() {
-        put_lower_tip_panics(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics_bls_multisig_min_sig() {
-        put_same_height_different_payload_panics(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_get_nonexistent_bls_multisig_min_sig() {
-        get_nonexistent::<Bls12381MultisigScheme<PublicKey, MinSig>>();
-    }
-
-    #[test]
-    fn test_multiple_sequencers_bls_multisig_min_sig() {
-        multiple_sequencers(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_multiple_updates_bls_multisig_min_sig() {
-        put_multiple_updates(&setup_bls_multisig_fixture::<MinSig>());
-    }
-
-    // Test entry points for BLS12-381 Threshold MinPk
-
-    #[test]
-    fn test_put_new_tip_bls_threshold_min_pk() {
-        put_new_tip(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_same_height_same_payload_bls_threshold_min_pk() {
-        put_same_height_same_payload(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_higher_tip_bls_threshold_min_pk() {
-        put_higher_tip(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics_bls_threshold_min_pk() {
-        put_lower_tip_panics(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics_bls_threshold_min_pk() {
-        put_same_height_different_payload_panics(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_get_nonexistent_bls_threshold_min_pk() {
-        get_nonexistent::<Bls12381ThresholdScheme<PublicKey, MinPk>>();
-    }
-
-    #[test]
-    fn test_multiple_sequencers_bls_threshold_min_pk() {
-        multiple_sequencers(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    #[test]
-    fn test_put_multiple_updates_bls_threshold_min_pk() {
-        put_multiple_updates(&setup_bls_threshold_fixture::<MinPk>());
-    }
-
-    // Test entry points for BLS12-381 Threshold MinSig
-
-    #[test]
-    fn test_put_new_tip_bls_threshold_min_sig() {
-        put_new_tip(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_same_height_same_payload_bls_threshold_min_sig() {
-        put_same_height_same_payload(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_higher_tip_bls_threshold_min_sig() {
-        put_higher_tip(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempted to insert a lower-height tip")]
-    fn test_put_lower_tip_panics_bls_threshold_min_sig() {
-        put_lower_tip_panics(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_put_same_height_different_payload_panics_bls_threshold_min_sig() {
-        put_same_height_different_payload_panics(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_get_nonexistent_bls_threshold_min_sig() {
-        get_nonexistent::<Bls12381ThresholdScheme<PublicKey, MinSig>>();
-    }
-
-    #[test]
-    fn test_multiple_sequencers_bls_threshold_min_sig() {
-        multiple_sequencers(&setup_bls_threshold_fixture::<MinSig>());
-    }
-
-    #[test]
-    fn test_put_multiple_updates_bls_threshold_min_sig() {
-        put_multiple_updates(&setup_bls_threshold_fixture::<MinSig>());
+    fn test_put_multiple_updates() {
+        put_multiple_updates(ed25519);
+        put_multiple_updates(bls12381_multisig::<MinPk, _>);
+        put_multiple_updates(bls12381_multisig::<MinSig, _>);
+        put_multiple_updates(bls12381_threshold::<MinPk, _>);
+        put_multiple_updates(bls12381_threshold::<MinSig, _>);
     }
 }

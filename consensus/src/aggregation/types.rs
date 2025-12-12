@@ -431,98 +431,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519};
+    use crate::aggregation::{
+        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
+        scheme::AggregationScheme,
+    };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::{
-            dkg,
-            primitives::{
-                group::Private as BlsPrivate,
-                variant::{MinPk, MinSig, Variant},
-            },
-        },
-        ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
-        Hasher, PrivateKeyExt, Sha256, Signer,
+        bls12381::primitives::variant::{MinPk, MinSig},
+        Hasher, Sha256,
     };
-    use commonware_utils::{
-        ordered::{BiMap, Quorum, Set},
-        TryCollect, NZU32,
-    };
+    use commonware_utils::ordered::Quorum;
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
 
-    fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
-
-        let participants = private_keys
-            .iter()
-            .map(|p| p.public_key())
-            .try_collect::<Set<_>>()
-            .unwrap();
-
-        private_keys
-            .into_iter()
-            .map(|sk| ed25519::Scheme::signer(participants.clone(), sk).unwrap())
-            .collect()
-    }
-
-    fn generate_bls12381_multisig_schemes<V: Variant>(
-        n: u32,
-        seed: u64,
-    ) -> Vec<bls12381_multisig::Scheme<EdPublicKey, V>> {
-        let mut rng = StdRng::seed_from_u64(seed);
-
-        // Generate ed25519 keys for participant identities
-        let identity_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
-        let participants: Vec<_> = identity_keys.iter().map(|p| p.public_key()).collect();
-
-        // Generate BLS keys for signing
-        let bls_keys: Vec<_> = (0..n).map(|_| BlsPrivate::from_rand(&mut rng)).collect();
-        let bls_publics: Vec<_> = bls_keys
-            .iter()
-            .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
-            .collect();
-
-        let participants_with_bls = participants
-            .into_iter()
-            .zip(bls_publics)
-            .try_collect::<BiMap<_, _>>()
-            .unwrap();
-
-        bls_keys
-            .into_iter()
-            .map(|bls_sk| {
-                bls12381_multisig::Scheme::signer(participants_with_bls.clone(), bls_sk).unwrap()
-            })
-            .collect()
-    }
-
-    fn generate_bls12381_threshold_schemes<V: Variant>(
-        n: u32,
-        seed: u64,
-    ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, V>> {
-        let mut rng = StdRng::seed_from_u64(seed);
-
-        // Generate ed25519 keys for participant identities
-        let participants = (0..n)
-            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
-            .try_collect::<Set<_>>()
-            .unwrap();
-
-        let (polynomial, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(n));
-
-        shares
-            .into_iter()
-            .map(|share| {
-                bls12381_threshold::Scheme::signer(participants.clone(), &polynomial, share)
-                    .unwrap()
-            })
-            .collect()
+    /// Generate a fixture using the provided generator function.
+    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
+    where
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = StdRng::seed_from_u64(0);
+        fixture(&mut rng, n)
     }
 
     #[test]
@@ -532,7 +464,13 @@ mod tests {
         assert_eq!(ack_namespace(namespace), expected);
     }
 
-    fn codec<S: AggregationScheme<Sha256Digest>>(schemes: &[S]) {
+    fn codec<S, F>(fixture: F)
+    where
+        S: AggregationScheme<Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
+        let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),
@@ -613,21 +551,23 @@ mod tests {
 
     #[test]
     fn test_codec() {
-        let ed_schemes = generate_ed25519_schemes(4, 0);
-        codec(&ed_schemes);
-
-        let multisig_schemes = generate_bls12381_multisig_schemes::<MinPk>(4, 0);
-        codec(&multisig_schemes);
-
-        let threshold_schemes = generate_bls12381_threshold_schemes::<MinSig>(4, 0);
-        codec(&threshold_schemes);
+        codec(ed25519);
+        codec(bls12381_multisig::<MinPk, _>);
+        codec(bls12381_multisig::<MinSig, _>);
+        codec(bls12381_threshold::<MinPk, _>);
+        codec(bls12381_threshold::<MinSig, _>);
     }
 
-    fn activity_invalid_enum<S: AggregationScheme<Sha256Digest>>(schemes: &[S]) {
+    fn activity_invalid_enum<S, F>(fixture: F)
+    where
+        S: AggregationScheme<Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+    {
+        let fixture = setup(4, fixture);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
-        let cfg = schemes[0].certificate_codec_config();
+        let cfg = fixture.schemes[0].certificate_codec_config();
         let result = Activity::<S, Sha256Digest>::read_cfg(&mut &buf[..], &cfg);
         assert!(matches!(
             result,
@@ -640,22 +580,20 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        let ed_schemes = generate_ed25519_schemes(4, 1);
-        activity_invalid_enum(&ed_schemes);
-
-        let multisig_schemes = generate_bls12381_multisig_schemes::<MinPk>(4, 1);
-        activity_invalid_enum(&multisig_schemes);
-
-        let threshold_schemes = generate_bls12381_threshold_schemes::<MinSig>(4, 1);
-        activity_invalid_enum(&threshold_schemes);
+        activity_invalid_enum(ed25519);
+        activity_invalid_enum(bls12381_multisig::<MinPk, _>);
+        activity_invalid_enum(bls12381_multisig::<MinSig, _>);
+        activity_invalid_enum(bls12381_threshold::<MinPk, _>);
+        activity_invalid_enum(bls12381_threshold::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use commonware_cryptography::sha256::Digest as Sha256Digest;
+        use crate::aggregation::scheme::bls12381_threshold;
+        use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 
-        type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
+        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
         commonware_codec::conformance_tests! {
             Item<Sha256Digest>,
