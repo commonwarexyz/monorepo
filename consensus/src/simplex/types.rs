@@ -3138,29 +3138,30 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
 
-        commonware_codec::conformance_tests! {
-            Signature<Scheme>,
-            Vote<Scheme, Sha256Digest>,
-            Certificate<Scheme, Sha256Digest>,
-            Artifact<Scheme, Sha256Digest>,
-            Proposal<Sha256Digest>,
-            Notarize<Scheme, Sha256Digest>,
-            Notarization<Scheme, Sha256Digest>,
-            Nullify<Scheme>,
-            Nullification<Scheme>,
-            Finalize<Scheme, Sha256Digest>,
-            Finalization<Scheme, Sha256Digest>,
-            Backfiller<Scheme, Sha256Digest>,
-            Request,
-            Response<Scheme, Sha256Digest>,
-            Activity<Scheme, Sha256Digest>,
-            ConflictingNotarize<Scheme, Sha256Digest>,
-            ConflictingFinalize<Scheme, Sha256Digest>,
-            NullifyFinalize<Scheme, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Signature<Scheme>>,
+            CodecConformance<Vote<Scheme, Sha256Digest>>,
+            CodecConformance<Certificate<Scheme, Sha256Digest>>,
+            CodecConformance<Artifact<Scheme, Sha256Digest>>,
+            CodecConformance<Proposal<Sha256Digest>>,
+            CodecConformance<Notarize<Scheme, Sha256Digest>>,
+            CodecConformance<Notarization<Scheme, Sha256Digest>>,
+            CodecConformance<Nullify<Scheme>>,
+            CodecConformance<Nullification<Scheme>>,
+            CodecConformance<Finalize<Scheme, Sha256Digest>>,
+            CodecConformance<Finalization<Scheme, Sha256Digest>>,
+            CodecConformance<Backfiller<Scheme, Sha256Digest>>,
+            CodecConformance<Request>,
+            CodecConformance<Response<Scheme, Sha256Digest>>,
+            CodecConformance<Activity<Scheme, Sha256Digest>>,
+            CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
+            CodecConformance<ConflictingFinalize<Scheme, Sha256Digest>>,
+            CodecConformance<NullifyFinalize<Scheme, Sha256Digest>>,
         }
     }
 }

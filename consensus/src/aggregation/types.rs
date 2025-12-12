@@ -514,14 +514,15 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
-        commonware_codec::conformance_tests! {
-            Item<Sha256Digest>,
-            Ack<MinSig, Sha256Digest>,
-            TipAck<MinSig, Sha256Digest>,
-            Certificate<MinSig, Sha256Digest>,
-            Activity<MinSig, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Item<Sha256Digest>>,
+            CodecConformance<Ack<MinSig, Sha256Digest>>,
+            CodecConformance<TipAck<MinSig, Sha256Digest>>,
+            CodecConformance<Certificate<MinSig, Sha256Digest>>,
+            CodecConformance<Activity<MinSig, Sha256Digest>>,
         }
     }
 }

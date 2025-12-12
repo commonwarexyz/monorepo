@@ -619,9 +619,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Ciphertext<MinPk>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Ciphertext<MinPk>>,
         }
     }
 }

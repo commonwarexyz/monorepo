@@ -1792,15 +1792,16 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Chunk<PublicKey, Sha256Digest>,
-            Parent<MinPk, Sha256Digest>,
-            Node<PublicKey, MinPk, Sha256Digest>,
-            Ack<PublicKey, MinPk, Sha256Digest>,
-            Activity<PublicKey, MinPk, Sha256Digest>,
-            Proposal<PublicKey, Sha256Digest>,
-            Lock<PublicKey, MinPk, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Chunk<PublicKey, Sha256Digest>>,
+            CodecConformance<Parent<MinPk, Sha256Digest>>,
+            CodecConformance<Node<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Ack<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Activity<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Proposal<PublicKey, Sha256Digest>>,
+            CodecConformance<Lock<PublicKey, MinPk, Sha256Digest>>,
         }
     }
 }

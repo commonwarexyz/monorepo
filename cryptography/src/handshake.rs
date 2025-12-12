@@ -437,11 +437,12 @@ mod test {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Syn<crate::ed25519::Signature>,
-            SynAck<crate::ed25519::Signature>,
-            Ack,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Syn<crate::ed25519::Signature>>,
+            CodecConformance<SynAck<crate::ed25519::Signature>>,
+            CodecConformance<Ack>,
         }
     }
 }

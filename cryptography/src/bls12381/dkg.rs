@@ -2446,16 +2446,17 @@ mod test {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Output<MinPk, ed25519::PublicKey>,
-            DealerPubMsg<MinPk>,
-            DealerPrivMsg,
-            PlayerAck<ed25519::PublicKey>,
-            AckOrReveal<ed25519::PublicKey>,
-            DealerResult<ed25519::PublicKey>,
-            DealerLog<MinPk, ed25519::PublicKey>,
-            SignedDealerLog<MinPk, ed25519::PrivateKey>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Output<MinPk, ed25519::PublicKey>>,
+            CodecConformance<DealerPubMsg<MinPk>>,
+            CodecConformance<DealerPrivMsg>,
+            CodecConformance<PlayerAck<ed25519::PublicKey>>,
+            CodecConformance<AckOrReveal<ed25519::PublicKey>>,
+            CodecConformance<DealerResult<ed25519::PublicKey>>,
+            CodecConformance<DealerLog<MinPk, ed25519::PublicKey>>,
+            CodecConformance<SignedDealerLog<MinPk, ed25519::PrivateKey>>,
         }
     }
 }

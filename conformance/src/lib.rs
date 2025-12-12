@@ -7,13 +7,7 @@
 //! # The `Conformance` Trait
 //!
 //! The core abstraction is the [`Conformance`] trait, which represents
-//! types that can produce deterministic bytes from a seed:
-//!
-//! ```ignore
-//! pub trait Conformance: Send + Sync {
-//!     fn commit(&self, seed: u64) -> impl Future<Output = Vec<u8>> + Send;
-//! }
-//! ```
+//! types that can produce deterministic bytes from a seed.
 //!
 //! This enables conformance testing across different domains, for example:
 //! - **Codec**: Verify wire format stability
@@ -47,10 +41,22 @@
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
 
+// Re-export commonware_macros for use in macros
+#[doc(hidden)]
+pub use commonware_macros;
 use core::future::Future;
+// Re-export futures for use in macros
+#[doc(hidden)]
+pub use futures;
+// Re-export paste for use in macros
+#[doc(hidden)]
+pub use paste;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::Path};
+
+/// Default number of test cases when not explicitly specified.
+pub const DEFAULT_CASES: usize = 65536;
 
 /// Trait for types that can produce deterministic bytes for conformance testing.
 ///
@@ -59,13 +65,13 @@ use std::{collections::BTreeMap, fs, path::Path};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rs
 /// use commonware_conformance::Conformance;
 ///
 /// struct MyConformance;
 ///
 /// impl Conformance for MyConformance {
-///     async fn commit(&self, seed: u64) -> Vec<u8> {
+///     async fn commit(seed: u64) -> Vec<u8> {
 ///         // Generate deterministic bytes from the seed
 ///         seed.to_le_bytes().to_vec()
 ///     }
@@ -76,7 +82,7 @@ pub trait Conformance: Send + Sync {
     ///
     /// The implementation should use the seed to generate deterministic
     /// test data and return a byte vector representing the commitment.
-    fn commit(&self, seed: u64) -> impl Future<Output = Vec<u8>> + Send;
+    fn commit(seed: u64) -> impl Future<Output = Vec<u8>> + Send;
 }
 
 /// A conformance test file containing test data for multiple types.
@@ -170,11 +176,11 @@ fn acquire_lock(path: &Path) -> fs::File {
 ///
 /// Generates `n_cases` commitments (using seeds 0..n_cases), and hashes
 /// all the bytes together using SHA-256.
-pub async fn compute_conformance_hash<C: Conformance>(conformance: &C, n_cases: usize) -> String {
+pub async fn compute_conformance_hash<C: Conformance>(n_cases: usize) -> String {
     let mut hasher = Sha256::new();
 
     for seed in 0..n_cases as u64 {
-        let committed = conformance.commit(seed).await;
+        let committed = C::commit(seed).await;
 
         // Write length prefix to avoid ambiguity between concatenated values
         hasher.update((committed.len() as u64).to_le_bytes());
@@ -187,8 +193,7 @@ pub async fn compute_conformance_hash<C: Conformance>(conformance: &C, n_cases: 
 /// Run conformance tests using the [`Conformance`] trait.
 ///
 /// This function is the generic version that works with any `Conformance`
-/// implementation. For codec-specific testing, use the
-/// `commonware_codec::conformance_tests!` macro which handles the wrapper.
+/// implementation.
 ///
 /// # Behavior
 ///
@@ -198,7 +203,6 @@ pub async fn compute_conformance_hash<C: Conformance>(conformance: &C, n_cases: 
 ///
 /// # Arguments
 ///
-/// * `conformance` - The conformance implementation to test
 /// * `type_name` - The stringified type name (used as the TOML section key)
 /// * `n_cases` - Number of test cases to hash together (seeds 0..n_cases)
 /// * `conformance_path` - Path to the conformance TOML file
@@ -207,25 +211,23 @@ pub async fn compute_conformance_hash<C: Conformance>(conformance: &C, n_cases: 
 ///
 /// Panics if the hash doesn't match (format changed).
 pub async fn run_conformance_test<C: Conformance>(
-    conformance: &C,
     type_name: &str,
     n_cases: usize,
     conformance_path: &Path,
 ) {
     #[cfg(generate_conformance_tests)]
     {
-        regenerate_conformance(conformance, type_name, n_cases, conformance_path).await;
+        regenerate_conformance::<C>(type_name, n_cases, conformance_path).await;
     }
 
     #[cfg(not(generate_conformance_tests))]
     {
-        verify_and_update_conformance(conformance, type_name, n_cases, conformance_path).await;
+        verify_and_update_conformance::<C>(type_name, n_cases, conformance_path).await;
     }
 }
 
 #[cfg(not(generate_conformance_tests))]
 async fn verify_and_update_conformance<C: Conformance>(
-    conformance: &C,
     type_name: &str,
     n_cases: usize,
     path: &Path,
@@ -234,7 +236,7 @@ async fn verify_and_update_conformance<C: Conformance>(
 
     // Compute the hash first WITHOUT holding the lock - this is the expensive part
     // and can run in parallel across all conformance tests
-    let actual_hash = compute_conformance_hash(conformance, n_cases).await;
+    let actual_hash = compute_conformance_hash::<C>(n_cases).await;
 
     // Now acquire the lock only for file I/O
     let mut lock = acquire_lock(path);
@@ -299,17 +301,12 @@ async fn verify_and_update_conformance<C: Conformance>(
 }
 
 #[cfg(generate_conformance_tests)]
-async fn regenerate_conformance<C: Conformance>(
-    conformance: &C,
-    type_name: &str,
-    n_cases: usize,
-    path: &Path,
-) {
+async fn regenerate_conformance<C: Conformance>(type_name: &str, n_cases: usize, path: &Path) {
     use std::io::{Read, Seek, Write};
 
     // Compute the hash first WITHOUT holding the lock - this is the expensive part
     // and can run in parallel across all conformance tests
-    let hash = compute_conformance_hash(conformance, n_cases).await;
+    let hash = compute_conformance_hash::<C>(n_cases).await;
 
     // Now acquire the lock only for file I/O
     let mut lock = acquire_lock(path);
@@ -339,6 +336,79 @@ async fn regenerate_conformance<C: Conformance>(
         .expect("failed to write conformance file");
 }
 
+/// Define conformance tests for [`Conformance`] types.
+///
+/// This macro generates test functions that verify encodings match expected
+/// hash values stored in `conformance.toml`.
+///
+/// # Usage
+///
+/// ```ignore
+/// conformance_tests! {
+///     Vec<u8>,                       // Uses default (65536 cases)
+///     Vec<u16> => 100,               // Explicit case count
+///     BTreeMap<u32, String> => 100,
+/// }
+/// ```
+///
+/// Test names are auto-generated. The type name is used as the key in the TOML file.
+///
+/// # Regeneration Mode
+///
+/// When `cfg(generate_conformance_tests)` is set, tests regenerate their
+/// expected values in the TOML file (useful for intentional format changes):
+///
+/// ```bash
+/// RUSTFLAGS="--cfg generate_conformance_tests" cargo test -p my_crate conformance
+/// ```
+#[macro_export]
+macro_rules! conformance_tests {
+    // Helper to emit a single test
+    (@emit [$($counter:tt)*] $type:ty, $n_cases:expr) => {
+        $crate::paste::paste! {
+            #[$crate::commonware_macros::test_group("conformance")]
+            #[test]
+            fn [<test_conformance_ $($counter)* x>]() {
+                $crate::futures::executor::block_on($crate::run_conformance_test::<$type>(
+                    concat!(module_path!(), "::", stringify!($type)),
+                    $n_cases,
+                    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
+                ));
+            }
+        }
+    };
+
+    // Base case: nothing left
+    (@internal [$($counter:tt)*]) => {};
+
+    // Case: Type => n_cases, rest...
+    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr, $($rest:tt)*) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
+        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
+    };
+
+    // Case: Type => n_cases (no trailing comma, last item)
+    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
+    };
+
+    // Case: Type, rest...
+    (@internal [$($counter:tt)*] $type:ty, $($rest:tt)*) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::DEFAULT_CASES);
+        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
+    };
+
+    // Case: Type (no trailing comma, last item with default)
+    (@internal [$($counter:tt)*] $type:ty) => {
+        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::DEFAULT_CASES);
+    };
+
+    // Entrypoint
+    ($($input:tt)*) => {
+        $crate::conformance_tests!(@internal [] $($input)*);
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,24 +425,24 @@ mod tests {
     struct SimpleConformance;
 
     impl Conformance for SimpleConformance {
-        async fn commit(&self, seed: u64) -> Vec<u8> {
+        async fn commit(seed: u64) -> Vec<u8> {
             seed.to_le_bytes().to_vec()
         }
     }
 
     #[test]
     fn test_compute_conformance_hash_deterministic() {
-        let conformance = SimpleConformance;
-        let hash1 = futures::executor::block_on(compute_conformance_hash(&conformance, 10));
-        let hash2 = futures::executor::block_on(compute_conformance_hash(&conformance, 10));
-        assert_eq!(hash1, hash2);
+        let hash_1 = futures::executor::block_on(compute_conformance_hash::<SimpleConformance>(1));
+        let hash_2 = futures::executor::block_on(compute_conformance_hash::<SimpleConformance>(1));
+        assert_eq!(hash_1, hash_2);
     }
 
     #[test]
     fn test_compute_conformance_hash_different_n_cases() {
-        let conformance = SimpleConformance;
-        let hash_10 = futures::executor::block_on(compute_conformance_hash(&conformance, 10));
-        let hash_20 = futures::executor::block_on(compute_conformance_hash(&conformance, 20));
+        let hash_10 =
+            futures::executor::block_on(compute_conformance_hash::<SimpleConformance>(10));
+        let hash_20 =
+            futures::executor::block_on(compute_conformance_hash::<SimpleConformance>(20));
         assert_ne!(hash_10, hash_20);
     }
 

@@ -38,6 +38,7 @@ rand_distr.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true

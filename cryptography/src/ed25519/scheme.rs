@@ -829,11 +829,12 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            PrivateKey,
-            PublicKey,
-            Signature,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PrivateKey>,
+            CodecConformance<PublicKey>,
+            CodecConformance<Signature>,
         }
     }
 }

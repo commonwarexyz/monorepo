@@ -213,9 +213,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::conformance::CodecConformance;
 
-        crate::conformance_tests! {
-            BTreeSet<u8>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<BTreeSet<u8>>,
         }
     }
 }

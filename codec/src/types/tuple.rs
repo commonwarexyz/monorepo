@@ -87,12 +87,14 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        crate::conformance_tests! {
-            (u32, u32),
-            (u32, u32, u32),
-            (u32, u32, u32, u32),
-            (u32, u32, u32, u32, u32),
-            (u32, u32, u32, u32, u32, u32),
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<(u32, u32)>,
+            CodecConformance<(u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32, u32, u32)>,
         }
     }
 }
