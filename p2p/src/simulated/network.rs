@@ -148,12 +148,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     // State of the transmitter
     transmitter: transmitter::State<P>,
 
-    // Subscribers to peer set updates
+    // Subscribers to peer set updates (used by both Manager::subscribe() and Sender)
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
-
-    // Sender peer subscriptions - notified when the combined peer set changes
-    sender_peer_subscriptions: Vec<mpsc::UnboundedSender<Set<P>>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -196,7 +193,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
-                sender_peer_subscriptions: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -306,9 +302,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 let notification = (id, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
-
-                // Notify sender subscriptions about the peer set change
-                self.notify_sender_subscriptions();
             }
             ingress::Message::Register {
                 channel,
@@ -320,9 +313,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
 
-                // Create a subscription for peer updates
+                // Create a subscription for peer updates (same channel as Manager::subscribe())
                 let (peer_sub_sender, peer_sub_receiver) = mpsc::unbounded();
-                self.sender_peer_subscriptions.push(peer_sub_sender);
+                self.subscribers.push(peer_sub_sender);
 
                 // Get the current set of all tracked peers
                 let initial_peers = self.all_tracked_peers();
@@ -473,13 +466,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
             .cloned()
             .try_collect()
             .expect("BTreeMap keys are unique")
-    }
-
-    /// Notify all sender subscriptions of the current peer set.
-    fn notify_sender_subscriptions(&mut self) {
-        let all_peers = self.all_tracked_peers();
-        self.sender_peer_subscriptions
-            .retain(|sender| sender.unbounded_send(all_peers.clone()).is_ok());
     }
 }
 
@@ -668,7 +654,9 @@ pub struct Sender<P: PublicKey, C: GClock> {
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
     rate_limiter: Arc<Mutex<RateLimiter<P, C>>>,
-    peer_subscription: Option<mpsc::UnboundedReceiver<Set<P>>>,
+    // Subscription receives (id, peers_in_set, all_tracked_peers); we only use the third element
+    #[allow(clippy::type_complexity)]
+    peer_subscription: Option<mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>>,
     known_peers: Vec<P>,
 }
 
@@ -708,7 +696,7 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
         mut sender: mpsc::UnboundedSender<Task<P>>,
         quota: Quota,
         clock: C,
-        peer_subscription: mpsc::UnboundedReceiver<Set<P>>,
+        peer_subscription: mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>,
         initial_peers: Set<P>,
     ) -> (Self, Handle<()>) {
         // Create rate limiter for this sender
@@ -807,10 +795,11 @@ where
         let rate_limiter = self.rate_limiter.lock().await;
 
         // Update known peers from subscription (non-blocking)
+        // Subscription sends (id, peers_in_set, all_tracked_peers); we only use the third element
         if let Some(ref mut subscription) = self.peer_subscription {
             // Drain all pending updates, keeping the most recent
-            while let Ok(Some(peers)) = subscription.try_next() {
-                self.known_peers = peers.into_iter().collect();
+            while let Ok(Some((_, _, all_peers))) = subscription.try_next() {
+                self.known_peers = all_peers.into_iter().collect();
                 rate_limiter.retain_recent();
             }
         }
