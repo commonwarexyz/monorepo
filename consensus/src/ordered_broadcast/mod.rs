@@ -800,6 +800,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_updated_epoch() {
         updated_epoch(mocks::fixtures::bls12381_threshold::<MinPk, _>);

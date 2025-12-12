@@ -95,7 +95,7 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         buffer::PoolRef,
@@ -788,6 +788,7 @@ mod tests {
         slow_and_lossy_links(ed25519, 0);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
