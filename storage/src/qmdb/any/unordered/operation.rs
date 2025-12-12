@@ -7,9 +7,9 @@ use crate::qmdb::any::{
 };
 
 pub type FixedOperation<K, V> =
-    Operation<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>;
+    Operation<K, FixedEncoding<V>, UnorderedUpdate<K, FixedEncoding<V>>>;
 pub type VariableOperation<K, V> =
-    Operation<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>;
+    Operation<K, VariableEncoding<V>, UnorderedUpdate<K, VariableEncoding<V>>>;
 
 /*
 #[cfg(test)]

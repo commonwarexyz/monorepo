@@ -1,13 +1,3 @@
-use std::fmt;
-
-use bytes::{Buf, BufMut};
-use commonware_codec::{
-    util::{at_least, ensure_zeros},
-    varint::UInt,
-    Codec, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
-};
-use commonware_utils::{hex, Array};
-
 use crate::{
     mmr::Location,
     qmdb::{
@@ -19,40 +9,45 @@ use crate::{
         operation::Committable,
     },
 };
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    util::{at_least, ensure_zeros},
+    varint::UInt,
+    Codec, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
+use commonware_utils::{hex, Array};
+use std::fmt;
 
 const DELETE_CONTEXT: u8 = 0xD1;
 const UPDATE_CONTEXT: u8 = 0xD2;
 const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub type OrderedOperation<K, V> = Operation<OrderedUpdate<K, V>, K, V>;
-pub type UnorderedOperation<K, V> = Operation<UnorderedUpdate<K, V>, K, V>;
+pub type OrderedOperation<K, V> = Operation<K, V, OrderedUpdate<K, V>>;
+pub type UnorderedOperation<K, V> = Operation<K, V, UnorderedUpdate<K, V>>;
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Operation<S, K: Array, V: ValueEncoding>
-where
-    S: Update<K, V>,
-{
+pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
     Delete(K),
     Update(S),
     CommitFloor(Option<V::Value>, Location),
 }
 
-impl<S, K, V> Operation<S, K, FixedEncoding<V>>
+impl<K, V, S> Operation<K, FixedEncoding<V>, S>
 where
-    S: Update<K, FixedEncoding<V>> + FixedSize,
     K: Array,
     V: FixedValue,
+    S: Update<K, FixedEncoding<V>> + FixedSize,
 {
     const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<S, K, V> FixedSize for Operation<S, K, FixedEncoding<V>>
+impl<K, V, S> FixedSize for Operation<K, FixedEncoding<V>, S>
 where
-    S: Update<K, FixedEncoding<V>> + FixedSize,
     K: Array,
     V: FixedValue,
+    S: Update<K, FixedEncoding<V>> + FixedSize,
 {
     const SIZE: usize = {
         let max = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
@@ -68,11 +63,11 @@ where
     };
 }
 
-impl<S, K, V> Write for Operation<S, K, FixedEncoding<V>>
+impl<K, V, S> Write for Operation<K, FixedEncoding<V>, S>
 where
-    S: Update<K, FixedEncoding<V>> + FixedSize + Write,
     K: Array + Codec,
     V: FixedValue,
+    S: Update<K, FixedEncoding<V>> + FixedSize + Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -101,11 +96,11 @@ where
     }
 }
 
-impl<S, K, V> Read for Operation<S, K, FixedEncoding<V>>
+impl<K, V, S> Read for Operation<K, FixedEncoding<V>, S>
 where
-    S: Update<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
     K: Array + Codec,
     V: FixedValue,
+    S: Update<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
 {
     type Cfg = ();
 
@@ -146,11 +141,11 @@ where
     }
 }
 
-impl<S, K, V> EncodeSize for Operation<S, K, VariableEncoding<V>>
+impl<K, V, S> EncodeSize for Operation<K, VariableEncoding<V>, S>
 where
-    S: Update<K, VariableEncoding<V>> + EncodeSize,
     K: Array,
     V: VariableValue,
+    S: Update<K, VariableEncoding<V>> + EncodeSize,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
@@ -161,11 +156,11 @@ where
     }
 }
 
-impl<S, K, V> Write for Operation<S, K, VariableEncoding<V>>
+impl<K, V, S> Write for Operation<K, VariableEncoding<V>, S>
 where
-    S: Update<K, VariableEncoding<V>> + Write,
     K: Array + Codec,
     V: VariableValue,
+    S: Update<K, VariableEncoding<V>> + Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -186,11 +181,11 @@ where
     }
 }
 
-impl<S, K, V> Read for Operation<S, K, VariableEncoding<V>>
+impl<K, V, S> Read for Operation<K, VariableEncoding<V>, S>
 where
-    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
     K: Array + Codec,
     V: VariableValue,
+    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
 {
     type Cfg = <V as Read>::Cfg;
 
@@ -220,12 +215,12 @@ where
     }
 }
 
-impl<S, K, V> crate::qmdb::operation::Operation for Operation<S, K, V>
+impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
 where
-    S: Update<K, V>,
     K: Array,
     V: ValueEncoding,
     V::Value: Codec,
+    S: Update<K, V>,
 {
     type Key = K;
 
@@ -253,19 +248,19 @@ where
     }
 }
 
-impl<S, K, V> Committable for Operation<S, K, V>
+impl<K, V, S> Committable for Operation<K, V, S>
 where
-    S: Update<K, V>,
     K: Array,
     V: ValueEncoding,
     V::Value: Codec,
+    S: Update<K, V>,
 {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K, V> fmt::Display for Operation<OrderedUpdate<K, V>, K, V>
+impl<K, V> fmt::Display for Operation<K, V, OrderedUpdate<K, V>>
 where
     K: Array + fmt::Display,
     V: ValueEncoding,
