@@ -10,8 +10,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log, ordered::FixedOperation as Operation, todo::IndexedLog,
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, todo::IndexedLog, value::FixedEncoding,
+            FixedConfig as Config, FixedValue, OrderedOperation,
         },
         Error,
     },
@@ -20,6 +20,8 @@ use crate::{
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+
+type Operation<K, V> = OrderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

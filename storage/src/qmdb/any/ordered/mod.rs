@@ -1,9 +1,6 @@
 use commonware_codec::Codec;
 use commonware_utils::Array;
 
-mod operation;
-pub use operation::{FixedOperation, VariableOperation};
-
 pub mod fixed;
 pub mod variable;
 

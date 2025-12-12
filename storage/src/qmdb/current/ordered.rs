@@ -2,23 +2,13 @@
 //! lexicographic-next active key of each active key, allowing for exclusion proofs.
 
 use crate::{
-    bitmap::{CleanBitMap, DirtyBitMap},
-    mmr::{
-        grafting::Storage as GraftingStorage,
-        mem::{Clean, Dirty, Mmr as MemMmr, State},
-        verification, Location, Position, Proof, StandardHasher,
-    },
-    qmdb::{
-        any::{
-            ordered::{fixed::Any, FixedOperation as Operation, KeyData},
-            CleanAny, DirtyAny, FixedValue,
-        },
-        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
-        Error,
-    },
-    translator::Translator,
-    AuthenticatedBitMap as BitMap,
+    AuthenticatedBitMap as BitMap, bitmap::{CleanBitMap, DirtyBitMap}, mmr::{
+        Location, Position, Proof, StandardHasher, grafting::Storage as GraftingStorage, mem::{Clean, Dirty, Mmr as MemMmr, State}, verification
+    }, qmdb::{
+        Error, any::{
+            CleanAny, DirtyAny, FixedEncoding, FixedValue, OrderedOperation, ordered::{KeyData, fixed::Any}
+        }, current::{Config, merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof}, store::{Batchable, CleanStore, DirtyStore, LogStore}
+    }, translator::Translator
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -26,6 +16,8 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
+
+type Operation<K, V> = OrderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.

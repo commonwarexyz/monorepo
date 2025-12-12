@@ -35,7 +35,7 @@ pub use operation::Operation;
 pub(super) use operation::{OrderedOperation, UnorderedOperation};
 
 mod value;
-pub(crate) use value::{FixedValue, VariableValue};
+pub(crate) use value::{FixedEncoding, FixedValue, VariableValue};
 
 mod ext;
 pub mod ordered;
