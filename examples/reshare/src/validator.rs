@@ -29,7 +29,6 @@ const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
 const ORCHESTRATOR_CHANNEL: u64 = 6;
 
-const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
@@ -66,7 +65,7 @@ pub async fn run<S>(
     );
 
     let p2p_namespace = union_unique(namespace::APPLICATION, b"_P2P");
-    let mut p2p_cfg = discovery::Config::local(
+    let p2p_cfg = discovery::Config::local(
         config.signing_key.clone(),
         &p2p_namespace,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
@@ -74,7 +73,6 @@ pub async fn run<S>(
         config.bootstrappers.clone().into_iter().collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
-    p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
     let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
@@ -104,7 +102,7 @@ pub async fn run<S>(
         public_key: config.signing_key.public_key(),
         manager: oracle.clone(),
         blocker: oracle.clone(),
-        mailbox_size: 1024,
+        mailbox_size: 1_000,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
             rate_limit: marshal_limit,
