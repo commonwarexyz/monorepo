@@ -213,7 +213,7 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    fn from_64_bytes(mut ikm: [u8; 64]) -> Self {
+    fn from_bytes(mut ikm: [u8; 64]) -> Self {
         // Generate a scalar from the randomly populated buffer
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
@@ -487,7 +487,7 @@ impl Random for Scalar {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-        Self::from_64_bytes(ikm)
+        Self::from_bytes(ikm)
     }
 }
 
@@ -1116,7 +1116,7 @@ mod tests {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 64]>().prop_map(Self::from_64_bytes).boxed()
+            any::<[u8; 64]>().prop_map(Self::from_bytes).boxed()
         }
     }
 

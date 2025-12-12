@@ -155,7 +155,6 @@ impl Display for PrivateKey {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for PrivateKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);

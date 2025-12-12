@@ -168,7 +168,6 @@ impl Random for PrivateKey {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for PrivateKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
@@ -296,7 +295,6 @@ impl Display for PublicKey {
 impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
-        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
@@ -399,7 +397,6 @@ impl Display for Signature {
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
-        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);

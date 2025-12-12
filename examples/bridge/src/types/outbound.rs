@@ -82,7 +82,7 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self},
+            group,
             variant::{MinSig, Variant},
         },
         sha256::Digest as Sha256Digest,

@@ -1449,7 +1449,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         return Err(Error::NumPlayers(0));
     }
     let n = NZU32!(players.len() as u32);
-    let t = quorum(n.get());
+    let t = players.quorum();
     let private = Poly::new(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
