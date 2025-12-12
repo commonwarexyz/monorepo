@@ -836,6 +836,20 @@ where
     T: Translator,
     H: Hasher,
 {
+    async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V>)>,
+    ) -> Result<(), Error> {
+        let status = &mut self.status;
+        self.any
+            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
+                status.push(append);
+                if let Some(loc) = loc {
+                    status.set_bit(*loc, false);
+                }
+            })
+            .await
+    }
 }
 
 impl<
