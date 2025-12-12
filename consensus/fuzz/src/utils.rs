@@ -1,11 +1,11 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use commonware_utils::NZU32;
 use governor::Quota;
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU32};
 
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+/// Default rate limit set high enough to not interfere with normal operation
+const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 #[derive(Clone)]
 pub enum Action {

@@ -461,9 +461,8 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
-    use commonware_utils::NZU32;
     use governor::Quota;
-    use std::time::Duration;
+    use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
@@ -474,8 +473,8 @@ mod tests {
     };
     const CAPACITY: usize = 5usize;
 
-    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(10000));
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {

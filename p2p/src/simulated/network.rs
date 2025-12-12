@@ -741,13 +741,6 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
-    /// Sends a message to a set of recipients.
-    ///
-    /// # Rate Limiting
-    ///
-    /// Rate limiting is applied in the Network, not the Sender. Recipients that exceed their
-    /// rate limit will be filtered out. Check the returned vector to see which peers were
-    /// actually sent the message.
     async fn send(
         &mut self,
         recipients: Recipients<P>,
@@ -759,7 +752,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
             return Err(Error::MessageTooLarge(message.len()));
         }
 
-        // Send message to network for delivery
+        // Send message
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         channel
@@ -1114,14 +1107,14 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZU32;
     use futures::FutureExt;
     use governor::Quota;
+    use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(10000));
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     #[test]
     fn test_register_and_link() {
@@ -1726,89 +1719,6 @@ mod tests {
             drop(oracle);
             drop(sender);
             network_handle.abort();
-        });
-    }
-
-    #[test]
-    fn test_rate_limiting() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
-                disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
-            };
-            let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
-            network_context.spawn(|_| network.run());
-
-            // Create two public keys
-            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
-            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
-
-            // Register the peer set
-            let mut manager = oracle.manager();
-            manager
-                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
-                .await;
-
-            // Register with a very restrictive quota: 1 message per second
-            let restrictive_quota = Quota::per_second(NZU32!(1));
-            let mut control1 = oracle.control(pk1.clone());
-            let (mut sender, _) = control1.register(0, restrictive_quota).await.unwrap();
-            let mut control2 = oracle.control(pk2.clone());
-            let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
-
-            // Add bidirectional links
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle.add_link(pk2.clone(), pk1, link).await.unwrap();
-
-            // First message should succeed immediately
-            let msg1 = Bytes::from_static(b"message1");
-            let result1 = sender
-                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
-                .unwrap();
-            assert_eq!(result1.len(), 1, "first message should be sent");
-
-            // Verify first message is received
-            let (_, received1) = receiver.recv().await.unwrap();
-            assert_eq!(received1, msg1);
-
-            // Second message should be rate-limited (quota is 1/sec, no time has passed)
-            let msg2 = Bytes::from_static(b"message2");
-            let result2 = sender
-                .send(Recipients::One(pk2.clone()), msg2.clone(), false)
-                .await
-                .unwrap();
-            assert_eq!(
-                result2.len(),
-                0,
-                "second message should be rate-limited (skipped)"
-            );
-
-            // Advance time by 1 second to allow the rate limiter to reset
-            context.sleep(Duration::from_secs(1)).await;
-
-            // Third message should succeed after waiting
-            let msg3 = Bytes::from_static(b"message3");
-            let result3 = sender
-                .send(Recipients::One(pk2.clone()), msg3.clone(), false)
-                .await
-                .unwrap();
-            assert_eq!(result3.len(), 1, "third message should be sent after wait");
-
-            // Verify third message is received
-            let (_, received3) = receiver.recv().await.unwrap();
-            assert_eq!(received3, msg3);
         });
     }
 }

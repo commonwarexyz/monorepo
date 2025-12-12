@@ -46,9 +46,8 @@ mod tests {
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use commonware_utils::NZU32;
     use governor::Quota;
-    use std::{collections::BTreeMap, time::Duration};
+    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -63,8 +62,8 @@ mod tests {
     // Enough time for a message to propagate through the network
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
-    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
 
