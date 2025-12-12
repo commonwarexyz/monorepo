@@ -97,12 +97,50 @@ pub trait Context: Clone + Debug + Send + Sync {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>);
 }
 
-/// Cryptographic surface required by `simplex`.
+/// Cryptographic surface required by consensus protocols.
 ///
 /// A `Scheme` produces validator votes, validates them (individually or in batches), assembles
-/// quorum certificates, checks recovered certificates and, when available, derives a randomness
-/// seed for leader rotation. Implementations may override the provided defaults to take advantage
-/// of scheme-specific batching strategies.
+/// quorum certificates, and verifies recovered certificates. Implementations may override the
+/// provided defaults to take advantage of scheme-specific batching strategies.
+///
+/// # Pluggable Cryptography
+///
+/// The consensus modules ([`simplex`][crate::simplex], [`aggregation`][crate::aggregation],
+/// [`ordered_broadcast`][crate::ordered_broadcast]) are generic over the signing scheme,
+/// allowing users to choose the scheme best suited for their requirements:
+///
+/// - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly, no trusted
+///   setup required, and widely supported. Certificates contain individual signatures from each
+///   signer.
+///
+/// - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
+///   can be aggregated into a single multi-signature for compact certificates while preserving
+///   attribution (signer indices are stored alongside the aggregated signature).
+///
+/// - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
+///   certificates that are constant-size regardless of committee size. Requires a trusted
+///   setup (distributed key generation) and cannot attribute signatures to individual signers.
+///
+/// # Attributable Schemes and Liveness/Fault Evidence
+///
+/// Signing schemes differ in whether per-validator activities can be used as evidence of either
+/// liveness or of committing a fault:
+///
+/// - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
+///   presented to some third party as evidence of either liveness or of committing a fault.
+///   Certificates contain signer indices alongside individual signatures, enabling secure
+///   per-validator activity tracking and conflict detection.
+///
+/// - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
+///   presented to some third party as evidence of either liveness or of committing a fault
+///   because they can be forged by other players (often after some quorum of partial signatures
+///   are collected). With [`bls12381_threshold`], possession of any `t` valid partial signatures
+///   can be used to forge a partial signature for any other player. Because peer connections are
+///   authenticated, evidence can be used locally (as it must be sent by said participant) but
+///   cannot be used by an external observer.
+///
+/// The [`Scheme::is_attributable()`] method signals whether evidence can be safely exposed to
+/// third parties.
 ///
 /// # Identity Keys vs Consensus Keys
 ///

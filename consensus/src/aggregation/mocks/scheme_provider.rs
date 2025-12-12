@@ -1,3 +1,9 @@
+//! Mock scheme provider for testing aggregation.
+//!
+//! This module provides a simple [`SchemeProvider`] implementation that can be
+//! used in tests. It allows registering signing schemes for specific epochs
+//! and retrieving them later.
+
 use crate::{
     scheme::{self, Scheme},
     types::Epoch,

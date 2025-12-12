@@ -365,7 +365,14 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
 mod macros {
     /// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
     ///
-    /// This macro creates a pure proxy wrapper that delegates to the raw implementation.
+    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait
+    /// implementation. The only required parameter is the `Context` type, which varies
+    /// per protocol.
+    ///
+    /// # Example
+    /// ```ignore
+    /// impl_bls12381_threshold_scheme!(VoteContext<'a, D>);
+    /// ```
     #[macro_export]
     macro_rules! impl_bls12381_threshold_scheme {
         ($context:ty) => {

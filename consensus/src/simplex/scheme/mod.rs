@@ -47,6 +47,15 @@ impl<'a, D: Digest> Context for Subject<'a, D> {
     }
 }
 
+/// Extension trait for schemes that can derive randomness from certificates.
+///
+/// Some signing schemes (like [`bls12381_threshold`]) produce certificates that contain
+/// embedded randomness which can be extracted and used for leader election or other
+/// protocol-level randomness requirements. This trait provides a uniform interface for
+/// extracting that randomness when available.
+///
+/// Schemes that do not support embedded randomness (like [`ed25519`] and [`bls12381_multisig`])
+/// implement this trait but return `None` from [`SeededScheme::seed`].
 pub trait SeededScheme: Scheme {
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;

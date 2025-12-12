@@ -350,7 +350,14 @@ where
 mod macros {
     /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
     ///
-    /// This macro creates a pure proxy wrapper that delegates to the raw implementation.
+    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait
+    /// implementation. The only required parameter is the `Context` type, which varies
+    /// per protocol.
+    ///
+    /// # Example
+    /// ```ignore
+    /// impl_bls12381_multisig_scheme!(VoteContext<'a, D>);
+    /// ```
     #[macro_export]
     macro_rules! impl_bls12381_multisig_scheme {
         ($context:ty) => {
