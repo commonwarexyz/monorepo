@@ -123,7 +123,7 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(info.key, info.value);
+        let element = Operation::Update((info.key, info.value));
         verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
             Self::grafting_height(),
@@ -1197,7 +1197,7 @@ pub mod test {
                 // it's a key-updating operation.
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
-                    Operation::Update(key, value) => (key, value),
+                    Operation::Update((key, value)) => (key, value),
                     Operation::CommitFloor(_, _) => continue,
                     Operation::Delete(_) => {
                         unreachable!("location does not reference update/commit operation")

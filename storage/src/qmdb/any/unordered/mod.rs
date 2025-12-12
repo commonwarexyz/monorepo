@@ -1,5 +1,4 @@
 mod operation;
-pub(super) use operation::Operation;
 pub use operation::{FixedOperation, VariableOperation};
 
 pub mod fixed;

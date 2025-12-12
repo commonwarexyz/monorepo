@@ -348,7 +348,7 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(loc).await? else {
+            let Operation::Update((k, v)) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -424,7 +424,7 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log.append(Operation::Update((key, value))).await?;
 
         Ok(())
     }
@@ -439,7 +439,7 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log.append(Operation::Update((key, value))).await?;
 
         Ok(true)
     }

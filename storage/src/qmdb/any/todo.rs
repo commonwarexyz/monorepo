@@ -11,7 +11,6 @@ use crate::{
     qmdb::{
         any::{
             ordered::KeyData,
-            unordered::{self},
             value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
             CleanAny, DirtyAny,
         },
@@ -40,7 +39,7 @@ use std::{
 use tracing::debug;
 
 type OrderedOperation<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
-type UnorderedOperation<K, V> = unordered::Operation<K, V>;
+type UnorderedOperation<K, V> = Operation2<UnorderedUpdate<K, V>, K, V>;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
@@ -359,7 +358,7 @@ where
         for &loc in iter {
             let op = self.log.read(loc).await?;
             match &op {
-                UnorderedOperation::Update(k, value) => {
+                UnorderedOperation::Update((k, value)) => {
                     if k == key {
                         return Ok(Some((value.clone(), loc)));
                     }
@@ -762,7 +761,7 @@ where
         let res = self.update_loc(&key, new_loc).await?;
 
         self.log
-            .append(UnorderedOperation::Update(key, value))
+            .append(UnorderedOperation::Update((key, value)))
             .await?;
         if res.is_some() {
             self.steps += 1;
@@ -781,7 +780,7 @@ where
         }
 
         self.log
-            .append(UnorderedOperation::Update(key, value))
+            .append(UnorderedOperation::Update((key, value)))
             .await?;
         self.active_keys += 1;
 
@@ -1970,7 +1969,7 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(UnorderedOperation::Update(key.clone(), value))
+                    .append(UnorderedOperation::Update((key.clone(), value)))
                     .await?;
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
@@ -1989,7 +1988,7 @@ where
             };
             self.snapshot.insert(&key, self.op_count());
             self.log
-                .append(UnorderedOperation::Update(key, value))
+                .append(UnorderedOperation::Update((key, value)))
                 .await?;
             self.active_keys += 1;
         }
@@ -2359,7 +2358,7 @@ impl<K: Array, V: FixedValue> Write
                 OP2_DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::DELETE_OP_SIZE - K::SIZE);
+                buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Self::Update((k, v)) => {
                 OP2_UPDATE_CONTEXT.write(buf);

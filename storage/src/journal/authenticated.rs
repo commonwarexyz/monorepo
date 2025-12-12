@@ -698,7 +698,7 @@ mod tests {
 
     /// Create a test operation with predictable values based on index.
     fn create_operation(index: u8) -> Operation<Digest, Digest> {
-        Operation::Update(Sha256::fill(index), Sha256::fill(index.wrapping_add(1)))
+        Operation::Update((Sha256::fill(index), Sha256::fill(index.wrapping_add(1))))
     }
 
     /// Create an authenticated journal with N committed operations.
