@@ -329,87 +329,6 @@ pub enum Error {
     DkgFailed,
 }
 
-/// Indicates whether the player safely recovered their share in the DKG.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShareStatus {
-    /// The player recovered their share with fewer than `max_faults` reveals.
-    /// This means the player's share remains private.
-    Recovered(Share),
-    /// The player had `max_faults` or more reveals, meaning their share
-    /// may be known by an adversary.
-    Revealed(Share),
-}
-
-impl ShareStatus {
-    /// Returns a reference to the share, regardless of status.
-    pub const fn share(&self) -> &Share {
-        match self {
-            Self::Recovered(share) | Self::Revealed(share) => share,
-        }
-    }
-
-    /// Returns true if the share was recovered (fewer than `max_faults` reveals).
-    pub const fn is_recovered(&self) -> bool {
-        matches!(self, Self::Recovered(_))
-    }
-
-    /// Returns true if the share was revealed (`max_faults` or more reveals).
-    pub const fn is_revealed(&self) -> bool {
-        matches!(self, Self::Revealed(_))
-    }
-}
-
-impl From<ShareStatus> for Share {
-    fn from(status: ShareStatus) -> Self {
-        match status {
-            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
-        }
-    }
-}
-
-impl Write for ShareStatus {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Recovered(share) => {
-                buf.put_u8(0);
-                share.write(buf);
-            }
-            Self::Revealed(share) => {
-                buf.put_u8(1);
-                share.write(buf);
-            }
-        }
-    }
-}
-
-impl Read for ShareStatus {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => {
-                let share = Share::read(buf)?;
-                Ok(Self::Recovered(share))
-            }
-            1 => {
-                let share = Share::read(buf)?;
-                Ok(Self::Revealed(share))
-            }
-            other => Err(commonware_codec::Error::InvalidEnum(other)),
-        }
-    }
-}
-
-impl EncodeSize for ShareStatus {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Recovered(share) => share.encode_size(),
-            Self::Revealed(share) => share.encode_size(),
-        }
-    }
-}
-
 /// Recover public polynomial by interpolating coefficient-wise all
 /// polynomials using precomputed Barycentric Weights.
 ///
@@ -537,6 +456,99 @@ where
             players,
             public,
         })
+    }
+}
+
+/// Indicates whether the player safely recovered their share in the DKG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareStatus {
+    /// The player recovered their share with fewer than `max_faults` reveals.
+    /// This means the player's share remains private.
+    Recovered(Share),
+    /// The player had `max_faults` or more reveals, meaning their share
+    /// may be known by an adversary.
+    Revealed(Share),
+}
+
+impl ShareStatus {
+    /// Returns a reference to the share, regardless of status.
+    pub const fn share(&self) -> &Share {
+        match self {
+            Self::Recovered(share) | Self::Revealed(share) => share,
+        }
+    }
+
+    /// Returns true if the share was recovered (fewer than `max_faults` reveals).
+    pub const fn is_recovered(&self) -> bool {
+        matches!(self, Self::Recovered(_))
+    }
+
+    /// Returns true if the share was revealed (`max_faults` or more reveals).
+    pub const fn is_revealed(&self) -> bool {
+        matches!(self, Self::Revealed(_))
+    }
+}
+
+impl From<ShareStatus> for Share {
+    fn from(status: ShareStatus) -> Self {
+        match status {
+            ShareStatus::Recovered(share) | ShareStatus::Revealed(share) => share,
+        }
+    }
+}
+
+impl Write for ShareStatus {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Recovered(share) => {
+                buf.put_u8(0);
+                share.write(buf);
+            }
+            Self::Revealed(share) => {
+                buf.put_u8(1);
+                share.write(buf);
+            }
+        }
+    }
+}
+
+impl Read for ShareStatus {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            0 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Recovered(share))
+            }
+            1 => {
+                let share = Share::read(buf)?;
+                Ok(Self::Revealed(share))
+            }
+            other => Err(commonware_codec::Error::InvalidEnum(other)),
+        }
+    }
+}
+
+impl EncodeSize for ShareStatus {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Recovered(share) => share.encode_size(),
+            Self::Revealed(share) => share.encode_size(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for ShareStatus {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let share = Share::arbitrary(u)?;
+        match u.int_in_range(0..=1)? {
+            0 => Ok(Self::Recovered(share)),
+            1 => Ok(Self::Revealed(share)),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -2542,6 +2554,7 @@ mod test {
 
         commonware_codec::conformance_tests! {
             Output<MinPk, ed25519::PublicKey>,
+            ShareStatus,
             DealerPubMsg<MinPk>,
             DealerPrivMsg,
             PlayerAck<ed25519::PublicKey>,
