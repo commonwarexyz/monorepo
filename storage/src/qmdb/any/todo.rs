@@ -23,12 +23,12 @@ use crate::{
     AuthenticatedBitMap,
 };
 use bytes::{Buf, BufMut};
+use commonware_codec::varint::UInt;
 use commonware_codec::Codec;
 use commonware_codec::{
     util::{at_least, ensure_zeros},
     FixedSize,
 };
-use commonware_codec::{varint::UInt, CodecFixed};
 use commonware_codec::{Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -38,7 +38,6 @@ use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     ops::Bound,
 };
 use tracing::debug;
@@ -2006,66 +2005,26 @@ const OP2_DELETE_CONTEXT: u8 = 0xD1;
 const OP2_UPDATE_CONTEXT: u8 = 0xD2;
 const OP2_COMMIT_CONTEXT: u8 = 0xD3;
 
-/*
-/// Helper to route value encode/decode by encoding flavor.
-trait ValueEncodingOps: ValueEncoding {
-    fn value_size(value: &Self::Value) -> usize;
-    fn write_value(value: &Self::Value, buf: &mut impl BufMut);
-    fn read_value(
-        buf: &mut impl Buf,
-        cfg: &<Self::Value as Read>::Cfg,
-    ) -> Result<Self::Value, CodecError>;
-}
-
-impl<V: FixedValue> ValueEncodingOps for FixedEncoding<V> {
-    fn value_size(_value: &Self::Value) -> usize {
-        V::SIZE
-    }
-
-    fn write_value(value: &Self::Value, buf: &mut impl BufMut) {
-        value.write(buf);
-    }
-
-    fn read_value(
-        buf: &mut impl Buf,
-        cfg: &<Self::Value as Read>::Cfg,
-    ) -> Result<Self::Value, CodecError> {
-        V::read_cfg(buf, cfg)
-    }
-}
-
-impl<V: VariableValue> ValueEncodingOps for VariableEncoding<V> {
-    fn value_size(value: &Self::Value) -> usize {
-        value.encode_size()
-    }
-
-    fn write_value(value: &Self::Value, buf: &mut impl BufMut) {
-        value.write(buf);
-    }
-
-    fn read_value(
-        buf: &mut impl Buf,
-        cfg: &<Self::Value as Read>::Cfg,
-    ) -> Result<Self::Value, CodecError> {
-        V::read_cfg(buf, cfg)
-    }
-}
-*/
-
 pub trait UpdateShape<K: Array, V: ValueEncoding> {
     type UpdatePayload;
 }
 
-pub struct OrderedShape<K: Array, V: ValueEncoding>(KeyData<K, V::Value>);
-impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedShape<K, V> {
+pub struct OrderedUpdate<K: Array, V: ValueEncoding>(KeyData<K, V::Value>);
+impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for OrderedUpdate<K, V> {
     type UpdatePayload = KeyData<K, V::Value>;
 }
 
-impl<K: Array, V: FixedValue> FixedSize for OrderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> FixedSize for OrderedUpdate<K, FixedEncoding<V>> {
     const SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
 }
 
-impl<K: Array, V: FixedValue> Write for OrderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
+    fn encode_size(&self) -> usize {
+        1 + K::SIZE + self.0.value.encode_size() + K::SIZE
+    }
+}
+
+impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         OP2_UPDATE_CONTEXT.write(buf);
         self.0.key.write(buf);
@@ -2074,7 +2033,16 @@ impl<K: Array, V: FixedValue> Write for OrderedShape<K, FixedEncoding<V>> {
     }
 }
 
-impl<K: Array, V: FixedValue> Read for OrderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        OP2_UPDATE_CONTEXT.write(buf);
+        self.0.key.write(buf);
+        self.0.value.write(buf);
+        self.0.next_key.write(buf);
+    }
+}
+
+impl<K: Array, V: FixedValue> Read for OrderedUpdate<K, FixedEncoding<V>> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -2089,17 +2057,37 @@ impl<K: Array, V: FixedValue> Read for OrderedShape<K, FixedEncoding<V>> {
     }
 }
 
-pub struct UnorderedShape<K: Array, V: ValueEncoding>(K, V::Value);
+impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> {
+    type Cfg = <V as Read>::Cfg;
 
-impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedShape<K, V> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        let next_key = K::read(buf)?;
+        Ok(Self(KeyData {
+            key,
+            value,
+            next_key,
+        }))
+    }
+}
+pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(K, V::Value);
+
+impl<K: Array, V: ValueEncoding> UpdateShape<K, V> for UnorderedUpdate<K, V> {
     type UpdatePayload = (K, V::Value);
 }
 
-impl<K: Array, V: FixedValue> FixedSize for UnorderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> FixedSize for UnorderedUpdate<K, FixedEncoding<V>> {
     const SIZE: usize = 1 + K::SIZE + V::SIZE;
 }
 
-impl<K: Array, V: FixedValue> Write for UnorderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: VariableValue> EncodeSize for UnorderedUpdate<K, VariableEncoding<V>> {
+    fn encode_size(&self) -> usize {
+        1 + K::SIZE + self.1.encode_size()
+    }
+}
+
+impl<K: Array, V: FixedValue> Write for UnorderedUpdate<K, FixedEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         OP2_UPDATE_CONTEXT.write(buf);
         self.0.write(buf);
@@ -2107,8 +2095,26 @@ impl<K: Array, V: FixedValue> Write for UnorderedShape<K, FixedEncoding<V>> {
     }
 }
 
-impl<K: Array, V: FixedValue> Read for UnorderedShape<K, FixedEncoding<V>> {
+impl<K: Array, V: VariableValue> Write for UnorderedUpdate<K, VariableEncoding<V>> {
+    fn write(&self, buf: &mut impl BufMut) {
+        OP2_UPDATE_CONTEXT.write(buf);
+        self.0.write(buf);
+        self.1.write(buf);
+    }
+}
+
+impl<K: Array, V: FixedValue> Read for UnorderedUpdate<K, FixedEncoding<V>> {
     type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        Ok(Self(key, value))
+    }
+}
+
+impl<K: Array, V: VariableValue> Read for UnorderedUpdate<K, VariableEncoding<V>> {
+    type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let key = K::read(buf)?;
@@ -2127,81 +2133,359 @@ where
     CommitFloor(Option<V::Value>, Location),
 }
 
-pub type OrderedOperation2<K, V> = Operation2<OrderedShape<K, V>, K, V>;
-pub type UnorderedOperation2<K, V> = Operation2<UnorderedShape<K, V>, K, V>;
+pub type OrderedOperation2<K, V> = Operation2<OrderedUpdate<K, V>, K, V>;
+pub type UnorderedOperation2<K, V> = Operation2<UnorderedUpdate<K, V>, K, V>;
 
-impl<K: Array, V: FixedValue> Operation2<OrderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
+    // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+
+    // Update op has a context byte, a key, a value, and a next key.
     const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+
+    // Delete op has a context byte and a key.
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+}
 
-    const fn padding_for_update<K2: Array, V2: FixedValue>() -> usize {
-        Self::SIZE::<K2, V2>() - Self::UPDATE_OP_SIZE
-    }
+impl<K: Array, V: FixedValue> FixedSize
+    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    // Make sure operation array is large enough to hold the maximum of all ops.
+    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+        Self::UPDATE_OP_SIZE
+    } else {
+        Self::COMMIT_OP_SIZE
+    };
+}
 
-    const fn padding_for_delete<K2: Array, V2: FixedValue>() -> usize {
-        Self::SIZE::<K2, V2>() - Self::DELETE_OP_SIZE
-    }
-
-    const fn padding_for_commit<V2: FixedValue>() -> usize {
-        Self::SIZE::<K, V2>() - Self::COMMIT_OP_SIZE
-    }
-
-    const fn SIZE<K2: Array, V2: FixedValue>() -> usize {
-        let max1 = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-            Self::UPDATE_OP_SIZE
-        } else {
-            Self::COMMIT_OP_SIZE
-        };
-        if max1 > Self::DELETE_OP_SIZE {
-            max1
-        } else {
-            Self::DELETE_OP_SIZE
+impl<K: Array, V: VariableValue> EncodeSize
+    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(_) => K::SIZE,
+            Self::Update(p) => K::SIZE + p.value.encode_size() + K::SIZE,
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
     }
 }
 
-impl<K: Array, V: FixedValue> Operation2<UnorderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> Write
+    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Operation2::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::DELETE_OP_SIZE - K::SIZE);
+            }
+            Operation2::Update(p) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                p.key.write(buf);
+                p.value.write(buf);
+                p.next_key.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
+            }
+            Operation2::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                if let Some(metadata) = metadata {
+                    true.write(buf);
+                    metadata.write(buf);
+                } else {
+                    buf.put_bytes(0, V::SIZE + 1);
+                }
+                buf.put_slice(&floor_loc.to_be_bytes());
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
+            }
+        }
+    }
+}
+
+impl<K: Array, V: VariableValue> Write
+    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Operation2::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+            }
+            Operation2::Update(p) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                p.key.write(buf);
+                p.value.write(buf);
+                p.next_key.write(buf);
+            }
+            Operation2::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                metadata.write(buf);
+                UInt(**floor_loc).write(buf);
+            }
+        }
+    }
+}
+
+impl<K: Array, V: FixedValue> Read
+    for Operation2<OrderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE)?;
+
+        match u8::read(buf)? {
+            OP2_UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                let next_key = K::read(buf)?;
+                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
+
+                Ok(Self::Update(KeyData {
+                    key,
+                    value,
+                    next_key,
+                }))
+            }
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
+
+                Ok(Self::Delete(key))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let is_some = bool::read(buf)?;
+                let metadata = if is_some {
+                    Some(V::read_cfg(buf, cfg)?)
+                } else {
+                    ensure_zeros(buf, V::SIZE)?;
+                    None
+                };
+                let floor_loc = u64::read(buf)?;
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::operation::ordered::Operation",
+                        "commit floor location overflow",
+                    )
+                })?;
+                ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
+
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
+impl<K: Array, V: VariableValue> Read
+    for Operation2<OrderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+{
+    type Cfg = <V as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                Ok(Self::Delete(key))
+            }
+            OP2_UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                let next_key = K::read(buf)?;
+                Ok(Self::Update(KeyData {
+                    key,
+                    value,
+                    next_key,
+                }))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let metadata = Option::<V>::read_cfg(buf, cfg)?;
+                let floor_loc = UInt::read(buf)?;
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::operation::ordered::Operation",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
+impl<K: Array, V: FixedValue>
+    Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+
+    // Update op has a context byte, a key, and a value.
     const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE;
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+
+    // Delete op has a context byte and a key.
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+}
 
-    const fn padding_for_update<K2: Array, V2: FixedValue>() -> usize {
-        Self::SIZE::<K2, V2>() - Self::UPDATE_OP_SIZE
-    }
+impl<K: Array, V: FixedValue> FixedSize
+    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    // Make sure operation array is large enough to hold the maximum of all ops.
+    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+        Self::UPDATE_OP_SIZE
+    } else {
+        Self::COMMIT_OP_SIZE
+    };
+}
 
-    const fn padding_for_delete<K2: Array, V2: FixedValue>() -> usize {
-        Self::SIZE::<K2, V2>() - Self::DELETE_OP_SIZE
-    }
-
-    const fn padding_for_commit<V2: FixedValue>() -> usize {
-        Self::SIZE::<K, V2>() - Self::COMMIT_OP_SIZE
-    }
-
-    const fn SIZE<K2: Array, V2: FixedValue>() -> usize {
-        let max1 = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-            Self::UPDATE_OP_SIZE
-        } else {
-            Self::COMMIT_OP_SIZE
-        };
-        if max1 > Self::DELETE_OP_SIZE {
-            max1
-        } else {
-            Self::DELETE_OP_SIZE
+impl<K: Array, V: VariableValue> EncodeSize
+    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(_) => K::SIZE,
+            Self::Update((_, v)) => K::SIZE + v.encode_size(),
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
     }
 }
 
-impl<K: Array, V: FixedValue> FixedSize
-    for Operation2<OrderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+impl<K: Array, V: FixedValue> Write
+    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
 {
-    const SIZE: usize = Self::SIZE::<K, V>();
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Operation2::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::DELETE_OP_SIZE - K::SIZE);
+            }
+            Operation2::Update((k, v)) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                k.write(buf);
+                v.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
+            }
+            Operation2::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                if let Some(metadata) = metadata {
+                    true.write(buf);
+                    metadata.write(buf);
+                } else {
+                    buf.put_bytes(0, V::SIZE + 1);
+                }
+                buf.put_slice(&floor_loc.to_be_bytes());
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
+            }
+        }
+    }
 }
 
-impl<K: Array, V: FixedValue> FixedSize
-    for Operation2<UnorderedShape<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+impl<K: Array, V: VariableValue> Write
+    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
 {
-    const SIZE: usize = Self::SIZE::<K, V>();
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Operation2::Delete(k) => {
+                OP2_DELETE_CONTEXT.write(buf);
+                k.write(buf);
+            }
+            Operation2::Update((k, v)) => {
+                OP2_UPDATE_CONTEXT.write(buf);
+                k.write(buf);
+                v.write(buf);
+            }
+            Operation2::CommitFloor(metadata, floor_loc) => {
+                OP2_COMMIT_CONTEXT.write(buf);
+                metadata.write(buf);
+                UInt(**floor_loc).write(buf);
+            }
+        }
+    }
+}
+
+impl<K: Array, V: FixedValue> Read
+    for Operation2<UnorderedUpdate<K, FixedEncoding<V>>, K, FixedEncoding<V>>
+{
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE)?;
+
+        match u8::read(buf)? {
+            OP2_UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
+
+                Ok(Self::Update((key, value)))
+            }
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
+
+                Ok(Self::Delete(key))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let is_some = bool::read(buf)?;
+                let metadata = if is_some {
+                    Some(V::read_cfg(buf, cfg)?)
+                } else {
+                    ensure_zeros(buf, V::SIZE)?;
+                    None
+                };
+                let floor_loc = u64::read(buf)?;
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::operation::ordered::Operation",
+                        "commit floor location overflow",
+                    )
+                })?;
+                ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
+
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
+impl<K: Array, V: VariableValue> Read
+    for Operation2<UnorderedUpdate<K, VariableEncoding<V>>, K, VariableEncoding<V>>
+{
+    type Cfg = <V as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            OP2_DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                Ok(Self::Delete(key))
+            }
+            OP2_UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                Ok(Self::Update((key, value)))
+            }
+            OP2_COMMIT_CONTEXT => {
+                let metadata = Option::<V>::read_cfg(buf, cfg)?;
+                let floor_loc = UInt::read(buf)?;
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::operation::ordered::Operation",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
 }
 
 /*
@@ -2438,7 +2722,7 @@ where
     */
 
 impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
-    for Operation2<OrderedShape<K, V>, K, V>
+    for Operation2<OrderedUpdate<K, V>, K, V>
 where
     V::Value: Codec,
 {
@@ -2469,7 +2753,7 @@ where
 }
 
 impl<K: Array, V: ValueEncoding> crate::qmdb::operation::Operation
-    for Operation2<UnorderedShape<K, V>, K, V>
+    for Operation2<UnorderedUpdate<K, V>, K, V>
 where
     V::Value: Codec,
 {
@@ -2511,7 +2795,7 @@ where
     }
 }
 
-impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<OrderedShape<K, V>, K, V>
+impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<OrderedUpdate<K, V>, K, V>
 where
     K: Array + fmt::Display,
     V: ValueEncoding,
@@ -2542,7 +2826,7 @@ where
     }
 }
 
-impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<UnorderedShape<K, V>, K, V>
+impl<K: Array, V: ValueEncoding> fmt::Display for Operation2<UnorderedUpdate<K, V>, K, V>
 where
     K: Array + fmt::Display,
     V: ValueEncoding,
