@@ -22,14 +22,21 @@ pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
 pub struct PrivateKeyInner {
     raw: [u8; PRIVATE_KEY_LENGTH],
-    /// `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
-    ///
-    /// Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
-    #[zeroize(skip)]
     pub key: SigningKey,
+}
+
+impl Zeroize for PrivateKeyInner {
+    fn zeroize(&mut self) {
+        self.raw.zeroize();
+
+        // skip zeroizing `key` here, `ZeroizeOnDrop` is implemented for `SigningKey` and
+        // can't be called directly.
+        //
+        // Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
+    }
 }
 
 impl PrivateKeyInner {
