@@ -21,12 +21,7 @@ const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: usize = 1024 * 1024;
-
-/// Maximum sleep duration in milliseconds for fuzz tests.
-///
-/// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
-/// and can only represent durations up to ~584 years.
-const MAX_SLEEP_DURATION: u64 = 1000;
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -265,7 +260,7 @@ fn fuzz(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             }
                         }

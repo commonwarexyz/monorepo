@@ -26,7 +26,7 @@ const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 ///
 /// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
 /// and can only represent durations up to ~584 years.
-const MAX_SLEEP_DURATION: u64 = 1000;
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -126,7 +126,7 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
                 digest: u.arbitrary()?,
             }),
             _ => Ok(BroadcastAction::Sleep {
-                duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION)?,
+                duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
             }),
         }
     }
