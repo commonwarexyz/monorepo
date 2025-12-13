@@ -258,16 +258,13 @@ fn fuzz(data: FuzzInput) {
 
                     let current_root = db.root();
 
-                    // Get the current value first (before proof generation consumes k)
-                    let value = db.get(&k).await.expect("get should not fail");
-
                     match db.key_value_proof(hasher.inner(), k.clone()).await {
                         Ok(proof) => {
-                            let value = value.expect("key should exist if proof was generated");
-                            let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
+                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
                                 hasher.inner(),
                                 k,
-                                value.clone(),
+                                value,
                                 proof,
                                 &current_root,
                             );
