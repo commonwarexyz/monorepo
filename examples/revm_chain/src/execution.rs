@@ -4,12 +4,23 @@ use alloy_evm::{eth::EthEvmBuilder, Database as AlloyDatabase, Evm, EvmEnv};
 use alloy_evm::revm::{
     context::TxEnv,
     context_interface::result::ResultAndState,
-    primitives::TxKind,
+    primitives::{B256, TxKind, U256},
     state::{Account, EvmState},
     DatabaseCommit,
 };
 use anyhow::Context as _;
 use std::collections::BTreeMap;
+
+pub const CHAIN_ID: u64 = 1337;
+
+pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
+    let mut env: EvmEnv = EvmEnv::default();
+    env.cfg_env.chain_id = CHAIN_ID;
+    env.block_env.number = U256::from(height);
+    env.block_env.timestamp = U256::from(height);
+    env.block_env.prevrandao = Some(prevrandao);
+    env
+}
 
 #[derive(Debug, Clone)]
 pub struct ExecutionOutcome {
@@ -104,7 +115,6 @@ fn account_change_from_evm_account(account: &Account) -> AccountChange {
 mod tests {
     use super::*;
     use crate::commitment::commit_state_root;
-    use alloy_evm::EvmEnv;
     use alloy_evm::revm::{
         database::InMemoryDB,
         primitives::{Address, B256, Bytes, U256},
@@ -141,7 +151,7 @@ mod tests {
 
         let prev_root = StateRoot(B256::ZERO);
         let (mut db, outcome) =
-            execute_txs(db, test_env(1, B256::from([7u8; 32])), prev_root, &[tx]).unwrap();
+            execute_txs(db, evm_env(1, B256::from([7u8; 32])), prev_root, &[tx]).unwrap();
 
         assert_eq!(outcome.tx_changes.len(), 1);
         assert!(!outcome.tx_changes[0].is_empty());
@@ -156,14 +166,5 @@ mod tests {
         assert_eq!(from_info.nonce, 1);
         assert_eq!(to_info.balance, U256::from(100u64));
         assert_eq!(to_info.nonce, 0);
-    }
-
-    fn test_env(height: u64, prevrandao: B256) -> EvmEnv {
-        let mut env: EvmEnv = EvmEnv::default();
-        env.cfg_env.chain_id = 1337;
-        env.block_env.number = U256::from(height);
-        env.block_env.timestamp = U256::from(height);
-        env.block_env.prevrandao = Some(prevrandao);
-        env
     }
 }
