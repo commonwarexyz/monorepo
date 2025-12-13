@@ -1,4 +1,4 @@
-//! Augment the development of conformance tests with procedural macros.
+//! Augment the development of [`commonware-conformance`](https://docs.rs/commonware-conformance) with procedural macros.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -86,10 +86,11 @@ fn type_to_ident(ty: &Type) -> String {
     result.trim_end_matches("_").to_string()
 }
 
-/// Define conformance tests for types implementing the `Conformance` trait.
+/// Define tests for types implementing the
+/// [`Conformance`](https://docs.rs/commonware-conformance/latest/commonware_conformance/trait.Conformance.html) trait.
 ///
-/// This macro generates test functions that verify implementations match expected
-/// hash values stored in `conformance.toml`.
+/// Generates test functions that verify implementations match expected digest
+/// values stored in `conformance.toml`.
 ///
 /// # Usage
 ///
