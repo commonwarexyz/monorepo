@@ -21,6 +21,8 @@ use futures::{
 };
 use std::collections::BTreeMap;
 
+type ThresholdActivity = <crate::consensus::Mailbox as commonware_consensus::Reporter>::Activity;
+
 /// Chain application actor.
 pub struct Application<S> {
     node: u32,
@@ -37,6 +39,25 @@ pub struct Application<S> {
     gossip: S,
     ingress: mpsc::Receiver<IngressMessage>,
     control: mpsc::Receiver<ControlMessage>,
+}
+
+enum Event {
+    Ingress(IngressMessage),
+    Control(ControlMessage),
+}
+
+struct Runtime<S> {
+    node: u32,
+    finalized: mpsc::UnboundedSender<FinalizationEvent>,
+    genesis_alloc: Vec<(Address, U256)>,
+    genesis_tx: Option<Tx>,
+    store: ChainStore,
+    received: BTreeMap<ConsensusDigest, Block>,
+    pending_verifies: BTreeMap<
+        ConsensusDigest,
+        Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>,
+    >,
+    gossip: S,
 }
 
 impl<S> Application<S>
@@ -192,191 +213,297 @@ where
     }
 
     pub async fn run(self) {
-        enum Event {
-            Ingress(IngressMessage),
-            Control(ControlMessage),
-        }
-
         let Application {
             node,
             codec,
             finalized,
             genesis_alloc,
-            mut genesis_tx,
-            mut store,
-            mut received,
-            mut pending_verifies,
-            mut gossip,
+            genesis_tx,
+            store,
+            received,
+            pending_verifies,
+            gossip,
             ingress,
             control,
         } = self;
 
         let cfg = Self::block_cfg(codec);
+        let mut runtime = Runtime {
+            node,
+            finalized,
+            genesis_alloc,
+            genesis_tx,
+            store,
+            received,
+            pending_verifies,
+            gossip,
+        };
         let mut inbox =
             futures::stream::select(ingress.map(Event::Ingress), control.map(Event::Control));
 
         while let Some(event) = inbox.next().await {
-            match event {
-                Event::Ingress(IngressMessage::Genesis { epoch, response }) => {
-                    assert_eq!(epoch, commonware_consensus::types::Epoch::zero());
-                    let genesis_block = Self::genesis_block();
-                    let digest = Self::digest_for_block(&genesis_block);
-                    let mut db = InMemoryDB::default();
-                    for (address, balance) in genesis_alloc.iter().copied() {
-                        db.insert_account_info(
-                            address,
-                            AccountInfo {
-                                balance,
-                                nonce: 0,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    store.insert(
-                        digest,
-                        BlockEntry {
-                            block: genesis_block,
-                            db,
-                            seed: Some(B256::ZERO),
-                        },
-                    );
-                    let _ = response.send(digest);
-                }
-                Event::Control(ControlMessage::QueryBalance {
-                    digest,
-                    address,
-                    response,
-                }) => {
-                    let entry = store.get_by_digest(&digest).cloned();
-                    let value = entry
-                        .and_then(|mut e| e.db.basic(address).ok().flatten())
-                        .map(|info| info.balance);
-                    let _ = response.send(value);
-                }
-                Event::Control(ControlMessage::QueryStateRoot { digest, response }) => {
-                    let entry = store.get_by_digest(&digest).cloned();
-                    let _ = response.send(entry.map(|e| e.block.state_root));
-                }
-                Event::Control(ControlMessage::QuerySeed { digest, response }) => {
-                    let entry = store.get_by_digest(&digest);
-                    let _ = response.send(entry.and_then(|e| e.seed));
-                }
-                Event::Ingress(IngressMessage::Propose { context, response }) => {
-                    let parent = store.get_by_digest(&context.parent.1).cloned();
-                    let Some(parent) = parent else {
-                        continue;
-                    };
-                    let prevrandao = parent.seed.unwrap_or(B256::from(context.parent.1 .0));
-                    let txs = if parent.block.height == 0 {
-                        genesis_tx.clone().into_iter().collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let child = Self::build_child_block(&parent.block, prevrandao, txs);
-                    if let Ok((digest, entry)) = Self::execute_block(&parent, child) {
-                        let clears_genesis_tx = entry.block.height == 1;
-                        store.insert(digest, entry);
-                        if clears_genesis_tx {
-                            genesis_tx = None;
-                        }
-                        let _ = response.send(digest);
-                    }
-                }
-                Event::Ingress(IngressMessage::Verify {
-                    context,
-                    digest,
-                    response,
-                }) => {
-                    let already = store.get_by_digest(&digest).is_some();
-                    if already {
-                        let _ = response.send(true);
-                        continue;
-                    }
+            runtime.handle_event(event, &cfg).await;
+        }
+    }
+}
 
-                    if let Some(block) = received.get(&digest).cloned() {
-                        match Self::try_verify_and_insert(
-                            &mut store,
-                            &mut genesis_tx,
-                            digest,
-                            &context,
-                            block,
-                        ) {
-                            Ok(ok) => {
-                                let _ = response.send(ok);
-                            }
-                            Err(_) => {
-                                let _ = response.send(false);
-                            }
-                        }
-                        continue;
-                    }
+impl<S> Runtime<S>
+where
+    S: commonware_p2p::Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
+{
+    async fn handle_event(&mut self, event: Event, cfg: &crate::types::BlockCfg) {
+        match event {
+            Event::Ingress(message) => self.handle_ingress(message).await,
+            Event::Control(message) => self.handle_control(message, cfg),
+        }
+    }
 
-                    pending_verifies
-                        .entry(digest)
-                        .or_default()
-                        .push((context, response));
-                }
-                Event::Control(ControlMessage::BlockReceived { from, bytes }) => {
-                    let _ = from;
-                    let Ok(block) = Self::decode_block(bytes.clone(), &cfg) else {
-                        continue;
-                    };
-                    let digest = Self::digest_for_block(&block);
-                    received.entry(digest).or_insert(block);
-
-                    if let Some(pending) = pending_verifies.remove(&digest) {
-                        for (context, response) in pending {
-                            let block = match received.get(&digest).cloned() {
-                                Some(b) => b,
-                                None => {
-                                    let _ = response.send(false);
-                                    continue;
-                                }
-                            };
-                            let ok = Self::try_verify_and_insert(
-                                &mut store,
-                                &mut genesis_tx,
-                                digest,
-                                &context,
-                                block,
-                            )
-                            .unwrap_or(false);
-                            let _ = response.send(ok);
-                        }
-                    }
-                }
-                Event::Ingress(IngressMessage::Broadcast { digest }) => {
-                    let bytes = store
-                        .get_by_digest(&digest)
-                        .map(|entry| Self::encode_block(&entry.block));
-                    let Some(bytes) = bytes else {
-                        continue;
-                    };
-                    let _ = gossip
-                        .send(commonware_p2p::Recipients::All, bytes, true)
-                        .await;
-                }
-                Event::Ingress(IngressMessage::Report { activity }) => match activity {
-                    Activity::Notarization(notarization) => {
-                        use commonware_codec::Encode as _;
-                        let seed_hash = keccak256(notarization.seed().encode());
-                        if let Some(entry) = store.get_by_digest_mut(&notarization.proposal.payload)
-                        {
-                            entry.seed = Some(seed_hash);
-                        }
-                    }
-                    Activity::Finalization(finalization) => {
-                        use commonware_codec::Encode as _;
-                        let seed_hash = keccak256(finalization.seed().encode());
-                        if let Some(entry) = store.get_by_digest_mut(&finalization.proposal.payload)
-                        {
-                            entry.seed = Some(seed_hash);
-                        }
-                        let _ = finalized.unbounded_send((node, finalization.proposal.payload));
-                    }
-                    _ => {}
-                },
+    async fn handle_ingress(&mut self, message: IngressMessage) {
+        match message {
+            IngressMessage::Genesis { epoch, response } => {
+                self.handle_genesis(epoch, response);
             }
+            IngressMessage::Propose { context, response } => {
+                self.handle_propose(context, response);
+            }
+            IngressMessage::Verify {
+                context,
+                digest,
+                response,
+            } => {
+                self.handle_verify(context, digest, response);
+            }
+            IngressMessage::Broadcast { digest } => {
+                self.handle_broadcast(digest).await;
+            }
+            IngressMessage::Report { activity } => {
+                self.handle_report(activity);
+            }
+        }
+    }
+
+    fn handle_control(&mut self, message: ControlMessage, cfg: &crate::types::BlockCfg) {
+        match message {
+            ControlMessage::QueryBalance {
+                digest,
+                address,
+                response,
+            } => self.handle_query_balance(digest, address, response),
+            ControlMessage::QueryStateRoot { digest, response } => {
+                self.handle_query_state_root(digest, response);
+            }
+            ControlMessage::QuerySeed { digest, response } => {
+                self.handle_query_seed(digest, response)
+            }
+            ControlMessage::BlockReceived { from, bytes } => {
+                self.handle_block_received(from, bytes, cfg);
+            }
+        }
+    }
+
+    fn handle_genesis(
+        &mut self,
+        epoch: commonware_consensus::types::Epoch,
+        response: oneshot::Sender<ConsensusDigest>,
+    ) {
+        assert_eq!(epoch, commonware_consensus::types::Epoch::zero());
+
+        let genesis_block = Application::<S>::genesis_block();
+        let digest = Application::<S>::digest_for_block(&genesis_block);
+        let mut db = InMemoryDB::default();
+        for (address, balance) in self.genesis_alloc.iter().copied() {
+            db.insert_account_info(
+                address,
+                AccountInfo {
+                    balance,
+                    nonce: 0,
+                    ..Default::default()
+                },
+            );
+        }
+
+        self.store.insert(
+            digest,
+            BlockEntry {
+                block: genesis_block,
+                db,
+                seed: Some(B256::ZERO),
+            },
+        );
+        let _ = response.send(digest);
+    }
+
+    fn handle_query_balance(
+        &mut self,
+        digest: ConsensusDigest,
+        address: Address,
+        response: oneshot::Sender<Option<U256>>,
+    ) {
+        let entry = self.store.get_by_digest(&digest).cloned();
+        let value = entry
+            .and_then(|mut e| e.db.basic(address).ok().flatten())
+            .map(|info| info.balance);
+        let _ = response.send(value);
+    }
+
+    fn handle_query_state_root(
+        &mut self,
+        digest: ConsensusDigest,
+        response: oneshot::Sender<Option<StateRoot>>,
+    ) {
+        let entry = self.store.get_by_digest(&digest).cloned();
+        let _ = response.send(entry.map(|e| e.block.state_root));
+    }
+
+    fn handle_query_seed(
+        &mut self,
+        digest: ConsensusDigest,
+        response: oneshot::Sender<Option<B256>>,
+    ) {
+        let entry = self.store.get_by_digest(&digest);
+        let _ = response.send(entry.and_then(|e| e.seed));
+    }
+
+    fn handle_propose(
+        &mut self,
+        context: Context<ConsensusDigest, PublicKey>,
+        response: oneshot::Sender<ConsensusDigest>,
+    ) {
+        let parent = self.store.get_by_digest(&context.parent.1).cloned();
+        let Some(parent) = parent else {
+            return;
+        };
+
+        let prevrandao = parent.seed.unwrap_or(B256::from(context.parent.1 .0));
+        let txs = if parent.block.height == 0 {
+            self.genesis_tx.clone().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        let child = Application::<S>::build_child_block(&parent.block, prevrandao, txs);
+        if let Ok((digest, entry)) = Application::<S>::execute_block(&parent, child) {
+            let clears_genesis_tx = entry.block.height == 1;
+            self.store.insert(digest, entry);
+            if clears_genesis_tx {
+                self.genesis_tx = None;
+            }
+            let _ = response.send(digest);
+        }
+    }
+
+    fn handle_verify(
+        &mut self,
+        context: Context<ConsensusDigest, PublicKey>,
+        digest: ConsensusDigest,
+        response: oneshot::Sender<bool>,
+    ) {
+        if self.store.get_by_digest(&digest).is_some() {
+            let _ = response.send(true);
+            return;
+        }
+
+        if let Some(block) = self.received.get(&digest).cloned() {
+            let ok = Application::<S>::try_verify_and_insert(
+                &mut self.store,
+                &mut self.genesis_tx,
+                digest,
+                &context,
+                block,
+            )
+            .unwrap_or(false);
+            let _ = response.send(ok);
+            return;
+        }
+
+        self.pending_verifies
+            .entry(digest)
+            .or_default()
+            .push((context, response));
+    }
+
+    fn handle_block_received(
+        &mut self,
+        from: PublicKey,
+        bytes: Bytes,
+        cfg: &crate::types::BlockCfg,
+    ) {
+        let _ = from;
+        let Ok(block) = Application::<S>::decode_block(bytes, cfg) else {
+            return;
+        };
+
+        let digest = Application::<S>::digest_for_block(&block);
+        self.received.entry(digest).or_insert(block);
+        self.flush_pending_verifies(digest);
+    }
+
+    fn flush_pending_verifies(&mut self, digest: ConsensusDigest) {
+        let Some(pending) = self.pending_verifies.remove(&digest) else {
+            return;
+        };
+
+        for (context, response) in pending {
+            let block = match self.received.get(&digest).cloned() {
+                Some(b) => b,
+                None => {
+                    let _ = response.send(false);
+                    continue;
+                }
+            };
+            let ok = Application::<S>::try_verify_and_insert(
+                &mut self.store,
+                &mut self.genesis_tx,
+                digest,
+                &context,
+                block,
+            )
+            .unwrap_or(false);
+            let _ = response.send(ok);
+        }
+    }
+
+    async fn handle_broadcast(&mut self, digest: ConsensusDigest) {
+        let bytes = self
+            .store
+            .get_by_digest(&digest)
+            .map(|entry| Application::<S>::encode_block(&entry.block));
+        let Some(bytes) = bytes else {
+            return;
+        };
+        let _ = self
+            .gossip
+            .send(commonware_p2p::Recipients::All, bytes, true)
+            .await;
+    }
+
+    fn handle_report(&mut self, activity: ThresholdActivity) {
+        match activity {
+            Activity::Notarization(notarization) => {
+                self.update_seed(
+                    notarization.proposal.payload,
+                    Self::seed_hash_from_seed(notarization.seed()),
+                );
+            }
+            Activity::Finalization(finalization) => {
+                self.update_seed(
+                    finalization.proposal.payload,
+                    Self::seed_hash_from_seed(finalization.seed()),
+                );
+                let _ = self
+                    .finalized
+                    .unbounded_send((self.node, finalization.proposal.payload));
+            }
+            _ => {}
+        }
+    }
+
+    fn seed_hash_from_seed(seed: impl commonware_codec::Encode) -> B256 {
+        keccak256(seed.encode())
+    }
+
+    fn update_seed(&mut self, digest: ConsensusDigest, seed_hash: B256) {
+        if let Some(entry) = self.store.get_by_digest_mut(&digest) {
+            entry.seed = Some(seed_hash);
         }
     }
 }
