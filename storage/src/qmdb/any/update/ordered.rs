@@ -1,15 +1,30 @@
 use crate::qmdb::any::{
-    ordered::KeyData,
     update::{sealed::Sealed, Update},
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Codec, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_utils::{hex, Array};
 use std::fmt;
+
+/// Data about a key in an ordered database or an ordered database operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyData<K: Array + Ord, V: Codec> {
+    /// The key that exists in the database or in the database operation.
+    pub key: K,
+    /// The value of `key` in the database or operation.
+    pub value: V,
+    /// The next-key of `key` in the database or operation.
+    ///
+    /// The next-key is the next active key that lexicographically follows it in the key space. If
+    /// the key is the lexicographically-last active key, then next-key is the
+    /// lexicographically-first of all active keys (in a DB with only one key, this means its
+    /// next-key is itself)
+    pub next_key: K,
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct OrderedUpdate<K: Array, V: ValueEncoding>(pub KeyData<K, V::Value>);

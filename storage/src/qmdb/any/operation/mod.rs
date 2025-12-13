@@ -100,8 +100,8 @@ where
 mod tests {
     use super::*;
     use crate::qmdb::any::{
-        ordered::KeyData,
         value::{FixedEncoding, VariableEncoding},
+        KeyData,
     };
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;

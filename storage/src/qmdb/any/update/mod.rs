@@ -7,7 +7,7 @@ mod sealed {
 }
 
 mod ordered;
-pub use ordered::OrderedUpdate;
+pub use ordered::{KeyData, OrderedUpdate};
 
 mod unordered;
 pub use unordered::UnorderedUpdate;
@@ -24,9 +24,8 @@ pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
 #[cfg(test)]
 mod tests {
     use crate::qmdb::any::{
-        ordered::KeyData,
         value::{FixedEncoding, VariableEncoding},
-        OrderedUpdate, UnorderedUpdate,
+        KeyData, OrderedUpdate, UnorderedUpdate,
     };
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;

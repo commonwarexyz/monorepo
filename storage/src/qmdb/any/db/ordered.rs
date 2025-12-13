@@ -7,7 +7,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            db::IndexedLog, ordered::KeyData, value::ValueEncoding, CleanAny, DirtyAny,
+            db::IndexedLog, update::KeyData, value::ValueEncoding, CleanAny, DirtyAny,
             OrderedOperation, OrderedUpdate, VariableValue,
         },
         delete_known_loc,

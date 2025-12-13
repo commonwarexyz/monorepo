@@ -1,24 +1,5 @@
-use commonware_codec::Codec;
-use commonware_utils::Array;
-
 pub mod fixed;
 pub mod variable;
-
-/// Data about a key in an ordered database or an ordered database operation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyData<K: Array + Ord, V: Codec> {
-    /// The key that exists in the database or in the database operation.
-    pub key: K,
-    /// The value of `key` in the database or operation.
-    pub value: V,
-    /// The next-key of `key` in the database or operation.
-    ///
-    /// The next-key is the next active key that lexicographically follows it in the key space. If
-    /// the key is the lexicographically-last active key, then next-key is the
-    /// lexicographically-first of all active keys (in a DB with only one key, this means its
-    /// next-key is itself)
-    pub next_key: K,
-}
 
 #[cfg(test)]
 mod test {

@@ -2,13 +2,23 @@
 //! lexicographic-next active key of each active key, allowing for exclusion proofs.
 
 use crate::{
-    AuthenticatedBitMap as BitMap, bitmap::{CleanBitMap, DirtyBitMap}, mmr::{
-        Location, Position, Proof, StandardHasher, grafting::Storage as GraftingStorage, mem::{Clean, Dirty, Mmr as MemMmr, State}, verification
-    }, qmdb::{
-        Error, any::{
-            CleanAny, DirtyAny, FixedEncoding, FixedValue, OrderedOperation, ordered::{KeyData, fixed::Any}
-        }, current::{Config, merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof}, store::{Batchable, CleanStore, DirtyStore, LogStore}
-    }, translator::Translator
+    bitmap::{CleanBitMap, DirtyBitMap},
+    mmr::{
+        grafting::Storage as GraftingStorage,
+        mem::{Clean, Dirty, Mmr as MemMmr, State},
+        verification, Location, Position, Proof, StandardHasher,
+    },
+    qmdb::{
+        any::{
+            ordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue, KeyData,
+            OrderedOperation, OrderedUpdate,
+        },
+        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
+        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        Error,
+    },
+    translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -141,7 +151,7 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(crate::qmdb::any::OrderedUpdate(KeyData {
+        let element = Operation::Update(OrderedUpdate(KeyData {
             key: info.key,
             value: info.value,
             next_key: info.next_key,
@@ -183,7 +193,7 @@ impl<
                     return false;
                 }
 
-                let element = Operation::Update(crate::qmdb::any::OrderedUpdate(KeyData {
+                let element = Operation::Update(OrderedUpdate(KeyData {
                     key: info.key,
                     value: info.value,
                     next_key: info.next_key,

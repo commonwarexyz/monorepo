@@ -65,7 +65,7 @@ mod test {
         index::Unordered as _,
         mmr::{mem::Mmr, Position, StandardHasher as Standard},
         qmdb::{
-            any::{ordered::KeyData, OrderedUpdate},
+            any::{KeyData, OrderedUpdate},
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
