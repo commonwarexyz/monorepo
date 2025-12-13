@@ -203,7 +203,7 @@ fn fuzz(data: FuzzInput) {
                             assert!(
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                                     hasher.inner(),
-                                    &proof,
+                                    proof,
                                     start_loc,
                                     &ops,
                                     &chunks,
@@ -236,7 +236,7 @@ fn fuzz(data: FuzzInput) {
 
                         let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                             hasher.inner(),
-                            &proof,
+                            proof,
                             start_loc,
                             &res.1,
                             chunks,

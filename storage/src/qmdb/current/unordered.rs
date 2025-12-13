@@ -13,10 +13,7 @@ use crate::{
             unordered::{fixed::Any, FixedOperation as Operation},
             CleanAny, DirtyAny, FixedValue,
         },
-        current::{
-            get_current_proof, merkleize_grafted_bitmap, verify_operation_proof,
-            verify_range_proof, Config, OperationProof,
-        },
+        current::{merkleize_grafted_bitmap, verify_range_proof, Config, OperationProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -33,8 +30,8 @@ use std::num::NonZeroU64;
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
-/// A key-value QMDB based on an MMR over its log of operations, supporting authentication of whether
-/// a key ever had a specific value, and whether the key currently has that value.
+/// A key-value QMDB based on an MMR over its log of operations, supporting authentication of
+/// whether a key ever had a specific value, and whether the key currently has that value.
 ///
 /// Note: The generic parameter N is not really generic, and must be manually set to double the size
 /// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
@@ -104,8 +101,8 @@ impl<
         CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the DB with
-    /// the given root.
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the provided `root`.
     pub fn verify_key_value_proof(
         hasher: &mut H,
         key: K,
@@ -115,14 +112,14 @@ impl<
     ) -> bool {
         let op = Operation::Update(key, value);
 
-        verify_operation_proof(hasher, Self::grafting_height(), op, proof, root)
+        proof.verify(hasher, Self::grafting_height(), op, root)
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub fn verify_range_proof(
         hasher: &mut H,
-        proof: &Proof<H::Digest>,
+        proof: Proof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
@@ -252,8 +249,9 @@ impl<
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
+        let mmr = &self.any.log.mmr;
 
-        get_current_proof(hasher, &self.status, height, &self.any.log.mmr, loc).await
+        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
     }
 
     #[cfg(test)]
@@ -991,7 +989,7 @@ pub mod test {
             let op = Operation::Update(k, v1);
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
-                &proof_inactive.proof,
+                proof_inactive.proof.clone(),
                 proof_inactive.loc,
                 &[op],
                 &[proof_inactive.chunk],
@@ -1122,7 +1120,7 @@ pub mod test {
                 assert!(
                     CleanCurrentTest::verify_range_proof(
                         hasher.inner(),
-                        &proof,
+                        proof,
                         loc,
                         &ops,
                         &chunks,

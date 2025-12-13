@@ -13,10 +13,7 @@ use crate::{
             ordered::{fixed::Any, FixedOperation as Operation, KeyData},
             CleanAny, DirtyAny, FixedValue,
         },
-        current::{
-            get_current_proof, merkleize_grafted_bitmap, verify_operation_proof,
-            verify_range_proof, Config, OperationProof,
-        },
+        current::{merkleize_grafted_bitmap, verify_range_proof, Config, OperationProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -132,8 +129,8 @@ impl<
         CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the DB with
-    /// the given root.
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the provided `root`.
     pub fn verify_key_value_proof(
         hasher: &mut H,
         key: K,
@@ -148,7 +145,7 @@ impl<
         });
         let height = Self::grafting_height();
 
-        verify_operation_proof(hasher, height, op, proof.proof, root)
+        proof.proof.verify(hasher, height, op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -194,7 +191,7 @@ impl<
             }
         };
 
-        verify_operation_proof(hasher, Self::grafting_height(), op, op_proof, root)
+        op_proof.verify(hasher, Self::grafting_height(), op, root)
     }
 }
 
@@ -303,7 +300,7 @@ impl<
     /// the log with the provided root.
     pub fn verify_range_proof(
         hasher: &mut H,
-        proof: &Proof<H::Digest>,
+        proof: Proof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
@@ -331,7 +328,9 @@ impl<
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let proof = get_current_proof(hasher, &self.status, height, &self.any.log.mmr, loc).await?;
+        let mmr = &self.any.log.mmr;
+        let proof =
+            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -1155,7 +1154,7 @@ pub mod test {
             });
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
-                &proof_inactive.proof.proof,
+                proof_inactive.proof.proof.clone(),
                 proof_inactive.proof.loc,
                 &[op],
                 &[proof_inactive.proof.chunk],
@@ -1286,7 +1285,7 @@ pub mod test {
                 assert!(
                     CleanCurrentTest::verify_range_proof(
                         hasher.inner(),
-                        &proof,
+                        proof,
                         loc,
                         &ops,
                         &chunks,
