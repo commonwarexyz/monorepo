@@ -306,7 +306,7 @@ mod tests {
         2u8.write(&mut expected2); // Item 2
         5u8.write(&mut expected2); // Item 5
         assert_eq!(set2.encode(), expected2.freeze());
-        assert_eq!(set2.encode_size(), 1 + 3 * u8::SIZE);
+        assert_eq!(set2.encode_size(), 1 + 3);
 
         // Case 3: HashSet<Bytes>
         // HashSet sorts items for encoding: "apple", "banana", "cherry"
