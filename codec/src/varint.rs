@@ -696,7 +696,13 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<UInt<u16>>,
+            CodecConformance<UInt<u32>>,
+            CodecConformance<UInt<u64>>,
+            CodecConformance<UInt<u128>>,
             CodecConformance<SInt<i16>>,
+            CodecConformance<SInt<i32>>,
+            CodecConformance<SInt<i64>>,
+            CodecConformance<SInt<i128>>,
         }
     }
 }
