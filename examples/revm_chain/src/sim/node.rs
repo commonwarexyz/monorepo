@@ -1,6 +1,6 @@
 use super::{
-    consensus, genesis, simplex, Mailbox, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA,
-    BLOCK_CODEC_MAX_TXS, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
+    genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS, CHANNEL_BLOCKS,
+    CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
 use anyhow::Context as _;
 use commonware_consensus::types::{Epoch, ViewDelta};
@@ -14,6 +14,8 @@ use futures::channel::mpsc;
 use governor::Quota;
 use std::time::Duration;
 
+use crate::{application, consensus};
+
 pub(super) async fn start_all_nodes(
     context: &deterministic::Context,
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
@@ -21,17 +23,17 @@ pub(super) async fn start_all_nodes(
     schemes: &[ThresholdScheme],
     genesis: &genesis::GenesisTransfer,
 ) -> anyhow::Result<(
-    Vec<Mailbox>,
+    Vec<application::Handle>,
     mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
 )> {
     let quota = Quota::per_second(NZU32!(1_000));
     let buffer_pool = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
     let (finalized_tx, finalized_rx) = mpsc::unbounded::<consensus::FinalizationEvent>();
-    let mut mailboxes = Vec::with_capacity(participants.len());
+    let mut nodes = Vec::with_capacity(participants.len());
 
     for (i, pk) in participants.iter().cloned().enumerate() {
-        let mailbox = start_node(
+        let handle = start_node(
             context,
             oracle,
             i,
@@ -43,10 +45,10 @@ pub(super) async fn start_all_nodes(
             genesis,
         )
         .await?;
-        mailboxes.push(mailbox);
+        nodes.push(handle);
     }
 
-    Ok((mailboxes, finalized_rx))
+    Ok((nodes, finalized_rx))
 }
 
 async fn start_node(
@@ -59,7 +61,7 @@ async fn start_node(
     buffer_pool: PoolRef,
     finalized_tx: mpsc::UnboundedSender<consensus::FinalizationEvent>,
     genesis: &genesis::GenesisTransfer,
-) -> anyhow::Result<Mailbox> {
+) -> anyhow::Result<application::Handle> {
     let mut control = oracle.control(public_key.clone());
     let blocker = control.clone();
 
@@ -80,9 +82,9 @@ async fn start_node(
         .await
         .context("register blocks channel")?;
 
-    let (application, mailbox, inbox) = consensus::Application::new(
+    let (application, consensus_mailbox, handle) = application::Application::new(
         index as u32,
-        consensus::BlockCodecCfg {
+        application::BlockCodecCfg {
             max_txs: BLOCK_CODEC_MAX_TXS,
             max_calldata_bytes: BLOCK_CODEC_MAX_CALLDATA,
         },
@@ -93,19 +95,19 @@ async fn start_node(
         Some(genesis.tx.clone()),
     );
 
-    let mailbox_for_blocks = mailbox.clone();
+    let handle_for_blocks = handle.clone();
     context
         .with_label(&format!("block_receiver_{index}"))
         .spawn(move |_ctx| async move {
             while let Ok((from, bytes)) = block_receiver.recv().await {
-                mailbox_for_blocks.deliver_block(from, bytes).await;
+                handle_for_blocks.deliver_block(from, bytes).await;
             }
         });
 
     context
         .with_label(&format!("application_{index}"))
         .spawn(move |_ctx| async move {
-            application.run(inbox).await;
+            application.run().await;
         });
 
     let engine = simplex::Engine::new(
@@ -113,9 +115,9 @@ async fn start_node(
         simplex::Config {
             scheme,
             blocker,
-            automaton: mailbox.clone(),
-            relay: mailbox.clone(),
-            reporter: mailbox.clone(),
+            automaton: consensus_mailbox.clone(),
+            relay: consensus_mailbox.clone(),
+            reporter: consensus_mailbox.clone(),
             partition: format!("revm-chain-{index}"),
             mailbox_size: MAILBOX_SIZE,
             epoch: Epoch::zero(),
@@ -139,5 +141,5 @@ async fn start_node(
         (resolver_sender, resolver_receiver),
     );
 
-    Ok(mailbox)
+    Ok(handle)
 }

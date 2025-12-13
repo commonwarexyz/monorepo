@@ -1,4 +1,6 @@
-use super::{consensus, genesis, ConsensusDigest, Mailbox};
+use super::{genesis, ConsensusDigest};
+use crate::application::Handle;
+use crate::consensus;
 use futures::{channel::mpsc, StreamExt as _};
 
 pub(super) async fn wait_for_finalized_head(
@@ -33,17 +35,17 @@ pub(super) async fn wait_for_finalized_head(
 }
 
 pub(super) async fn assert_all_nodes_converged(
-    mailboxes: &[Mailbox],
+    nodes: &[Handle],
     head: ConsensusDigest,
     genesis: &genesis::GenesisTransfer,
 ) -> anyhow::Result<crate::StateRoot> {
     let mut state_root = None;
-    for mailbox in mailboxes.iter() {
-        let from_balance = mailbox
+    for node in nodes.iter() {
+        let from_balance = node
             .query_balance(head, genesis.from)
             .await
             .ok_or_else(|| anyhow::anyhow!("missing from balance"))?;
-        let to_balance = mailbox
+        let to_balance = node
             .query_balance(head, genesis.to)
             .await
             .ok_or_else(|| anyhow::anyhow!("missing to balance"))?;
@@ -51,7 +53,7 @@ pub(super) async fn assert_all_nodes_converged(
             return Err(anyhow::anyhow!("unexpected balances"));
         }
 
-        let root = mailbox
+        let root = node
             .query_state_root(head)
             .await
             .ok_or_else(|| anyhow::anyhow!("missing state root"))?;
