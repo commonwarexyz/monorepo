@@ -8,7 +8,10 @@ use futures::{
 };
 use governor::Quota;
 use rand_distr::Normal;
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
+
+// Re-export Link from runtime
+pub use commonware_runtime::simulated::Link;
 
 pub enum Message<P: PublicKey> {
     Register {
@@ -56,22 +59,6 @@ pub enum Message<P: PublicKey> {
     Blocked {
         result: oneshot::Sender<Result<Vec<(P, P)>, Error>>,
     },
-}
-
-/// Describes a connection between two peers.
-///
-/// Links are unidirectional (and must be set up in both directions
-/// for a bidirectional connection).
-#[derive(Clone)]
-pub struct Link {
-    /// Mean latency for the delivery of a message.
-    pub latency: Duration,
-
-    /// Standard deviation of the latency for the delivery of a message.
-    pub jitter: Duration,
-
-    /// Probability of a message being delivered successfully (in range \[0,1\]).
-    pub success_rate: f64,
 }
 
 /// Interface for modifying the simulated network.

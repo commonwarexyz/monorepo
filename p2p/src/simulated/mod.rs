@@ -141,7 +141,6 @@
 //! });
 //! ```
 
-mod bandwidth;
 mod ingress;
 mod metrics;
 mod network;

@@ -1392,6 +1392,12 @@ pub mod multihead {
     /// - Metrics namespace (metrics are prefixed)
     ///
     /// Instances can communicate with each other over the shared network.
+    ///
+    /// # Link Conditions
+    ///
+    /// For message-level link simulation (latency, jitter, bandwidth, drops),
+    /// use the [`crate::simulated`] module which provides a generic transmitter
+    /// that can be used with any peer identifier type.
     pub struct Manager {
         context: Context,
         /// Shared base network for all instances (allows cross-instance communication)

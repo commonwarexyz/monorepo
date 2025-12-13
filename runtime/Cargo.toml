@@ -23,10 +23,13 @@ futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand.workspace = true
+rand_distr.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
@@ -55,6 +58,9 @@ test-utils = []
 iouring-storage = [ "io-uring" ]
 iouring-network = [ "io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
+
+[dev-dependencies]
+rand_chacha.workspace = true
 
 [lib]
 bench = false
