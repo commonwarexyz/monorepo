@@ -1025,4 +1025,123 @@ mod tests {
             );
         });
     }
+
+    /// Test connectivity using multihead runtime instances.
+    ///
+    /// Each peer runs as an actor on its own `Instance` with a unique IP address,
+    /// isolated storage namespace, and isolated metrics. This pattern is useful for:
+    /// - More realistic simulation (unique IPs instead of unique ports)
+    /// - Natural isolation of peer state (storage/metrics automatically namespaced)
+    /// - Cleaner test setup (no manual port allocation)
+    #[test_traced]
+    fn test_multihead_connectivity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024;
+            const NUM_PEERS: usize = 5;
+            const PORT: u16 = 8080; // Same port for all, different IPs
+
+            // Create multihead manager - all instances share the same executor
+            let manager = deterministic::multihead::Manager::new(context.clone());
+
+            // Create peers with unique IPs
+            let mut peers_and_sks = Vec::new();
+            for i in 0..NUM_PEERS {
+                let ip = Ipv4Addr::new(10, 0, 0, (i + 1) as u8);
+                let private_key = ed25519::PrivateKey::from_seed(i as u64);
+                let public_key = private_key.public_key();
+                let address = SocketAddr::new(IpAddr::V4(ip), PORT);
+                peers_and_sks.push((private_key, public_key, address, ip));
+            }
+
+            let peers: Vec<_> = peers_and_sks
+                .iter()
+                .map(|(_, pub_key, addr, _)| (pub_key.clone(), *addr))
+                .collect();
+
+            // Spawn each peer on its own instance
+            let (complete_sender, mut complete_receiver) = mpsc::channel(NUM_PEERS);
+            for (i, (private_key, public_key, address, ip)) in peers_and_sks.iter().enumerate() {
+                // Create isolated instance with unique IP, storage, and metrics
+                let instance = manager.instance(*ip);
+                let ctx = instance.context();
+
+                // Create network - uses the instance's IP for all network operations
+                let config = Config::test(private_key.clone(), *address, MAX_MESSAGE_SIZE);
+                let (mut network, mut oracle) = Network::new(ctx.with_label("network"), config);
+
+                // Register all peers
+                oracle.update(0, peers.clone().try_into().unwrap()).await;
+
+                // Register application channel
+                let (mut sender, mut receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+
+                network.start();
+
+                // Spawn peer actor
+                let public_key = public_key.clone();
+                let peers_clone = peers.clone();
+                let mut complete_sender = complete_sender.clone();
+                ctx.with_label("agent").spawn(move |ctx| async move {
+                    // Receiver task: wait for messages from all other peers
+                    let receiver_task = ctx.with_label("receiver").spawn(move |_| async move {
+                        let mut received = HashSet::new();
+                        while received.len() < NUM_PEERS - 1 {
+                            let (sender_pk, message) = receiver.recv().await.unwrap();
+                            // Message should be the sender's public key
+                            assert_eq!(sender_pk.as_ref(), message.as_ref());
+                            received.insert(sender_pk);
+                        }
+                    });
+
+                    // Sender task: send our public key to all other peers
+                    let sender_task = ctx.with_label("sender").spawn(move |ctx| async move {
+                        // Track which peers we've successfully sent to
+                        let mut sent_to = HashSet::new();
+                        while sent_to.len() < NUM_PEERS - 1 {
+                            for (j, (pk, _)) in peers_clone.iter().enumerate() {
+                                if i == j || sent_to.contains(pk) {
+                                    continue;
+                                }
+                                let sent = sender
+                                    .send(
+                                        Recipients::One(pk.clone()),
+                                        public_key.to_vec().into(),
+                                        true,
+                                    )
+                                    .await
+                                    .unwrap();
+                                if !sent.is_empty() {
+                                    sent_to.insert(pk.clone());
+                                }
+                            }
+                            ctx.sleep(Duration::from_millis(100)).await;
+                        }
+                    });
+
+                    // Wait for receiver to complete
+                    receiver_task.await.unwrap();
+                    sender_task.abort();
+                    complete_sender.send(()).await.unwrap();
+                });
+            }
+
+            // Wait for all peers to complete
+            for _ in 0..NUM_PEERS {
+                complete_receiver.next().await.unwrap();
+            }
+
+            // Verify metrics are isolated per instance (each has its own namespace)
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("i10_0_0_1"),
+                "should have metrics for instance 10.0.0.1"
+            );
+            assert!(
+                metrics.contains("i10_0_0_5"),
+                "should have metrics for instance 10.0.0.5"
+            );
+        });
+    }
 }

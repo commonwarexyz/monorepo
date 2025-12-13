@@ -1111,4 +1111,104 @@ mod tests {
             );
         });
     }
+
+    /// Test that multihead runtime instances can be used with discovery networks.
+    ///
+    /// Each peer runs as an actor on its own `Instance` with a unique IP address,
+    /// isolated storage namespace, and isolated metrics. This pattern is useful for:
+    /// - More realistic simulation (unique IPs instead of unique ports)
+    /// - Natural isolation of peer state (storage/metrics automatically namespaced)
+    /// - Cleaner test setup (no manual port allocation)
+    ///
+    /// Note: For full connectivity tests with discovery, see `run_network` which
+    /// handles the complexities of peer discovery and message delivery.
+    #[test_traced]
+    fn test_multihead_instances() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024;
+            const NUM_PEERS: usize = 3;
+            const PORT: u16 = 8080;
+
+            // Create multihead manager - all instances share the same executor
+            let manager = deterministic::multihead::Manager::new(context.clone());
+
+            // Create peer keys
+            let mut peer_keys = Vec::new();
+            for i in 0..NUM_PEERS {
+                let private_key = ed25519::PrivateKey::from_seed(i as u64);
+                let public_key = private_key.public_key();
+                let ip = Ipv4Addr::new(10, 0, 0, (i + 1) as u8);
+                peer_keys.push((private_key, public_key, ip));
+            }
+
+            // First peer is the bootstrapper
+            let (_, bootstrap_pk, bootstrap_ip) = &peer_keys[0];
+            let bootstrapper = (
+                bootstrap_pk.clone(),
+                SocketAddr::new(IpAddr::V4(*bootstrap_ip), PORT),
+            );
+
+            // Create each peer on its own instance and verify isolation
+            for (i, (private_key, _public_key, ip)) in peer_keys.iter().enumerate() {
+                // Create isolated instance with unique IP, storage, and metrics
+                let instance = manager.instance(*ip);
+                let ctx = instance.context();
+
+                // Verify instance has correct IP
+                assert_eq!(instance.ip(), *ip);
+
+                // Verify namespace is derived from IP
+                let expected_namespace = format!(
+                    "{}_{}_{}_{}",
+                    ip.octets()[0],
+                    ip.octets()[1],
+                    ip.octets()[2],
+                    ip.octets()[3]
+                );
+                assert_eq!(instance.namespace(), expected_namespace);
+
+                // Bootstrappers: peers > 0 bootstrap from peer 0
+                let bootstrappers = if i > 0 {
+                    vec![bootstrapper.clone()]
+                } else {
+                    vec![]
+                };
+
+                // Create network with discovery - uses instance's IP for binding
+                let config = Config::test(
+                    private_key.clone(),
+                    SocketAddr::new(IpAddr::V4(*ip), PORT),
+                    bootstrappers,
+                    MAX_MESSAGE_SIZE,
+                );
+                let (network, mut oracle) = Network::new(ctx.with_label("network"), config);
+
+                // Register peers (discovery uses Set<PublicKey>, not Map<PublicKey, SocketAddr>)
+                let peer_set: Set<_> = peer_keys
+                    .iter()
+                    .map(|(_, pk, _)| pk.clone())
+                    .try_collect()
+                    .unwrap();
+                oracle.update(0, peer_set).await;
+
+                // Start network
+                network.start();
+            }
+
+            // Give time for discovery to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify metrics are isolated per instance
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("i10_0_0_1"),
+                "should have metrics for instance 10.0.0.1"
+            );
+            assert!(
+                metrics.contains("i10_0_0_3"),
+                "should have metrics for instance 10.0.0.3"
+            );
+        });
+    }
 }
