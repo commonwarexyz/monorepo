@@ -52,5 +52,6 @@ cargo test -p commonware-revm-chain
 ## Notes and Next Steps
 
 - This is intentionally minimal and does not implement an Ethereum trie or block syncing; `state_root` is a rolling commitment over per-tx state deltas.
+- Transactions are built directly as EVM call environments (no signature/fee market modeling); gas price is set to 0.
 - The demo block stream is minimal (a single transfer is injected early); extend `src/application/` to add more tx generation.
 - A future persistent backend can be implemented by adapting a Commonware storage primitive to the `Database` / `DatabaseCommit` seam (note the async/sync impedance mismatch).

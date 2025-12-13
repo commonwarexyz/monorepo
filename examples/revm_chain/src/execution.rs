@@ -50,12 +50,12 @@ where
     let spec = env.cfg_env.spec;
     let precompiles = precompiles_with_seed(spec);
     let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
+    let chain_id = evm.chain_id();
 
     let mut state_root = prev_root;
     let mut tx_changes = Vec::with_capacity(txs.len());
 
     for tx in txs {
-        let chain_id = evm.chain_id();
         let tx_env = tx_env_from_db(evm.db_mut(), tx, chain_id).context("build tx env")?;
 
         let ResultAndState { result: _, state } = evm.transact_raw(tx_env).context("execute tx")?;
