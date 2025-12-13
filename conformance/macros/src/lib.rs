@@ -1,4 +1,4 @@
-//! Augment the development of conformance tests with procedural macros.
+//! Augment the development of [`commonware-conformance`](https://docs.rs/commonware-conformance) with procedural macros.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -45,10 +45,8 @@ impl Parse for ConformanceInput {
 
 /// Convert a type to a valid snake_case function name suffix.
 ///
-/// Examples:
-/// - `Vec<u8>` -> `vec_u8`
-/// - `BTreeMap<u32, String>` -> `btreemap_u32_string`
-/// - `Option<Vec<u8>>` -> `option_vec_u8`
+/// Inserts underscores at PascalCase boundaries and replaces punctuation
+/// with underscores. Consecutive separators are collapsed.
 fn type_to_ident(ty: &Type) -> String {
     let type_str = quote!(#ty).to_string();
 
@@ -88,10 +86,11 @@ fn type_to_ident(ty: &Type) -> String {
     result.trim_end_matches("_").to_string()
 }
 
-/// Define conformance tests for types implementing the `Conformance` trait.
+/// Define tests for types implementing the
+/// [`Conformance`](https://docs.rs/commonware-conformance/latest/commonware_conformance/trait.Conformance.html) trait.
 ///
-/// This macro generates test functions that verify implementations match expected
-/// hash values stored in `conformance.toml`.
+/// Generates test functions that verify implementations match expected digest
+/// values stored in `conformance.toml`.
 ///
 /// # Usage
 ///
@@ -106,7 +105,7 @@ fn type_to_ident(ty: &Type) -> String {
 /// This generates test functions named after the type:
 /// - `test_vec_u8`
 /// - `test_vec_u16`
-/// - `test_btreemap_u32_string`
+/// - `test_b_tree_map_u32_string`
 ///
 /// The type name is used as the key in the TOML file.
 #[proc_macro]
@@ -145,4 +144,69 @@ pub fn conformance_tests(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ident_for(type_str: &str) -> String {
+        let ty: Type = syn::parse_str(type_str).unwrap();
+        type_to_ident(&ty)
+    }
+
+    #[test]
+    fn test_simple_types() {
+        assert_eq!(ident_for("u8"), "u8");
+        assert_eq!(ident_for("u32"), "u32");
+        assert_eq!(ident_for("String"), "string");
+    }
+
+    #[test]
+    fn test_generic_types() {
+        assert_eq!(ident_for("Vec<u8>"), "vec_u8");
+        assert_eq!(ident_for("Option<u32>"), "option_u32");
+        assert_eq!(ident_for("Option<Vec<u8>>"), "option_vec_u8");
+    }
+
+    #[test]
+    fn test_pascal_case_splitting() {
+        assert_eq!(ident_for("BTreeMap<u32, String>"), "b_tree_map_u32_string");
+        assert_eq!(ident_for("HashMap<u32, u32>"), "hash_map_u32_u32");
+    }
+
+    #[test]
+    fn test_wrapper_types() {
+        assert_eq!(
+            ident_for("CodecConformance<Vec<u8>>"),
+            "codec_conformance_vec_u8"
+        );
+        assert_eq!(
+            ident_for("CodecConformance<BTreeMap<u32, u32>>"),
+            "codec_conformance_b_tree_map_u32_u32"
+        );
+    }
+
+    #[test]
+    fn test_paths() {
+        assert_eq!(ident_for("std::vec::Vec<u8>"), "std_vec_vec_u8");
+        assert_eq!(ident_for("crate::Foo"), "crate_foo");
+    }
+
+    #[test]
+    fn test_tuples() {
+        assert_eq!(ident_for("(u32, u32)"), "u32_u32");
+        assert_eq!(ident_for("(u32, u32, u32)"), "u32_u32_u32");
+    }
+
+    #[test]
+    fn test_arrays() {
+        assert_eq!(ident_for("[u8; 32]"), "u8_32");
+    }
+
+    #[test]
+    fn test_underscores_in_names() {
+        assert_eq!(ident_for("my_type"), "my_type");
+        assert_eq!(ident_for("My_Type"), "my_type");
+    }
 }
