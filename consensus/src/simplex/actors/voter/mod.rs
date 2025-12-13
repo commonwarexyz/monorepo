@@ -2181,9 +2181,9 @@ mod tests {
 
             // Register network channels for the validator
             let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Start the actor
             voter.start(
