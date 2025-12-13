@@ -46,6 +46,7 @@ cfg_if::cfg_if! {
 }
 mod network;
 mod process;
+pub mod simulated;
 mod storage;
 pub mod telemetry;
 mod utils;

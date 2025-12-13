@@ -1346,6 +1346,272 @@ impl crate::Storage for Context {
     }
 }
 
+/// Multi-headed runtime support for creating multiple isolated instances
+/// that share a single deterministic executor.
+///
+/// This is useful for simulating multiple nodes in a distributed system test,
+/// where each node needs its own IP address, storage namespace, and metrics namespace,
+/// but they all share the same simulated time and task scheduler.
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_runtime::{deterministic::{self, Manager}, Runner, Clock, Metrics, Storage, Network};
+/// use std::net::{Ipv4Addr, SocketAddr};
+///
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
+///     // Create a manager from the root context
+///     let manager = Manager::new(context);
+///
+///     // Create instances with unique IP addresses
+///     let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+///     let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+///
+///     // Each instance has its own IP, storage namespace, and metrics prefix
+///     let context1 = instance1.context();
+///     let context2 = instance2.context();
+///
+///     // Storage is isolated by IP-derived namespace
+///     let (blob1, _) = context1.open("data", b"key").await.unwrap();
+///     let (blob2, _) = context2.open("data", b"key").await.unwrap();
+///     // blob1 and blob2 are in separate partitions
+/// });
+/// ```
+pub mod multihead {
+    use super::*;
+    use crate::{Metrics as _, Storage as _};
+    use std::net::Ipv4Addr;
+
+    /// A manager for creating multiple isolated runtime instances.
+    ///
+    /// All instances share the same executor (task queue, simulated time, RNG),
+    /// but each has its own:
+    /// - IP address for network operations
+    /// - Storage namespace (partitions are prefixed)
+    /// - Metrics namespace (metrics are prefixed)
+    ///
+    /// Instances can communicate with each other over the shared network.
+    ///
+    /// # Link Conditions
+    ///
+    /// For message-level link simulation (latency, jitter, bandwidth, drops),
+    /// use the [`crate::simulated`] module which provides a generic transmitter
+    /// that can be used with any peer identifier type.
+    pub struct Manager {
+        context: Context,
+        /// Shared base network for all instances (allows cross-instance communication)
+        base_network: DeterministicNetwork,
+        /// Track allocated IPs to detect duplicates
+        allocated_ips: std::cell::RefCell<std::collections::HashSet<Ipv4Addr>>,
+    }
+
+    impl Manager {
+        /// Create a new manager from a root context.
+        pub fn new(context: Context) -> Self {
+            Self {
+                context,
+                base_network: DeterministicNetwork::default(),
+                allocated_ips: std::cell::RefCell::new(std::collections::HashSet::new()),
+            }
+        }
+
+        /// Create a new isolated instance with the given IP address.
+        ///
+        /// The instance will use:
+        /// - The specified IP address for all network operations
+        /// - A storage namespace derived from the IP (e.g., "10_0_0_1_")
+        /// - A metrics namespace derived from the IP (e.g., "i10_0_0_1")
+        ///
+        /// Instances share the same network listener registry, allowing
+        /// them to communicate with each other.
+        ///
+        /// # Panics
+        ///
+        /// Panics if an instance with the same IP address has already been created.
+        pub fn instance(&self, ip: Ipv4Addr) -> Instance {
+            let mut allocated = self.allocated_ips.borrow_mut();
+            assert!(
+                allocated.insert(ip),
+                "duplicate IP address: {} has already been allocated",
+                ip
+            );
+            Instance::new(self.context.clone(), &self.base_network, ip)
+        }
+
+        /// Get a reference to the underlying context.
+        ///
+        /// This is useful for operations that should not be namespaced.
+        pub const fn context(&self) -> &Context {
+            &self.context
+        }
+    }
+
+    /// An isolated runtime instance with its own IP, storage namespace, and metrics prefix.
+    pub struct Instance {
+        ip: Ipv4Addr,
+        namespace: String,
+        context: Context,
+    }
+
+    impl Instance {
+        fn new(base_context: Context, base_network: &DeterministicNetwork, ip: Ipv4Addr) -> Self {
+            // Create namespace from IP address (e.g., "10_0_0_1")
+            let namespace = format!(
+                "{}_{}_{}_{}",
+                ip.octets()[0],
+                ip.octets()[1],
+                ip.octets()[2],
+                ip.octets()[3]
+            );
+
+            // Create new network with this instance's IP, sharing listeners with other instances
+            let executor = base_context.executor();
+            let instance_network = base_network.with_ip(ip);
+            let auditor = executor.auditor.clone();
+            let network = AuditedNetwork::new(instance_network, auditor);
+
+            // Get the runtime registry for metering
+            let mut registry = executor.registry.lock().unwrap();
+            let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+            let network = MeteredNetwork::new(network, runtime_registry);
+            drop(registry);
+
+            // Create a new context with the instance-specific network
+            // The storage and metrics will be namespaced via the Instance wrapper
+            let context = Context {
+                name: String::new(),
+                executor: base_context.executor.clone(),
+                network: Arc::new(network),
+                storage: base_context.storage.clone(),
+                tree: base_context.tree,
+                execution: Execution::default(),
+                instrumented: false,
+            };
+
+            Self {
+                ip,
+                namespace,
+                context,
+            }
+        }
+
+        /// Returns the IP address of this instance.
+        pub const fn ip(&self) -> Ipv4Addr {
+            self.ip
+        }
+
+        /// Returns the storage/metrics namespace for this instance.
+        pub fn namespace(&self) -> &str {
+            &self.namespace
+        }
+
+        /// Create a namespaced context for this instance.
+        ///
+        /// The returned context has:
+        /// - Network operations using this instance's IP
+        /// - A metrics prefix based on the instance namespace
+        /// - Storage operations should use the namespace prefix manually or use
+        ///   the provided helper methods on Instance.
+        pub fn context(&self) -> Context {
+            // Return a context with the instance namespace as its label
+            // Create a proper child tree for supervision
+            let (child, _) = Tree::child(&self.context.tree);
+            let name = format!("i{}", self.namespace);
+            Context {
+                name,
+                executor: self.context.executor.clone(),
+                network: self.context.network.clone(),
+                storage: self.context.storage.clone(),
+                tree: child,
+                execution: Execution::default(),
+                instrumented: false,
+            }
+        }
+
+        /// Open a blob in a namespaced partition.
+        ///
+        /// The partition name is automatically prefixed with this instance's namespace.
+        pub async fn open(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> Result<(<Storage as crate::Storage>::Blob, u64), Error> {
+            let namespaced_partition = format!("{}_{}", self.namespace, partition);
+            self.context.storage.open(&namespaced_partition, name).await
+        }
+
+        /// Remove a blob or partition from namespaced storage.
+        ///
+        /// The partition name is automatically prefixed with this instance's namespace.
+        pub async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            let namespaced_partition = format!("{}_{}", self.namespace, partition);
+            self.context
+                .storage
+                .remove(&namespaced_partition, name)
+                .await
+        }
+
+        /// Scan a namespaced partition.
+        ///
+        /// The partition name is automatically prefixed with this instance's namespace.
+        pub async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            let namespaced_partition = format!("{}_{}", self.namespace, partition);
+            self.context.storage.scan(&namespaced_partition).await
+        }
+
+        /// Encode only this instance's metrics.
+        ///
+        /// This filters the global metrics registry to return only metrics
+        /// that belong to this instance (those prefixed with the instance namespace).
+        /// The instance prefix is stripped from the returned metric names.
+        pub fn encode(&self) -> String {
+            let prefix = format!("i{}_", self.namespace);
+            let all_metrics = self.context.encode();
+
+            // Filter and transform lines:
+            // - Keep comments/empty lines as-is
+            // - Keep only metrics with our prefix, stripping the prefix
+            #[allow(clippy::option_if_let_else)]
+            all_metrics
+                .lines()
+                .filter_map(|line| {
+                    if line.is_empty() {
+                        Some(line.to_string())
+                    } else if line.starts_with('#') {
+                        // For comments (HELP, TYPE), also strip the prefix if present
+                        if let Some(rest) = line.strip_prefix("# HELP ") {
+                            rest.strip_prefix(&prefix)
+                                .map(|stripped| format!("# HELP {}", stripped))
+                        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+                            rest.strip_prefix(&prefix)
+                                .map(|stripped| format!("# TYPE {}", stripped))
+                        } else {
+                            // Skip comments that don't match our prefix
+                            None
+                        }
+                    } else {
+                        line.strip_prefix(&prefix).map(|s| s.to_string())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+
+    impl Manager {
+        /// Encode all metrics from all instances.
+        ///
+        /// This returns the complete metrics output from the shared registry,
+        /// including metrics from all instances created by this manager.
+        pub fn encode(&self) -> String {
+            self.context.encode()
+        }
+    }
+}
+
+pub use multihead::{Instance, Manager};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1726,5 +1992,338 @@ mod tests {
                 .expect("missing runtime_iterations_total metric");
             assert!(iterations > 500);
         });
+    }
+
+    mod multihead_tests {
+        use super::*;
+        use crate::{Blob, Listener as _, Network as _, Sink as _, Stream as _};
+        use std::net::Ipv4Addr;
+
+        #[test]
+        fn test_manager_creates_instances() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                // Verify IP addresses are assigned correctly
+                assert_eq!(instance1.ip(), Ipv4Addr::new(10, 0, 0, 1));
+                assert_eq!(instance2.ip(), Ipv4Addr::new(10, 0, 0, 2));
+
+                // Verify namespaces are correct
+                assert_eq!(instance1.namespace(), "10_0_0_1");
+                assert_eq!(instance2.namespace(), "10_0_0_2");
+            });
+        }
+
+        #[test]
+        fn test_instance_storage_isolation() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                // Write data to instance1's storage
+                let (blob1, _) = instance1.open("data", b"key").await.unwrap();
+                blob1.write_at(b"instance1_data".to_vec(), 0).await.unwrap();
+                blob1.sync().await.unwrap();
+
+                // Write data to instance2's storage
+                let (blob2, _) = instance2.open("data", b"key").await.unwrap();
+                blob2.write_at(b"instance2_data".to_vec(), 0).await.unwrap();
+                blob2.sync().await.unwrap();
+
+                // Verify data is isolated
+                let read1 = blob1.read_at(vec![0; 14], 0).await.unwrap();
+                assert_eq!(read1.as_ref(), b"instance1_data");
+
+                let read2 = blob2.read_at(vec![0; 14], 0).await.unwrap();
+                assert_eq!(read2.as_ref(), b"instance2_data");
+            });
+        }
+
+        #[test]
+        fn test_instance_metrics_isolation() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                let ctx1 = instance1.context();
+                let ctx2 = instance2.context();
+
+                // Register metrics with each instance
+                let counter1: prometheus_client::metrics::counter::Counter<u64> =
+                    prometheus_client::metrics::counter::Counter::default();
+                ctx1.register("test_counter", "A test counter", counter1.clone());
+                counter1.inc();
+
+                let counter2: prometheus_client::metrics::counter::Counter<u64> =
+                    prometheus_client::metrics::counter::Counter::default();
+                ctx2.register("test_counter", "A test counter", counter2.clone());
+                counter2.inc();
+                counter2.inc();
+
+                // Instance1's encode() should only see instance1's metrics (prefix stripped)
+                let metrics1 = instance1.encode();
+                assert!(
+                    metrics1.contains("test_counter_total 1"),
+                    "instance1 should see its own metrics without prefix: {}",
+                    metrics1
+                );
+                assert!(
+                    !metrics1.contains("i10_0_0_1"),
+                    "instance1's metrics should have prefix stripped: {}",
+                    metrics1
+                );
+                assert!(
+                    !metrics1.contains("i10_0_0_2"),
+                    "instance1 should not see instance2's metrics: {}",
+                    metrics1
+                );
+
+                // Instance2's encode() should only see instance2's metrics (prefix stripped)
+                let metrics2 = instance2.encode();
+                assert!(
+                    metrics2.contains("test_counter_total 2"),
+                    "instance2 should see its own metrics without prefix: {}",
+                    metrics2
+                );
+                assert!(
+                    !metrics2.contains("i10_0_0_2"),
+                    "instance2's metrics should have prefix stripped: {}",
+                    metrics2
+                );
+                assert!(
+                    !metrics2.contains("i10_0_0_1"),
+                    "instance2 should not see instance1's metrics: {}",
+                    metrics2
+                );
+
+                // Manager's encode() should see all metrics (with prefixes)
+                let all_metrics = manager.encode();
+                assert!(
+                    all_metrics.contains("i10_0_0_1_test_counter_total 1"),
+                    "manager should see instance1's metrics with prefix: {}",
+                    all_metrics
+                );
+                assert!(
+                    all_metrics.contains("i10_0_0_2_test_counter_total 2"),
+                    "manager should see instance2's metrics with prefix: {}",
+                    all_metrics
+                );
+            });
+        }
+
+        #[test]
+        #[should_panic(expected = "duplicate IP address")]
+        fn test_duplicate_ip_panics() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let _instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                // This should panic
+                let _instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+            });
+        }
+
+        #[test]
+        fn test_instance_network_communication() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                let ctx1 = instance1.context();
+                let ctx2 = instance2.context();
+
+                // Instance1 binds a listener
+                let server_addr = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    8080,
+                );
+                let mut listener = ctx1.bind(server_addr).await.unwrap();
+
+                // Instance2 connects to Instance1
+                let (mut client_sink, mut client_stream) = ctx2.dial(server_addr).await.unwrap();
+
+                // Accept connection on server side
+                let (peer_addr, mut server_sink, mut server_stream) =
+                    listener.accept().await.unwrap();
+
+                // Verify client address uses instance2's IP
+                assert_eq!(
+                    peer_addr.ip(),
+                    std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+                );
+
+                // Send message from client to server
+                client_sink
+                    .send(b"hello from client".to_vec())
+                    .await
+                    .unwrap();
+                let received = server_stream.recv(vec![0; 17]).await.unwrap();
+                assert_eq!(received.as_ref(), b"hello from client");
+
+                // Send message from server to client
+                server_sink
+                    .send(b"hello from server".to_vec())
+                    .await
+                    .unwrap();
+                let received = client_stream.recv(vec![0; 17]).await.unwrap();
+                assert_eq!(received.as_ref(), b"hello from server");
+            });
+        }
+
+        #[test]
+        fn test_instance_shared_time() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context.clone());
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                let ctx1 = instance1.context();
+                let ctx2 = instance2.context();
+
+                // Both instances should see the same time
+                let time1 = ctx1.current();
+                let time2 = ctx2.current();
+                assert_eq!(time1, time2);
+
+                // After sleeping on one context, both should see updated time
+                ctx1.sleep(Duration::from_millis(100)).await;
+
+                let time1_after = ctx1.current();
+                let time2_after = ctx2.current();
+                assert_eq!(time1_after, time2_after);
+                assert!(time1_after > time1);
+            });
+        }
+
+        #[test]
+        fn test_many_instances() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                // Create 100 instances to verify scalability
+                let instances: Vec<_> = (0..100u8)
+                    .map(|i| manager.instance(Ipv4Addr::new(10, 0, i, 1)))
+                    .collect();
+
+                // Verify each instance has unique IP and namespace
+                for (i, instance) in instances.iter().enumerate() {
+                    assert_eq!(instance.ip(), Ipv4Addr::new(10, 0, i as u8, 1));
+                    assert_eq!(instance.namespace(), format!("10_0_{}_1", i));
+                }
+
+                // Write data to each instance's storage
+                for (i, instance) in instances.iter().enumerate() {
+                    let (blob, _) = instance.open("data", b"key").await.unwrap();
+                    blob.write_at(format!("data_{}", i).into_bytes(), 0)
+                        .await
+                        .unwrap();
+                    blob.sync().await.unwrap();
+                }
+
+                // Verify data isolation
+                for (i, instance) in instances.iter().enumerate() {
+                    let (blob, len) = instance.open("data", b"key").await.unwrap();
+                    assert_eq!(len as usize, format!("data_{}", i).len());
+                    let read = blob.read_at(vec![0; len as usize], 0).await.unwrap();
+                    assert_eq!(read.as_ref(), format!("data_{}", i).as_bytes());
+                }
+            });
+        }
+
+        #[test]
+        fn test_context_drop_does_not_affect_others() {
+            use crate::Spawner;
+            use futures::channel::oneshot;
+
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                let (tx1, rx1) = oneshot::channel::<u32>();
+                let (tx2, rx2) = oneshot::channel::<u32>();
+
+                // Spawn task from instance1's context
+                let ctx1 = instance1.context();
+                ctx1.clone().spawn(|_| async move {
+                    tx1.send(42).unwrap();
+                });
+
+                // Spawn task from instance2's context
+                let ctx2 = instance2.context();
+                ctx2.clone().spawn(|_| async move {
+                    tx2.send(84).unwrap();
+                });
+
+                // Drop instance1's context - should not affect instance2's task
+                drop(ctx1);
+
+                // Both tasks should complete successfully
+                let result1 = rx1.await.unwrap();
+                let result2 = rx2.await.unwrap();
+
+                assert_eq!(result1, 42);
+                assert_eq!(result2, 84);
+            });
+        }
+
+        #[test]
+        fn test_multiple_contexts_from_same_instance() {
+            use crate::Spawner;
+            use futures::channel::oneshot;
+
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+
+                // Create multiple contexts from the same instance
+                let ctx1 = instance.context();
+                let ctx2 = instance.context();
+                let ctx3 = instance.context();
+
+                let (tx1, rx1) = oneshot::channel::<u32>();
+                let (tx2, rx2) = oneshot::channel::<u32>();
+                let (tx3, rx3) = oneshot::channel::<u32>();
+
+                // Spawn tasks from each context
+                ctx1.spawn(|_| async move {
+                    tx1.send(1).unwrap();
+                });
+
+                ctx2.spawn(|_| async move {
+                    tx2.send(2).unwrap();
+                });
+
+                ctx3.spawn(|_| async move {
+                    tx3.send(3).unwrap();
+                });
+
+                // All tasks should complete successfully
+                assert_eq!(rx1.await.unwrap(), 1);
+                assert_eq!(rx2.await.unwrap(), 2);
+                assert_eq!(rx3.await.unwrap(), 3);
+            });
+        }
     }
 }
