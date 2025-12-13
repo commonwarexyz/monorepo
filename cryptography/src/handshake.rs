@@ -49,7 +49,7 @@ use key_exchange::{EphemeralPublicKey, SecretKey};
 mod cipher;
 pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
 
-const NAMESPACE: &[u8] = b"commonware/handshake";
+const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
@@ -180,11 +180,11 @@ pub struct ListenState {
 /// Handshake context containing timing and identity information.
 /// Used by both dialer and listener to initialize handshake state.
 pub struct Context<S, P> {
+    transcript: Transcript,
     current_time: u64,
     ok_timestamps: Range<u64>,
     my_identity: S,
     peer_identity: P,
-    transcript: Transcript,
 }
 
 impl<S, P> Context<S, P> {
@@ -197,13 +197,12 @@ impl<S, P> Context<S, P> {
         my_identity: S,
         peer_identity: P,
     ) -> Self {
-        let transcript = base.fork(NAMESPACE);
         Self {
+            transcript: base.fork(NAMESPACE),
             current_time: current_time_ms,
             ok_timestamps,
             my_identity,
             peer_identity,
-            transcript,
         }
     }
 }
@@ -219,11 +218,10 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         my_identity,
         peer_identity,
-        transcript,
+        mut transcript,
     } = ctx;
     let esk = SecretKey::new(rng);
     let epk = esk.public();
-    let mut transcript = transcript;
     let sig = transcript
         .commit(current_time.encode())
         .commit(peer_identity.encode())
@@ -411,5 +409,37 @@ mod test {
         assert_eq!(m2, &m2_prime);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_mismatched_namespace_fails() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let dialer_crypto = PrivateKey::from_rng(&mut rng);
+        let listener_crypto = PrivateKey::from_rng(&mut rng);
+
+        let (_, msg1) = dial_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(b"namespace_a"),
+                0,
+                0..1,
+                dialer_crypto.clone(),
+                listener_crypto.public_key(),
+            ),
+        );
+
+        let result = listen_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(b"namespace_b"),
+                0,
+                0..1,
+                listener_crypto,
+                dialer_crypto.public_key(),
+            ),
+            msg1,
+        );
+
+        assert!(matches!(result, Err(Error::HandshakeFailed)));
     }
 }
