@@ -41,13 +41,14 @@ pub struct Application<S> {
     control: mpsc::Receiver<ControlMessage>,
 }
 
-enum Event {
-    Ingress(IngressMessage),
+enum Input {
+    Consensus(IngressMessage),
     Control(ControlMessage),
 }
 
 struct Runtime<S> {
     node: u32,
+    block_cfg: crate::types::BlockCfg,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
     genesis_tx: Option<Tx>,
@@ -227,9 +228,10 @@ where
             control,
         } = self;
 
-        let cfg = Self::block_cfg(codec);
+        let block_cfg = Self::block_cfg(codec);
         let mut runtime = Runtime {
             node,
+            block_cfg,
             finalized,
             genesis_alloc,
             genesis_tx,
@@ -239,10 +241,10 @@ where
             gossip,
         };
         let mut inbox =
-            futures::stream::select(ingress.map(Event::Ingress), control.map(Event::Control));
+            futures::stream::select(ingress.map(Input::Consensus), control.map(Input::Control));
 
         while let Some(event) = inbox.next().await {
-            runtime.handle_event(event, &cfg).await;
+            runtime.handle_input(event).await;
         }
     }
 }
@@ -251,10 +253,10 @@ impl<S> Runtime<S>
 where
     S: commonware_p2p::Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
 {
-    async fn handle_event(&mut self, event: Event, cfg: &crate::types::BlockCfg) {
-        match event {
-            Event::Ingress(message) => self.handle_ingress(message).await,
-            Event::Control(message) => self.handle_control(message, cfg),
+    async fn handle_input(&mut self, input: Input) {
+        match input {
+            Input::Consensus(message) => self.handle_ingress(message).await,
+            Input::Control(message) => self.handle_control(message),
         }
     }
 
@@ -282,7 +284,7 @@ where
         }
     }
 
-    fn handle_control(&mut self, message: ControlMessage, cfg: &crate::types::BlockCfg) {
+    fn handle_control(&mut self, message: ControlMessage) {
         match message {
             ControlMessage::QueryBalance {
                 digest,
@@ -296,7 +298,7 @@ where
                 self.handle_query_seed(digest, response)
             }
             ControlMessage::BlockReceived { from, bytes } => {
-                self.handle_block_received(from, bytes, cfg);
+                self.handle_block_received(from, bytes);
             }
         }
     }
@@ -421,14 +423,9 @@ where
             .push((context, response));
     }
 
-    fn handle_block_received(
-        &mut self,
-        from: PublicKey,
-        bytes: Bytes,
-        cfg: &crate::types::BlockCfg,
-    ) {
+    fn handle_block_received(&mut self, from: PublicKey, bytes: Bytes) {
         let _ = from;
-        let Ok(block) = Application::<S>::decode_block(bytes, cfg) else {
+        let Ok(block) = Application::<S>::decode_block(bytes, &self.block_cfg) else {
             return;
         };
 
