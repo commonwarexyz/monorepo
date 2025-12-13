@@ -5,6 +5,7 @@
 
 mod commitment;
 mod consensus;
+mod application;
 mod execution;
 mod sim;
 mod types;

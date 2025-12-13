@@ -2,7 +2,7 @@ use crate::types::{Block, BlockId};
 use alloy_evm::revm::database::InMemoryDB;
 use std::collections::BTreeMap;
 
-use super::ConsensusDigest;
+use crate::consensus::ConsensusDigest;
 
 #[derive(Clone, Debug)]
 pub(super) struct BlockEntry {
@@ -26,4 +26,3 @@ impl ChainStore {
         self.by_digest.get(digest)
     }
 }
-

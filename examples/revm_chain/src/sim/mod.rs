@@ -1,14 +1,11 @@
-use crate::{consensus, ConsensusDigest};
+use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::U256;
 use commonware_consensus::simplex;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
-use commonware_p2p::simulated;
 use commonware_runtime::{deterministic, Runner as _};
 
 type ThresholdScheme =
     simplex::signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
-type GossipSender = simulated::Sender<ed25519::PublicKey>;
-type Mailbox = consensus::Mailbox<GossipSender>;
 
 mod checks;
 mod dkg;
@@ -55,7 +52,7 @@ async fn run_sim(context: deterministic::Context, cfg: SimConfig) -> anyhow::Res
 
     let genesis = genesis::GenesisTransfer::new();
 
-    let (mailboxes, mut finalized_rx) = node::start_all_nodes(
+    let (nodes, mut finalized_rx) = node::start_all_nodes(
         &context,
         &mut oracle,
         &participants_vec,
@@ -65,7 +62,7 @@ async fn run_sim(context: deterministic::Context, cfg: SimConfig) -> anyhow::Res
     .await?;
 
     let head = checks::wait_for_finalized_head(&mut finalized_rx, cfg.nodes, cfg.blocks).await?;
-    let state_root = checks::assert_all_nodes_converged(&mailboxes, head, &genesis).await?;
+    let state_root = checks::assert_all_nodes_converged(&nodes, head, &genesis).await?;
 
     Ok(SimOutcome {
         head,
