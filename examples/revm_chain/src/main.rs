@@ -3,7 +3,7 @@ use commonware_revm_chain::{simulate, SimConfig};
 
 fn main() -> anyhow::Result<()> {
     let matches = Command::new("commonware-revm-chain")
-        .about("threshold-simplex + EVM execution example (scaffold)")
+        .about("threshold-simplex + EVM execution example")
         .arg(
             Arg::new("nodes")
                 .long("nodes")
@@ -31,8 +31,15 @@ fn main() -> anyhow::Result<()> {
     let blocks = *matches.get_one::<u64>("blocks").expect("defaulted");
     let seed = *matches.get_one::<u64>("seed").expect("defaulted");
 
-    let outcome = simulate(SimConfig { nodes, blocks, seed })?;
-    println!("scaffold complete: head={:?}", outcome.head);
+    let outcome = simulate(SimConfig {
+        nodes,
+        blocks,
+        seed,
+    })?;
+    println!("finalized head: {:?}", outcome.head);
+    println!("state root: {:?}", outcome.state_root);
+    println!("seed: {:?}", outcome.seed);
+    println!("from balance: {:?}", outcome.from_balance);
+    println!("to balance: {:?}", outcome.to_balance);
     Ok(())
 }
-
