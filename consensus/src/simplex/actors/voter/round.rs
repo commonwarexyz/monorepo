@@ -7,6 +7,7 @@ use crate::{
     types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::futures::Aborter;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -45,6 +46,8 @@ pub struct Round<S: Scheme, D: Digest> {
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
+    certified: Option<bool>,
+    certify_handle: Option<Aborter>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -67,6 +70,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
+            certified: None,
+            certify_handle: None,
         }
     }
 
@@ -116,6 +121,27 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
+    pub fn should_certify(&mut self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+        // Ignore any requests where we cannot certify or have already requested certification.
+        if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
+        {
+            return None;
+        }
+
+        // Mark certification as in-flight.
+        let leader = self.leader.clone()?;
+        let proposal = self.proposal.proposal().cloned().unwrap();
+        Some((leader, proposal))
+    }
+
+    pub fn set_certify_handle(&mut self, handle: Aborter) {
+        self.certify_handle = Some(handle);
+    }
+
+    pub fn unset_certify_handle(&mut self) {
+        self.certify_handle = None;
+    }
+
     /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
@@ -159,6 +185,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the finalization certificate if we already reconstructed one.
     pub const fn finalization(&self) -> Option<&Finalization<S, D>> {
         self.finalization.as_ref()
+    }
+
+    /// Returns true if we have explicitly certified the proposal.
+    pub fn is_certified(&self) -> bool {
+        self.certified == Some(true)
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
@@ -205,6 +236,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             | ProposalChange::Equivocated { .. }
             | ProposalChange::Skipped => false,
         }
+    }
+
+    /// Marks proposal certification as complete.
+    pub fn certified(&mut self, is_success: bool) {
+        assert!(
+            self.certified.is_none_or(|v| v == is_success),
+            "certification should not conflict"
+        );
+        self.certified = Some(is_success);
     }
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
@@ -418,6 +458,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
+
+        // If we haven't certified the proposal, return None.
+        if !self.is_certified() {
+            return None;
+        }
+
         self.broadcast_finalize = true;
         self.proposal.proposal()
     }
@@ -458,6 +504,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             }
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
+            }
+            Artifact::Certification(_, success) => {
+                self.certified(*success);
             }
         }
     }
