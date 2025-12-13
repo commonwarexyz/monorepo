@@ -1396,6 +1396,8 @@ pub mod multihead {
         context: Context,
         /// Shared base network for all instances (allows cross-instance communication)
         base_network: DeterministicNetwork,
+        /// Track allocated IPs to detect duplicates
+        allocated_ips: std::cell::RefCell<std::collections::HashSet<Ipv4Addr>>,
     }
 
     impl Manager {
@@ -1404,6 +1406,7 @@ pub mod multihead {
             Self {
                 context,
                 base_network: DeterministicNetwork::default(),
+                allocated_ips: std::cell::RefCell::new(std::collections::HashSet::new()),
             }
         }
 
@@ -1416,7 +1419,17 @@ pub mod multihead {
         ///
         /// Instances share the same network listener registry, allowing
         /// them to communicate with each other.
+        ///
+        /// # Panics
+        ///
+        /// Panics if an instance with the same IP address has already been created.
         pub fn instance(&self, ip: Ipv4Addr) -> Instance {
+            let mut allocated = self.allocated_ips.borrow_mut();
+            assert!(
+                allocated.insert(ip),
+                "duplicate IP address: {} has already been allocated",
+                ip
+            );
             Instance::new(self.context.clone(), &self.base_network, ip)
         }
 
@@ -1545,15 +1558,35 @@ pub mod multihead {
         ///
         /// This filters the global metrics registry to return only metrics
         /// that belong to this instance (those prefixed with the instance namespace).
+        /// The instance prefix is stripped from the returned metric names.
         pub fn encode(&self) -> String {
             let prefix = format!("i{}_", self.namespace);
             let all_metrics = self.context.encode();
 
-            // Filter to only include lines that start with our prefix or are comments/metadata
+            // Filter and transform lines:
+            // - Keep comments/empty lines as-is
+            // - Keep only metrics with our prefix, stripping the prefix
+            #[allow(clippy::option_if_let_else)]
             all_metrics
                 .lines()
-                .filter(|line| {
-                    line.starts_with('#') || line.starts_with(&prefix) || line.is_empty()
+                .filter_map(|line| {
+                    if line.is_empty() {
+                        Some(line.to_string())
+                    } else if line.starts_with('#') {
+                        // For comments (HELP, TYPE), also strip the prefix if present
+                        if let Some(rest) = line.strip_prefix("# HELP ") {
+                            rest.strip_prefix(&prefix)
+                                .map(|stripped| format!("# HELP {}", stripped))
+                        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+                            rest.strip_prefix(&prefix)
+                                .map(|stripped| format!("# TYPE {}", stripped))
+                        } else {
+                            // Skip comments that don't match our prefix
+                            None
+                        }
+                    } else {
+                        line.strip_prefix(&prefix).map(|s| s.to_string())
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -2031,38 +2064,67 @@ mod tests {
                 counter2.inc();
                 counter2.inc();
 
-                // Instance1's encode() should only see instance1's metrics
+                // Instance1's encode() should only see instance1's metrics (prefix stripped)
                 let metrics1 = instance1.encode();
                 assert!(
-                    metrics1.contains("i10_0_0_1_test_counter_total 1"),
-                    "instance1 should see its own metrics"
+                    metrics1.contains("test_counter_total 1"),
+                    "instance1 should see its own metrics without prefix: {}",
+                    metrics1
                 );
                 assert!(
-                    !metrics1.contains("i10_0_0_2_test_counter_total"),
-                    "instance1 should not see instance2's metrics"
+                    !metrics1.contains("i10_0_0_1"),
+                    "instance1's metrics should have prefix stripped: {}",
+                    metrics1
+                );
+                assert!(
+                    !metrics1.contains("i10_0_0_2"),
+                    "instance1 should not see instance2's metrics: {}",
+                    metrics1
                 );
 
-                // Instance2's encode() should only see instance2's metrics
+                // Instance2's encode() should only see instance2's metrics (prefix stripped)
                 let metrics2 = instance2.encode();
                 assert!(
-                    metrics2.contains("i10_0_0_2_test_counter_total 2"),
-                    "instance2 should see its own metrics"
+                    metrics2.contains("test_counter_total 2"),
+                    "instance2 should see its own metrics without prefix: {}",
+                    metrics2
                 );
                 assert!(
-                    !metrics2.contains("i10_0_0_1_test_counter_total"),
-                    "instance2 should not see instance1's metrics"
+                    !metrics2.contains("i10_0_0_2"),
+                    "instance2's metrics should have prefix stripped: {}",
+                    metrics2
+                );
+                assert!(
+                    !metrics2.contains("i10_0_0_1"),
+                    "instance2 should not see instance1's metrics: {}",
+                    metrics2
                 );
 
-                // Manager's encode() should see all metrics
+                // Manager's encode() should see all metrics (with prefixes)
                 let all_metrics = manager.encode();
                 assert!(
                     all_metrics.contains("i10_0_0_1_test_counter_total 1"),
-                    "manager should see instance1's metrics"
+                    "manager should see instance1's metrics with prefix: {}",
+                    all_metrics
                 );
                 assert!(
                     all_metrics.contains("i10_0_0_2_test_counter_total 2"),
-                    "manager should see instance2's metrics"
+                    "manager should see instance2's metrics with prefix: {}",
+                    all_metrics
                 );
+            });
+        }
+
+        #[test]
+        #[should_panic(expected = "duplicate IP address")]
+        fn test_duplicate_ip_panics() {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let _instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                // This should panic
+                let _instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
             });
         }
 
