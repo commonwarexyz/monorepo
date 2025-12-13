@@ -1,7 +1,7 @@
 use super::ControlMessage;
 use crate::consensus::{ConsensusDigest, PublicKey};
 use crate::types::StateRoot;
-use alloy_evm::revm::primitives::{Address, U256};
+use alloy_evm::revm::primitives::{Address, B256, U256};
 use bytes::Bytes;
 use futures::{
     channel::{mpsc, oneshot},
@@ -43,6 +43,15 @@ impl Handle {
         let mut sender = self.sender.clone();
         let _ = sender
             .send(ControlMessage::QueryStateRoot { digest, response })
+            .await;
+        receiver.await.unwrap_or(None)
+    }
+
+    pub async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
+        let (response, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        let _ = sender
+            .send(ControlMessage::QuerySeed { digest, response })
             .await;
         receiver.await.unwrap_or(None)
     }

@@ -1,6 +1,7 @@
 use super::{genesis, ConsensusDigest};
 use crate::application::Handle;
 use crate::consensus;
+use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
 
 pub(super) async fn wait_for_finalized_head(
@@ -38,8 +39,9 @@ pub(super) async fn assert_all_nodes_converged(
     nodes: &[Handle],
     head: ConsensusDigest,
     genesis: &genesis::GenesisTransfer,
-) -> anyhow::Result<crate::StateRoot> {
+) -> anyhow::Result<(crate::StateRoot, B256)> {
     let mut state_root = None;
+    let mut seed = None;
     for node in nodes.iter() {
         let from_balance = node
             .query_balance(head, genesis.from)
@@ -62,6 +64,19 @@ pub(super) async fn assert_all_nodes_converged(
             Some(prev) if prev == root => Some(prev),
             Some(_) => return Err(anyhow::anyhow!("divergent state roots")),
         };
+
+        let node_seed = node
+            .query_seed(head)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("missing seed"))?;
+        seed = match seed {
+            None => Some(node_seed),
+            Some(prev) if prev == node_seed => Some(prev),
+            Some(_) => return Err(anyhow::anyhow!("divergent seeds")),
+        };
     }
-    state_root.ok_or_else(|| anyhow::anyhow!("missing state root"))
+
+    let state_root = state_root.ok_or_else(|| anyhow::anyhow!("missing state root"))?;
+    let seed = seed.ok_or_else(|| anyhow::anyhow!("missing seed"))?;
+    Ok((state_root, seed))
 }
