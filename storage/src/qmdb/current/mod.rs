@@ -12,6 +12,7 @@ use crate::{
         hasher::Hasher,
         journaled::Mmr,
         mem::Clean,
+        storage::Storage,
         verification, Location, Proof, StandardHasher,
     },
     qmdb::{any::FixedConfig as AConfig, Error},
@@ -371,4 +372,29 @@ pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
     );
 
     reconstructed_root == *root
+}
+
+/// Return an inclusion proof that incorporates activity status for the operation designated by
+/// `loc`.
+async fn get_current_proof<H: CHasher, S: Storage<H::Digest>, const N: usize>(
+    hasher: &mut H,
+    status: &CleanBitMap<H::Digest, N>,
+    grafting_height: u32,
+    grafted_mmr: &S,
+    loc: Location,
+) -> Result<OperationProof<H::Digest, N>, Error> {
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, grafted_mmr, grafting_height);
+
+    // loc is valid so it won't overflow from + 1
+    let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
+    let chunk = *status.get_chunk_containing(*loc);
+
+    let (last_chunk, next_bit) = status.last_chunk();
+    if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+        hasher.update(last_chunk);
+        proof.digests.push(hasher.finalize());
+    }
+
+    Ok(OperationProof { loc, chunk, proof })
 }
