@@ -6,8 +6,9 @@ use commonware_cryptography::{
         dkg::deal,
         primitives::{group, variant::Variant},
     },
-    ed25519, PrivateKeyExt, Signer,
+    ed25519, Signer,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{ordered::BiMap, TryCollect};
 use rand::{CryptoRng, RngCore};
 
@@ -32,7 +33,7 @@ where
 {
     (0..n)
         .map(|_| {
-            let private_key = ed25519::PrivateKey::from_rng(rng);
+            let private_key = ed25519::PrivateKey::random(&mut *rng);
             let public_key = private_key.public_key();
             (public_key, private_key)
         })
@@ -54,7 +55,7 @@ where
 
     let schemes = ed25519_associated
         .into_iter()
-        .map(|(_, sk)| ed_scheme::Scheme::new(participants.clone(), sk))
+        .map(|(_, sk)| ed_scheme::Scheme::signer(participants.clone(), sk).unwrap())
         .collect();
     let verifier = ed_scheme::Scheme::verifier(participants.clone());
 
@@ -79,7 +80,7 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
+    let bls_privates: Vec<_> = (0..n).map(|_| group::Private::random(&mut *rng)).collect();
     let bls_public: Vec<_> = bls_privates
         .iter()
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
@@ -93,7 +94,7 @@ where
         .expect("ed25519 public keys are unique");
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::signer(signers.clone(), sk).unwrap())
         .collect();
     let verifier = bls12381_multisig::Scheme::verifier(signers);
 
@@ -118,15 +119,18 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let (output, shares) = deal::<V, _>(rng, participants.clone()).expect("deal should succeed");
+    let (output, shares) =
+        deal::<V, _>(rng, Default::default(), participants.clone()).expect("deal should succeed");
 
     let schemes = shares
         .into_iter()
         .map(|(_, share)| {
-            bls12381_threshold::Scheme::new(participants.clone(), output.public(), share)
+            bls12381_threshold::Scheme::signer(participants.clone(), output.public().clone(), share)
+                .unwrap()
         })
         .collect();
-    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), output.public());
+    let verifier =
+        bls12381_threshold::Scheme::verifier(participants.clone(), output.public().clone());
 
     Fixture {
         participants: participants.into(),

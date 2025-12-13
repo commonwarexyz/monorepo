@@ -14,7 +14,7 @@ use crate::{
         mem::Clean,
         verification, Location, Proof, StandardHasher,
     },
-    qmdb::{any::FixedConfig as AConfig, Error, Keyed},
+    qmdb::{any::FixedConfig as AConfig, Error},
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -131,13 +131,7 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
 ///
 /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
 /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-async fn range_proof<
-    E: RStorage + Clock + Metrics,
-    H: CHasher,
-    O: Keyed,
-    C: Contiguous<Item = O>,
-    const N: usize,
->(
+async fn range_proof<E: RStorage + Clock + Metrics, H: CHasher, C: Contiguous, const N: usize>(
     hasher: &mut H,
     status: &CleanBitMap<H::Digest, N>,
     height: u32,
@@ -145,7 +139,7 @@ async fn range_proof<
     log: &C,
     start_loc: Location,
     max_ops: NonZeroU64,
-) -> Result<(Proof<H::Digest>, Vec<O>, Vec<[u8; N]>), Error> {
+) -> Result<(Proof<H::Digest>, Vec<C::Item>, Vec<[u8; N]>), Error> {
     // Compute the start and end locations & positions of the range.
     let leaves = mmr.leaves();
     if start_loc >= leaves {

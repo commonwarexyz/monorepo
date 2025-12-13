@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
 use commonware_stream::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;

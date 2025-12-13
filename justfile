@@ -84,3 +84,11 @@ check-features:
 # Fix feature propagation and formatting
 fix-features:
     zepter && zepter format features --fix
+
+# Test conformance
+test-conformance:
+    just test --features arbitrary --profile conformance
+
+# Regenerate conformance fixtures
+regenerate-conformance:
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance

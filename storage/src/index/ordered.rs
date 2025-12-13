@@ -121,22 +121,50 @@ impl<T: Translator, V: Eq> Index<T, V> {
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         s
     }
-}
 
-impl<T: Translator, V: Eq> Ordered for Index<T, V> {
-    /// Get the values associated with the translated key that lexicographically precedes the result
-    /// of translating `key`.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
+    /// Like [Ordered::next_translated_key] but without cycling around to the first key if there is
+    /// no next key.
+    pub(super) fn next_translated_key_no_cycle<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<ImmutableCursor<'a, V>> {
+        let k = self.translator.transform(key);
+        self.map
+            .range((Excluded(k), Unbounded))
+            .next()
+            .map(|(_, record)| ImmutableCursor::new(record))
+    }
+
+    /// Like [Ordered::prev_translated_key] but without cycling around to the last key if there is
+    /// no previous key.
+    pub(super) fn prev_translated_key_no_cycle<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<ImmutableCursor<'a, V>> {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
             .next_back()
             .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
+    }
+}
+
+impl<T: Translator, V: Eq> Ordered for Index<T, V> {
+    type Iterator<'a>
+        = ImmutableCursor<'a, V>
+    where
+        Self: 'a;
+
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    where
+        Self::Value: 'a,
+    {
+        let res = self.prev_translated_key_no_cycle(key);
+        if res.is_some() {
+            return res;
+        }
+
+        self.last_translated_key()
     }
 
     /// Get the values associated with the translated key that lexicographically follows the result
@@ -149,41 +177,36 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     /// the same translated key can appear in any order, keys with the same first byte in this
     /// example would need to be ordered by the caller if a full ordering over the untranslated
     /// keyspace is desired.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
     {
-        let k = self.translator.transform(key);
-        self.map
-            .range((Excluded(k), Unbounded))
-            .next()
-            .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
+        let res = self.next_translated_key_no_cycle(key);
+        if res.is_some() {
+            return res;
+        }
+
+        self.first_translated_key()
     }
 
     /// Get the values associated with the lexicographically first translated key.
-    fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
     {
         self.map
             .first_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
     }
 
     /// Get the values associated with the lexicographically last translated key.
-    fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
     {
         self.map
             .last_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
     }
 }
 
@@ -331,6 +354,19 @@ mod tests {
     use commonware_utils::hex;
 
     #[test_traced]
+    fn test_ordered_empty_index() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let index = Index::<_, u64>::new(context, OneCap);
+
+            assert!(index.first_translated_key().is_none());
+            assert!(index.last_translated_key().is_none());
+            assert!(index.prev_translated_key(b"key").is_none());
+            assert!(index.next_translated_key(b"key").is_none());
+        });
+    }
+
+    #[test_traced]
     fn test_ordered_index_ordering() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -348,61 +384,65 @@ mod tests {
             assert_eq!(index.keys(), 3);
 
             // First translated key is 0b.
-            let mut next = index.first_translated_key();
+            let mut next = index.first_translated_key().unwrap();
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x00 is 0b.
-            let mut next = index.next_translated_key(&[0x00]);
+            let mut next = index.next_translated_key(&[0x00]).unwrap();
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x0b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x0b0102"));
+            let mut next = index.next_translated_key(&hex!("0x0b0102")).unwrap();
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x1b010203"));
+            let mut next = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key(&hex!("0x2a01020304"));
+            let mut next = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
             assert_eq!(next.next().unwrap(), &3);
             assert_eq!(next.next(), None);
 
-            // Next translated key to 0x2d is None.
-            let mut next = index.next_translated_key(k3);
+            // Next translated key to 0x2d cycles around to 0x0b.
+            let mut next = index.next_translated_key(k3).unwrap();
+            assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
-            let mut next = index.next_translated_key(&hex!("0x2eFF"));
+            // Another cycle-around case.
+            let mut next = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
-            // Previous translated key is None.
-            let mut prev = index.prev_translated_key(k1);
+            // Previous translated key of first key is the last key.
+            let mut prev = index.prev_translated_key(k1).unwrap();
+            assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key(&hex!("0x0c0102"));
+            let mut prev = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key(&hex!("0x1d0102"));
+            let mut prev = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key(&hex!("0xCC0102"));
+            let mut prev = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Last translated key is 2d.
-            let mut last = index.last_translated_key();
+            let mut last = index.last_translated_key().unwrap();
             assert_eq!(last.next().unwrap(), &3);
             assert_eq!(last.next(), None);
         });

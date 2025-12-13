@@ -36,17 +36,20 @@ impl Scheme {
     ///
     /// Participants use the same key for both identity and consensus.
     ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: Set<ed25519::PublicKey>, private_key: ed25519::PrivateKey) -> Self {
+    /// Returns `None` if the provided private key does not match any participant
+    /// in the committee.
+    pub fn signer(
+        participants: Set<ed25519::PublicKey>,
+        private_key: ed25519::PrivateKey,
+    ) -> Option<Self> {
         let signer = participants
             .position(&private_key.public_key())
-            .map(|index| (index as u32, private_key));
+            .map(|index| (index as u32, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
@@ -137,6 +140,20 @@ impl Read for Certificate {
             ));
         }
 
+        Ok(Self {
+            signers,
+            signatures,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Certificate {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signatures = (0..signers.count())
+            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
             signatures,
@@ -1025,5 +1042,15 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate>,
+        }
     }
 }

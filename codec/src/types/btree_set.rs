@@ -209,4 +209,14 @@ mod tests {
 
         assert_eq!(set1.encode(), set2.encode());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<BTreeSet<u8>>,
+        }
+    }
 }

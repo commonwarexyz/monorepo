@@ -49,9 +49,7 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     pub(super) const fn new(sender: mpsc::Sender<Message<P, M>>) -> Self {
         Self { sender }
     }
-}
 
-impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
     ///
     /// The responder will be sent the first message for an commitment when it is available; either

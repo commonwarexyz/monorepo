@@ -9,7 +9,7 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        operation::{Committable, Keyed},
+        operation::Committable,
         store::{CleanStore, DirtyStore},
         Error,
     },
@@ -24,6 +24,14 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
+
+// Context byte prefixes for Any operation types.
+const DELETE_CONTEXT: u8 = 0;
+const UPDATE_CONTEXT: u8 = 1;
+const COMMIT_FLOOR_CONTEXT: u8 = 2;
+
+mod value;
+pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
 
 mod ext;
 pub mod ordered;
@@ -170,7 +178,7 @@ type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
 /// floor specified by the last commit.
 pub(crate) async fn init_fixed_authenticated_log<
     E: Storage + Clock + Metrics,
-    O: Keyed + Committable + CodecFixed<Cfg = ()>,
+    O: Committable + CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
 >(

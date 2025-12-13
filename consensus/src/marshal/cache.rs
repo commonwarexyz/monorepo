@@ -13,7 +13,6 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -25,7 +24,7 @@ use std::{
 use tracing::{debug, info};
 
 // The key used to store the current epoch in the metadata store.
-const CACHED_EPOCHS_KEY: FixedBytes<1> = fixed_bytes!("0x00");
+const CACHED_EPOCHS_KEY: u8 = 0;
 
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
@@ -80,7 +79,7 @@ pub(crate) struct Manager<
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
-    metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
+    metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, B, S>>,

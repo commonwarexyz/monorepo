@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{poly, variant::Variant},
+    bls12381::primitives::{sharing::Sharing, variant::Variant},
     Digest,
 };
 use futures::{
@@ -34,7 +34,7 @@ pub struct Reporter<V: Variant, D: Digest> {
     identity: V::Public,
 
     // Polynomial public key of the group
-    polynomial: Vec<V::Public>,
+    polynomial: Sharing<V>,
 
     // Received acks (for validation)
     acks: HashSet<(Index, Epoch)>,
@@ -56,11 +56,15 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
     pub fn new(
         namespace: &[u8],
         participants: u32,
-        polynomial: poly::Public<V>,
+        polynomial: Sharing<V>,
     ) -> (Self, Mailbox<V, D>) {
+        assert_eq!(
+            participants,
+            polynomial.total().get(),
+            "number of participants does not match polynomial"
+        );
         let (sender, receiver) = mpsc::channel(1024);
-        let identity = *poly::public::<V>(&polynomial);
-        let polynomial = polynomial.evaluate_all(participants);
+        let identity = *polynomial.public();
         (
             Self {
                 mailbox: receiver,

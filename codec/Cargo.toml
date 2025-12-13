@@ -15,9 +15,20 @@ workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "bytes/std", "thiserror/std" ]
+std = [ "bytes/std", "rand?/std", "rand_chacha?/std", "thiserror/std" ]
+arbitrary = [
+	"dep:arbitrary",
+	"dep:commonware-conformance",
+	"dep:rand",
+	"dep:rand_chacha",
+	"std",
+]
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
+commonware-conformance = { workspace = true, optional = true }
 paste.workspace = true
+rand = { workspace = true, optional = true }
+rand_chacha = { workspace = true, optional = true }
 thiserror.workspace = true

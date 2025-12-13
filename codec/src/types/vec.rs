@@ -136,4 +136,15 @@ mod tests {
         expected_long_u8.extend_from_slice(&[0xCC; 200]);
         assert_eq!(v_long_u8.encode(), expected_long_u8.as_slice());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Vec<u8>>,
+            CodecConformance<Vec<u16>>,
+            CodecConformance<Vec<u32>>,
+        }
+    }
 }

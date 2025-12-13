@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
     ed25519::{self, Batch as Ed25519Batch},
-    BatchVerifier, PrivateKeyExt, Signer, Verifier,
+    BatchVerifier, Signer, Verifier,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};

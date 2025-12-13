@@ -346,7 +346,7 @@ impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
 }
 
 /// An immutable iterator over the values associated with a translated key.
-pub(super) struct ImmutableCursor<'a, V: Eq> {
+pub struct ImmutableCursor<'a, V: Eq> {
     current: Option<&'a Record<V>>,
 }
 

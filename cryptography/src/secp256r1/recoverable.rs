@@ -223,6 +223,25 @@ impl Display for Signature {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(private_key.sign(&[], &message))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +686,15 @@ mod tests {
             }
         };
         assert!(expected);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Signature>,
+        }
     }
 }

@@ -319,4 +319,18 @@ mod test {
             &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
         );
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Ipv4Addr>,
+            CodecConformance<Ipv6Addr>,
+            CodecConformance<SocketAddrV4>,
+            CodecConformance<SocketAddrV6>,
+            CodecConformance<SocketAddr>,
+        }
+    }
 }

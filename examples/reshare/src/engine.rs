@@ -63,8 +63,6 @@ where
     pub output: Option<Output<V, C::PublicKey>>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<C::PublicKey>,
-    pub orchestrator_rate_limit: governor::Quota,
-    pub dkg_rate_limit: governor::Quota,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
 }
@@ -133,7 +131,6 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
-                rate_limit: config.dkg_rate_limit,
             },
         )
         .await;
@@ -264,7 +261,6 @@ where
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
