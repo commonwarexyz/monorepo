@@ -4,9 +4,11 @@
 //! backend generic over the database trait boundary (`Database` + `DatabaseCommit`).
 
 mod commitment;
+mod execution;
 mod sim;
 mod types;
 
 pub use commitment::{commit_state_root, StateChanges};
+pub use execution::{execute_txs, ExecutionOutcome};
 pub use sim::{simulate, SimConfig, SimOutcome};
 pub use types::{block_id, Block, BlockId, StateRoot, Tx, TxId};
