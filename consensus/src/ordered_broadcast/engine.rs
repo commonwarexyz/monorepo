@@ -825,9 +825,10 @@ impl<
 
     /// Takes a raw `Node` (from sender) from the p2p network and validates it.
     ///
-    /// If valid (and not already the tracked tip for the sender), returns the implied
-    /// parent chunk and its threshold signature.
-    /// Else returns an error if the `Node` is invalid.
+    /// Returns an error if the `Node` is invalid. If the node is a duplicate of the
+    /// current tracked tip for the sender, returns `Ok(None)`. For a valid non-genesis
+    /// node, returns `Ok(Some(parent_chunk))`, where `parent_chunk` is the implied
+    /// parent chunk of this node.
     fn validate_node(
         &mut self,
         node: &Node<C::PublicKey, V, D>,
@@ -856,8 +857,9 @@ impl<
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
-    /// Returns the chunk, epoch, and partial signature if the ack is valid.
-    /// Returns an error if the ack is invalid.
+    /// Returns `Ok(())` if the ack is valid, comes from a known validator, and is
+    /// within the accepted epoch and height bounds. Returns an error if the ack is
+    /// invalid.
     fn validate_ack(
         &self,
         ack: &Ack<C::PublicKey, V, D>,
@@ -915,8 +917,9 @@ impl<
 
     /// Takes a raw chunk from the p2p network and validates it against the epoch.
     ///
-    /// Returns the chunk if the chunk is valid.
-    /// Returns an error if the chunk is invalid.
+    /// Returns `Ok(())` if the chunk is valid for the given epoch. Returns an error
+    /// if the chunk is invalid (e.g. unknown sequencer, height too low, or conflicting
+    /// payload at the same height).
     fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
         // Verify sequencer
         if self
