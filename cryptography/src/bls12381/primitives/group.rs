@@ -125,6 +125,11 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(
+    all(test, feature = "arbitrary"),
+    derive(commonware_conformance::ConformanceTest)
+)]
+#[cfg_attr(all(test, feature = "arbitrary"), conformance(bridge = commonware_codec::conformance::CodecConformance))]
 #[repr(transparent)]
 pub struct G1(blst_p1);
 

@@ -5,7 +5,7 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input,
+    parse_macro_input, DeriveInput,
     punctuated::Punctuated,
     Ident, Token, Type,
 };
@@ -142,6 +142,123 @@ pub fn conformance_tests(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #(#tests)*
+    };
+
+    expanded.into()
+}
+
+/// Generate a conformance test for the type this derive is applied to.
+///
+/// This derive macro generates a test module containing a conformance test
+/// for the annotated type.
+///
+/// # Attributes
+///
+/// Use the `#[conformance(...)]` attribute to configure the test:
+///
+/// - `bridge = SomeType`: Wrap the type with a bridge type, generating
+///   `SomeType<MyType>` instead of just `MyType`. This is useful for types
+///   that don't directly implement `Conformance` but have a wrapper that does.
+///
+/// - `n_cases = N`: Number of test cases to generate (default: 65536).
+///
+/// # Examples
+///
+/// Basic usage (type must implement `Conformance`):
+///
+/// ```ignore
+/// #[derive(ConformanceTest)]
+/// pub struct MyType { /* ... */ }
+/// ```
+///
+/// With a bridge type (e.g., for codec conformance):
+///
+/// ```ignore
+/// #[derive(ConformanceTest)]
+/// #[conformance(bridge = CodecConformance)]
+/// pub struct MyType { /* ... */ }
+/// // Generates test for: CodecConformance<MyType>
+/// ```
+///
+/// With custom case count:
+///
+/// ```ignore
+/// #[derive(ConformanceTest)]
+/// #[conformance(n_cases = 1024)]
+/// pub struct MyType { /* ... */ }
+/// ```
+///
+/// Combined:
+///
+/// ```ignore
+/// #[derive(ConformanceTest)]
+/// #[conformance(bridge = CodecConformance, n_cases = 1024)]
+/// pub struct MyType { /* ... */ }
+/// ```
+#[proc_macro_derive(ConformanceTest, attributes(conformance))]
+pub fn derive_conformance_test(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let type_name = &input.ident;
+
+    // Parse the #[conformance(...)] attribute
+    let mut bridge: Option<syn::Path> = None;
+    let mut n_cases: Option<syn::Expr> = None;
+
+    for attr in &input.attrs {
+        if attr.path().is_ident("conformance") {
+            let result = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("bridge") {
+                    meta.input.parse::<Token![=]>()?;
+                    bridge = Some(meta.input.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("n_cases") {
+                    meta.input.parse::<Token![=]>()?;
+                    n_cases = Some(meta.input.parse()?);
+                    Ok(())
+                } else {
+                    Err(meta.error("expected `bridge` or `n_cases`"))
+                }
+            });
+
+            if let Err(e) = result {
+                return e.to_compile_error().into();
+            }
+        }
+    }
+
+    // Build the test type (either Bridge<Type> or just Type)
+    let test_type: proc_macro2::TokenStream = if let Some(bridge_path) = &bridge {
+        quote!(#bridge_path<#type_name>)
+    } else {
+        quote!(#type_name)
+    };
+
+    // Build the n_cases expression
+    let n_cases_expr = n_cases
+        .map(|e| quote!(#e))
+        .unwrap_or_else(|| quote!(::commonware_conformance::DEFAULT_CASES));
+
+    // Generate the test function name from the full test type
+    let test_type_for_name: syn::Type = syn::parse2(test_type.clone()).unwrap();
+    let fn_name_suffix = type_to_ident(&test_type_for_name);
+    let fn_name = Ident::new(&format!("test_{fn_name_suffix}"), Span::call_site());
+
+    // Generate the type name string for the TOML key
+    let type_name_str = test_type.to_string().replace(' ', "");
+
+    let expanded = quote! {
+        #[cfg(test)]
+        #[::commonware_conformance::commonware_macros::test_group("conformance")]
+        #[test]
+        fn #fn_name() {
+            ::commonware_conformance::futures::executor::block_on(
+                ::commonware_conformance::run_conformance_test::<#test_type>(
+                    concat!(module_path!(), "::", #type_name_str),
+                    #n_cases_expr,
+                    ::std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
+                )
+            );
+        }
     };
 
     expanded.into()

@@ -41,7 +41,7 @@
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
 
-pub use commonware_conformance_macros::conformance_tests;
+pub use commonware_conformance_macros::{conformance_tests, ConformanceTest};
 #[doc(hidden)]
 pub use commonware_macros;
 use core::future::Future;

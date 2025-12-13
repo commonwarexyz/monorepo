@@ -54,7 +54,7 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = [ "std" ]
+default = [ "std", "arbitrary" ]
 parallel = [ "blake3/rayon", "rayon", "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
