@@ -70,8 +70,9 @@ mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -903,7 +904,7 @@ mod test {
 
                 // Insert 1000 random keys into both the db and an ordered map.
                 for i in 0..1000 {
-                    let key = Digest::random(rng);
+                    let key = Digest::random(&mut *rng);
                     keys.insert(key, i);
                     db.update(key, i).await.unwrap();
                 }
@@ -948,7 +949,7 @@ mod test {
                 }
                 assert_eq!(keys.len(), 0);
                 assert!(db.is_empty());
-                assert_eq!(db.get_span(&Digest::random(rng)).await.unwrap(), None);
+                assert_eq!(db.get_span(&Digest::random(&mut *rng)).await.unwrap(), None);
             }
 
             let mut rng = StdRng::seed_from_u64(context.next_u64());

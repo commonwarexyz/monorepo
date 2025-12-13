@@ -23,6 +23,7 @@ cfg-if.workspace = true
 chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
 commonware-codec.workspace = true
 commonware-macros = { workspace = true, optional = true }
+commonware-math.workspace = true
 commonware-utils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
@@ -44,7 +45,9 @@ features = ["js"]
 [dev-dependencies]
 anyhow.workspace = true
 commonware-conformance.workspace = true
+commonware-math = { workspace = true, features = ["test_strategies"] }
 criterion.workspace = true
+proptest.workspace = true
 rstest.workspace = true
 
 [lib]
@@ -56,6 +59,7 @@ default = [ "std" ]
 parallel = [ "blake3/rayon", "rayon", "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-math/arbitrary",
 	"dep:anyhow",
 	"dep:arbitrary",
 	"dep:commonware-macros",
@@ -68,6 +72,7 @@ std = [
 	"chacha20poly1305/getrandom",
 	"chacha20poly1305/std",
 	"commonware-codec/std",
+	"commonware-math/std",
 	"commonware-utils/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",

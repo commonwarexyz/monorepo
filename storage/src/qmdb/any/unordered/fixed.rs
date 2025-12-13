@@ -72,8 +72,9 @@ pub(super) mod test {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},

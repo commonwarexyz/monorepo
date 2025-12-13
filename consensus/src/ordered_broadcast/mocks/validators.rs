@@ -1,17 +1,13 @@
 use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        poly::{public, Public},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, sharing::Sharing, variant::Variant},
     PublicKey,
 };
 use std::{collections::HashMap, marker::PhantomData};
 
 #[derive(Clone)]
 pub struct Validators<P: PublicKey, V: Variant> {
-    polynomial: Public<V>,
+    polynomial: Sharing<V>,
     validators: Vec<P>,
     validators_map: HashMap<P, u32>,
     share: Option<Share>,
@@ -20,7 +16,7 @@ pub struct Validators<P: PublicKey, V: Variant> {
 }
 
 impl<P: PublicKey, V: Variant> Validators<P, V> {
-    pub fn new(polynomial: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
+    pub fn new(polynomial: Sharing<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
         // Setup validators
         validators.sort();
         let mut validators_map = HashMap::new();
@@ -53,13 +49,13 @@ impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
 }
 
 impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
-    type Polynomial = Public<V>;
+    type Polynomial = Sharing<V>;
     type Identity = V::Public;
     type Share = Share;
     type Seed = V::Signature;
 
     fn identity(&self) -> &Self::Identity {
-        public::<V>(&self.polynomial)
+        self.polynomial.public()
     }
 
     fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {

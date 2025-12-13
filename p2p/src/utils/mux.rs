@@ -458,7 +458,7 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
     use governor::Quota;

@@ -1,0 +1,40 @@
+[package]
+name = "commonware-math"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Create and manipulate mathematical objects."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
+documentation = "https://docs.rs/commonware-math"
+
+[features]
+arbitrary = [ "commonware-codec/arbitrary", "dep:arbitrary", "std" ]
+default = [ "arbitrary", "std" ]
+test_strategies = [ "dep:proptest", "std" ]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-utils/std",
+	"rand_core/std",
+	"rayon",
+]
+
+[dependencies]
+arbitrary = { workspace = true, optional = true }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-utils.workspace = true
+proptest = { workspace = true, optional = true }
+rand_core.workspace = true
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lib]
+bench = false

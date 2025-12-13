@@ -81,7 +81,7 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{Element, Scalar, DST, GT},
+        group::{Scalar, DST, GT},
         ops::{hash_message, hash_message_namespace},
         variant::Variant,
     },
@@ -91,6 +91,7 @@ use crate::{
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRngCore;
 
@@ -112,7 +113,7 @@ impl From<Digest> for Block {
 /// Encrypted message.
 #[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ciphertext<V: Variant> {
-    /// First group element U = r * Public::one().
+    /// First group element U = r * Public::generator().
     pub u: V::Public,
     /// Encrypted random value V = sigma XOR H2(e(P_pub, Q_id)^r).
     pub v: Block,
@@ -285,15 +286,15 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     // Derive scalar r from sigma and message
     let r = hash::h3(&sigma, message.as_ref());
 
-    // Compute U = r * Public::one()
-    let mut u = V::Public::one();
-    u.mul(&r);
+    // Compute U = r * Public::generator()
+    let mut u = V::Public::generator();
+    u *= &r;
 
     // Compute e(P_pub, Q_id)^r = e(r * P_pub, Q_id).
     //
     // The latter expression is more efficient to compute.
     let mut r_pub = public;
-    r_pub.mul(&r);
+    r_pub *= &r;
     let gt = V::pairing(&r_pub, &q_id);
 
     // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
@@ -334,10 +335,10 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
     let h4_value = hash::h4(&sigma);
     let message = xor(&ciphertext.w, &h4_value);
 
-    // Recompute r and verify U = r * Public::one()
+    // Recompute r and verify U = r * Public::generator()
     let r = hash::h3(&sigma, &message);
-    let mut expected_u = V::Public::one();
-    expected_u.mul(&r);
+    let mut expected_u = V::Public::generator();
+    expected_u *= &r;
     if ciphertext.u != expected_u {
         return None;
     }
@@ -352,6 +353,7 @@ mod tests {
         ops::{keypair, sign_message},
         variant::{MinPk, MinSig},
     };
+    use commonware_math::algebra::Random as _;
     use rand::thread_rng;
 
     #[test]
@@ -608,7 +610,7 @@ mod tests {
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
-        modified_u.mul(&Scalar::from_rand(&mut rng));
+        modified_u *= &Scalar::random(&mut rng);
         ciphertext.u = modified_u;
 
         // Try to decrypt - should fail

@@ -1,7 +1,9 @@
+use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
-use commonware_cryptography::Hasher;
+use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+#[cfg(test)]
+use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
-use std::ops::{Add, Mul, Neg, Sub};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -33,8 +35,8 @@ impl Read for F {
     }
 }
 
-impl std::fmt::Debug for F {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for F {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:016X}", self.0)
     }
 }
@@ -67,16 +69,12 @@ impl F {
     /// The zero element of the field.
     ///
     /// This is the identity for addition.
-    pub const fn zero() -> Self {
-        Self(0)
-    }
+    const ZERO: Self = Self(0);
 
     /// The one element of the field.
     ///
     /// This is the identity for multiplication.
-    pub const fn one() -> Self {
-        Self(1)
-    }
+    const ONE: Self = Self(1);
 
     const fn add_inner(self, b: Self) -> Self {
         // We want to calculate self + b mod P.
@@ -172,30 +170,14 @@ impl F {
     }
 
     const fn neg_inner(self) -> Self {
-        Self::zero().sub_inner(self)
+        Self::ZERO.sub_inner(self)
     }
 
     /// Return the multiplicative inverse of a field element.
     ///
     /// [Self::zero] will return [Self::zero].
-    pub const fn inv(self) -> Self {
-        self.exp(P - 2)
-    }
-
-    /// Calculate self ^ k.
-    pub const fn exp(self, mut k: u64) -> Self {
-        let mut acc = Self::one();
-        // w will contain self, self^2, self^4, ...
-        let mut w = self;
-        while k > 0 {
-            // If the ith bit of exponent is 1, multiply by self^(2^i)
-            if k & 1 != 0 {
-                acc = acc.mul_inner(w);
-            }
-            w = w.mul_inner(w);
-            k >>= 1;
-        }
-        acc
+    pub fn inv(self) -> Self {
+        self.exp(&[P - 2])
     }
 
     /// Construct a 2^lg_k root of unity.
@@ -314,13 +296,9 @@ impl F {
         bits.div_ceil(63)
     }
 
-    /// Hash the elements in a slice of field elements.
-    pub fn slice_digest<H: Hasher>(data: &[Self]) -> H::Digest {
-        let mut h = H::new();
-        for x in data {
-            h.update(x.0.to_le_bytes().as_slice());
-        }
-        h.finalize()
+    /// Convert this element to little-endian bytes.
+    pub const fn to_le_bytes(&self) -> [u8; 8] {
+        self.0.to_le_bytes()
     }
 
     /// Create a random field element.
@@ -337,11 +315,47 @@ impl F {
     }
 }
 
+impl Object for F {}
+
 impl Add for F {
     type Output = Self;
 
     fn add(self, b: Self) -> Self::Output {
         self.add_inner(b)
+    }
+}
+
+impl<'a> Add<&'a F> for F {
+    type Output = F;
+
+    fn add(self, rhs: &'a F) -> Self::Output {
+        self + *rhs
+    }
+}
+
+impl<'a> AddAssign<&'a F> for F {
+    fn add_assign(&mut self, rhs: &'a F) {
+        *self = *self + rhs
+    }
+}
+
+impl<'a> Sub<&'a F> for F {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a F) -> Self::Output {
+        self - *rhs
+    }
+}
+
+impl<'a> SubAssign<&'a F> for F {
+    fn sub_assign(&mut self, rhs: &'a F) {
+        *self = *self - rhs;
+    }
+}
+
+impl Additive for F {
+    fn zero() -> Self {
+        Self::ZERO
     }
 }
 
@@ -361,6 +375,22 @@ impl Mul for F {
     }
 }
 
+impl<'a> Mul<&'a F> for F {
+    type Output = F;
+
+    fn mul(self, rhs: &'a F) -> Self::Output {
+        self * *rhs
+    }
+}
+
+impl<'a> MulAssign<&'a F> for F {
+    fn mul_assign(&mut self, rhs: &'a F) {
+        *self = *self * rhs;
+    }
+}
+
+impl Multiplicative for F {}
+
 impl Neg for F {
     type Output = Self;
 
@@ -375,24 +405,46 @@ impl From<u64> for F {
     }
 }
 
+impl Ring for F {
+    fn one() -> Self {
+        Self::ONE
+    }
+}
+
+impl Field for F {
+    fn inv(&self) -> Self {
+        F::inv(*self)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::algebra;
     use proptest::prelude::*;
+
+    impl Arbitrary for F {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            any::<u64>().prop_map_into().boxed()
+        }
+    }
 
     #[test]
     fn test_generator_calculation() {
-        assert_eq!(F::GENERATOR, F(7).exp(133));
+        assert_eq!(F::GENERATOR, F(7).exp(&[133]));
     }
 
     #[test]
     fn test_root_of_unity_calculation() {
-        assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp((P - 1) >> 32));
+        assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp(&[(P - 1) >> 32]));
     }
 
     #[test]
     fn test_not_root_of_unity_calculation() {
-        assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(1 << 32));
+        assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(&[1 << 32]));
     }
 
     #[test]
@@ -402,11 +454,7 @@ mod test {
 
     #[test]
     fn test_root_of_unity_exp() {
-        assert_eq!(F::ROOT_OF_UNITY.exp(1 << 26), F(8));
-    }
-
-    fn any_f() -> impl Strategy<Value = F> {
-        any::<u64>().prop_map(F)
+        assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
     }
 
     fn test_stream_roundtrip_inner(data: Vec<u64>) {
@@ -418,51 +466,16 @@ mod test {
 
     proptest! {
         #[test]
-        fn test_add_zero_does_nothing(x in any_f()) {
-            assert_eq!(x + F::zero(), x);
-        }
-
-        #[test]
-        fn test_add_commutative(x in any_f(), y in any_f()) {
-            assert_eq!(x + y, y + x);
-        }
-
-        #[test]
-        fn test_add_associative(x in any_f(), y in any_f(), z in any_f()) {
-            assert_eq!(x + (y + z), (x + y) + z);
-        }
-
-        #[test]
-        fn test_mul_one_does_nothing(x in any_f()) {
-            assert_eq!(x * F::one(), x);
-        }
-
-        #[test]
-        fn test_mul_commutative(x in any_f(), y in any_f()) {
-            assert_eq!(x * y, y * x);
-        }
-
-        #[test]
-        fn test_mul_associative(x in any_f(), y in any_f(), z in any_f()) {
-            assert_eq!(x * (y * z), (x * y) * z);
-        }
-
-        #[test]
-        fn test_sub_eq_mul_minus_one(x in any_f(), y in any_f()) {
-            assert_eq!(x - y, x + -F::one() * y);
-        }
-
-        #[test]
-        fn test_exp(x in any_f(), k: u8) {
+        fn test_exp(x: F, k: u8) {
             let mut naive = F::one();
             for _ in 0..k {
                 naive = naive * x;
             }
-            assert_eq!(naive, x.exp(k as u64));
+            assert_eq!(naive, x.exp(&[k as u64]));
         }
 
         #[test]
-        fn test_div2(x in any_f()) {
+        fn test_div2(x: F) {
             assert_eq!((x + x).div_2(), x)
         }
 
@@ -470,5 +483,10 @@ mod test {
         fn test_stream_roundtrip(xs in proptest::collection::vec(any::<u64>(), 0..128)) {
             test_stream_roundtrip_inner(xs);
         }
+    }
+
+    #[test]
+    fn test_field() {
+        algebra::test_suites::test_field(file!(), &F::arbitrary());
     }
 }

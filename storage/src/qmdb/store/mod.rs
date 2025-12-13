@@ -33,6 +33,7 @@
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
+//! use commonware_math::algebra::Random;
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
 //! const PAGE_SIZE: usize = 77;
@@ -655,9 +656,10 @@ mod test {
     use crate::{qmdb::store::batch_tests, store::StoreMut as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
-        Digest as _, Hasher as _,
+        Hasher as _,
     };
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
 

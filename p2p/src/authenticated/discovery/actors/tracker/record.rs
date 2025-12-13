@@ -305,10 +305,7 @@ impl<C: PublicKey> Record<C> {
 mod tests {
     use super::*;
     use commonware_codec::Encode;
-    use commonware_cryptography::{
-        secp256r1::standard::{PrivateKey, PublicKey},
-        PrivateKeyExt,
-    };
+    use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -320,7 +317,7 @@ mod tests {
         timestamp: u64,
     ) -> Info<S::PublicKey>
     where
-        S: PrivateKeyExt,
+        S: commonware_cryptography::PrivateKey,
     {
         let signer = S::from_seed(signer_seed);
         let signature = signer.sign(NAMESPACE, &(socket, timestamp).encode());

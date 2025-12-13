@@ -20,6 +20,7 @@ cfg-if.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+commonware-math = { workspace = true, optional = true }
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
@@ -39,6 +40,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
@@ -48,9 +50,10 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-fuzz = []
+fuzz = [ "dep:commonware-math" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
 	"dep:arbitrary",
 ]

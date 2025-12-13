@@ -9,6 +9,7 @@ members = [
     "cryptography",
     "deployer",
     "macros",
+    "math",
     "p2p",
     "resolver",
     "runtime",
@@ -55,6 +56,9 @@ use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
 undocumented_unsafe_blocks = "deny"
+# This generates false positives for methods that are correct, and the contortions
+# to avoid triggering this method make the code worse.
+suspicious_op_assign_impl = "allow"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
@@ -81,6 +85,7 @@ commonware-consensus = { version = "0.0.63", path = "consensus" }
 commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.63", path = "macros" }
+commonware-math = { version = "0.0.63", path = "math", default-features = false }
 commonware-p2p = { version = "0.0.63", path = "p2p" }
 commonware-resolver = { version = "0.0.63", path = "resolver" }
 commonware-runtime = { version = "0.0.63", path = "runtime" }

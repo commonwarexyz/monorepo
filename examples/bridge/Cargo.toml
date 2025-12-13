@@ -32,6 +32,9 @@ rand.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 
+[dev-dependencies]
+commonware-math.workspace = true
+
 [[bin]]
 name = "validator"
 path = "src/bin/validator.rs"
