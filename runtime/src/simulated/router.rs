@@ -246,6 +246,7 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
+    use std::net::Ipv4Addr;
     use std::time::UNIX_EPOCH;
 
     type TestRouter = Router<u64, u32>;
@@ -360,5 +361,132 @@ mod tests {
 
         assert_eq!(deliveries.len(), 1);
         assert!(deliveries[0].deliver_at.is_none()); // Dropped
+    }
+
+    /// Test that messages only flow between IPs that have explicit links.
+    ///
+    /// This verifies that the router enforces link topology:
+    /// - No link = no message flow
+    /// - Link exists = messages can flow
+    /// - Link removed = message flow stops
+    /// - Links are unidirectional (A→B doesn't imply B→A)
+    #[test]
+    fn messages_only_flow_between_linked_ips() {
+        let mut router: Router<Ipv4Addr, u32> = Router::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let now = UNIX_EPOCH;
+
+        // Three "nodes" with unique IPs
+        let ip_a = Ipv4Addr::new(10, 0, 0, 1);
+        let ip_b = Ipv4Addr::new(10, 0, 0, 2);
+        let ip_c = Ipv4Addr::new(10, 0, 0, 3);
+
+        let link = Link::new(Duration::from_millis(10), Duration::ZERO, 1.0);
+
+        // --- No links: all sends should fail ---
+        assert!(router.send(now, &mut rng, ip_a, ip_b, 0, Bytes::from("a->b")).is_none());
+        assert!(router.send(now, &mut rng, ip_b, ip_a, 0, Bytes::from("b->a")).is_none());
+        assert!(router.send(now, &mut rng, ip_a, ip_c, 0, Bytes::from("a->c")).is_none());
+        assert!(router.send(now, &mut rng, ip_b, ip_c, 0, Bytes::from("b->c")).is_none());
+
+        // --- Add link A→B only ---
+        router.add_link(ip_a, ip_b, link.clone());
+
+        // A→B should work
+        let result = router.send(now, &mut rng, ip_a, ip_b, 0, Bytes::from("a->b"));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 1);
+
+        // B→A should fail (unidirectional)
+        assert!(router.send(now, &mut rng, ip_b, ip_a, 0, Bytes::from("b->a")).is_none());
+
+        // A→C should fail (no link)
+        assert!(router.send(now, &mut rng, ip_a, ip_c, 0, Bytes::from("a->c")).is_none());
+
+        // B→C should fail (no link)
+        assert!(router.send(now, &mut rng, ip_b, ip_c, 0, Bytes::from("b->c")).is_none());
+
+        // --- Add bidirectional link B↔C ---
+        router.add_link(ip_b, ip_c, link.clone());
+        router.add_link(ip_c, ip_b, link.clone());
+
+        // B→C and C→B should both work
+        assert!(router.send(now, &mut rng, ip_b, ip_c, 0, Bytes::from("b->c")).is_some());
+        assert!(router.send(now, &mut rng, ip_c, ip_b, 0, Bytes::from("c->b")).is_some());
+
+        // A→C still fails (no direct link)
+        assert!(router.send(now, &mut rng, ip_a, ip_c, 0, Bytes::from("a->c")).is_none());
+
+        // --- Remove A→B link ---
+        router.remove_link(ip_a, ip_b);
+
+        // A→B should now fail
+        assert!(router.send(now, &mut rng, ip_a, ip_b, 0, Bytes::from("a->b")).is_none());
+
+        // B↔C should still work
+        assert!(router.send(now, &mut rng, ip_b, ip_c, 0, Bytes::from("b->c")).is_some());
+        assert!(router.send(now, &mut rng, ip_c, ip_b, 0, Bytes::from("c->b")).is_some());
+    }
+
+    /// Test that network partitions can be simulated by removing links.
+    #[test]
+    fn network_partition_simulation() {
+        let mut router: Router<Ipv4Addr, u32> = Router::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let now = UNIX_EPOCH;
+
+        let link = Link::new(Duration::from_millis(10), Duration::ZERO, 1.0);
+
+        // Create 4 nodes in a mesh
+        let nodes: Vec<Ipv4Addr> = (1..=4).map(|i| Ipv4Addr::new(10, 0, 0, i)).collect();
+
+        // Fully connect all nodes
+        for i in 0..nodes.len() {
+            for j in 0..nodes.len() {
+                if i != j {
+                    router.add_link(nodes[i], nodes[j], link.clone());
+                }
+            }
+        }
+
+        // Verify all pairs can communicate
+        for i in 0..nodes.len() {
+            for j in 0..nodes.len() {
+                if i != j {
+                    assert!(
+                        router.send(now, &mut rng, nodes[i], nodes[j], 0, Bytes::from("msg")).is_some(),
+                        "Before partition: {} -> {} should work",
+                        nodes[i], nodes[j]
+                    );
+                }
+            }
+        }
+
+        // Simulate partition: split into {1,2} and {3,4}
+        // Remove cross-partition links
+        for i in 0..2 {
+            for j in 2..4 {
+                router.remove_link(nodes[i], nodes[j]);
+                router.remove_link(nodes[j], nodes[i]);
+            }
+        }
+
+        // Within partition {1,2}: should still work
+        assert!(router.send(now, &mut rng, nodes[0], nodes[1], 0, Bytes::from("msg")).is_some());
+        assert!(router.send(now, &mut rng, nodes[1], nodes[0], 0, Bytes::from("msg")).is_some());
+
+        // Within partition {3,4}: should still work
+        assert!(router.send(now, &mut rng, nodes[2], nodes[3], 0, Bytes::from("msg")).is_some());
+        assert!(router.send(now, &mut rng, nodes[3], nodes[2], 0, Bytes::from("msg")).is_some());
+
+        // Cross partition: should fail
+        assert!(router.send(now, &mut rng, nodes[0], nodes[2], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[0], nodes[3], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[1], nodes[2], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[1], nodes[3], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[2], nodes[0], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[2], nodes[1], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[3], nodes[0], 0, Bytes::from("msg")).is_none());
+        assert!(router.send(now, &mut rng, nodes[3], nodes[1], 0, Bytes::from("msg")).is_none());
     }
 }
