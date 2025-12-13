@@ -189,7 +189,6 @@ pub struct Context<S, P> {
 
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
-    #[allow(clippy::missing_const_for_fn)]
     pub fn new(
         base: &Transcript,
         current_time_ms: u64,
