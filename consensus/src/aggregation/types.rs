@@ -591,16 +591,20 @@ mod tests {
     mod conformance {
         use super::*;
         use crate::aggregation::scheme::bls12381_threshold;
+        use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 
         type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
-        commonware_codec::conformance_tests! {
-            Item<Sha256Digest>,
-            Ack<Scheme, Sha256Digest>,
-            TipAck<Scheme, Sha256Digest>,
-            Certificate<Scheme, Sha256Digest>,
-            Activity<Scheme, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Item<Sha256Digest>>,
+            CodecConformance<Ack<Scheme, Sha256Digest>>,
+            CodecConformance<TipAck<Scheme, Sha256Digest>>,
+            CodecConformance<Certificate<Scheme, Sha256Digest>>,
+            CodecConformance<Activity<Scheme, Sha256Digest>>,
         }
     }
 }
+
+
+

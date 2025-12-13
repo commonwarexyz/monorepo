@@ -1103,11 +1103,11 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::*;
-        use commonware_cryptography::bls12381::primitives::variant::MinSig;
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Certificate<MinSig>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
         }
     }
 }

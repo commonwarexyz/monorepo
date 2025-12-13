@@ -298,6 +298,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::*;
+        use commonware_codec::conformance::CodecConformance;
 
         /// Test context type for generic scheme tests.
         #[derive(Clone, Debug)]
@@ -314,8 +315,8 @@ mod tests {
         // Use the macro to generate the test scheme
         impl_ed25519_scheme!(TestContext<'a>);
 
-        commonware_codec::conformance_tests! {
-            Signature<Scheme>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Signature<Scheme>>,
         }
     }
 }

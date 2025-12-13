@@ -1,12 +1,12 @@
-["commonware_consensus::aggregation::types::tests::conformance::Ack<Scheme, Sha256Digest>"]
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Ack<Scheme, Sha256Digest>>"]
 n_cases = 65536
 hash = "084c2a8a3dca611978f20ebc78edba80ee2514240238402fb6a7f20bd58e6485"
 
-["commonware_consensus::aggregation::types::tests::conformance::Activity<Scheme, Sha256Digest>"]
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Activity<Scheme, Sha256Digest>>"]
 n_cases = 65536
 hash = "ec7205ce9a8844b28fc720fc01155ff6ff36617f1197658314d5f44ef93bc64a"
 
-["commonware_consensus::aggregation::types::tests::conformance::Certificate<Scheme, Sha256Digest>"]
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Certificate<Scheme, Sha256Digest>>"]
 n_cases = 65536
 hash = "6d62a98f635a930dcf01f2d5709f70190ef916cce774b7483eaf0092f0b5e1dc"
 
@@ -14,7 +14,7 @@ hash = "6d62a98f635a930dcf01f2d5709f70190ef916cce774b7483eaf0092f0b5e1dc"
 n_cases = 65536
 hash = "69536ce6262449bc22fd256943545a3c9d8c5290b67a9a6e8396a5e5cf761961"
 
-["commonware_consensus::aggregation::types::tests::conformance::TipAck<Scheme, Sha256Digest>"]
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<TipAck<Scheme, Sha256Digest>>"]
 n_cases = 65536
 hash = "81e2d63a9f82fa4e47e7dbd0511b767fcd11743012a78e4d0828745b932d39e6"
 
@@ -22,55 +22,55 @@ hash = "81e2d63a9f82fa4e47e7dbd0511b767fcd11743012a78e4d0828745b932d39e6"
 n_cases = 65536
 hash = "85cd899b2ae04636d34a4559d6ffdde0e186f3bd8045282a832868491c608e6f"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::Ack<PublicKey, Scheme, Sha256Digest>"]
+["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Ack<PublicKey, Scheme, Sha256Digest>>"]
 n_cases = 65536
-hash = "7cea9ed2f8b19180dbbc31fde57b7cc316d0344333b0f6d5b47ba298e3cfcba5"
+hash = "516861add27581ede1a3532820c18cdd3447684582401bcdea4d2e4e10dc22f7"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::Activity<PublicKey, Scheme, Sha256Digest>"]
+["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Activity<PublicKey, Scheme, Sha256Digest>>"]
 n_cases = 65536
-hash = "32289b30541897138a2ebf2c8331e3bb0838ac4f2134bc0089bcb67b9709a653"
+hash = "902584ad8634ae1eea9551343feddaf0c8b19cc1ca9bafa949c5fe07f61397ca"
 
 ["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Chunk<PublicKey, Sha256Digest>>"]
 n_cases = 65536
 hash = "b62ae4cd0dfe7ccd2193c2294be33784f37b1bdd9e4f8a6db640e745495f6e64"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::Lock<PublicKey, Scheme, Sha256Digest>"]
+["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Lock<PublicKey, Scheme, Sha256Digest>>"]
 n_cases = 65536
-hash = "eb27214fa1cbe1aeafb554fe10a507d02bb6e9b199a8de997ce307b212d57a0c"
+hash = "1ba3de6600c32bad42e2a70440a5fcb0ff4970866cd12fa955c1ccdec6ae0704"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::Node<PublicKey, Scheme, Sha256Digest>"]
+["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Node<PublicKey, Scheme, Sha256Digest>>"]
 n_cases = 65536
-hash = "6ee1c658378b85df390590bba88e545af1d496db2553799ce7730cd4e50501f5"
+hash = "ce5158fafa28b1d9f033a19c5d33fa9d91f6a8940bbd5d42312d0e88804cdb0e"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::Parent<Scheme, Sha256Digest>"]
+["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Parent<Scheme, Sha256Digest>>"]
 n_cases = 65536
-hash = "dff0aa613febd4f2e2783d05ba47e9b2e96d7cffc81d63a190b83f0356c124a3"
+hash = "f46dbf29df8571c17a69fbde128c4c62af0efdc3566b945f8add9938071c21db"
 
 ["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Proposal<PublicKey, Sha256Digest>>"]
 n_cases = 65536
 hash = "9d2ee4f3c6bf86521c09f8858683de48d6310a987643ee379c143480fc7e9a34"
 
-["commonware_consensus::scheme::bls12381_multisig::tests::conformance::Certificate<MinSig>"]
+["commonware_consensus::scheme::bls12381_multisig::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
 hash = "300d04d83f33581f5bce771224f35a4f41a50887e6f83648a43013d8e8292815"
 
-["commonware_consensus::scheme::ed25519::tests::conformance::Certificate"]
+["commonware_consensus::scheme::ed25519::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 65536
 hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
 
-["commonware_consensus::scheme::tests::conformance::Signature<Scheme>"]
+["commonware_consensus::scheme::tests::conformance::CodecConformance<Signature<Scheme>>"]
 n_cases = 65536
 hash = "dcbe92d97768657dc0c779e2058b44669a985dd8a1dbbf94427237f0fb4b78d2"
 
-["commonware_consensus::scheme::utils::tests::conformance::Signers"]
+["commonware_consensus::scheme::utils::tests::conformance::CodecConformance<Signers>"]
 n_cases = 65536
 hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::Seed<MinSig>"]
+["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::CodecConformance<Seed<MinSig>>"]
 n_cases = 65536
 hash = "d3cddac59b7f95fdf7d6dcda64b20bb685800ec87ea01a643c4fa5d3f8f71eed"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::Signature<MinSig>"]
+["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::CodecConformance<Signature<MinSig>>"]
 n_cases = 65536
 hash = "030caacb9ab46d08601977418808dc5ff729bddb9f6bb2ea685920539b69ecfb"
 

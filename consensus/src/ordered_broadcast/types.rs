@@ -2262,17 +2262,18 @@ mod tests {
     mod conformance {
         use super::*;
         use crate::ordered_broadcast::scheme::bls12381_threshold;
+        use commonware_codec::conformance::CodecConformance;
 
-        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+        type Scheme = bls12381_threshold::Scheme<PublicKey, MinPk>;
 
-        commonware_codec::conformance_tests! {
-            Chunk<PublicKey, Sha256Digest>,
-            Parent<Scheme, Sha256Digest>,
-            Node<PublicKey, Scheme, Sha256Digest>,
-            Ack<PublicKey, Scheme, Sha256Digest>,
-            Activity<PublicKey, Scheme, Sha256Digest>,
-            Proposal<PublicKey, Sha256Digest>,
-            Lock<PublicKey, Scheme, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Chunk<PublicKey, Sha256Digest>>,
+            CodecConformance<Parent<Scheme, Sha256Digest>>,
+            CodecConformance<Node<PublicKey, Scheme, Sha256Digest>>,
+            CodecConformance<Ack<PublicKey, Scheme, Sha256Digest>>,
+            CodecConformance<Activity<PublicKey, Scheme, Sha256Digest>>,
+            CodecConformance<Proposal<PublicKey, Sha256Digest>>,
+            CodecConformance<Lock<PublicKey, Scheme, Sha256Digest>>,
         }
     }
 }
