@@ -12,8 +12,15 @@ pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 6
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Position(u64);
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Position {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = u.int_in_range(0..=MAX_POSITION.0)?;
+        Ok(Self(value))
+    }
+}
 
 impl Position {
     /// Return a new [Position] from a raw `u64`.

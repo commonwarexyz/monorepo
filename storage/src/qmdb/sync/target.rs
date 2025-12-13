@@ -54,9 +54,10 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::mmr::MAX_LOCATION;
         let root = u.arbitrary()?;
-        let lower = u.int_in_range(0..=u64::MAX - 1)?;
-        let upper = u.int_in_range(lower + 1..=u64::MAX)?;
+        let lower = u.int_in_range(0..=MAX_LOCATION - 1)?;
+        let upper = u.int_in_range(lower + 1..=MAX_LOCATION)?;
         Ok(Self {
             root,
             range: Location::new_unchecked(lower)..Location::new_unchecked(upper),

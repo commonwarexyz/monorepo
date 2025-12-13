@@ -40,7 +40,7 @@ hash = "b4f2eb51a158d964317fb1714dbe708ffbe6673453dc648eabdd72409fb30440"
 
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
-hash = "d51be2d3e018f48a09f5886340cb7632c0c393796288a5790f935a1e85a9f033"
+hash = "e3e6735a810f1002164333013fbff442c91a690483e75fe7a78618a96d5afd62"
 
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536
@@ -48,19 +48,19 @@ hash = "07a88b442e9f86b5395a73584211cb6abbb58e51c6f3954b29095c56d77d370c"
 
 ["commonware_storage::qmdb::any::ordered::operation::tests::conformance::CodecConformance<FixedOperation<U64,U64>>"]
 n_cases = 65536
-hash = "44e1e398990948764c340efe390d8fcf9673937810e21d105c0a677ada390dcb"
+hash = "3256e6553b9d4f0eb7230b8a70c8c9d6366cd01fe1c284e355445c9a26cb3210"
 
 ["commonware_storage::qmdb::any::ordered::operation::tests::conformance::CodecConformance<VariableOperation<U64,Vec<u8>>>"]
 n_cases = 65536
-hash = "fe4a04fbc4331b4c29809d7b10a71243a58a4e34b124d45e7c6920ab70b9923e"
+hash = "1cf77ea327f4785cebf25d5d854a985cd84d07fc84f0c295cc845078ed1f0b40"
 
 ["commonware_storage::qmdb::any::unordered::operation::tests::conformance::CodecConformance<FixedOperation<U64,U64>>"]
 n_cases = 65536
-hash = "a47ef8b959d3f4e42b04e7d4c616d06783d80e5fd2f870eddac4b4aa1e330a1b"
+hash = "6fe29c8b0ca576ab04c8beedb314c123ab003099aaa6d90680469f7e58f0acad"
 
 ["commonware_storage::qmdb::any::unordered::operation::tests::conformance::CodecConformance<VariableOperation<U64,Vec<u8>>>"]
 n_cases = 65536
-hash = "c545bfc5ea9dcca9eceb9df73497cc4ceaadb0f3f6c3269b59e83cf369292008"
+hash = "c483b36790002dbbe4e5d4cd937dbd96659df946d74ee173b113f19d47984d30"
 
 ["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<U64,U64>>"]
 n_cases = 65536
@@ -72,4 +72,4 @@ hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
 
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<sha256::Digest>>"]
 n_cases = 65536
-hash = "501d2d55bd76087d1a61f5ae73eb77bd7167578b6f9b4900b71226db68a4aa6c"
+hash = "48e2131a0dffcb40a0a29581aa7bb0e39160212117eadb661b629030a58373d6"
