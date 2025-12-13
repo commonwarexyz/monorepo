@@ -28,7 +28,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Quota, Spawner,
     Storage,
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::NZUsize;
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
@@ -370,7 +370,6 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 buffer_pool: self.pool_ref.clone(),
             },
         );

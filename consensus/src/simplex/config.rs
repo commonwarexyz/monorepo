@@ -94,11 +94,6 @@ pub struct Config<
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Maximum rate of requests to send to a given peer.
-    ///
-    /// Inbound rate limiting is handled by [commonware_p2p].
-    pub fetch_rate_per_peer: Quota,
-
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
 }

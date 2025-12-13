@@ -5,7 +5,7 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
@@ -26,8 +26,11 @@ pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey 
     /// The size of the request mailbox backlog.
     pub mailbox_size: usize,
 
-    /// The requester configuration.
-    pub requester_config: requester::Config<P>,
+    /// Initial expected performance for new participants.
+    pub initial: Duration,
+
+    /// Timeout for requests.
+    pub timeout: Duration,
 
     /// Retry timeout for the fetcher.
     pub fetch_retry_timeout: Duration,
@@ -67,7 +70,9 @@ where
             consumer: handler.clone(),
             producer: handler,
             mailbox_size: config.mailbox_size,
-            requester_config: config.requester_config,
+            me: Some(config.public_key),
+            initial: config.initial,
+            timeout: config.timeout,
             fetch_retry_timeout: config.fetch_retry_timeout,
             priority_requests: config.priority_requests,
             priority_responses: config.priority_responses,

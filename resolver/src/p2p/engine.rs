@@ -112,13 +112,19 @@ impl<
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
+        use super::fetcher::Config as FetcherConfig;
+
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
             context.with_label("fetcher"),
-            cfg.requester_config,
-            cfg.fetch_retry_timeout,
-            cfg.priority_requests,
+            FetcherConfig {
+                me: cfg.me,
+                initial: cfg.initial,
+                timeout: cfg.timeout,
+                retry_timeout: cfg.fetch_retry_timeout,
+                priority_requests: cfg.priority_requests,
+            },
         );
         (
             Self {
