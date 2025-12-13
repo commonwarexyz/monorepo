@@ -91,7 +91,7 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
-        any::{unordered::VariableOperation as Operation, VariableValue},
+        any::{UnorderedOperation, VariableEncoding, VariableValue},
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
         update_key, Error, FloorHelper,
@@ -110,6 +110,8 @@ mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 pub use batch::{Batch, Batchable, Getter};
+
+type Operation<K, V> = UnorderedOperation<K, VariableEncoding<V>>;
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -349,7 +351,9 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(loc).await? else {
+            let Operation::Update(crate::qmdb::any::UnorderedUpdate(k, v)) =
+                self.get_op(loc).await?
+            else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -425,7 +429,11 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(crate::qmdb::any::UnorderedUpdate(
+                key, value,
+            )))
+            .await?;
 
         Ok(())
     }
@@ -440,7 +448,11 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(crate::qmdb::any::UnorderedUpdate(
+                key, value,
+            )))
+            .await?;
 
         Ok(true)
     }

@@ -10,9 +10,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            ordered::{FixedOperation as Operation, IndexedLog},
-            FixedConfig as Config, FixedValue,
+            db::IndexedLog, init_fixed_authenticated_log, value::FixedEncoding,
+            FixedConfig as Config, FixedValue, OrderedOperation,
         },
         Error,
     },
@@ -22,10 +21,12 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
+type Operation<K, V> = OrderedOperation<K, FixedEncoding<V>>;
+
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+    IndexedLog<E, Operation<K, V>, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -64,7 +65,7 @@ mod test {
         index::Unordered as _,
         mmr::{mem::Mmr, Position, StandardHasher as Standard},
         qmdb::{
-            any::ordered::KeyData,
+            any::{KeyData, OrderedUpdate},
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -150,11 +151,11 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(KeyData {
+                ops.push(Operation::Update(OrderedUpdate(KeyData {
                     key,
                     value,
                     next_key,
-                }));
+                })));
                 prev_key = key;
             }
         }
@@ -166,7 +167,7 @@ mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.key, data.value).await.unwrap();
+                    db.update(data.0.key, data.0.value).await.unwrap();
                 }
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
@@ -821,11 +822,11 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(KeyData {
+            let changed_op = Operation::Update(OrderedUpdate(KeyData {
                 key: Sha256::hash(b"key1"),
                 value: Sha256::hash(b"value1"),
                 next_key: Sha256::hash(b"key2"),
-            });
+            }));
             {
                 let mut ops = ops.clone();
                 ops[0] = changed_op.clone();

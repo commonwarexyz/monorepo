@@ -5,10 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
-        any::{
-            unordered::{fixed::Any, FixedOperation},
-            FixedConfig as Config,
-        },
+        any::{unordered::fixed::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation},
         store::CleanStore as _,
         sync,
     },
@@ -109,7 +106,7 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
 async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
-        Op = FixedOperation<Key, Value>,
+        Op = UnorderedOperation<Key, FixedEncoding<Value>>,
     >,
 >(
     context: deterministic::Context,

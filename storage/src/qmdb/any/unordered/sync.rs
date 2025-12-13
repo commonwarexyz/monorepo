@@ -2,13 +2,9 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     qmdb::{
         self,
-        any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
-            FixedValue,
-        },
+        any::{unordered::fixed::Any, FixedEncoding, FixedValue, UnorderedOperation},
     },
     translator::Translator,
 };
@@ -21,6 +17,9 @@ use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
+
+// TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
 where
@@ -266,15 +265,15 @@ mod tests {
         mmr::iterator::nodes_to_pin,
         qmdb::{
             self,
-            any::unordered::{
-                fixed::{
+            any::{
+                unordered::fixed::{
                     test::{
                         any_db_config, apply_ops, create_test_config, create_test_db,
                         create_test_ops, AnyTest,
                     },
                     Any,
                 },
-                FixedOperation as Operation,
+                UnorderedUpdate,
             },
             operation::Operation as _,
             store::CleanStore as _,
@@ -311,6 +310,8 @@ mod tests {
     // Janky sizes to test boundary conditions.
     const PAGE_SIZE: usize = 99;
     const PAGE_CACHE_SIZE: usize = 3;
+
+    type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
     fn test_digest(value: u64) -> Digest {
         Sha256::hash(&value.to_be_bytes())
@@ -350,7 +351,7 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Operation::Update(UnorderedUpdate(key, _)) => {
                         if let Some((op, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
@@ -409,7 +410,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Operation::Update(UnorderedUpdate(key, value)));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -655,7 +656,7 @@ mod tests {
             }
             // Verify the last operation is present
             let (last_key, last_value) = match last_op[0] {
-                Operation::Update(key, value) => (key, value),
+                Operation::Update(UnorderedUpdate(key, value)) => (key, value),
                 _ => unreachable!("last operation is not an update"),
             };
             assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
@@ -1432,7 +1433,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(UnorderedUpdate(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {
@@ -1527,7 +1528,7 @@ mod tests {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Operation::Update(key, value) = op {
+                    if let Operation::Update(UnorderedUpdate(key, value)) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
                     } else if let Operation::Delete(key) = op {
@@ -1634,7 +1635,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(UnorderedUpdate(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {

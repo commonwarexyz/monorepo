@@ -8,8 +8,8 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
-            FixedConfig as Config,
+            unordered::fixed::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation,
+            UnorderedUpdate,
         },
         store::CleanStore,
     },
@@ -21,7 +21,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = UnorderedOperation<Key, FixedEncoding<Value>>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
@@ -61,7 +61,7 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            operations.push(Operation::Update(UnorderedUpdate(key, value)));
 
             if (i + 1) % 10 == 0 {
                 operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
@@ -79,7 +79,7 @@ where
     ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
-                Operation::Update(key, value) => {
+                Operation::Update(UnorderedUpdate(key, value)) => {
                     database.update(key, value).await?;
                 }
                 Operation::Delete(key) => {

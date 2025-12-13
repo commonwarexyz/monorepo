@@ -10,8 +10,8 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::{fixed::Any, FixedOperation as Operation, KeyData},
-            CleanAny, DirtyAny, FixedValue,
+            ordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue, KeyData,
+            OrderedOperation, OrderedUpdate,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -26,6 +26,8 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
+
+type Operation<K, V> = OrderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -149,11 +151,11 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(KeyData {
+        let element = Operation::Update(OrderedUpdate(KeyData {
             key: info.key,
             value: info.value,
             next_key: info.next_key,
-        });
+        }));
 
         verify_key_value_proof(
             hasher,
@@ -191,11 +193,11 @@ impl<
                     return false;
                 }
 
-                let element = Operation::Update(KeyData {
+                let element = Operation::Update(OrderedUpdate(KeyData {
                     key: info.key,
                     value: info.value,
                     next_key: info.next_key,
-                });
+                }));
 
                 (info.loc, info.chunk, element)
             }
@@ -1380,7 +1382,7 @@ pub mod test {
                 // it's a key-updating operation.
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
                 let (key, value) = match op {
-                    Operation::Update(key_data) => (key_data.key, key_data.value),
+                    Operation::Update(key_data) => (key_data.0.key, key_data.0.value),
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
