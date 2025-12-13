@@ -171,33 +171,51 @@ mod tests {
         Address::from([byte; 20])
     }
 
-    #[test]
-    fn test_execute_single_transfer() {
-        let from = addr(0x11);
-        let to = addr(0x22);
-
-        let mut db = InMemoryDB::default();
+    fn fund(db: &mut InMemoryDB, address: Address, balance: U256, nonce: u64) {
         db.insert_account_info(
-            from,
+            address,
             AccountInfo {
-                balance: U256::from(1_000_000u64),
-                nonce: 0,
+                balance,
+                nonce,
                 ..Default::default()
             },
         );
+    }
 
+    fn nonce(db: &mut InMemoryDB, address: Address) -> u64 {
+        db.basic(address)
+            .unwrap()
+            .map(|info| info.nonce)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_execute_single_transfer() {
+        // Prepare
+        let sender = addr(0x11);
+        let recipient = addr(0x22);
+        let seed = B256::from([7u8; 32]);
+        let height = 1;
+        let prev_root = StateRoot(B256::ZERO);
+        let mut db = InMemoryDB::default();
+        fund(
+            &mut db,
+            sender,
+            U256::from(1_000_000u64),
+            /* nonce */ 0,
+        );
         let tx = Tx {
-            from,
-            to,
-            value: U256::from(100u64),
+            from: sender,
+            to: recipient,
+            value: U256::from(100),
             gas_limit: 21_000,
             data: Bytes::new(),
         };
 
-        let prev_root = StateRoot(B256::ZERO);
-        let (mut db, outcome) =
-            execute_txs(db, evm_env(1, B256::from([7u8; 32])), prev_root, &[tx]).unwrap();
+        // Execute
+        let (mut db, outcome) = execute_txs(db, evm_env(height, seed), prev_root, &[tx]).unwrap();
 
+        // Assert (outcome)
         assert_eq!(outcome.tx_changes.len(), 1);
         assert!(!outcome.tx_changes[0].is_empty());
         assert_eq!(
@@ -205,32 +223,32 @@ mod tests {
             commit_state_root(prev_root, &outcome.tx_changes[0])
         );
 
-        let from_info = db.basic(from).unwrap().unwrap();
-        let to_info = db.basic(to).unwrap().unwrap();
-        assert_eq!(from_info.balance, U256::from(1_000_000u64 - 100));
-        assert_eq!(from_info.nonce, 1);
-        assert_eq!(to_info.balance, U256::from(100u64));
-        assert_eq!(to_info.nonce, 0);
+        // Assert (state)
+        let sender_info = db.basic(sender).unwrap().unwrap();
+        let recipient_info = db.basic(recipient).unwrap().unwrap();
+        assert_eq!(sender_info.balance, U256::from(1_000_000u64 - 100));
+        assert_eq!(sender_info.nonce, 1);
+        assert_eq!(recipient_info.balance, U256::from(100u64));
+        assert_eq!(recipient_info.nonce, 0);
     }
 
     #[test]
     fn test_seed_precompile_returns_block_prevrandao() {
         use alloy_evm::revm::context_interface::result::ExecutionResult;
 
+        // Prepare
         let caller = addr(0x11);
-
+        let seed = B256::from([7u8; 32]);
+        let height = 1;
         let mut db = InMemoryDB::default();
-        db.insert_account_info(
+        fund(
+            &mut db,
             caller,
-            AccountInfo {
-                balance: U256::from(1_000_000u64),
-                nonce: 0,
-                ..Default::default()
-            },
+            U256::from(1_000_000u64),
+            /* nonce */ 0,
         );
 
-        let seed = B256::from([7u8; 32]);
-        let env = evm_env(1, seed);
+        let env = evm_env(height, seed);
         let spec = env.cfg_env.spec;
         let precompiles = precompiles_with_seed(spec);
         let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
@@ -243,10 +261,12 @@ mod tests {
             data: Bytes::new(),
         };
 
+        // Execute
         let chain_id = evm.chain_id();
         let tx_env = tx_env_from_db(evm.db_mut(), &tx, chain_id).unwrap();
         let ResultAndState { result, state: _ } = evm.transact_raw(tx_env).unwrap();
 
+        // Assert
         match result {
             ExecutionResult::Success { output, .. } => {
                 assert_eq!(output.into_data().as_ref(), seed.as_slice());
@@ -259,20 +279,19 @@ mod tests {
     fn test_contract_can_read_seed_precompile() {
         use alloy_evm::revm::context_interface::result::{ExecutionResult, Output};
 
+        // Prepare
         let caller = addr(0x11);
-
+        let seed = B256::from([9u8; 32]);
+        let height = 1;
         let mut db = InMemoryDB::default();
-        db.insert_account_info(
+        fund(
+            &mut db,
             caller,
-            AccountInfo {
-                balance: U256::from(1_000_000u64),
-                nonce: 0,
-                ..Default::default()
-            },
+            U256::from(1_000_000u64),
+            /* nonce */ 0,
         );
 
-        let seed = B256::from([9u8; 32]);
-        let env = evm_env(1, seed);
+        let env = evm_env(height, seed);
         let spec = env.cfg_env.spec;
         let precompiles = precompiles_with_seed(spec);
         let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
@@ -280,12 +299,8 @@ mod tests {
         let runtime = seed_reader_runtime();
         let init = seed_reader_init(&runtime);
 
-        let create_nonce = evm
-            .db_mut()
-            .basic(caller)
-            .unwrap()
-            .map(|info| info.nonce)
-            .unwrap_or(0);
+        // Execute (deploy contract)
+        let create_nonce = nonce(evm.db_mut(), caller);
 
         let mut create = TxEnv::default();
         create.caller = caller;
@@ -311,12 +326,8 @@ mod tests {
         };
         evm.db_mut().commit(create_state);
 
-        let call_nonce = evm
-            .db_mut()
-            .basic(caller)
-            .unwrap()
-            .map(|info| info.nonce)
-            .unwrap_or(0);
+        // Execute (call deployed contract)
+        let call_nonce = nonce(evm.db_mut(), caller);
 
         let mut call = TxEnv::default();
         call.caller = caller;
@@ -334,6 +345,7 @@ mod tests {
             state: _,
         } = evm.transact_raw(call).unwrap();
 
+        // Assert
         match call_result {
             ExecutionResult::Success { output, .. } => {
                 assert_eq!(output.into_data().as_ref(), seed.as_slice());
@@ -343,6 +355,9 @@ mod tests {
     }
 
     fn seed_reader_runtime() -> Bytes {
+        // Runtime program:
+        // - STATICCALL seed precompile with no calldata
+        // - return exactly 32 bytes from memory[0..32)
         let address = seed_precompile_address();
 
         let mut bytecode = Vec::new();
@@ -354,6 +369,9 @@ mod tests {
     }
 
     fn seed_reader_init(runtime: &Bytes) -> Bytes {
+        // Init program:
+        // - copy runtime to memory[0..len)
+        // - return it as the deployed code
         let runtime_len = u8::try_from(runtime.len()).expect("runtime too large");
         let runtime_offset = 12u8;
 
