@@ -24,10 +24,7 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
-prometheus-client.workspace = true
 rand.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 # EVM execution
 alloy-evm = { version = "=0.25.1", default-features = false, features = ["std"] }
