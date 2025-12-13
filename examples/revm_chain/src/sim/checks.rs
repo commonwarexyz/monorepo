@@ -9,22 +9,31 @@ pub(super) async fn wait_for_finalized_head(
     nodes: usize,
     blocks: u64,
 ) -> anyhow::Result<ConsensusDigest> {
+    if blocks == 0 {
+        return Err(anyhow::anyhow!("blocks must be greater than zero"));
+    }
+
     let mut counts = vec![0u64; nodes];
-    let mut last = vec![None; nodes];
-    while counts.iter().any(|count| *count < blocks) {
+    let mut nth = vec![None; nodes];
+    while nth.iter().any(Option::is_none) {
         let Some((node, digest)) = finalized_rx.next().await else {
             break;
         };
         let idx = node as usize;
+        if nth[idx].is_some() {
+            continue;
+        }
         counts[idx] += 1;
-        last[idx] = Some(digest);
+        if counts[idx] == blocks {
+            nth[idx] = Some(digest);
+        }
     }
 
-    let head = last
+    let head = nth
         .first()
         .and_then(|d| *d)
         .ok_or_else(|| anyhow::anyhow!("missing finalization"))?;
-    for (i, d) in last.iter().enumerate() {
+    for (i, d) in nth.iter().enumerate() {
         let Some(d) = d else {
             return Err(anyhow::anyhow!("node {i} missing finalization"));
         };
