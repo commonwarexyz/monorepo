@@ -24,6 +24,35 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 - `src/commitment.rs`: canonical `StateChanges` encoding and rolling `StateRoot` commitment.
 - `src/sim/`: deterministic, single-process simulation harness (N nodes, simulated P2P).
 
+## How It Works
+
+This example is intentionally "digest-first":
+
+- Simplex agrees on a `ConsensusDigest` for each height (32 bytes).
+- The application maps `ConsensusDigest <-> Block` and ensures a digest is only accepted if the
+  corresponding block re-executes to the advertised `state_root`.
+
+### Block Lifecycle (One Height)
+
+1. Genesis: the application creates the genesis block and prefunds accounts in the EVM DB.
+2. Propose: when Simplex asks a leader to propose, the application builds a child block, executes
+   its txs, stores the block + resulting DB snapshot locally, and returns only the digest to Simplex.
+3. Broadcast: the full block bytes are broadcast out-of-band (separate from consensus messages).
+4. Verify: validators decode the block, check parent linkage, re-execute it on the parent snapshot,
+   and accept only if the computed `state_root` matches the advertised `state_root`.
+5. Finalize: once the digest finalizes, the simulation records it and stops after the configured
+   number of finalizations per node.
+
+The main glue points are implemented in `src/consensus/ingress.rs` (mailbox traits) and
+`src/application/actor.rs` (genesis/propose/verify/broadcast + finalization reporting).
+
+### Seed Lifecycle
+
+- On notarization/finalization, threshold-simplex emits a seed signature.
+- This example hashes that seed signature to 32 bytes and stores it alongside the finalized digest.
+- The next block uses the parent digest's stored seed hash as `prevrandao` (EIP-4399).
+- The seed precompile returns the current block's `prevrandao` so contracts can read it.
+
 ## Run (Deterministic Simulation)
 
 ```sh
