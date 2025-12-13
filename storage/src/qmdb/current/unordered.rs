@@ -5,9 +5,8 @@
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
     mmr::{
-        grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, State},
-        verification, Location, Proof, StandardHasher,
+        Location, Proof, StandardHasher,
     },
     qmdb::{
         any::{
@@ -15,8 +14,8 @@ use crate::{
             CleanAny, DirtyAny, FixedValue,
         },
         current::{
-            merkleize_grafted_bitmap, verify_operation_proof, verify_range_proof, Config,
-            OperationProof,
+            get_current_proof, merkleize_grafted_bitmap, verify_operation_proof,
+            verify_range_proof, Config, OperationProof,
         },
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
@@ -253,21 +252,8 @@ impl<
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
 
-        // loc is valid so it won't overflow from + 1
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk_containing(*loc);
-
-        let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
-            hasher.update(last_chunk);
-            proof.digests.push(hasher.finalize());
-        }
-
-        Ok(KeyValueProof { loc, chunk, proof })
+        get_current_proof(hasher, &self.status, height, &self.any.log.mmr, loc).await
     }
 
     #[cfg(test)]
