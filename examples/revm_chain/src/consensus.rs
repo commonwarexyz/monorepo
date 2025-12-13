@@ -1,6 +1,11 @@
 use crate::execution::{evm_env, execute_txs};
 use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
-use alloy_evm::revm::{database::InMemoryDB, primitives::B256};
+use alloy_evm::revm::{
+    database::InMemoryDB,
+    primitives::{Address, B256, U256},
+    state::AccountInfo,
+    Database as _,
+};
 use bytes::Bytes;
 use commonware_consensus::{
     simplex::types::{Activity, Context},
@@ -19,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 pub type ConsensusDigest = sha256::Digest;
 pub type PublicKey = ed25519::PublicKey;
+pub type FinalizationEvent = (u32, ConsensusDigest);
 
 #[derive(Clone, Copy, Debug)]
 pub struct BlockCodecCfg {
@@ -54,6 +60,18 @@ pub enum Message {
     Genesis {
         epoch: Epoch,
         response: oneshot::Sender<ConsensusDigest>,
+    },
+    SetGenesisTx {
+        tx: Option<Tx>,
+    },
+    QueryBalance {
+        digest: ConsensusDigest,
+        address: Address,
+        response: oneshot::Sender<Option<U256>>,
+    },
+    QueryStateRoot {
+        digest: ConsensusDigest,
+        response: oneshot::Sender<Option<StateRoot>>,
     },
     Propose {
         context: Context<ConsensusDigest, PublicKey>,
@@ -97,6 +115,40 @@ impl<S> Mailbox<S> {
             gossip,
             store,
         }
+    }
+
+    pub async fn deliver_block(&self, from: PublicKey, bytes: Bytes) {
+        let mut sender = self.sender.clone();
+        let _ = sender
+            .send(Message::BlockReceived { from, bytes })
+            .await;
+    }
+
+    pub async fn set_genesis_tx(&self, tx: Option<Tx>) {
+        let mut sender = self.sender.clone();
+        let _ = sender.send(Message::SetGenesisTx { tx }).await;
+    }
+
+    pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
+        let (response, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        let _ = sender
+            .send(Message::QueryBalance {
+                digest,
+                address,
+                response,
+            })
+            .await;
+        receiver.await.unwrap_or(None)
+    }
+
+    pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
+        let (response, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        let _ = sender
+            .send(Message::QueryStateRoot { digest, response })
+            .await;
+        receiver.await.unwrap_or(None)
     }
 }
 
@@ -194,7 +246,11 @@ where
 
 /// Chain application actor.
 pub struct Application {
+    node: u32,
     codec: BlockCodecCfg,
+    finalized: mpsc::UnboundedSender<FinalizationEvent>,
+    genesis_alloc: Vec<(Address, U256)>,
+    genesis_tx: Option<Tx>,
     store: Arc<Mutex<ChainStore>>,
     received: BTreeMap<ConsensusDigest, Block>,
     pending_verifies: BTreeMap<ConsensusDigest, Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>>,
@@ -202,9 +258,13 @@ pub struct Application {
 
 impl Application {
     pub fn new<S>(
+        node: u32,
         codec: BlockCodecCfg,
         mailbox_size: usize,
         gossip: S,
+        finalized: mpsc::UnboundedSender<FinalizationEvent>,
+        genesis_alloc: Vec<(Address, U256)>,
+        genesis_tx: Option<Tx>,
     ) -> (Self, Mailbox<S>, mpsc::Receiver<Message>)
     where
         S: Clone + Send + Sync + 'static,
@@ -213,7 +273,11 @@ impl Application {
         let store = Arc::new(Mutex::new(ChainStore::default()));
         (
             Self {
+                node,
                 codec,
+                finalized,
+                genesis_alloc,
+                genesis_tx,
                 store: store.clone(),
                 received: BTreeMap::new(),
                 pending_verifies: BTreeMap::new(),
@@ -287,11 +351,12 @@ impl Application {
     }
 
     fn try_verify_and_insert(
-        &self,
+        &mut self,
         expected_digest: ConsensusDigest,
         context: &Context<ConsensusDigest, PublicKey>,
         block: Block,
     ) -> anyhow::Result<bool> {
+        let clears_genesis_tx = block.height == 1;
         if self.digest_for_block(&block) != expected_digest {
             return Ok(false);
         }
@@ -320,14 +385,19 @@ impl Application {
             return Ok(false);
         }
 
-        let mut store = self.store.lock().expect("store lock poisoned");
-        store.insert(
-            expected_digest,
-            BlockEntry {
-                block,
-                db,
-            },
-        );
+        {
+            let mut store = self.store.lock().expect("store lock poisoned");
+            store.insert(
+                expected_digest,
+                BlockEntry {
+                    block,
+                    db,
+                },
+            );
+        }
+        if clears_genesis_tx {
+            self.genesis_tx = None;
+        }
         Ok(true)
     }
 
@@ -337,15 +407,50 @@ impl Application {
                 Message::Genesis { epoch: _, response } => {
                     let genesis_block = self.genesis_block();
                     let digest = self.digest_for_block(&genesis_block);
+                    let mut db = InMemoryDB::default();
+                    for (address, balance) in self.genesis_alloc.iter().copied() {
+                        db.insert_account_info(
+                            address,
+                            AccountInfo {
+                                balance,
+                                nonce: 0,
+                                ..Default::default()
+                            },
+                        );
+                    }
                     let mut store = self.store.lock().expect("store lock poisoned");
                     store.insert(
                         digest,
                         BlockEntry {
                             block: genesis_block,
-                            db: InMemoryDB::default(),
+                            db,
                         },
                     );
                     let _ = response.send(digest);
+                }
+                Message::SetGenesisTx { tx } => {
+                    self.genesis_tx = tx;
+                }
+                Message::QueryBalance {
+                    digest,
+                    address,
+                    response,
+                } => {
+                    let entry = {
+                        let store = self.store.lock().expect("store lock poisoned");
+                        store.get_by_digest(&digest).cloned()
+                    };
+                    let value = entry
+                        .and_then(|mut e| e.db.basic(address).ok().flatten())
+                        .map(|info| info.balance);
+                    let _ = response.send(value);
+                }
+                Message::QueryStateRoot { digest, response } => {
+                    let entry = {
+                        let store = self.store.lock().expect("store lock poisoned");
+                        store.get_by_digest(&digest).cloned()
+                    };
+                    let _ = response.send(entry.map(|e| e.block.state_root));
                 }
                 Message::Propose { context, response } => {
                     let parent = {
@@ -353,10 +458,22 @@ impl Application {
                         store.get_by_digest(&context.parent.1).cloned()
                     };
                     let Some(parent) = parent else { continue; };
-                    let child = self.build_child_block(&parent.block, B256::ZERO, Vec::new());
+                    let prevrandao = B256::from(context.parent.1 .0);
+                    let txs = if parent.block.height == 0 {
+                        self.genesis_tx.clone().into_iter().collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let child = self.build_child_block(&parent.block, prevrandao, txs);
                     if let Ok((digest, entry)) = self.execute_block(&parent, child) {
-                        let mut store = self.store.lock().expect("store lock poisoned");
-                        store.insert(digest, entry);
+                        let clears_genesis_tx = entry.block.height == 1;
+                        {
+                            let mut store = self.store.lock().expect("store lock poisoned");
+                            store.insert(digest, entry);
+                        }
+                        if clears_genesis_tx {
+                            self.genesis_tx = None;
+                        }
                         let _ = response.send(digest);
                     }
                 }
@@ -414,7 +531,13 @@ impl Application {
                     }
                 }
                 Message::Broadcast { digest: _ } => {}
-                Message::Report { activity: _ } => {}
+                Message::Report { activity } => {
+                    if let Activity::Finalization(finalization) = activity {
+                        let _ = self
+                            .finalized
+                            .unbounded_send((self.node, finalization.proposal.payload));
+                    }
+                }
             }
         }
     }
