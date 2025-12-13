@@ -226,6 +226,21 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
+        let (app, mailbox, _processed_height) =
+            setup_validator_with_height(context, oracle, validator, scheme_provider).await;
+        (app, mailbox)
+    }
+
+    async fn setup_validator_with_height(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K>,
+        validator: K,
+        scheme_provider: P,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        u64,
+    ) {
         let config: Config<B, _, _> = Config {
             scheme_provider,
             epoch_length: BLOCKS_PER_EPOCH,
@@ -345,7 +360,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -357,7 +372,7 @@ mod tests {
         // Start the application
         actor.start(application.clone(), buffer, resolver);
 
-        (application, mailbox)
+        (application, mailbox, processed_height)
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -1713,6 +1728,76 @@ mod tests {
             // Validator 1 should still have the original finalization (v2)
             let fin0_after = actors[1].get_finalization(1).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_init_processed_height() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Test 1: Fresh init should return processed height 0
+            let me = participants[0].clone();
+            let (application, mut actor, initial_height) = setup_validator_with_height(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me.clone(),
+                schemes[0].clone().into(),
+            )
+            .await;
+            assert_eq!(initial_height, 0);
+
+            // Process multiple blocks (1, 2, 3)
+            let mut parent = Sha256::hash(b"");
+            let mut blocks = Vec::new();
+            for i in 1..=3 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(Epoch::new(0), View::new(i));
+
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+
+                blocks.push(block);
+                parent = commitment;
+            }
+
+            // Wait for application to process all blocks
+            while application.blocks().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Set marshal's processed height to 3
+            actor.set_floor(3).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify application received all blocks
+            assert_eq!(application.blocks().len(), 3);
+            assert_eq!(application.tip(), Some((3, blocks[2].digest())));
+
+            // Test 2: Restart with marshal processed height = 3
+            let (_restart_application, _restart_actor, restart_height) =
+                setup_validator_with_height(
+                    context.with_label("validator-0-restart"),
+                    &mut oracle,
+                    me,
+                    schemes[0].clone().into(),
+                )
+                .await;
+
+            assert_eq!(restart_height, 3);
         })
     }
 
