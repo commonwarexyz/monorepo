@@ -1,20 +1,21 @@
 use crate::execution::{evm_env, execute_txs};
 use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
-use alloy_evm::revm::{
-    database::InMemoryDB,
-    primitives::{B256, Bytes},
-};
+use alloy_evm::revm::{database::InMemoryDB, primitives::B256};
+use bytes::Bytes;
 use commonware_consensus::{
     simplex::types::{Activity, Context},
     types::Epoch,
     Automaton as ConsensusAutomaton, Relay as ConsensusRelay, Reporter as ConsensusReporter,
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{ed25519, sha256, Hasher as _};
+use commonware_p2p::{Recipients, Sender as P2pSender};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 pub type ConsensusDigest = sha256::Digest;
 pub type PublicKey = ed25519::PublicKey;
@@ -63,6 +64,10 @@ pub enum Message {
         digest: ConsensusDigest,
         response: oneshot::Sender<bool>,
     },
+    BlockReceived {
+        from: PublicKey,
+        bytes: Bytes,
+    },
     Broadcast {
         digest: ConsensusDigest,
     },
@@ -79,17 +84,26 @@ pub enum Message {
 
 /// Mailbox for the chain application.
 #[derive(Clone)]
-pub struct Mailbox {
+pub struct Mailbox<S> {
     sender: mpsc::Sender<Message>,
+    gossip: S,
+    store: Arc<Mutex<ChainStore>>,
 }
 
-impl Mailbox {
-    pub(super) const fn new(sender: mpsc::Sender<Message>) -> Self {
-        Self { sender }
+impl<S> Mailbox<S> {
+    fn new(sender: mpsc::Sender<Message>, gossip: S, store: Arc<Mutex<ChainStore>>) -> Self {
+        Self {
+            sender,
+            gossip,
+            store,
+        }
     }
 }
 
-impl ConsensusAutomaton for Mailbox {
+impl<S> ConsensusAutomaton for Mailbox<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     type Context = Context<ConsensusDigest, PublicKey>;
     type Digest = ConsensusDigest;
 
@@ -137,15 +151,34 @@ impl ConsensusAutomaton for Mailbox {
     }
 }
 
-impl ConsensusRelay for Mailbox {
+impl<S> ConsensusRelay for Mailbox<S>
+where
+    S: P2pSender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
+{
     type Digest = ConsensusDigest;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
-        let _ = self.sender.send(Message::Broadcast { digest: payload }).await;
+        let bytes = {
+            let store = self.store.lock().expect("store lock poisoned");
+            store
+                .get_by_digest(&payload)
+                .map(|entry| entry.block.encode())
+        };
+        let Some(bytes) = bytes else {
+            return;
+        };
+
+        let _ = self
+            .gossip
+            .send(Recipients::All, Bytes::copy_from_slice(bytes.as_ref()), true)
+            .await;
     }
 }
 
-impl ConsensusReporter for Mailbox {
+impl<S> ConsensusReporter for Mailbox<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     type Activity = Activity<
         commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<
             PublicKey,
@@ -162,18 +195,30 @@ impl ConsensusReporter for Mailbox {
 /// Chain application actor.
 pub struct Application {
     codec: BlockCodecCfg,
-    store: ChainStore,
+    store: Arc<Mutex<ChainStore>>,
+    received: BTreeMap<ConsensusDigest, Block>,
+    pending_verifies: BTreeMap<ConsensusDigest, Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>>,
 }
 
 impl Application {
-    pub fn new(codec: BlockCodecCfg, mailbox_size: usize) -> (Self, Mailbox, mpsc::Receiver<Message>) {
+    pub fn new<S>(
+        codec: BlockCodecCfg,
+        mailbox_size: usize,
+        gossip: S,
+    ) -> (Self, Mailbox<S>, mpsc::Receiver<Message>)
+    where
+        S: Clone + Send + Sync + 'static,
+    {
         let (sender, receiver) = mpsc::channel(mailbox_size);
+        let store = Arc::new(Mutex::new(ChainStore::default()));
         (
             Self {
                 codec,
-                store: ChainStore::default(),
+                store: store.clone(),
+                received: BTreeMap::new(),
+                pending_verifies: BTreeMap::new(),
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, gossip, store),
             receiver,
         )
     }
@@ -241,13 +286,59 @@ impl Application {
         Ok((digest, BlockEntry { block: child, db }))
     }
 
+    fn try_verify_and_insert(
+        &self,
+        expected_digest: ConsensusDigest,
+        context: &Context<ConsensusDigest, PublicKey>,
+        block: Block,
+    ) -> anyhow::Result<bool> {
+        if self.digest_for_block(&block) != expected_digest {
+            return Ok(false);
+        }
+        let parent = {
+            let store = self.store.lock().expect("store lock poisoned");
+            store.get_by_digest(&context.parent.1).cloned()
+        };
+        let Some(parent) = parent else {
+            return Ok(false);
+        };
+
+        if block.parent != parent.block.id() {
+            return Ok(false);
+        }
+        if block.height != parent.block.height + 1 {
+            return Ok(false);
+        }
+
+        let (db, outcome) = execute_txs(
+            parent.db.clone(),
+            evm_env(block.height, block.prevrandao),
+            parent.block.state_root,
+            &block.txs,
+        )?;
+        if outcome.state_root != block.state_root {
+            return Ok(false);
+        }
+
+        let mut store = self.store.lock().expect("store lock poisoned");
+        store.insert(
+            expected_digest,
+            BlockEntry {
+                block,
+                db,
+            },
+        );
+        Ok(true)
+    }
+
     pub async fn run(mut self, mut mailbox: mpsc::Receiver<Message>) {
         while let Some(message) = mailbox.next().await {
             match message {
                 Message::Genesis { epoch: _, response } => {
                     let genesis_block = self.genesis_block();
                     let digest = self.digest_for_block(&genesis_block);
-                    self.store.insert(
+                    let mut store = self.store.lock().expect("store lock poisoned");
+                    store.insert(
                         digest,
                         BlockEntry {
                             block: genesis_block,
@@ -257,13 +348,15 @@ impl Application {
                     let _ = response.send(digest);
                 }
                 Message::Propose { context, response } => {
-                    let Some(parent) = self.store.get_by_digest(&context.parent.1).cloned()
-                    else {
-                        continue;
+                    let parent = {
+                        let store = self.store.lock().expect("store lock poisoned");
+                        store.get_by_digest(&context.parent.1).cloned()
                     };
+                    let Some(parent) = parent else { continue; };
                     let child = self.build_child_block(&parent.block, B256::ZERO, Vec::new());
                     if let Ok((digest, entry)) = self.execute_block(&parent, child) {
-                        self.store.insert(digest, entry);
+                        let mut store = self.store.lock().expect("store lock poisoned");
+                        store.insert(digest, entry);
                         let _ = response.send(digest);
                     }
                 }
@@ -272,12 +365,53 @@ impl Application {
                     digest,
                     response,
                 } => {
-                    let Some(_parent) = self.store.get_by_digest(&context.parent.1) else {
-                        let _ = response.send(false);
+                    let already = {
+                        let store = self.store.lock().expect("store lock poisoned");
+                        store.get_by_digest(&digest).is_some()
+                    };
+                    if already {
+                        let _ = response.send(true);
+                        continue;
+                    }
+
+                    if let Some(block) = self.received.get(&digest).cloned() {
+                        match self.try_verify_and_insert(digest, &context, block) {
+                            Ok(ok) => {
+                                let _ = response.send(ok);
+                            }
+                            Err(_) => {
+                                let _ = response.send(false);
+                            }
+                        }
+                        continue;
+                    }
+
+                    self.pending_verifies
+                        .entry(digest)
+                        .or_default()
+                        .push((context, response));
+                }
+                Message::BlockReceived { from: _, bytes } => {
+                    let Ok(block) = self.decode_block(bytes.clone()) else {
                         continue;
                     };
-                    let ok = self.store.get_by_digest(&digest).is_some();
-                    let _ = response.send(ok);
+                    let digest = self.digest_for_block(&block);
+                    self.received.entry(digest).or_insert(block);
+
+                    if let Some(pending) = self.pending_verifies.remove(&digest) {
+                        for (context, response) in pending {
+                            let block = match self.received.get(&digest).cloned() {
+                                Some(b) => b,
+                                None => {
+                                    let _ = response.send(false);
+                                    continue;
+                                }
+                            };
+                            let ok =
+                                self.try_verify_and_insert(digest, &context, block).unwrap_or(false);
+                            let _ = response.send(ok);
+                        }
+                    }
                 }
                 Message::Broadcast { digest: _ } => {}
                 Message::Report { activity: _ } => {}
