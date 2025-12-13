@@ -97,7 +97,8 @@ where
         .await?;
         // Build the snapshot from the log.
         let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
-        let db = Self::from_components(range.start, log, snapshot).await?;
+        let db =
+            Self::from_components(range.start, log, snapshot, Location::new_unchecked(0)).await?;
 
         Ok(db)
     }
@@ -1469,7 +1470,7 @@ mod tests {
             let total_ops = source_db.op_count();
 
             // Test different pruning boundaries
-            for lower_bound in [0, 50, 100, 150] {
+            for lower_bound in [1, 51, 101, 151] {
                 let upper_bound = std::cmp::min(lower_bound + 50, *total_ops );
 
                 // Create log with operations
@@ -1526,7 +1527,7 @@ mod tests {
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
-                for op in &ops[lower_bound as usize..upper_bound as usize] {
+                for op in &ops[(lower_bound-1) as usize..(upper_bound-1) as usize] {
                     if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);

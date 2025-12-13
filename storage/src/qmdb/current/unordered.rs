@@ -88,7 +88,7 @@ impl<
         self.any.get(key).await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await
     }
@@ -283,9 +283,7 @@ impl<
         let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
 
         // Inactivate the current commit operation.
-        if let Some(last_commit_loc) = self.any.last_commit {
-            status.set_bit(*last_commit_loc, false);
-        }
+        status.set_bit(*self.any.last_commit_loc, false);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -304,10 +302,7 @@ impl<
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = self
-            .any
-            .last_commit
-            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+        let start_loc = self.any.last_commit_loc + 1;
 
         // Phase 1: Commit to log (recovery is ensured after this returns)
         let status = self.commit_to_log(metadata).await?;
@@ -701,7 +696,7 @@ pub mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{hasher::Hasher as _, mem::Mmr},
+        mmr::hasher::Hasher as _,
         qmdb::{any::AnyExt, store::batch_tests},
         translator::TwoCap,
     };
@@ -751,18 +746,16 @@ pub mod test {
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
@@ -772,15 +765,15 @@ pub mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let mut db = db.merkleize().await.unwrap();
             let range = db.commit(None).await.unwrap();
-            assert_eq!(range.start, 0);
-            assert_eq!(range.end, 3);
+            assert_eq!(range.start, 1);
+            assert_eq!(range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
+            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 move + 1 initial commit.
             let root1 = db.root();
             assert!(root1 != root0);
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 moves.
+            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 moves + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root1);
 
@@ -793,10 +786,10 @@ pub mod test {
             let metadata = Sha256::hash(&1u64.to_be_bytes());
             let mut db = db.merkleize().await.unwrap();
             let range = db.commit(Some(metadata)).await.unwrap();
-            assert_eq!(range.start, 3);
-            assert_eq!(range.end, 5);
+            assert_eq!(range.start, 4);
+            assert_eq!(range.end, 6);
 
-            assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
 
@@ -808,7 +801,7 @@ pub mod test {
             // Confirm close/re-open preserves state.
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 5);
+            assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete + 1 initial commit.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.root(), root2);
 
@@ -860,9 +853,9 @@ pub mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.op_count(), 1477);
+            assert_eq!(db.op_count(), 1478);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.op_count(), 1477);
+            assert_eq!(db.op_count(), 1478);
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
@@ -870,8 +863,8 @@ pub mod test {
             db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 1956);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+            assert_eq!(db.op_count(), 1957);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -879,8 +872,8 @@ pub mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone(), "build_big").await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 1956);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+            assert_eq!(db.op_count(), 1957);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.

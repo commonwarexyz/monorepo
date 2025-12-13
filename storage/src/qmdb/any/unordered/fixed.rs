@@ -17,6 +17,7 @@ use crate::{
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use tracing::warn;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -45,7 +46,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
         let translator = cfg.translator.clone();
-        let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .await?;
+            log.sync().await?;
+        }
+
         let log = Self::init_from_log(
             Index::new(context.clone(), translator),
             log,
@@ -282,11 +290,11 @@ pub(super) mod test {
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(5), max_ops)
+                .historical_proof(original_op_count, Location::new_unchecked(6), max_ops)
                 .await
                 .unwrap();
             let (regular_proof, regular_ops) =
-                db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
+                db.proof(Location::new_unchecked(6), max_ops).await.unwrap();
 
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -296,7 +304,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                Location::new_unchecked(5),
+                Location::new_unchecked(6),
                 &historical_ops,
                 &root_hash
             ));
@@ -308,7 +316,7 @@ pub(super) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(5), NZU64!(10))
+                .historical_proof(original_op_count, Location::new_unchecked(6), NZU64!(10))
                 .await
                 .unwrap();
             assert_eq!(
@@ -322,7 +330,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                Location::new_unchecked(5),
+                Location::new_unchecked(6),
                 &historical_ops,
                 &root_hash
             ));
@@ -330,7 +338,7 @@ pub(super) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.op_count() + 1, Location::new_unchecked(5), NZU64!(10))
+                db.historical_proof(db.op_count() + 1, Location::new_unchecked(6), NZU64!(10))
                     .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
@@ -353,15 +361,15 @@ pub(super) mod test {
             // Test singleton database
             let (single_proof, single_ops) = db
                 .historical_proof(
+                    Location::new_unchecked(2),
                     Location::new_unchecked(1),
-                    Location::new_unchecked(0),
                     NZU64!(1),
                 )
                 .await
                 .unwrap();
             assert_eq!(
                 single_proof.size,
-                Position::try_from(Location::new_unchecked(1)).unwrap()
+                Position::try_from(Location::new_unchecked(2)).unwrap()
             );
             assert_eq!(single_ops.len(), 1);
 
@@ -375,7 +383,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
-                Location::new_unchecked(0),
+                Location::new_unchecked(1),
                 &single_ops,
                 &single_root
             ));
@@ -383,8 +391,8 @@ pub(super) mod test {
             // Test requesting more operations than available in historical position
             let (_limited_proof, limited_ops) = db
                 .historical_proof(
-                    Location::new_unchecked(10),
-                    Location::new_unchecked(5),
+                    Location::new_unchecked(11),
+                    Location::new_unchecked(6),
                     NZU64!(20),
                 )
                 .await
@@ -395,15 +403,15 @@ pub(super) mod test {
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db
                 .historical_proof(
-                    Location::new_unchecked(3),
-                    Location::new_unchecked(0),
+                    Location::new_unchecked(4),
+                    Location::new_unchecked(1),
                     NZU64!(3),
                 )
                 .await
                 .unwrap();
             assert_eq!(
                 min_proof.size,
-                Position::try_from(Location::new_unchecked(3)).unwrap()
+                Position::try_from(Location::new_unchecked(4)).unwrap()
             );
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
@@ -425,9 +433,9 @@ pub(super) mod test {
             let mut hasher = StandardHasher::<Sha256>::new();
 
             // Test historical proof generation for several historical states.
-            let start_loc = Location::new_unchecked(20);
+            let start_loc = Location::new_unchecked(21);
             let max_ops = NZU64!(10);
-            for end_loc in 31..50 {
+            for end_loc in 32..51 {
                 let end_loc = Location::new_unchecked(end_loc);
                 let (historical_proof, historical_ops) = db
                     .historical_proof(end_loc, start_loc, max_ops)
@@ -436,9 +444,9 @@ pub(super) mod test {
 
                 assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
 
-                // Create  reference database at the given historical size
+                // Create reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                apply_ops(&mut ref_db, ops[0..*end_loc as usize].to_vec()).await;
+                apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -447,7 +455,10 @@ pub(super) mod test {
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
                 let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
-                assert_eq!(ref_ops, ops[*start_loc as usize..*end_loc as usize]);
+                assert_eq!(
+                    ref_ops,
+                    ops[(*start_loc - 1) as usize..(*end_loc - 1) as usize]
+                );
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root();
