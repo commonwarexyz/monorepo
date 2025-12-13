@@ -227,34 +227,19 @@ impl Display for Signature {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let mut raw = u.arbitrary::<[u8; SIGNATURE_LENGTH]>()?;
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
 
-        // Recovery ID must be 0-3 (use only low 2 bits).
-        raw[0] &= 0x03;
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Ensure R is a valid non-zero scalar (< curve order n).
-        // Since n > 2^255, clearing the high bit ensures R < n.
-        raw[1] &= 0x7F;
-        if raw[1..33].iter().all(|&b| b == 0) {
-            raw[32] = 1;
-        }
-
-        // Ensure S is a valid non-zero "low" scalar (< n/2).
-        // Clearing top 2 bits ensures S < 2^254 < n/2.
-        raw[33] &= 0x3F;
-        if raw[33..].iter().all(|&b| b == 0) {
-            raw[64] = 1;
-        }
-
-        let recovery_id = RecoveryId::from_byte(raw[0]).expect("recovery id should be valid (0-3)");
-        let signature = p256::ecdsa::Signature::from_slice(&raw[1..])
-            .expect("constructed bytes should form valid signature");
-
-        Ok(Self {
-            raw,
-            recovery_id,
-            signature,
-        })
+        Ok(private_key.sign(&[], &message))
     }
 }
 

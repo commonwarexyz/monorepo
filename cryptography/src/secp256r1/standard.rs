@@ -181,26 +181,19 @@ impl Display for Signature {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let mut raw = u.arbitrary::<[u8; SIGNATURE_LENGTH]>()?;
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
 
-        // Ensure R is a valid non-zero scalar (< curve order n).
-        // Since n > 2^255, clearing the high bit ensures R < n.
-        raw[0] &= 0x7F;
-        if raw[..32].iter().all(|&b| b == 0) {
-            raw[31] = 1;
-        }
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Ensure S is a valid non-zero "low" scalar (< n/2).
-        // Clearing top 2 bits ensures S < 2^254 < n/2.
-        raw[32] &= 0x3F;
-        if raw[32..].iter().all(|&b| b == 0) {
-            raw[63] = 1;
-        }
-
-        let signature = p256::ecdsa::Signature::from_slice(&raw)
-            .expect("constructed bytes should form valid signature");
-
-        Ok(Self::from(signature))
+        Ok(private_key.sign(&[], &message))
     }
 }
 
