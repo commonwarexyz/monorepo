@@ -1496,13 +1496,15 @@ pub mod multihead {
         ///   the provided helper methods on Instance.
         pub fn context(&self) -> Context {
             // Return a context with the instance namespace as its label
+            // Create a proper child tree for supervision
+            let (child, _) = Tree::child(&self.context.tree);
             let name = format!("i{}", self.namespace);
             Context {
                 name,
                 executor: self.context.executor.clone(),
                 network: self.context.network.clone(),
                 storage: self.context.storage.clone(),
-                tree: self.context.tree.clone(),
+                tree: child,
                 execution: Execution::default(),
                 instrumented: false,
             }
@@ -2118,6 +2120,85 @@ mod tests {
                     let read = blob.read_at(vec![0; len as usize], 0).await.unwrap();
                     assert_eq!(read.as_ref(), format!("data_{}", i).as_bytes());
                 }
+            });
+        }
+
+        #[test]
+        fn test_context_drop_does_not_affect_others() {
+            use crate::Spawner;
+            use futures::channel::oneshot;
+
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance1 = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+                let instance2 = manager.instance(Ipv4Addr::new(10, 0, 0, 2));
+
+                let (tx1, rx1) = oneshot::channel::<u32>();
+                let (tx2, rx2) = oneshot::channel::<u32>();
+
+                // Spawn task from instance1's context
+                let ctx1 = instance1.context();
+                ctx1.clone().spawn(|_| async move {
+                    tx1.send(42).unwrap();
+                });
+
+                // Spawn task from instance2's context
+                let ctx2 = instance2.context();
+                ctx2.clone().spawn(|_| async move {
+                    tx2.send(84).unwrap();
+                });
+
+                // Drop instance1's context - should not affect instance2's task
+                drop(ctx1);
+
+                // Both tasks should complete successfully
+                let result1 = rx1.await.unwrap();
+                let result2 = rx2.await.unwrap();
+
+                assert_eq!(result1, 42);
+                assert_eq!(result2, 84);
+            });
+        }
+
+        #[test]
+        fn test_multiple_contexts_from_same_instance() {
+            use crate::Spawner;
+            use futures::channel::oneshot;
+
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let manager = Manager::new(context);
+
+                let instance = manager.instance(Ipv4Addr::new(10, 0, 0, 1));
+
+                // Create multiple contexts from the same instance
+                let ctx1 = instance.context();
+                let ctx2 = instance.context();
+                let ctx3 = instance.context();
+
+                let (tx1, rx1) = oneshot::channel::<u32>();
+                let (tx2, rx2) = oneshot::channel::<u32>();
+                let (tx3, rx3) = oneshot::channel::<u32>();
+
+                // Spawn tasks from each context
+                ctx1.spawn(|_| async move {
+                    tx1.send(1).unwrap();
+                });
+
+                ctx2.spawn(|_| async move {
+                    tx2.send(2).unwrap();
+                });
+
+                ctx3.spawn(|_| async move {
+                    tx3.send(3).unwrap();
+                });
+
+                // All tasks should complete successfully
+                assert_eq!(rx1.await.unwrap(), 1);
+                assert_eq!(rx2.await.unwrap(), 2);
+                assert_eq!(rx3.await.unwrap(), 3);
             });
         }
     }
