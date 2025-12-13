@@ -5,7 +5,8 @@
 //!
 //! - [`Link`]: Configures latency, jitter, and packet loss between endpoints
 //! - [`bandwidth`]: Max-min fair bandwidth allocation algorithm
-//! - [`transmitter`]: Deterministic scheduler for message delivery with bandwidth limits
+//! - [`Completion`]/[`State`]: Deterministic scheduler for message delivery with bandwidth limits
+//! - [`Router`]: High-level message router that manages links and delivery
 //!
 //! # Design
 //!
@@ -16,24 +17,33 @@
 //! # Example
 //!
 //! ```ignore
-//! use commonware_runtime::simulated::{Link, transmitter::State};
+//! use commonware_runtime::simulated::{Link, Router};
 //! use std::time::Duration;
 //!
-//! // Configure link conditions
+//! // Create a router for message delivery
+//! let mut router: Router<u64, u32> = Router::new();
+//!
+//! // Configure link conditions between peers
 //! let link = Link::new(
 //!     Duration::from_millis(50),  // 50ms latency
 //!     Duration::from_millis(10),  // 10ms jitter
-//!     0.01,                        // 1% drop rate
+//!     0.99,                        // 99% success rate
 //! );
+//! router.add_link(peer1, peer2, link);
 //!
-//! // Create a transmitter for scheduling message delivery
-//! let mut transmitter: State<u64> = State::new();
+//! // Set bandwidth limits
+//! router.limit_bandwidth(now, &peer1, Some(1_000_000), None); // 1MB/s egress
+//!
+//! // Send messages through the router
+//! let deliveries = router.send(now, &mut rng, peer1, peer2, channel, message);
 //! ```
 
 pub mod bandwidth;
 mod link;
+mod router;
 mod transmitter;
 
 pub use bandwidth::{allocate, duration, transfer, Flow, Rate};
 pub use link::Link;
+pub use router::{Delivery, Router};
 pub use transmitter::{Completion, State};

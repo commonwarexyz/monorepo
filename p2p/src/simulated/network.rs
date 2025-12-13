@@ -1,17 +1,13 @@
 //! Implementation of a simulated p2p network.
 
-use super::{
-    ingress::{self, Oracle},
-    metrics,
-    transmitter::{self, Completion},
-    Error,
-};
+use super::{ingress, metrics, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
+    simulated::{Delivery, Router},
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork,
     RateLimiter, Spawner,
 };
@@ -23,14 +19,14 @@ use futures::{
     future, SinkExt, StreamExt,
 };
 use governor::clock::Clock as GClock;
+pub use ingress::Oracle;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
-use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -124,8 +120,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     sender: mpsc::UnboundedSender<Task<P>>,
     receiver: mpsc::UnboundedReceiver<Task<P>>,
 
-    // A map from a pair of public keys (from, to) to a link between the two peers
-    links: HashMap<(P, P), Link>,
+    // A map from a pair of public keys (from, to) to a delivery link between the two peers
+    links: HashMap<(P, P), DeliveryLink>,
 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
@@ -142,8 +138,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
-    // State of the transmitter
-    transmitter: transmitter::State<P>,
+    // Router for message scheduling and delivery
+    router: Router<P, Channel>,
 
     // Subscribers to peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
@@ -191,7 +187,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
                 blocks: HashSet::new(),
-                transmitter: transmitter::State::new(),
+                router: Router::new(),
                 subscribers: Vec::new(),
                 rate_limiters: HashMap::new(),
                 received_messages,
@@ -375,10 +371,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 
                 // Update bandwidth limits
                 let now = self.context.current();
-                let completions = self
-                    .transmitter
-                    .limit(now, &public_key, egress_cap, ingress_cap);
-                self.process_completions(completions);
+                let deliveries = self
+                    .router
+                    .limit_bandwidth(now, &public_key, egress_cap, ingress_cap);
+                self.process_deliveries(deliveries);
 
                 // Notify the caller that the bandwidth update has been applied
                 let _ = result.send(());
@@ -386,8 +382,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
             ingress::Message::AddLink {
                 sender,
                 receiver,
-                sampler,
-                success_rate,
+                link,
                 result,
             } => {
                 // If sender or receiver does not exist, then create it.
@@ -400,17 +395,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                     return send_result(result, Err(Error::LinkExists));
                 }
 
-                let link = Link::new(
+                // Add link to router (handles scheduling and sampling)
+                self.router.add_link(sender.clone(), receiver.clone(), link);
+
+                // Create delivery link (handles actual network delivery)
+                let delivery_link = DeliveryLink::new(
                     &mut self.context,
                     sender,
                     receiver,
                     receiver_socket,
-                    sampler,
-                    success_rate,
                     self.max_size,
                     self.received_messages.clone(),
                 );
-                self.links.insert(key, link);
+                self.links.insert(key, delivery_link);
                 send_result(result, Ok(()))
             }
             ingress::Message::RemoveLink {
@@ -418,10 +415,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 receiver,
                 result,
             } => {
-                match self.links.remove(&(sender, receiver)) {
+                // Remove from delivery links
+                match self.links.remove(&(sender.clone(), receiver.clone())) {
                     Some(_) => (),
                     None => return send_result(result, Err(Error::LinkMissing)),
                 }
+                // Also remove from router
+                self.router.remove_link(sender, receiver);
                 send_result(result, Ok(()))
             }
             ingress::Message::Block { from, to } => {
@@ -468,31 +468,31 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
-    /// Process completions from the transmitter.
-    fn process_completions(&mut self, completions: Vec<Completion<P>>) {
-        for completion in completions {
+    /// Process deliveries from the router.
+    fn process_deliveries(&mut self, deliveries: Vec<Delivery<P, Channel>>) {
+        for delivery in deliveries {
             // If there is no message to deliver, then skip
-            let Some(deliver_at) = completion.deliver_at else {
+            let Some(deliver_at) = delivery.deliver_at else {
                 trace!(
-                    origin = ?completion.origin,
-                    recipient = ?completion.recipient,
+                    origin = ?delivery.origin,
+                    recipient = ?delivery.recipient,
                     "message dropped before delivery",
                 );
                 continue;
             };
 
             // Send message to link
-            let key = (completion.origin.clone(), completion.recipient.clone());
+            let key = (delivery.origin.clone(), delivery.recipient.clone());
             let Some(link) = self.links.get_mut(&key) else {
                 // This can happen if the link is removed before the message is delivered
                 trace!(
-                    origin = ?completion.origin,
-                    recipient = ?completion.recipient,
-                    "missing link for completion",
+                    origin = ?delivery.origin,
+                    recipient = ?delivery.recipient,
+                    "missing link for delivery",
                 );
                 continue;
             };
-            if let Err(err) = link.send(completion.channel, completion.message, deliver_at) {
+            if let Err(err) = link.send(delivery.channel, delivery.message, deliver_at) {
                 error!(?err, "failed to send");
             }
         }
@@ -564,11 +564,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 continue;
             }
 
-            // Determine if there is a link between the origin and recipient
-            let Some(link) = self.links.get_mut(&o_r) else {
+            // Check if there is a link between the origin and recipient
+            if !self.links.contains_key(&o_r) {
                 trace!(?origin, ?recipient, reason = "no link", "dropping message");
                 continue;
-            };
+            }
 
             // Check rate limit for this (sender, channel) pair
             if let Some(limiter) = self.rate_limiters.get(&(origin.clone(), channel)) {
@@ -589,23 +589,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
-            // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
-
-            // Determine if the message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
-
-            // Enqueue message for delivery
-            let completions = self.transmitter.enqueue(
+            // Send message through the router (handles latency sampling, success rate, and scheduling)
+            let deliveries = self.router.send(
                 now,
+                &mut self.context,
                 origin.clone(),
                 recipient.clone(),
                 channel,
                 message.clone(),
-                latency,
-                should_deliver,
             );
-            self.process_completions(completions);
+
+            // Process any immediate deliveries
+            if let Some(deliveries) = deliveries {
+                self.process_deliveries(deliveries);
+            }
 
             sent.push(recipient);
         }
@@ -626,15 +623,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 
     async fn run(mut self) {
         loop {
-            let tick = match self.transmitter.next() {
+            let tick = match self.router.next() {
                 Some(when) => Either::Left(self.context.sleep_until(when)),
                 None => Either::Right(future::pending()),
             };
             select! {
                 _ = tick => {
                     let now = self.context.current();
-                    let completions = self.transmitter.advance(now);
-                    self.process_completions(completions);
+                    let deliveries = self.router.advance(now);
+                    self.process_deliveries(deliveries);
                 },
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
@@ -1027,25 +1024,21 @@ impl<P: PublicKey> Peer<P> {
     }
 }
 
-// A unidirectional link between two peers.
-// Messages can be sent over the link with a given latency, jitter, and success rate.
-struct Link {
-    sampler: Normal<f64>,
-    success_rate: f64,
+/// A unidirectional delivery link between two peers.
+///
+/// This handles the actual network delivery of messages. The scheduling and
+/// link conditions (latency, jitter, success rate) are handled by the Router.
+struct DeliveryLink {
     // Messages with their receive time for ordered delivery
     inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
 }
 
-/// Buffered payload waiting for earlier messages on the same link to complete.
-impl Link {
-    #[allow(clippy::too_many_arguments)]
+impl DeliveryLink {
     fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
         context: &mut E,
         dialer: P,
         receiver: P,
         socket: SocketAddr,
-        sampler: Normal<f64>,
-        success_rate: f64,
         max_size: usize,
         received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
@@ -1079,11 +1072,7 @@ impl Link {
             }
         });
 
-        Self {
-            sampler,
-            success_rate,
-            inbox,
-        }
+        Self { inbox }
     }
 
     // Send a message over the link with receive timing.
@@ -1109,7 +1098,7 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use futures::FutureExt;
     use governor::Quota;
-    use std::num::NonZeroU32;
+    use std::{num::NonZeroU32, time::Duration};
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 

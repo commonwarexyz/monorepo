@@ -7,7 +7,6 @@ use futures::{
     SinkExt,
 };
 use governor::Quota;
-use rand_distr::Normal;
 use std::net::SocketAddr;
 
 // Re-export Link from runtime
@@ -41,8 +40,7 @@ pub enum Message<P: PublicKey> {
     AddLink {
         sender: P,
         receiver: P,
-        sampler: Normal<f64>,
-        success_rate: f64,
+        link: Link,
         result: oneshot::Sender<Result<(), Error>>,
     },
     RemoveLink {
@@ -143,21 +141,14 @@ impl<P: PublicKey> Oracle<P> {
     /// setting will be used.
     ///
     /// Link can be called before a peer is registered or bandwidth is specified.
-    pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
+    pub async fn add_link(&mut self, sender: P, receiver: P, link: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
         }
-        if config.success_rate < 0.0 || config.success_rate > 1.0 {
-            return Err(Error::InvalidSuccessRate(config.success_rate));
+        if link.success_rate < 0.0 || link.success_rate > 1.0 {
+            return Err(Error::InvalidSuccessRate(link.success_rate));
         }
-
-        // Convert Duration to milliseconds as f64 for the Normal distribution
-        let latency_ms = config.latency.as_secs_f64() * 1000.0;
-        let jitter_ms = config.jitter.as_secs_f64() * 1000.0;
-
-        // Create distribution
-        let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
         // Wait for update to complete
         let (s, r) = oneshot::channel();
@@ -165,8 +156,7 @@ impl<P: PublicKey> Oracle<P> {
             .send(Message::AddLink {
                 sender,
                 receiver,
-                sampler,
-                success_rate: config.success_rate,
+                link,
                 result: s,
             })
             .await

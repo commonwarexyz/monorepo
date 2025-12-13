@@ -144,7 +144,6 @@
 mod ingress;
 mod metrics;
 mod network;
-mod transmitter;
 
 use thiserror::Error;
 
