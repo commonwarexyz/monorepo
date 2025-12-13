@@ -1,3 +1,5 @@
+use super::store::{BlockEntry, ChainStore};
+use super::{BlockCodecCfg, ConsensusDigest, FinalizationEvent, Message, PublicKey};
 use crate::execution::{evm_env, execute_txs};
 use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
 use alloy_evm::revm::{
@@ -7,242 +9,16 @@ use alloy_evm::revm::{
     Database as _,
 };
 use bytes::Bytes;
-use commonware_consensus::{
-    simplex::types::{Activity, Context},
-    types::Epoch,
-    Automaton as ConsensusAutomaton, Relay as ConsensusRelay, Reporter as ConsensusReporter,
-};
-use commonware_codec::Encode as _;
-use commonware_cryptography::{ed25519, sha256, Hasher as _};
-use commonware_p2p::{Recipients, Sender as P2pSender};
+use commonware_consensus::simplex::types::{Activity, Context};
+use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    StreamExt as _,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-pub type ConsensusDigest = sha256::Digest;
-pub type PublicKey = ed25519::PublicKey;
-pub type FinalizationEvent = (u32, ConsensusDigest);
-
-#[derive(Clone, Copy, Debug)]
-pub struct BlockCodecCfg {
-    pub max_txs: usize,
-    pub max_calldata_bytes: usize,
-}
-
-#[derive(Clone, Debug)]
-struct BlockEntry {
-    block: Block,
-    db: InMemoryDB,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ChainStore {
-    by_digest: BTreeMap<ConsensusDigest, BlockEntry>,
-    by_id: BTreeMap<BlockId, ConsensusDigest>,
-}
-
-impl ChainStore {
-    fn insert(&mut self, digest: ConsensusDigest, entry: BlockEntry) {
-        self.by_id.insert(entry.block.id(), digest);
-        self.by_digest.insert(digest, entry);
-    }
-
-    fn get_by_digest(&self, digest: &ConsensusDigest) -> Option<&BlockEntry> {
-        self.by_digest.get(digest)
-    }
-}
-
-#[derive(Debug)]
-pub enum Message {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<ConsensusDigest>,
-    },
-    SetGenesisTx {
-        tx: Option<Tx>,
-    },
-    QueryBalance {
-        digest: ConsensusDigest,
-        address: Address,
-        response: oneshot::Sender<Option<U256>>,
-    },
-    QueryStateRoot {
-        digest: ConsensusDigest,
-        response: oneshot::Sender<Option<StateRoot>>,
-    },
-    Propose {
-        context: Context<ConsensusDigest, PublicKey>,
-        response: oneshot::Sender<ConsensusDigest>,
-    },
-    Verify {
-        context: Context<ConsensusDigest, PublicKey>,
-        digest: ConsensusDigest,
-        response: oneshot::Sender<bool>,
-    },
-    BlockReceived {
-        from: PublicKey,
-        bytes: Bytes,
-    },
-    Broadcast {
-        digest: ConsensusDigest,
-    },
-    Report {
-        activity: Activity<
-            commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<
-                PublicKey,
-                commonware_cryptography::bls12381::primitives::variant::MinSig,
-            >,
-            ConsensusDigest,
-        >,
-    },
-}
-
-/// Mailbox for the chain application.
-#[derive(Clone)]
-pub struct Mailbox<S> {
-    sender: mpsc::Sender<Message>,
-    gossip: S,
-    store: Arc<Mutex<ChainStore>>,
-}
-
-impl<S> Mailbox<S> {
-    fn new(sender: mpsc::Sender<Message>, gossip: S, store: Arc<Mutex<ChainStore>>) -> Self {
-        Self {
-            sender,
-            gossip,
-            store,
-        }
-    }
-
-    pub async fn deliver_block(&self, from: PublicKey, bytes: Bytes) {
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(Message::BlockReceived { from, bytes })
-            .await;
-    }
-
-    pub async fn set_genesis_tx(&self, tx: Option<Tx>) {
-        let mut sender = self.sender.clone();
-        let _ = sender.send(Message::SetGenesisTx { tx }).await;
-    }
-
-    pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(Message::QueryBalance {
-                digest,
-                address,
-                response,
-            })
-            .await;
-        receiver.await.unwrap_or(None)
-    }
-
-    pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(Message::QueryStateRoot { digest, response })
-            .await;
-        receiver.await.unwrap_or(None)
-    }
-}
-
-impl<S> ConsensusAutomaton for Mailbox<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    type Context = Context<ConsensusDigest, PublicKey>;
-    type Digest = ConsensusDigest;
-
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("failed to send genesis");
-        receiver.await.expect("failed to receive genesis")
-    }
-
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-        let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Propose { context, response })
-            .await
-            .is_err()
-        {
-            return receiver;
-        }
-        receiver
-    }
-
-    async fn verify(
-        &mut self,
-        context: Self::Context,
-        payload: Self::Digest,
-    ) -> oneshot::Receiver<bool> {
-        let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Verify {
-                context,
-                digest: payload,
-                response,
-            })
-            .await
-            .is_err()
-        {
-            return receiver;
-        }
-        receiver
-    }
-}
-
-impl<S> ConsensusRelay for Mailbox<S>
-where
-    S: P2pSender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
-{
-    type Digest = ConsensusDigest;
-
-    async fn broadcast(&mut self, payload: Self::Digest) {
-        let bytes = {
-            let store = self.store.lock().expect("store lock poisoned");
-            store
-                .get_by_digest(&payload)
-                .map(|entry| entry.block.encode())
-        };
-        let Some(bytes) = bytes else {
-            return;
-        };
-
-        let _ = self
-            .gossip
-            .send(Recipients::All, Bytes::copy_from_slice(bytes.as_ref()), true)
-            .await;
-    }
-}
-
-impl<S> ConsensusReporter for Mailbox<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    type Activity = Activity<
-        commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<
-            PublicKey,
-            commonware_cryptography::bls12381::primitives::variant::MinSig,
-        >,
-        ConsensusDigest,
-    >;
-
-    async fn report(&mut self, activity: Self::Activity) {
-        let _ = self.sender.send(Message::Report { activity }).await;
-    }
-}
+use super::Mailbox;
 
 /// Chain application actor.
 pub struct Application {
@@ -253,7 +29,8 @@ pub struct Application {
     genesis_tx: Option<Tx>,
     store: Arc<Mutex<ChainStore>>,
     received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: BTreeMap<ConsensusDigest, Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>>,
+    pending_verifies:
+        BTreeMap<ConsensusDigest, Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>>,
 }
 
 impl Application {
@@ -288,7 +65,7 @@ impl Application {
     }
 
     fn digest_for_block(&self, block: &Block) -> ConsensusDigest {
-        let mut hasher = commonware_cryptography::Sha256::default();
+        let mut hasher = Sha256::default();
         let id = block_id(block);
         hasher.update(id.0.as_slice());
         hasher.finalize()
@@ -316,11 +93,6 @@ impl Application {
     fn decode_block(&self, bytes: Bytes) -> anyhow::Result<Block> {
         use commonware_codec::Decode as _;
         Ok(Block::decode_cfg(bytes.as_ref(), &self.block_cfg())?)
-    }
-
-    fn encode_block(&self, block: &Block) -> Bytes {
-        use commonware_codec::Encode as _;
-        Bytes::copy_from_slice(block.encode().as_ref())
     }
 
     fn build_child_block(&self, parent: &Block, prevrandao: B256, txs: Vec<Tx>) -> Block {
@@ -387,13 +159,7 @@ impl Application {
 
         {
             let mut store = self.store.lock().expect("store lock poisoned");
-            store.insert(
-                expected_digest,
-                BlockEntry {
-                    block,
-                    db,
-                },
-            );
+            store.insert(expected_digest, BlockEntry { block, db });
         }
         if clears_genesis_tx {
             self.genesis_tx = None;
@@ -404,7 +170,8 @@ impl Application {
     pub async fn run(mut self, mut mailbox: mpsc::Receiver<Message>) {
         while let Some(message) = mailbox.next().await {
             match message {
-                Message::Genesis { epoch: _, response } => {
+                Message::Genesis { epoch, response } => {
+                    let _ = epoch;
                     let genesis_block = self.genesis_block();
                     let digest = self.digest_for_block(&genesis_block);
                     let mut db = InMemoryDB::default();
@@ -419,17 +186,8 @@ impl Application {
                         );
                     }
                     let mut store = self.store.lock().expect("store lock poisoned");
-                    store.insert(
-                        digest,
-                        BlockEntry {
-                            block: genesis_block,
-                            db,
-                        },
-                    );
+                    store.insert(digest, BlockEntry { block: genesis_block, db });
                     let _ = response.send(digest);
-                }
-                Message::SetGenesisTx { tx } => {
-                    self.genesis_tx = tx;
                 }
                 Message::QueryBalance {
                     digest,
@@ -457,7 +215,9 @@ impl Application {
                         let store = self.store.lock().expect("store lock poisoned");
                         store.get_by_digest(&context.parent.1).cloned()
                     };
-                    let Some(parent) = parent else { continue; };
+                    let Some(parent) = parent else {
+                        continue;
+                    };
                     let prevrandao = B256::from(context.parent.1 .0);
                     let txs = if parent.block.height == 0 {
                         self.genesis_tx.clone().into_iter().collect()
@@ -508,7 +268,8 @@ impl Application {
                         .or_default()
                         .push((context, response));
                 }
-                Message::BlockReceived { from: _, bytes } => {
+                Message::BlockReceived { from, bytes } => {
+                    let _ = from;
                     let Ok(block) = self.decode_block(bytes.clone()) else {
                         continue;
                     };
@@ -530,7 +291,6 @@ impl Application {
                         }
                     }
                 }
-                Message::Broadcast { digest: _ } => {}
                 Message::Report { activity } => {
                     if let Activity::Finalization(finalization) = activity {
                         let _ = self
