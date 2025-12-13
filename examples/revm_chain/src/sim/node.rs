@@ -1,15 +1,13 @@
 use super::{
-    genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS, CHANNEL_BLOCKS,
-    CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
+    genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
+    CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
 use anyhow::Context as _;
 use commonware_consensus::types::{Epoch, ViewDelta};
 use commonware_cryptography::ed25519;
 use commonware_p2p::{simulated, Receiver as _};
-use commonware_runtime::{
-    buffer::PoolRef, deterministic, Metrics as _, Spawner as _,
-};
-use commonware_utils::{NZU32, NZUsize};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _, Spawner as _};
+use commonware_utils::{NZUsize, NZU32};
 use futures::channel::mpsc;
 use governor::Quota;
 use std::time::Duration;

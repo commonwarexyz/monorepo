@@ -2,9 +2,7 @@ use super::ThresholdScheme;
 use commonware_consensus::simplex;
 use commonware_cryptography::{
     bls12381::{dkg, primitives::variant::MinSig},
-    ed25519,
-    PrivateKeyExt as _,
-    Signer as _,
+    ed25519, PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::{ordered::Set, TryCollect as _};
 use rand::{rngs::StdRng, SeedableRng as _};
