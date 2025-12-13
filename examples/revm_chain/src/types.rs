@@ -1,4 +1,4 @@
-use alloy_evm::revm::primitives::{keccak256, Address, B256, Bytes, U256};
+use alloy_evm::revm::primitives::{keccak256, Address, Bytes, B256, U256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -229,8 +229,13 @@ mod tests {
             data: Bytes::from(vec![1, 2, 3]),
         };
         let encoded = tx.encode();
-        let decoded = Tx::decode_cfg(encoded.clone(), &TxCfg { max_calldata_bytes: 1024 })
-            .expect("decode tx");
+        let decoded = Tx::decode_cfg(
+            encoded.clone(),
+            &TxCfg {
+                max_calldata_bytes: 1024,
+            },
+        )
+        .expect("decode tx");
         assert_eq!(tx, decoded);
         assert_eq!(tx.id(), decoded.id());
         assert_eq!(tx.id(), TxId(keccak256(encoded)));

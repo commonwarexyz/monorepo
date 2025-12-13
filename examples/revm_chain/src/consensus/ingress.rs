@@ -119,9 +119,6 @@ impl ConsensusReporter for Mailbox {
     >;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let _ = self
-            .sender
-            .send(IngressMessage::Report { activity })
-            .await;
+        let _ = self.sender.send(IngressMessage::Report { activity }).await;
     }
 }
