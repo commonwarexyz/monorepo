@@ -1296,7 +1296,7 @@ pub mod test {
                         proof,
                         &root
                     ),
-                    "proof of update {i} failed to verify"
+                    "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
             }

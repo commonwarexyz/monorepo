@@ -344,10 +344,9 @@ impl<
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
-        let kvp = OperationProof { loc, chunk, proof };
 
         Ok(KeyValueProof {
-            proof: kvp,
+            proof: OperationProof { loc, chunk, proof },
             next_key: data.next_key,
         })
     }
@@ -1467,7 +1466,7 @@ pub mod test {
                         proof,
                         &root
                     ),
-                    "proof of update {i} failed to verify"
+                    "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
             }
