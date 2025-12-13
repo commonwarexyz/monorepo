@@ -815,19 +815,8 @@ impl<
                     // Clear verify waiter
                     let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
-                    view = context.view();
 
-                    // Ensure the proposal is still current
-                    if view != self.state.current_view() {
-                        debug!(
-                            ?view,
-                            current = ?self.state.current_view(),
-                            "ignoring proposal verification result for stale view",
-                        );
-                        continue;
-                    }
-
-                    // Try to use result
+                    // Handle verification result
                     let valid = match verified {
                         Ok(valid) => valid,
                         Err(err) => {
@@ -835,7 +824,7 @@ impl<
                             continue;
                         }
                     };
-
+                    view = context.view();
                     if valid {
                         // Mark verification complete
                         self.state.verified(view);

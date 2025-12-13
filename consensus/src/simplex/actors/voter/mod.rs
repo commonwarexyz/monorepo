@@ -2073,6 +2073,7 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
+
             // Configure application to always fail verification
             actor.set_fail_verification(true);
             actor.start();
