@@ -1135,12 +1135,21 @@ dependencies = [
 name = "commonware-conformance"
 version = "0.0.63"
 dependencies = [
+ "commonware-conformance-macros",
  "commonware-macros",
  "futures",
- "paste",
  "serde",
  "sha2 0.10.9",
  "toml",
+]
+
+[[package]]
+name = "commonware-conformance-macros"
+version = "0.0.63"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1206,7 +1215,6 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
- "commonware-macros",
  "commonware-math",
  "commonware-utils",
  "criterion",

@@ -1,0 +1,148 @@
+//! Augment the development of conformance tests with procedural macros.
+
+use proc_macro::TokenStream;
+use proc_macro2::Span;
+use quote::quote;
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    punctuated::Punctuated,
+    Ident, Token, Type,
+};
+
+/// A single conformance test entry: `Type` or `Type => n_cases`
+struct ConformanceEntry {
+    ty: Type,
+    n_cases: Option<syn::Expr>,
+}
+
+impl Parse for ConformanceEntry {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let ty: Type = input.parse()?;
+
+        let n_cases = if input.peek(Token![=>]) {
+            input.parse::<Token![=>]>()?;
+            Some(input.parse()?)
+        } else {
+            None
+        };
+
+        Ok(Self { ty, n_cases })
+    }
+}
+
+/// The full input to conformance_tests!
+struct ConformanceInput {
+    entries: Punctuated<ConformanceEntry, Token![,]>,
+}
+
+impl Parse for ConformanceInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let entries = Punctuated::parse_terminated(input)?;
+        Ok(Self { entries })
+    }
+}
+
+/// Convert a type to a valid snake_case function name suffix.
+///
+/// Examples:
+/// - `Vec<u8>` -> `vec_u8`
+/// - `BTreeMap<u32, String>` -> `btreemap_u32_string`
+/// - `Option<Vec<u8>>` -> `option_vec_u8`
+fn type_to_ident(ty: &Type) -> String {
+    let type_str = quote!(#ty).to_string();
+
+    let mut result = String::with_capacity(type_str.len());
+    let mut prev_was_separator = true;
+
+    for c in type_str.chars() {
+        match c {
+            'A'..='Z' => {
+                if !prev_was_separator && !result.is_empty() {
+                    result.push('_');
+                }
+                result.push(c.to_ascii_lowercase());
+                prev_was_separator = false;
+            }
+            'a'..='z' | '0'..='9' => {
+                result.push(c);
+                prev_was_separator = false;
+            }
+            '_' => {
+                if !prev_was_separator && !result.is_empty() {
+                    result.push('_');
+                }
+                prev_was_separator = true;
+            }
+            '<' | '>' | ',' | ' ' | ':' => {
+                if !prev_was_separator && !result.is_empty() {
+                    result.push('_');
+                }
+                prev_was_separator = true;
+            }
+            // Skip other characters
+            _ => {}
+        }
+    }
+
+    result.trim_end_matches("_").to_string()
+}
+
+/// Define conformance tests for types implementing the `Conformance` trait.
+///
+/// This macro generates test functions that verify implementations match expected
+/// hash values stored in `conformance.toml`.
+///
+/// # Usage
+///
+/// ```ignore
+/// conformance_tests! {
+///     Vec<u8>,                       // Uses default (65536 cases)
+///     Vec<u16> => 100,               // Explicit case count
+///     BTreeMap<u32, String> => 100,
+/// }
+/// ```
+///
+/// This generates test functions named after the type:
+/// - `test_vec_u8`
+/// - `test_vec_u16`
+/// - `test_btreemap_u32_string`
+///
+/// The type name is used as the key in the TOML file.
+#[proc_macro]
+pub fn conformance_tests(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as ConformanceInput);
+
+    let tests = input.entries.iter().map(|entry| {
+        let ty = &entry.ty;
+        let n_cases = entry
+            .n_cases
+            .as_ref()
+            .map(|e| quote!(#e))
+            .unwrap_or_else(|| quote!(::commonware_conformance::DEFAULT_CASES));
+
+        let type_name_str = quote!(#ty).to_string().replace(' ', "");
+        let fn_name_suffix = type_to_ident(ty);
+        let fn_name = Ident::new(&format!("test_{fn_name_suffix}"), Span::call_site());
+
+        quote! {
+            #[::commonware_conformance::commonware_macros::test_group("conformance")]
+            #[test]
+            fn #fn_name() {
+                ::commonware_conformance::futures::executor::block_on(
+                    ::commonware_conformance::run_conformance_test::<#ty>(
+                        concat!(module_path!(), "::", #type_name_str),
+                        #n_cases,
+                        ::std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
+                    )
+                );
+            }
+        }
+    });
+
+    let expanded = quote! {
+        #(#tests)*
+    };
+
+    expanded.into()
+}
