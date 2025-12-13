@@ -54,9 +54,12 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let lower = u.int_in_range(0..=u64::MAX - 1)?;
+        let upper = u.int_in_range(lower + 1..=u64::MAX)?;
         Ok(Self {
-            root: u.arbitrary()?,
-            range: u.arbitrary()?,
+            root,
+            range: Location::new_unchecked(lower)..Location::new_unchecked(upper),
         })
     }
 }
