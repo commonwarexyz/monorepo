@@ -104,14 +104,20 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU32, NonZeroUsize},
+        time::Duration,
+    };
     use tracing::debug;
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -129,7 +135,7 @@ mod tests {
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));

@@ -1,8 +1,13 @@
-use crate::field::F;
+use crate::{
+    algebra::{Additive as _, Ring},
+    fields::goldilocks::F,
+};
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
+use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
-use std::ops::{Index, IndexMut};
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -32,7 +37,7 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
         } else {
             // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
             // making that left-hand term the inverse of w.
-            w.exp((1 << lg_rows) - 1)
+            w.exp(&[(1 << lg_rows) - 1])
         }
     };
     // The inverse algorithm consists of carefully undoing the work of the
@@ -206,8 +211,8 @@ impl Read for Matrix {
     }
 }
 
-impl std::fmt::Debug for Matrix {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Matrix {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for i in 0..self.rows {
             let row_i = &self[i];
             for &row_i_j in row_i {
@@ -333,11 +338,11 @@ impl IndexMut<(usize, usize)> for Matrix {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Polynomial {
+struct NTTPolynomial {
     coefficients: Vec<F>,
 }
 
-impl Polynomial {
+impl NTTPolynomial {
     /// Create a polynomial which vanishes (evaluates to 0) except at a few points.
     ///
     /// It's assumed that `except` is a bit vector with length a power of 2.
@@ -436,7 +441,7 @@ impl Polynomial {
             // making that left-hand term the inverse of w.
             let mut w_inv = F::root_of_unity(lg_rows as u8)
                 .expect("too many rows to create vanishing polynomial")
-                .exp((1 << lg_rows) - 1);
+                .exp(&[(1 << lg_rows) - 1]);
             let lg_rows = lg_rows as usize;
             let mut out = Vec::with_capacity(lg_rows);
             for _ in 0..lg_rows {
@@ -591,7 +596,7 @@ impl Polynomial {
     ///
     /// The number of roots does not change.
     ///
-    /// c.f. [Polynomial::vanishing] for an explanation of how this works.
+    /// c.f. [Self::vanishing] for an explanation of how this works.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
         let lg_rows = self.coefficients.len().ilog2();
@@ -699,7 +704,7 @@ impl PolynomialVector {
 
     /// Divide the roots of each polynomial by some factor.
     ///
-    /// c.f. [Polynomial::divide_roots]. This performs the same operation on
+    /// c.f. [NTTPolynomial::divide_roots]. This performs the same operation on
     /// each polynomial in this vector.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
@@ -722,12 +727,12 @@ impl PolynomialVector {
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
     /// This assumes that `q` has no zeroes over [F::NOT_ROOT_OF_UNITY] * [F::ROOT_OF_UNITY]^i,
-    /// for any i. This will be the case for [Polynomial::vanishing].
+    /// for any i. This will be the case for [NTTPolynomial::vanishing].
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
     /// for that polynomial is not guaranteed to be anything meaningful.
-    fn divide(&mut self, mut q: Polynomial) {
+    fn divide(&mut self, mut q: NTTPolynomial) {
         // The algorithm operates column wise.
         //
         // You can compute P(X) / Q(X) by evaluating each polynomial, then computing
@@ -850,8 +855,8 @@ impl EvaluationVector {
         self.active_rows.set(row as u64, false);
     }
 
-    fn multiply(&mut self, polynomial: Polynomial) {
-        let Polynomial { mut coefficients } = polynomial;
+    fn multiply(&mut self, polynomial: NTTPolynomial) {
+        let NTTPolynomial { mut coefficients } = polynomial;
         ntt::<true, _>(
             coefficients.len(),
             1,
@@ -880,7 +885,7 @@ impl EvaluationVector {
         //
         // If we have multiple columns, then this procedure can be done column by column,
         // with the same vanishing polynomial.
-        let vanishing = Polynomial::vanishing(&self.active_rows);
+        let vanishing = NTTPolynomial::vanishing(&self.active_rows);
         self.multiply(vanishing.clone());
         let mut out = self.interpolate();
         out.divide(vanishing);
@@ -1042,7 +1047,7 @@ mod test {
 
         #[test]
         fn test_vanishing_polynomial(bv in any_bit_vec_not_all_0(8)) {
-            let v = Polynomial::vanishing(&bv);
+            let v = NTTPolynomial::vanishing(&bv);
             let expected_degree = bv.count_zeros();
             assert_eq!(v.degree(), expected_degree as usize, "expected v to have degree {expected_degree}");
             let w = F::root_of_unity(bv.len().ilog2() as u8).unwrap();

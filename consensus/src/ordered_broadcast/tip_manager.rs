@@ -70,8 +70,9 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
-        Hasher as _, PrivateKeyExt as _, Signer as _,
+        Hasher as _, Signer as _,
     };
+    use commonware_math::algebra::Random;
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
 
@@ -101,7 +102,7 @@ mod tests {
         // Sign the chunk using a deterministic ed25519 key (since Node.signature is P::Signature,
         // which is ed25519::Signature for our PublicKey type)
         let mut rng = StdRng::seed_from_u64(sequencer_idx as u64);
-        let private_key = commonware_cryptography::ed25519::PrivateKey::from_rng(&mut rng);
+        let private_key = commonware_cryptography::ed25519::PrivateKey::random(&mut rng);
         let namespace = chunk_namespace(b"test");
         let message = chunk.encode();
         let signature = private_key.sign(namespace.as_ref(), &message);
@@ -112,7 +113,7 @@ mod tests {
     /// Generates a deterministic public key for testing using the provided seed.
     fn deterministic_public_key(seed: u64) -> PublicKey {
         let mut rng = StdRng::seed_from_u64(seed);
-        commonware_cryptography::ed25519::PrivateKey::from_rng(&mut rng).public_key()
+        commonware_cryptography::ed25519::PrivateKey::random(&mut rng).public_key()
     }
 
     fn put_new_tip<S, F>(fixture: F)

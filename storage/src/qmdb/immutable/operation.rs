@@ -5,19 +5,23 @@
 
 use crate::{
     mmr::Location,
-    qmdb::operation::{self, variable::Value, Keyed},
+    qmdb::{any::VariableValue, operation::Operation as OperationTrait},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
+// Context byte prefixes for identifying the operation type.
+const SET_CONTEXT: u8 = 0;
+const COMMIT_CONTEXT: u8 = 1;
+
 /// An operation applied to an immutable authenticated database.
 ///
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: Value> {
+pub enum Operation<K: Array, V: VariableValue> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V),
 
@@ -25,7 +29,7 @@ pub enum Operation<K: Array, V: Value> {
     Commit(Option<V>),
 }
 
-impl<K: Array, V: Value> Operation<K, V> {
+impl<K: Array, V: VariableValue> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
@@ -40,7 +44,7 @@ impl<K: Array, V: Value> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Value> EncodeSize for Operation<K, V> {
+impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(_, v) => K::SIZE + v.encode_size(),
@@ -49,9 +53,8 @@ impl<K: Array, V: Value> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Value> Keyed for Operation<K, V> {
+impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
     type Key = K;
-    type Value = V;
 
     fn key(&self) -> Option<&Self::Key> {
         self.key()
@@ -70,55 +73,41 @@ impl<K: Array, V: Value> Keyed for Operation<K, V> {
         // Immutable databases don't have inactivity floors
         None
     }
-
-    fn value(&self) -> Option<&Self::Value> {
-        match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value.as_ref(),
-        }
-    }
-
-    fn into_value(self) -> Option<Self::Value> {
-        match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value,
-        }
-    }
 }
 
-impl<K: Array, V: Value> Write for Operation<K, V> {
+impl<K: Array, V: VariableValue> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
-                operation::SET_CONTEXT.write(buf);
+                SET_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Self::Commit(v) => {
-                operation::COMMIT_CONTEXT.write(buf);
+                COMMIT_CONTEXT.write(buf);
                 v.write(buf);
             }
         }
     }
 }
 
-impl<K: Array, V: Value> Read for Operation<K, V> {
+impl<K: Array, V: VariableValue> Read for Operation<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            operation::SET_CONTEXT => {
+            SET_CONTEXT => {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Set(key, value))
             }
-            operation::COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
 }
 
-impl<K: Array, V: Value> Display for Operation<K, V> {
+impl<K: Array, V: VariableValue> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
@@ -254,12 +243,12 @@ mod tests {
     #[test]
     fn test_operation_insufficient_buffer() {
         // Test insufficient buffer for Set operation
-        let invalid = vec![operation::SET_CONTEXT];
+        let invalid = vec![SET_CONTEXT];
         let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
 
         // Test insufficient buffer for Commit operation
-        let invalid = vec![operation::COMMIT_CONTEXT];
+        let invalid = vec![COMMIT_CONTEXT];
         let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }

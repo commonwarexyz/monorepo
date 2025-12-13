@@ -511,14 +511,15 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{Element, Private},
+            group::Private,
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt, Signer as _,
+        Signer as _,
     };
+    use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::BiMap, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
@@ -551,9 +552,9 @@ mod tests {
 
         // Generate identity keys (ed25519) and consensus keys (BLS)
         let identity_keys: Vec<_> = (0..n)
-            .map(|_| Ed25519PrivateKey::from_rng(&mut rng))
+            .map(|_| Ed25519PrivateKey::random(&mut rng))
             .collect();
-        let consensus_keys: Vec<Private> = (0..n).map(|_| Private::from_rand(&mut rng)).collect();
+        let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut rng)).collect();
 
         // Build BiMap of identity public keys -> consensus public keys
         let participants: BiMap<ed25519::PublicKey, V::Public> = identity_keys

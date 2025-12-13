@@ -12,11 +12,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    qmdb::{
-        build_snapshot_from_log,
-        operation::variable::{immutable::Operation, Value},
-        Error,
-    },
+    qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -24,6 +20,9 @@ use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
+
+mod operation;
+pub use operation::Operation;
 
 type Journal<E, K, V, H, S> =
     authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;
@@ -75,7 +74,7 @@ pub struct Config<T: Translator, C> {
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     H: CHasher,
     T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -97,7 +96,7 @@ pub struct Immutable<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: VariableValue,
         H: CHasher,
         T: Translator,
         S: State<DigestOf<H>>,
@@ -176,7 +175,7 @@ impl<
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -439,7 +438,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Dirty>
 {
     /// Merkleize the database and compute the root digest.
@@ -452,7 +451,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     crate::store::Store for Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     type Key = K;
@@ -467,7 +466,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Value,
+        V: VariableValue,
         H: CHasher,
         T: Translator,
         S: State<DigestOf<H>>,
@@ -493,7 +492,7 @@ impl<
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     crate::qmdb::store::CleanStore for Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     type Digest = H::Digest;
@@ -527,7 +526,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     crate::qmdb::store::DirtyStore for Immutable<E, K, V, H, T, Dirty>
 {
     type Digest = H::Digest;

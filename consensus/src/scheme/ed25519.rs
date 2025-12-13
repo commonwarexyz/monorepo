@@ -518,8 +518,8 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt,
     };
+    use commonware_math::algebra::Random;
     use commonware_utils::{ordered::Set, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
@@ -543,7 +543,7 @@ mod tests {
 
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
+        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut rng)).collect();
         let participants: Set<PublicKey> = private_keys
             .iter()
             .map(|sk| sk.public_key())

@@ -308,7 +308,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
         sha256::{Digest as Sha256Digest, Digest as D},
-        Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        Hasher as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
@@ -323,7 +323,7 @@ mod tests {
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -332,6 +332,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Register a validator with the oracle.
     async fn register_validator<P: PublicKey>(
@@ -343,9 +344,10 @@ mod tests {
         (Sender<P>, Receiver<P>),
     ) {
         let mut control = oracle.control(validator.clone());
-        let (vote_sender, vote_receiver) = control.register(0).await.unwrap();
-        let (certificate_sender, certificate_receiver) = control.register(1).await.unwrap();
-        let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
+        let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
+        let (certificate_sender, certificate_receiver) =
+            control.register(1, TEST_QUOTA).await.unwrap();
+        let (resolver_sender, resolver_receiver) = control.register(2, TEST_QUOTA).await.unwrap();
         (
             (vote_sender, vote_receiver),
             (certificate_sender, certificate_receiver),
@@ -4330,7 +4332,7 @@ mod tests {
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
-                .register(1)
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 

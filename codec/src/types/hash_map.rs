@@ -399,9 +399,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::conformance::CodecConformance;
 
-        crate::conformance_tests! {
-            HashMap<u32, u32>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<HashMap<u32, u32>>,
         }
     }
 }

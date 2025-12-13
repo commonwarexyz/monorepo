@@ -110,16 +110,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
+    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
         backlog: usize,
     ) -> (
-        channels::Sender<C::PublicKey>,
+        channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        self.channels.register(channel, rate, backlog)
+        let clock = self
+            .context
+            .with_label(&format!("channel_{channel}"))
+            .take();
+        self.channels.register(channel, rate, backlog, clock)
     }
 
     /// Starts the network.

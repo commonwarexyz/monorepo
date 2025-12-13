@@ -7,8 +7,10 @@ use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::{unordered::fixed::Any, FixedConfig as Config},
-        operation,
+        any::{
+            unordered::{fixed::Any, FixedOperation},
+            FixedConfig as Config,
+        },
         store::CleanStore,
     },
 };
@@ -19,7 +21,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::fixed::unordered::Operation<Key, Value>;
+pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {

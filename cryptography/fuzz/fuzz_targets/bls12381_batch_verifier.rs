@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
     bls12381::{self, Batch as BlsBatch},
-    BatchVerifier, PrivateKeyExt, Signer, Verifier,
+    BatchVerifier, Signer, Verifier,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};

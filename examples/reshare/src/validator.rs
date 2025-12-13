@@ -128,8 +128,6 @@ pub async fn run<S>(
             namespace: union(namespace::APPLICATION, b"_ENGINE"),
             output,
             share: config.share,
-            orchestrator_rate_limit: orchestrator_limit,
-            dkg_rate_limit: dkg_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
@@ -169,7 +167,7 @@ mod test {
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt, Signer,
+        Signer,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
@@ -192,10 +190,14 @@ mod test {
     use std::{
         collections::{BTreeMap, HashSet},
         future::Future,
+        num::NonZeroU32,
         pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     #[derive(Debug)]
     struct FilteredReceiver<R> {
@@ -282,8 +284,8 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) =
-                deal(&mut rng, peer_config.dealers(0)).expect("deal should succeed");
+            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
+                .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -337,12 +339,22 @@ mod test {
             };
 
             let mut control = oracle.control(pk.clone());
-            let votes = control.register(VOTE_CHANNEL).await.unwrap();
-            let certificates = control.register(CERTIFICATE_CHANNEL).await.unwrap();
-            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-            let (dkg_sender, dkg_receiver) = control.register(DKG_CHANNEL).await.unwrap();
+            let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
+            let certificates = control
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let resolver = control
+                .register(RESOLVER_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let broadcast = control
+                .register(BROADCASTER_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let marshal = control.register(MARSHAL_CHANNEL, TEST_QUOTA).await.unwrap();
+            let (dkg_sender, dkg_receiver) =
+                control.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
             let dkg = (
                 dkg_sender,
                 FilteredReceiver {
@@ -350,7 +362,10 @@ mod test {
                     failures: self.failures.clone(),
                 },
             );
-            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+            let orchestrator = control
+                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
@@ -377,8 +392,6 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),

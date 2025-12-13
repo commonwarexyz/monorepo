@@ -219,9 +219,10 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::group::{self, Element},
+        bls12381::primitives::group::{self},
         sha256::Digest as Sha256Digest,
     };
+    use commonware_math::algebra::{CryptoGroup, Random as _};
     use rand::thread_rng;
 
     fn new_block() -> BlockFormat<Sha256Digest> {
@@ -233,18 +234,18 @@ mod tests {
     }
 
     fn new_group_public() -> <MinSig as Variant>::Public {
-        let mut result = <MinSig as Variant>::Public::one();
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        result.mul(&scalar);
+        let mut result = <MinSig as Variant>::Public::generator();
+        let scalar = group::Scalar::random(&mut thread_rng());
+        result *= &scalar;
         result
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::one();
-        proposal_signature.mul(&scalar);
-        let mut seed_signature = <MinSig as Variant>::Signature::one();
-        seed_signature.mul(&scalar);
+        let scalar = group::Scalar::random(&mut thread_rng());
+        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
+        proposal_signature *= &scalar;
+        let mut seed_signature = <MinSig as Variant>::Signature::generator();
+        seed_signature *= &scalar;
         Finalization {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),

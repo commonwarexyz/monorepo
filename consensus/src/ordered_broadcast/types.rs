@@ -1060,7 +1060,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};

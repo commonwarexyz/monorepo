@@ -247,7 +247,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt, Signer,
+        Signer,
     };
     use commonware_utils::TryCollect;
     use rstest::rstest;

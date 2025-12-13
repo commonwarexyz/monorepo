@@ -1,0 +1,21 @@
+[package]
+name = "commonware-conformance"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Automatically assert the stability of encoding and mechanisms over time."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/conformance"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros.workspace = true
+futures.workspace = true
+paste.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+toml.workspace = true

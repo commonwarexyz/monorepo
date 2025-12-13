@@ -79,7 +79,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt, Signer as _,
+        Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -90,15 +90,17 @@ mod tests {
     };
     use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
@@ -109,8 +111,8 @@ mod tests {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register(0).await.unwrap();
-            let (b1, b2) = control.register(1).await.unwrap();
+            let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
@@ -1035,13 +1037,13 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
-        run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinPk, _>(ctx, n, 3));
+        run_1k(mocks::fixtures::bls12381_threshold::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
-        run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinSig, _>(ctx, n, 3));
+        run_1k(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
     #[test_group("slow")]

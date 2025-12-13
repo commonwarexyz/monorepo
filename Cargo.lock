@@ -963,6 +963,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-storage",
@@ -988,6 +989,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
+ "governor",
  "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
@@ -1005,6 +1007,8 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
+ "governor",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]
@@ -1036,14 +1040,11 @@ version = "0.0.63"
 dependencies = [
  "arbitrary",
  "bytes",
- "commonware-macros",
+ "commonware-conformance",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "serde",
- "sha2 0.10.9",
  "thiserror 2.0.17",
- "toml",
 ]
 
 [[package]]
@@ -1065,6 +1066,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-math",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1130,6 +1132,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-conformance"
+version = "0.0.63"
+dependencies = [
+ "commonware-macros",
+ "futures",
+ "paste",
+ "serde",
+ "sha2 0.10.9",
+ "toml",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.63"
 dependencies = [
@@ -1138,8 +1152,10 @@ dependencies = [
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1167,6 +1183,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -1188,13 +1205,16 @@ dependencies = [
  "cfg-if",
  "chacha20poly1305",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-macros",
+ "commonware-math",
  "commonware-utils",
  "criterion",
  "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
  "p256",
+ "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1215,6 +1235,7 @@ dependencies = [
  "blst",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-math",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
@@ -1274,6 +1295,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -1329,6 +1351,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-math"
+version = "0.0.63"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-utils",
+ "proptest",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "rayon",
+]
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.63"
 dependencies = [
@@ -1336,6 +1373,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
@@ -1384,6 +1422,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1477,6 +1516,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",

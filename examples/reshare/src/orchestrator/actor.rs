@@ -29,7 +29,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota, RateLimiter};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -53,7 +53,6 @@ where
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
-    pub rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -82,7 +81,6 @@ where
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
-    rate_limit: governor::Quota,
     pool_ref: PoolRef,
 }
 
@@ -113,7 +111,6 @@ where
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                rate_limit: config.rate_limit,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -191,9 +188,6 @@ where
         );
         mux.start();
 
-        // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
-
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
@@ -221,9 +215,6 @@ where
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                if rate_limiter.check_key(&from).is_err() {
-                    continue;
-                }
                 let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
