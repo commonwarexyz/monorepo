@@ -1,41 +1,48 @@
 pub mod disrupter;
 pub mod invariants;
+pub mod simplex;
 pub mod types;
 pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
+    simplex::Simplex,
     utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
-use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
         mocks::{application, fixtures::Fixture, relay, reporter},
-        signing_scheme::Scheme as SimplexScheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+pub use simplex::{
+    SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
+    SimplexBls12381MultisigMinSig, SimplexEd25519,
+};
 use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
 
 pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const MIN_REQUIRED_CONTAINERS: u64 = 10;
-const MAX_REQUIRED_CONTAINERS: u64 = 50;
+const MIN_REQUIRED_FINALIZATIONS: u64 = 5;
+const MAX_REQUIRED_FINALIZATIONS: u64 = 50;
 const NAMESPACE: &[u8] = b"consensus_fuzz";
-const CONFIGURATIONS: [(u32, u32, u32); 2] = [(3, 2, 1), (4, 3, 1)];
+// 4 nodes, 3 correct, 1 faulty
+const N4C3F1: (u32, u32, u32) = (4, 3, 1);
+// 3 nodes, 2 correct, 1 faulty
+const N3C2F1: (u32, u32, u32) = (3, 2, 1);
 const MAX_RAW_BYTES: usize = 4096;
 
 const EXPECTED_PANICS: [&str; 3] = [
@@ -44,19 +51,11 @@ const EXPECTED_PANICS: [&str; 3] = [
     "invalid round (in payload)",
 ];
 
-pub trait Simplex: 'static
-where
-    <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
-{
-    type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
-}
-
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub seed: u64,
-    pub containers: u64,
+    pub required_finalizations: u64,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
     pub configuration: (u32, u32, u32),
@@ -105,9 +104,19 @@ impl FuzzInput {
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let partition = u.arbitrary()?;
-        let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
-        let containers = u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+
+        // Bias towards Connected partition
+        let partition = if u.ratio(4, 5)? {
+            Partition::Connected
+        } else {
+            u.arbitrary()?
+        };
+
+        // Bias towards the configuration where nodes can make progress and finalize containers
+        let configuration = if u.ratio(4, 5)? { N4C3F1 } else { N3C2F1 };
+
+        let required_finalizations =
+            u.int_in_range(MIN_REQUIRED_FINALIZATIONS..=MAX_REQUIRED_FINALIZATIONS)?;
 
         let mut raw_bytes = Vec::new();
         for _ in 0..MAX_RAW_BYTES {
@@ -127,7 +136,7 @@ impl Arbitrary<'_> for FuzzInput {
             partition,
             configuration,
             raw_bytes,
-            containers,
+            required_finalizations,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed(prng_seed)),
         })
@@ -136,7 +145,7 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
-    let containers = input.containers;
+    let required_finalizations = input.required_finalizations;
     let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -181,7 +190,8 @@ fn run<P: Simplex>(input: FuzzInput) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
 
-            let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
+            let (vote_network, certificate_network, resolver_network) =
+                registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
                 context.with_label("disrupter"),
                 validator.clone(),
@@ -193,7 +203,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 namespace.clone(),
                 input.clone(),
             );
-            disrupter.start(vote_network, certificate_network);
+            disrupter.start(vote_network, certificate_network, resolver_network);
         }
 
         for i in (f as usize)..(n as usize) {
@@ -250,13 +260,18 @@ fn run<P: Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        let expect_exact_finalizations =
+            input.partition == Partition::Connected && max_faults(n) == f;
+
+        if expect_exact_finalizations {
+            // For fuzzing we count the exact number of finalizations.
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let (_, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let reporter = reporter.clone();
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < containers {
-                        latest = monitor.next().await.expect("event missing");
+                    while reporter.finalizations.lock().unwrap().len() < required_finalizations as usize {
+                        monitor.next().await.expect("event missing");
                     }
                 }));
             }
@@ -266,7 +281,21 @@ fn run<P: Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters);
-        invariants::check(n, states);
+
+        if expect_exact_finalizations {
+            // Verify that exactly required_containers views were finalized and are contained in the `states`.
+            let finalizations_count = states
+                .iter()
+                .map(|(_, _, finalizations)| finalizations.len())
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                finalizations_count as u64, required_finalizations,
+                "Finalization count mismatch: got {finalizations_count} finalizations, but expected exactly {required_finalizations}",
+            );
+        }
+
+        invariants::check::<P>(n, states);
     });
 }
 
@@ -283,10 +312,12 @@ fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
 }
 
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
+    let seed = input.seed;
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
             if !is_expected_panic(&payload) {
+                println!("Panicked with seed: {}", seed);
                 panic::resume_unwind(payload);
             }
         }
