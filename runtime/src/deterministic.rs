@@ -1380,7 +1380,7 @@ impl crate::Storage for Context {
 /// ```
 pub mod multihead {
     use super::*;
-    use crate::Storage as _;
+    use crate::{Metrics as _, Storage as _};
     use std::net::Ipv4Addr;
 
     /// A manager for creating multiple isolated runtime instances.
@@ -1539,6 +1539,34 @@ pub mod multihead {
         pub async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
             let namespaced_partition = format!("{}_{}", self.namespace, partition);
             self.context.storage.scan(&namespaced_partition).await
+        }
+
+        /// Encode only this instance's metrics.
+        ///
+        /// This filters the global metrics registry to return only metrics
+        /// that belong to this instance (those prefixed with the instance namespace).
+        pub fn encode(&self) -> String {
+            let prefix = format!("i{}_", self.namespace);
+            let all_metrics = self.context.encode();
+
+            // Filter to only include lines that start with our prefix or are comments/metadata
+            all_metrics
+                .lines()
+                .filter(|line| {
+                    line.starts_with('#') || line.starts_with(&prefix) || line.is_empty()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+
+    impl Manager {
+        /// Encode all metrics from all instances.
+        ///
+        /// This returns the complete metrics output from the shared registry,
+        /// including metrics from all instances created by this manager.
+        pub fn encode(&self) -> String {
+            self.context.encode()
         }
     }
 }
@@ -1980,7 +2008,7 @@ mod tests {
         }
 
         #[test]
-        fn test_instance_metrics_namespace() {
+        fn test_instance_metrics_isolation() {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let manager = Manager::new(context);
@@ -2003,10 +2031,38 @@ mod tests {
                 counter2.inc();
                 counter2.inc();
 
-                // Encode and verify metrics are namespaced
-                let metrics = ctx1.encode();
-                assert!(metrics.contains("i10_0_0_1_test_counter_total 1"));
-                assert!(metrics.contains("i10_0_0_2_test_counter_total 2"));
+                // Instance1's encode() should only see instance1's metrics
+                let metrics1 = instance1.encode();
+                assert!(
+                    metrics1.contains("i10_0_0_1_test_counter_total 1"),
+                    "instance1 should see its own metrics"
+                );
+                assert!(
+                    !metrics1.contains("i10_0_0_2_test_counter_total"),
+                    "instance1 should not see instance2's metrics"
+                );
+
+                // Instance2's encode() should only see instance2's metrics
+                let metrics2 = instance2.encode();
+                assert!(
+                    metrics2.contains("i10_0_0_2_test_counter_total 2"),
+                    "instance2 should see its own metrics"
+                );
+                assert!(
+                    !metrics2.contains("i10_0_0_1_test_counter_total"),
+                    "instance2 should not see instance1's metrics"
+                );
+
+                // Manager's encode() should see all metrics
+                let all_metrics = manager.encode();
+                assert!(
+                    all_metrics.contains("i10_0_0_1_test_counter_total 1"),
+                    "manager should see instance1's metrics"
+                );
+                assert!(
+                    all_metrics.contains("i10_0_0_2_test_counter_total 2"),
+                    "manager should see instance2's metrics"
+                );
             });
         }
 
