@@ -1,5 +1,6 @@
 use crate::types::{Block, BlockId};
 use alloy_evm::revm::database::InMemoryDB;
+use alloy_evm::revm::primitives::B256;
 use std::collections::BTreeMap;
 
 use crate::consensus::ConsensusDigest;
@@ -8,6 +9,7 @@ use crate::consensus::ConsensusDigest;
 pub(super) struct BlockEntry {
     pub(super) block: Block,
     pub(super) db: InMemoryDB,
+    pub(super) seed: Option<B256>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -24,5 +26,12 @@ impl ChainStore {
 
     pub(super) fn get_by_digest(&self, digest: &ConsensusDigest) -> Option<&BlockEntry> {
         self.by_digest.get(digest)
+    }
+
+    pub(super) fn get_by_digest_mut(
+        &mut self,
+        digest: &ConsensusDigest,
+    ) -> Option<&mut BlockEntry> {
+        self.by_digest.get_mut(digest)
     }
 }

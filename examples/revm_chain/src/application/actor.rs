@@ -7,11 +7,12 @@ use crate::execution::{evm_env, execute_txs};
 use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
 use alloy_evm::revm::{
     database::InMemoryDB,
-    primitives::{Address, B256, U256},
+    primitives::{keccak256, Address, B256, U256},
     state::AccountInfo,
     Database as _,
 };
 use bytes::Bytes;
+use commonware_consensus::simplex::signing_scheme::bls12381_threshold::Seedable as _;
 use commonware_consensus::simplex::types::{Activity, Context};
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -29,8 +30,10 @@ pub struct Application<S> {
     genesis_tx: Option<Tx>,
     store: ChainStore,
     received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies:
-        BTreeMap<ConsensusDigest, Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>>,
+    pending_verifies: BTreeMap<
+        ConsensusDigest,
+        Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>,
+    >,
     gossip: S,
     ingress: mpsc::Receiver<IngressMessage>,
     control: mpsc::Receiver<ControlMessage>,
@@ -113,7 +116,10 @@ where
         }
     }
 
-    fn execute_block(parent: &BlockEntry, mut child: Block) -> anyhow::Result<(ConsensusDigest, BlockEntry)> {
+    fn execute_block(
+        parent: &BlockEntry,
+        mut child: Block,
+    ) -> anyhow::Result<(ConsensusDigest, BlockEntry)> {
         let (db, outcome) = execute_txs(
             parent.db.clone(),
             evm_env(child.height, child.prevrandao),
@@ -123,7 +129,14 @@ where
 
         child.state_root = outcome.state_root;
         let digest = Self::digest_for_block(&child);
-        Ok((digest, BlockEntry { block: child, db }))
+        Ok((
+            digest,
+            BlockEntry {
+                block: child,
+                db,
+                seed: None,
+            },
+        ))
     }
 
     fn try_verify_and_insert(
@@ -159,7 +172,14 @@ where
             return Ok(false);
         }
 
-        store.insert(expected_digest, BlockEntry { block, db });
+        store.insert(
+            expected_digest,
+            BlockEntry {
+                block,
+                db,
+                seed: None,
+            },
+        );
         if clears_genesis_tx {
             *genesis_tx = None;
         }
@@ -192,10 +212,8 @@ where
         } = self;
 
         let cfg = Self::block_cfg(codec);
-        let mut inbox = futures::stream::select(
-            ingress.map(Event::Ingress),
-            control.map(Event::Control),
-        );
+        let mut inbox =
+            futures::stream::select(ingress.map(Event::Ingress), control.map(Event::Control));
 
         while let Some(event) = inbox.next().await {
             match event {
@@ -214,7 +232,14 @@ where
                             },
                         );
                     }
-                    store.insert(digest, BlockEntry { block: genesis_block, db });
+                    store.insert(
+                        digest,
+                        BlockEntry {
+                            block: genesis_block,
+                            db,
+                            seed: Some(B256::ZERO),
+                        },
+                    );
                     let _ = response.send(digest);
                 }
                 Event::Control(ControlMessage::QueryBalance {
@@ -232,12 +257,16 @@ where
                     let entry = store.get_by_digest(&digest).cloned();
                     let _ = response.send(entry.map(|e| e.block.state_root));
                 }
+                Event::Control(ControlMessage::QuerySeed { digest, response }) => {
+                    let entry = store.get_by_digest(&digest);
+                    let _ = response.send(entry.and_then(|e| e.seed));
+                }
                 Event::Ingress(IngressMessage::Propose { context, response }) => {
                     let parent = store.get_by_digest(&context.parent.1).cloned();
                     let Some(parent) = parent else {
                         continue;
                     };
-                    let prevrandao = B256::from(context.parent.1 .0);
+                    let prevrandao = parent.seed.unwrap_or(B256::from(context.parent.1 .0));
                     let txs = if parent.block.height == 0 {
                         genesis_tx.clone().into_iter().collect()
                     } else {
@@ -327,12 +356,26 @@ where
                         .send(commonware_p2p::Recipients::All, bytes, true)
                         .await;
                 }
-                Event::Ingress(IngressMessage::Report { activity }) => {
-                    if let Activity::Finalization(finalization) = activity {
-                        let _ =
-                            finalized.unbounded_send((node, finalization.proposal.payload));
+                Event::Ingress(IngressMessage::Report { activity }) => match activity {
+                    Activity::Notarization(notarization) => {
+                        use commonware_codec::Encode as _;
+                        let seed_hash = keccak256(notarization.seed().encode());
+                        if let Some(entry) = store.get_by_digest_mut(&notarization.proposal.payload)
+                        {
+                            entry.seed = Some(seed_hash);
+                        }
                     }
-                }
+                    Activity::Finalization(finalization) => {
+                        use commonware_codec::Encode as _;
+                        let seed_hash = keccak256(finalization.seed().encode());
+                        if let Some(entry) = store.get_by_digest_mut(&finalization.proposal.payload)
+                        {
+                            entry.seed = Some(seed_hash);
+                        }
+                        let _ = finalized.unbounded_send((node, finalization.proposal.payload));
+                    }
+                    _ => {}
+                },
             }
         }
     }
