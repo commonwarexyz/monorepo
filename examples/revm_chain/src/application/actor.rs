@@ -413,6 +413,9 @@ where
                 block,
             )
             .unwrap_or(false);
+            if ok {
+                self.received.remove(&digest);
+            }
             let _ = response.send(ok);
             return;
         }
@@ -430,7 +433,9 @@ where
         };
 
         let digest = Application::<S>::digest_for_block(&block);
-        self.received.entry(digest).or_insert(block);
+        if self.store.get_by_digest(&digest).is_none() {
+            self.received.entry(digest).or_insert(block);
+        }
         self.flush_pending_verifies(digest);
     }
 
@@ -439,7 +444,19 @@ where
             return;
         };
 
+        if self.store.get_by_digest(&digest).is_some() {
+            for (_, response) in pending {
+                let _ = response.send(true);
+            }
+            self.received.remove(&digest);
+            return;
+        }
+
         for (context, response) in pending {
+            if self.store.get_by_digest(&digest).is_some() {
+                let _ = response.send(true);
+                continue;
+            }
             let block = match self.received.get(&digest).cloned() {
                 Some(b) => b,
                 None => {
@@ -455,6 +472,9 @@ where
                 block,
             )
             .unwrap_or(false);
+            if ok {
+                self.received.remove(&digest);
+            }
             let _ = response.send(ok);
         }
     }
