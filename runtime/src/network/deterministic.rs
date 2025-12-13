@@ -10,6 +10,9 @@ use std::{
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Default IP address for non-multi-headed contexts.
+const DEFAULT_IP: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
 /// Implementation of [crate::Sink] for a deterministic [Network].
 pub struct Sink {
     sender: mocks::Sink,
@@ -64,8 +67,13 @@ type Dialable = mpsc::UnboundedSender<(
 /// from the range `32768..61000`. To keep things simple, it is not possible to
 /// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
 /// the runtime will panic.
+///
+/// Each network instance can be configured with a specific IP address, which is useful
+/// for multi-headed runtime scenarios where different instances need distinct IPs.
 #[derive(Clone)]
 pub struct Network {
+    /// The IP address used by this network instance.
+    ip: Ipv4Addr,
     ephemeral: Arc<Mutex<u16>>,
     listeners: Arc<Mutex<HashMap<SocketAddr, Dialable>>>,
 }
@@ -73,9 +81,29 @@ pub struct Network {
 impl Default for Network {
     fn default() -> Self {
         Self {
+            ip: DEFAULT_IP,
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
             listeners: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Network {
+    /// Create a new network with a specific IP address.
+    ///
+    /// This shares the ephemeral port counter and listeners with other networks
+    /// created from the same base, but uses a different IP for its own connections.
+    pub fn with_ip(&self, ip: Ipv4Addr) -> Self {
+        Self {
+            ip,
+            ephemeral: self.ephemeral.clone(),
+            listeners: self.listeners.clone(),
+        }
+    }
+
+    /// Returns the IP address used by this network instance.
+    pub const fn ip(&self) -> Ipv4Addr {
+        self.ip
     }
 }
 
@@ -83,11 +111,9 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        // If the IP is localhost, ensure the port is not in the ephemeral range
-        // so that it can be used for binding in the dial method
-        if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
-            && EPHEMERAL_PORT_RANGE.contains(&socket.port())
-        {
+        // Ensure the port is not in the ephemeral range so that it can be used
+        // for binding in the dial method
+        if EPHEMERAL_PORT_RANGE.contains(&socket.port()) {
             return Err(Error::BindFailed);
         }
 
@@ -107,10 +133,10 @@ impl crate::Network for Network {
     }
 
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        // Assign dialer a port from the ephemeral range
+        // Assign dialer a port from the ephemeral range using this instance's IP
         let dialer = {
             let mut ephemeral = self.ephemeral.lock().unwrap();
-            let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
+            let dialer = SocketAddr::new(IpAddr::V4(self.ip), *ephemeral);
             *ephemeral = ephemeral
                 .checked_add(1)
                 .expect("ephemeral port range exhausted");
