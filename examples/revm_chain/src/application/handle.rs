@@ -1,4 +1,4 @@
-use super::ControlMessage;
+use super::ApplicationRequest;
 use crate::consensus::{ConsensusDigest, PublicKey};
 use crate::types::StateRoot;
 use alloy_evm::revm::primitives::{Address, B256, U256};
@@ -10,18 +10,18 @@ use futures::{
 
 #[derive(Clone)]
 pub struct Handle {
-    sender: mpsc::Sender<ControlMessage>,
+    sender: mpsc::Sender<ApplicationRequest>,
 }
 
 impl Handle {
-    pub(crate) const fn new(sender: mpsc::Sender<ControlMessage>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<ApplicationRequest>) -> Self {
         Self { sender }
     }
 
     pub async fn deliver_block(&self, from: PublicKey, bytes: Bytes) {
         let mut sender = self.sender.clone();
         let _ = sender
-            .send(ControlMessage::BlockReceived { from, bytes })
+            .send(ApplicationRequest::BlockReceived { from, bytes })
             .await;
     }
 
@@ -29,7 +29,7 @@ impl Handle {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         let _ = sender
-            .send(ControlMessage::QueryBalance {
+            .send(ApplicationRequest::QueryBalance {
                 digest,
                 address,
                 response,
@@ -42,7 +42,7 @@ impl Handle {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         let _ = sender
-            .send(ControlMessage::QueryStateRoot { digest, response })
+            .send(ApplicationRequest::QueryStateRoot { digest, response })
             .await;
         receiver.await.unwrap_or(None)
     }
@@ -51,7 +51,7 @@ impl Handle {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         let _ = sender
-            .send(ControlMessage::QuerySeed { digest, response })
+            .send(ApplicationRequest::QuerySeed { digest, response })
             .await;
         receiver.await.unwrap_or(None)
     }

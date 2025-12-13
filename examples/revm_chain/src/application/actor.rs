@@ -1,8 +1,8 @@
 use super::{
     store::{BlockEntry, ChainStore},
-    BlockCodecCfg, ControlMessage, Handle,
+    ApplicationRequest, BlockCodecCfg, Handle,
 };
-use crate::consensus::{ConsensusDigest, FinalizationEvent, IngressMessage, PublicKey};
+use crate::consensus::{ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey};
 use crate::execution::{evm_env, execute_txs};
 use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
 use alloy_evm::revm::{
@@ -37,13 +37,13 @@ pub struct Application<S> {
         Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>,
     >,
     gossip: S,
-    ingress: mpsc::Receiver<IngressMessage>,
-    control: mpsc::Receiver<ControlMessage>,
+    consensus: mpsc::Receiver<ConsensusRequest>,
+    control: mpsc::Receiver<ApplicationRequest>,
 }
 
 enum Input {
-    Consensus(IngressMessage),
-    Control(ControlMessage),
+    Consensus(ConsensusRequest),
+    Control(ApplicationRequest),
 }
 
 struct Runtime<S> {
@@ -74,9 +74,9 @@ where
         genesis_alloc: Vec<(Address, U256)>,
         genesis_tx: Option<Tx>,
     ) -> (Self, crate::consensus::Mailbox, Handle) {
-        let (ingress_sender, ingress) = mpsc::channel(mailbox_size);
+        let (consensus_sender, consensus) = mpsc::channel(mailbox_size);
         let (control_sender, control) = mpsc::channel(mailbox_size);
-        let consensus = crate::consensus::Mailbox::new(ingress_sender);
+        let consensus_mailbox = crate::consensus::Mailbox::new(consensus_sender);
         let handle = Handle::new(control_sender);
         (
             Self {
@@ -89,10 +89,10 @@ where
                 received: BTreeMap::new(),
                 pending_verifies: BTreeMap::new(),
                 gossip: gossip.clone(),
-                ingress,
+                consensus,
                 control,
             },
-            consensus,
+            consensus_mailbox,
             handle,
         )
     }
@@ -224,7 +224,7 @@ where
             received,
             pending_verifies,
             gossip,
-            ingress,
+            consensus,
             control,
         } = self;
 
@@ -241,7 +241,7 @@ where
             gossip,
         };
         let mut inbox =
-            futures::stream::select(ingress.map(Input::Consensus), control.map(Input::Control));
+            futures::stream::select(consensus.map(Input::Consensus), control.map(Input::Control));
 
         while let Some(event) = inbox.next().await {
             runtime.handle_input(event).await;
@@ -255,49 +255,49 @@ where
 {
     async fn handle_input(&mut self, input: Input) {
         match input {
-            Input::Consensus(message) => self.handle_ingress(message).await,
+            Input::Consensus(message) => self.handle_consensus(message).await,
             Input::Control(message) => self.handle_control(message),
         }
     }
 
-    async fn handle_ingress(&mut self, message: IngressMessage) {
+    async fn handle_consensus(&mut self, message: ConsensusRequest) {
         match message {
-            IngressMessage::Genesis { epoch, response } => {
+            ConsensusRequest::Genesis { epoch, response } => {
                 self.handle_genesis(epoch, response);
             }
-            IngressMessage::Propose { context, response } => {
+            ConsensusRequest::Propose { context, response } => {
                 self.handle_propose(context, response);
             }
-            IngressMessage::Verify {
+            ConsensusRequest::Verify {
                 context,
                 digest,
                 response,
             } => {
                 self.handle_verify(context, digest, response);
             }
-            IngressMessage::Broadcast { digest } => {
+            ConsensusRequest::Broadcast { digest } => {
                 self.handle_broadcast(digest).await;
             }
-            IngressMessage::Report { activity } => {
+            ConsensusRequest::Report { activity } => {
                 self.handle_report(activity);
             }
         }
     }
 
-    fn handle_control(&mut self, message: ControlMessage) {
+    fn handle_control(&mut self, message: ApplicationRequest) {
         match message {
-            ControlMessage::QueryBalance {
+            ApplicationRequest::QueryBalance {
                 digest,
                 address,
                 response,
             } => self.handle_query_balance(digest, address, response),
-            ControlMessage::QueryStateRoot { digest, response } => {
+            ApplicationRequest::QueryStateRoot { digest, response } => {
                 self.handle_query_state_root(digest, response);
             }
-            ControlMessage::QuerySeed { digest, response } => {
+            ApplicationRequest::QuerySeed { digest, response } => {
                 self.handle_query_seed(digest, response)
             }
-            ControlMessage::BlockReceived { from, bytes } => {
+            ApplicationRequest::BlockReceived { from, bytes } => {
                 self.handle_block_received(from, bytes);
             }
         }

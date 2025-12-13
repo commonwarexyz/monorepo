@@ -4,7 +4,7 @@ use alloy_evm::revm::primitives::{Address, B256, U256};
 use bytes::Bytes;
 use futures::channel::oneshot;
 
-pub(crate) enum ControlMessage {
+pub(crate) enum ApplicationRequest {
     BlockReceived {
         from: PublicKey,
         bytes: Bytes,

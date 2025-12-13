@@ -6,7 +6,7 @@
 
 mod ingress;
 
-pub use ingress::{IngressMessage, Mailbox};
+pub use ingress::{ConsensusRequest, Mailbox};
 
 use commonware_cryptography::{ed25519, sha256};
 

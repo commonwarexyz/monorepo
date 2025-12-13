@@ -10,7 +10,7 @@ use futures::{
 };
 
 #[allow(clippy::large_enum_variant)]
-pub enum IngressMessage {
+pub enum ConsensusRequest {
     Genesis {
         epoch: Epoch,
         response: oneshot::Sender<ConsensusDigest>,
@@ -41,11 +41,11 @@ pub enum IngressMessage {
 /// Mailbox for the chain application.
 #[derive(Clone)]
 pub struct Mailbox {
-    sender: mpsc::Sender<IngressMessage>,
+    sender: mpsc::Sender<ConsensusRequest>,
 }
 
 impl Mailbox {
-    pub(crate) const fn new(sender: mpsc::Sender<IngressMessage>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<ConsensusRequest>) -> Self {
         Self { sender }
     }
 }
@@ -57,7 +57,7 @@ impl ConsensusAutomaton for Mailbox {
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(IngressMessage::Genesis { epoch, response })
+            .send(ConsensusRequest::Genesis { epoch, response })
             .await
             .expect("failed to send genesis");
         receiver.await.expect("failed to receive genesis")
@@ -67,7 +67,7 @@ impl ConsensusAutomaton for Mailbox {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(IngressMessage::Propose { context, response })
+            .send(ConsensusRequest::Propose { context, response })
             .await
             .is_err()
         {
@@ -84,7 +84,7 @@ impl ConsensusAutomaton for Mailbox {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(IngressMessage::Verify {
+            .send(ConsensusRequest::Verify {
                 context,
                 digest: payload,
                 response,
@@ -104,7 +104,7 @@ impl ConsensusRelay for Mailbox {
     async fn broadcast(&mut self, payload: Self::Digest) {
         let _ = self
             .sender
-            .send(IngressMessage::Broadcast { digest: payload })
+            .send(ConsensusRequest::Broadcast { digest: payload })
             .await;
     }
 }
@@ -119,6 +119,9 @@ impl ConsensusReporter for Mailbox {
     >;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let _ = self.sender.send(IngressMessage::Report { activity }).await;
+        let _ = self
+            .sender
+            .send(ConsensusRequest::Report { activity })
+            .await;
     }
 }

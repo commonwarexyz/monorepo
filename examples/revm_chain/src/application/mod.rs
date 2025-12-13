@@ -7,7 +7,7 @@ mod store;
 
 pub use actor::Application;
 pub use handle::Handle;
-pub(crate) use message::ControlMessage;
+pub(crate) use message::ApplicationRequest;
 
 #[derive(Clone, Copy, Debug)]
 pub struct BlockCodecCfg {
