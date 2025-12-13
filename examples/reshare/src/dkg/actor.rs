@@ -21,9 +21,10 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::Variant},
     },
     transcript::Summary,
-    Digest as _, Hasher, PublicKey, Signer,
+    Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
+use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
@@ -277,6 +278,7 @@ where
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
+                Default::default(),
                 dealers,
                 players.clone(),
             )

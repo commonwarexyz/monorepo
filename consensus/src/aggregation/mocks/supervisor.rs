@@ -1,6 +1,6 @@
 use crate::{types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, poly, variant::Variant},
+    bls12381::primitives::{group::Share, sharing::Sharing, variant::Variant},
     PublicKey,
 };
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 pub struct Supervisor<P: PublicKey, V: Variant> {
     identity: V::Public,
     shares: HashMap<Epoch, Share>,
-    polynomials: HashMap<Epoch, Vec<V::Public>>,
+    polynomials: HashMap<Epoch, Sharing<V>>,
     validators: HashMap<Epoch, Vec<P>>,
     validators_maps: HashMap<Epoch, HashMap<P, u32>>,
 }
@@ -31,7 +31,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         &mut self,
         epoch: Epoch,
         share: Share,
-        polynomial: poly::Public<V>,
+        polynomial: Sharing<V>,
         mut validators: Vec<P>,
     ) {
         // Setup validators
@@ -42,9 +42,8 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         }
 
         // Evaluate the polynomial
-        let identity = *poly::public::<V>(&polynomial);
+        let identity = *polynomial.public();
         assert_eq!(identity, self.identity);
-        let polynomial = polynomial.evaluate_all(validators.len() as u32);
 
         // Store artifacts
         self.shares.insert(epoch, share);
@@ -70,7 +69,7 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
 impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
     type Identity = V::Public;
     type Seed = V::Signature;
-    type Polynomial = Vec<V::Public>;
+    type Polynomial = Sharing<V>;
     type Share = Share;
 
     fn identity(&self) -> &Self::Identity {

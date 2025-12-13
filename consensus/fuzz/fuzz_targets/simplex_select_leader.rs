@@ -15,8 +15,9 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt, Signer,
+    Signer,
 };
+use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -48,7 +49,7 @@ fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
     let participants: Vec<PublicKey> = (1..=input.participants_count)
         .map(|i| {
             let mut rng = StdRng::seed_from_u64(i as u64);
-            let private_key = PrivateKey::from_rng(&mut rng);
+            let private_key = PrivateKey::random(&mut rng);
             private_key.public_key()
         })
         .collect();

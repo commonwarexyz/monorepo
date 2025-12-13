@@ -4,7 +4,7 @@ use commonware_cryptography::{
         primitives::{self, variant::MinSig},
     },
     ed25519::PrivateKey,
-    PrivateKeyExt as _, Signer as _,
+    Signer as _,
 };
 use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -29,8 +29,10 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 .try_collect()
                                 .unwrap();
                             let (output, shares) =
-                                deal::<MinSig, _>(&mut rng, players).expect("deal should succeed");
-                            let polynomial = output.public().evaluate_all(n);
+                                deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                    .expect("deal should succeed");
+                            let polynomial = output.public().clone();
+                            polynomial.precompute_partial_publics();
                             let signatures = shares
                                 .values()
                                 .iter()
@@ -58,14 +60,13 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             }
 
                             // Verify
-                            let result = black_box(
-                                primitives::ops::partial_verify_multiple_public_keys_precomputed::<
+                            let result =
+                                black_box(primitives::ops::partial_verify_multiple_public_keys::<
                                     MinSig,
                                     _,
                                 >(
                                     &polynomial, Some(namespace), msg, &signatures
-                                ),
-                            );
+                                ));
                             if invalid == 0 {
                                 assert!(result.is_ok());
                             } else {

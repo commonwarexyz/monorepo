@@ -92,7 +92,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
                     transition.dealers.clone(),
                     transition
                         .poly
-                        .as_ref()
+                        .clone()
                         .expect("group polynomial must exist"),
                 )
             },
@@ -101,7 +101,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
                     transition.dealers.clone(),
                     transition
                         .poly
-                        .as_ref()
+                        .clone()
                         .expect("group polynomial must exist"),
                     share.clone(),
                 )

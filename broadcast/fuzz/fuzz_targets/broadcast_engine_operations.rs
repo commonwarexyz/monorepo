@@ -10,13 +10,23 @@ use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
+    Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+
+/// Default rate limit set high enough to not interfere with normal operation
+const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+/// Maximum sleep duration in milliseconds for fuzz tests.
+///
+/// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
+/// and can only represent durations up to ~584 years.
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -70,7 +80,7 @@ impl commonware_codec::Read for FuzzMessage {
     }
 }
 
-#[derive(Clone, Debug, Arbitrary)]
+#[derive(Clone, Debug)]
 enum BroadcastAction {
     SendMessage {
         peer_index: usize,
@@ -92,6 +102,34 @@ enum BroadcastAction {
     Sleep {
         duration_ms: u64,
     },
+}
+
+impl<'a> Arbitrary<'a> for BroadcastAction {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let variant = u.int_in_range(0..=3)?;
+        match variant {
+            0 => Ok(BroadcastAction::SendMessage {
+                peer_index: u.arbitrary()?,
+                recipients: u.arbitrary()?,
+                message: u.arbitrary()?,
+            }),
+            1 => Ok(BroadcastAction::Subscribe {
+                peer_index: u.arbitrary()?,
+                sender: u.arbitrary()?,
+                commitment: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            2 => Ok(BroadcastAction::Get {
+                peer_index: u.arbitrary()?,
+                sender: u.arbitrary()?,
+                commitment: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            _ => Ok(BroadcastAction::Sleep {
+                duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -174,7 +212,7 @@ fn fuzz(input: FuzzInput) {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 

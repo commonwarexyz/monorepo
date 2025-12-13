@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     authenticated::{
         discovery,
@@ -59,7 +59,7 @@ const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
-const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Operations that can be performed on the p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -597,7 +597,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

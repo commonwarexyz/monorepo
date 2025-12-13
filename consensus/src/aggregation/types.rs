@@ -6,7 +6,12 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
+    bls12381::primitives::{
+        group::Share,
+        ops,
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
+    },
     Digest,
 };
 use commonware_utils::union;
@@ -151,12 +156,12 @@ impl<V: Variant, D: Digest> Ack<V, D> {
     ///
     /// Returns `true` if the signature is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let Some(public) = polynomial.get(self.signature.index as usize) else {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Sharing<V>) -> bool {
+        let Ok(public) = polynomial.partial_public(self.signature.index) else {
             return false;
         };
         ops::verify_message::<V>(
-            public,
+            &public,
             Some(ack_namespace(namespace).as_ref()),
             self.item.encode().as_ref(),
             &self.signature.value,
@@ -445,8 +450,8 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(4));
-        let polynomial = public.evaluate_all(4);
+        let (public, shares) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(4));
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),
@@ -458,8 +463,8 @@ mod tests {
 
         // Test Ack creation, signing, verification, and codec
         let ack: Ack<MinSig, _> = Ack::sign(namespace, Epoch::new(1), &shares[0], item.clone());
-        assert!(ack.verify(namespace, &polynomial));
-        assert!(!ack.verify(b"wrong", &polynomial));
+        assert!(ack.verify(namespace, &public));
+        assert!(!ack.verify(b"wrong", &public));
 
         let restored_ack: Ack<MinSig, <Sha256 as Hasher>::Digest> =
             Ack::decode(ack.encode()).unwrap();
@@ -483,7 +488,7 @@ mod tests {
         assert_eq!(activity_ack, restored_activity_ack);
 
         // Test Activity codec - Certified variant
-        let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
+        let signature = sign_message::<MinSig>(shares[0].as_ref(), Some(b"test"), b"message");
         let activity_certified = Activity::Certified(Certificate { item, signature });
         let restored_activity_certified: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_certified.encode()).unwrap();
@@ -514,14 +519,15 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
-        commonware_codec::conformance_tests! {
-            Item<Sha256Digest>,
-            Ack<MinSig, Sha256Digest>,
-            TipAck<MinSig, Sha256Digest>,
-            Certificate<MinSig, Sha256Digest>,
-            Activity<MinSig, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Item<Sha256Digest>>,
+            CodecConformance<Ack<MinSig, Sha256Digest>>,
+            CodecConformance<TipAck<MinSig, Sha256Digest>>,
+            CodecConformance<Certificate<MinSig, Sha256Digest>>,
+            CodecConformance<Activity<MinSig, Sha256Digest>>,
         }
     }
 }

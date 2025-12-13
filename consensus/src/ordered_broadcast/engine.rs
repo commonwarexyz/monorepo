@@ -17,7 +17,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly, variant::Variant},
+    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
@@ -72,7 +72,7 @@ pub struct Engine<
         Index = Epoch,
         PublicKey = C::PublicKey,
         Identity = V::Public,
-        Polynomial = poly::Public<V>,
+        Polynomial = Sharing<V>,
         Share = group::Share,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
@@ -220,7 +220,7 @@ impl<
             Index = Epoch,
             PublicKey = C::PublicKey,
             Identity = V::Public,
-            Polynomial = poly::Public<V>,
+            Polynomial = Sharing<V>,
             Share = group::Share,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
@@ -594,10 +594,9 @@ impl<
         let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
             return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        let quorum = polynomial.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
-        if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
+        if let Some(threshold) = self.ack_manager.add_ack(ack, polynomial) {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)

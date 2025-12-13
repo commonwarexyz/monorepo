@@ -336,14 +336,12 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::Element,
-            variant::{MinPk, MinSig, Variant},
-        },
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_math::algebra::Additive;
     use commonware_utils::quorum_from_slice;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -1126,9 +1124,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Certificate<MinSig>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
         }
     }
 }

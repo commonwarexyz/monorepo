@@ -15,31 +15,20 @@ workspace = true
 
 [features]
 default = [ "std" ]
-std = [
-	"bytes/std",
-	"rand?/std",
-	"rand_chacha?/std",
-	"sha2?/std",
-	"thiserror/std",
-]
+std = [ "bytes/std", "rand?/std", "rand_chacha?/std", "thiserror/std" ]
 arbitrary = [
 	"dep:arbitrary",
-	"dep:commonware-macros",
+	"dep:commonware-conformance",
 	"dep:rand",
 	"dep:rand_chacha",
-	"dep:serde",
-	"dep:sha2",
-	"dep:toml",
+	"std",
 ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
-commonware-macros = { workspace = true, optional = true }
+commonware-conformance = { workspace = true, optional = true }
 paste.workspace = true
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
-sha2 = { workspace = true, optional = true }
 thiserror.workspace = true
-toml = { workspace = true, optional = true }

@@ -6,8 +6,9 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt, Signer,
+    Signer,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{
     from_hex, hex,
     ordered::{Map, Set},
@@ -181,7 +182,7 @@ fn generate_identities(
 ) {
     // Generate p2p private keys
     let peer_signers = (0..num_peers)
-        .map(|_| PrivateKey::from_rng(&mut OsRng))
+        .map(|_| PrivateKey::random(&mut OsRng))
         .collect::<Vec<_>>();
 
     // Generate consensus key
@@ -196,6 +197,7 @@ fn generate_identities(
     } else {
         let (output, shares) = deal(
             OsRng,
+            Default::default(),
             all_participants
                 .iter()
                 .take(num_participants_per_epoch as usize)

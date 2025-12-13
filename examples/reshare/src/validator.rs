@@ -165,7 +165,7 @@ mod test {
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt, Signer,
+        Signer,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
@@ -188,10 +188,14 @@ mod test {
     use std::{
         collections::{BTreeMap, HashSet},
         future::Future,
+        num::NonZeroU32,
         pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     #[derive(Debug)]
     struct FilteredReceiver<R> {
@@ -278,8 +282,8 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) =
-                deal(&mut rng, peer_config.dealers(0)).expect("deal should succeed");
+            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
+                .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -333,12 +337,22 @@ mod test {
             };
 
             let mut control = oracle.control(pk.clone());
-            let votes = control.register(VOTE_CHANNEL).await.unwrap();
-            let certificates = control.register(CERTIFICATE_CHANNEL).await.unwrap();
-            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-            let (dkg_sender, dkg_receiver) = control.register(DKG_CHANNEL).await.unwrap();
+            let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
+            let certificates = control
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let resolver = control
+                .register(RESOLVER_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let broadcast = control
+                .register(BROADCASTER_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let marshal = control.register(MARSHAL_CHANNEL, TEST_QUOTA).await.unwrap();
+            let (dkg_sender, dkg_receiver) =
+                control.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
             let dkg = (
                 dkg_sender,
                 FilteredReceiver {
@@ -346,7 +360,10 @@ mod test {
                     failures: self.failures.clone(),
                 },
             );
-            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+            let orchestrator = control
+                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),

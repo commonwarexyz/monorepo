@@ -2,19 +2,22 @@
 
 use super::{
     group::{
-        Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
-        GT,
+        Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
+        G2_PROOF_OF_POSSESSION, GT,
     },
     Error,
 };
-use crate::bls12381::primitives::group::{Element, Scalar};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{
     blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
     BLS12_381_NEG_G2,
 };
-use commonware_codec::FixedSize;
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
+use commonware_math::algebra::{Additive, HashToGroup, Random as _, Space};
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -24,10 +27,22 @@ use rand_core::CryptoRngCore;
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
-    type Public: Point + FixedSize + Debug + Hash + Copy;
+    type Public: HashToGroup<Scalar = Scalar>
+        + FixedSize
+        + Write
+        + Read<Cfg = ()>
+        + Debug
+        + Hash
+        + Copy;
 
     /// The signature type.
-    type Signature: Point + FixedSize + Debug + Hash + Copy;
+    type Signature: HashToGroup<Scalar = Scalar>
+        + FixedSize
+        + Write
+        + Read<Cfg = ()>
+        + Debug
+        + Hash
+        + Copy;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
@@ -145,7 +160,7 @@ impl Variant for MinPk {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
+                let scalar = Scalar::random(&mut *rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -153,7 +168,7 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars);
+        let s_agg = G2::msm(signatures, &scalars, 1);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -168,7 +183,7 @@ impl Variant for MinPk {
         // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&scalars[i]);
+            scaled_pk *= &scalars[i];
             let pk_affine = scaled_pk.as_blst_p1_affine();
             let hm_affine = hms[i].as_blst_p2_affine();
             pairing.raw_aggregate(&hm_affine, &pk_affine);
@@ -296,7 +311,7 @@ impl Variant for MinSig {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
+                let scalar = Scalar::random(&mut *rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -304,7 +319,7 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars);
+        let s_agg = G1::msm(signatures, &scalars, 1);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -319,7 +334,7 @@ impl Variant for MinSig {
         // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&scalars[i]);
+            scaled_pk *= &scalars[i];
             let pk_affine = scaled_pk.as_blst_p2_affine();
             let hm_affine = hms[i].as_blst_p1_affine();
             pairing.raw_aggregate(&pk_affine, &hm_affine);
@@ -353,5 +368,49 @@ impl Variant for MinSig {
 impl Debug for MinSig {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MinSig").finish()
+    }
+}
+
+/// A partial signature.
+///
+/// c.f. [`super::ops`] for how to manipulate these.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PartialSignature<V: Variant> {
+    pub index: u32,
+    pub value: V::Signature,
+}
+
+impl<V: Variant> Write for PartialSignature<V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.index).write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<V: Variant> Read for PartialSignature<V> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let index = UInt::read(buf)?.into();
+        let value = V::Signature::read(buf)?;
+        Ok(Self { index, value })
+    }
+}
+
+impl<V: Variant> EncodeSize for PartialSignature<V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + V::Signature::SIZE
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        use commonware_math::algebra::CryptoGroup;
+
+        Ok(Self {
+            index: u.arbitrary()?,
+            value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
+        })
     }
 }

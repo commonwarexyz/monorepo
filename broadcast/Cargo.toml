@@ -27,6 +27,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+governor.workspace = true
 tracing-subscriber.workspace = true
 
 [lib]

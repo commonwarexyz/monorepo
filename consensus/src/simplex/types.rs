@@ -2460,8 +2460,9 @@ mod tests {
         bls12381::{dkg, primitives::variant::MinSig},
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         sha256::Digest as Sha256,
-        PrivateKeyExt, Signer,
+        Signer,
     };
+    use commonware_math::algebra::Random;
     use commonware_utils::{ordered::Set, quorum_from_slice, TryCollect, NZU32};
     use rand::{
         rngs::{OsRng, StdRng},
@@ -2483,16 +2484,17 @@ mod tests {
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
-            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .map(|_| EdPrivateKey::random(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
 
         shares
             .into_iter()
             .map(|share| {
                 bls12381_threshold::Scheme::signer(
                     participants.clone().try_into().unwrap(),
-                    &polynomial,
+                    polynomial.clone(),
                     share,
                 )
                 .unwrap()
@@ -2508,16 +2510,17 @@ mod tests {
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
-            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .map(|_| EdPrivateKey::random(&mut rng).public_key())
             .collect();
 
-        let (polynomial, _) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
-        bls12381_threshold::Scheme::verifier(participants.try_into().unwrap(), &polynomial)
+        let (polynomial, _) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+        bls12381_threshold::Scheme::verifier(participants.try_into().unwrap(), polynomial)
     }
 
     fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
+        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::random(&mut rng)).collect();
 
         let participants: Set<_> = private_keys
             .iter()
@@ -3138,29 +3141,30 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         type Scheme = bls12381_threshold::Scheme<EdPublicKey, MinSig>;
 
-        commonware_codec::conformance_tests! {
-            Signature<Scheme>,
-            Vote<Scheme, Sha256Digest>,
-            Certificate<Scheme, Sha256Digest>,
-            Artifact<Scheme, Sha256Digest>,
-            Proposal<Sha256Digest>,
-            Notarize<Scheme, Sha256Digest>,
-            Notarization<Scheme, Sha256Digest>,
-            Nullify<Scheme>,
-            Nullification<Scheme>,
-            Finalize<Scheme, Sha256Digest>,
-            Finalization<Scheme, Sha256Digest>,
-            Backfiller<Scheme, Sha256Digest>,
-            Request,
-            Response<Scheme, Sha256Digest>,
-            Activity<Scheme, Sha256Digest>,
-            ConflictingNotarize<Scheme, Sha256Digest>,
-            ConflictingFinalize<Scheme, Sha256Digest>,
-            NullifyFinalize<Scheme, Sha256Digest>,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Signature<Scheme>>,
+            CodecConformance<Vote<Scheme, Sha256Digest>>,
+            CodecConformance<Certificate<Scheme, Sha256Digest>>,
+            CodecConformance<Artifact<Scheme, Sha256Digest>>,
+            CodecConformance<Proposal<Sha256Digest>>,
+            CodecConformance<Notarize<Scheme, Sha256Digest>>,
+            CodecConformance<Notarization<Scheme, Sha256Digest>>,
+            CodecConformance<Nullify<Scheme>>,
+            CodecConformance<Nullification<Scheme>>,
+            CodecConformance<Finalize<Scheme, Sha256Digest>>,
+            CodecConformance<Finalization<Scheme, Sha256Digest>>,
+            CodecConformance<Backfiller<Scheme, Sha256Digest>>,
+            CodecConformance<Request>,
+            CodecConformance<Response<Scheme, Sha256Digest>>,
+            CodecConformance<Activity<Scheme, Sha256Digest>>,
+            CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
+            CodecConformance<ConflictingFinalize<Scheme, Sha256Digest>>,
+            CodecConformance<NullifyFinalize<Scheme, Sha256Digest>>,
         }
     }
 }

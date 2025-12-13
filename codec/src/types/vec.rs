@@ -139,10 +139,12 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        crate::conformance_tests! {
-            Vec<u8>,
-            Vec<u16>,
-            Vec<u32>,
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Vec<u8>>,
+            CodecConformance<Vec<u16>>,
+            CodecConformance<Vec<u32>>,
         }
     }
 }

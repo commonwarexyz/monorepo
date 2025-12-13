@@ -52,7 +52,7 @@ use commonware_consensus::{
     simplex,
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
+use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU32};
