@@ -1,0 +1,37 @@
+[package]
+name = "commonware-revm-chain"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "REVM-based example chain running on threshold-simplex (simplex + threshold BLS signatures)."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/revm_chain"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+commonware-codec.workspace = true
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+# EVM execution
+alloy-evm = { version = "=0.25.1", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "commonware-revm-chain"
+bench = false
