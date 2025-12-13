@@ -224,6 +224,9 @@ fn simplex_config(
         automaton: mailbox.clone(),
         relay: mailbox.clone(),
         reporter: mailbox,
+        // NOTE: This is a *local* storage partition for the consensus journal. In the deterministic
+        // simulation all nodes share the same runtime/storage instance, so each node must use a
+        // unique partition to avoid sharing persisted state.
         partition: format!("revm-chain-{index}"),
         mailbox_size: MAILBOX_SIZE,
         epoch: Epoch::zero(),
