@@ -99,10 +99,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qmdb::any::{
-        value::{FixedEncoding, VariableEncoding},
-        KeyData,
-    };
+    use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
 
@@ -124,11 +121,11 @@ mod tests {
         type Op = OrderedOperation<K, FixedEncoding<V>>;
 
         let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
-        let update = Op::Update(OrderedUpdate(KeyData {
+        let update = Op::Update(OrderedUpdate {
             key: FixedBytes::from([4, 3, 2, 1]),
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
-        }));
+        });
         let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
         let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
 
@@ -161,11 +158,11 @@ mod tests {
         let cfg = (RangeCfg::from(..), ());
 
         let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
-        let update = Op::Update(OrderedUpdate(KeyData {
+        let update = Op::Update(OrderedUpdate {
             key: FixedBytes::from([2, 2, 2, 2]),
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
-        }));
+        });
         let commit_some =
             Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
         let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));

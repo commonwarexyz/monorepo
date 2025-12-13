@@ -10,8 +10,8 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue, KeyData,
-            OrderedOperation, OrderedUpdate,
+            ordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue, OrderedOperation,
+            OrderedUpdate,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -151,11 +151,11 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(OrderedUpdate(KeyData {
+        let element = Operation::Update(OrderedUpdate {
             key: info.key,
             value: info.value,
             next_key: info.next_key,
-        }));
+        });
 
         verify_key_value_proof(
             hasher,
@@ -170,7 +170,10 @@ impl<
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+    pub async fn get_span(
+        &self,
+        key: &K,
+    ) -> Result<Option<(Location, OrderedUpdate<K, V>)>, Error> {
         self.any.get_span(key).await
     }
 
@@ -193,11 +196,11 @@ impl<
                     return false;
                 }
 
-                let element = Operation::Update(OrderedUpdate(KeyData {
+                let element = Operation::Update(OrderedUpdate {
                     key: info.key,
                     value: info.value,
                     next_key: info.next_key,
-                }));
+                });
 
                 (info.loc, info.chunk, element)
             }

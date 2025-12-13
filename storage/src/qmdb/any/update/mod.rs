@@ -7,7 +7,7 @@ mod sealed {
 }
 
 mod ordered;
-pub use ordered::{KeyData, OrderedUpdate};
+pub use ordered::OrderedUpdate;
 
 mod unordered;
 pub use unordered::UnorderedUpdate;
@@ -25,7 +25,7 @@ pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
 mod tests {
     use crate::qmdb::any::{
         value::{FixedEncoding, VariableEncoding},
-        KeyData, OrderedUpdate, UnorderedUpdate,
+        OrderedUpdate, UnorderedUpdate,
     };
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
@@ -47,11 +47,11 @@ mod tests {
         type K = FixedBytes<4>;
         type V = u64;
 
-        let upd = OrderedUpdate::<K, FixedEncoding<V>>(KeyData {
+        let upd = OrderedUpdate::<K, FixedEncoding<V>> {
             key: FixedBytes::from([1, 2, 3, 4]),
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([4, 3, 2, 1]),
-        });
+        };
 
         roundtrip(&upd, &());
     }
@@ -61,11 +61,11 @@ mod tests {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
 
-        let upd = OrderedUpdate::<K, VariableEncoding<V>>(KeyData {
+        let upd = OrderedUpdate::<K, VariableEncoding<V>> {
             key: FixedBytes::from([1, 2, 3, 4]),
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([4, 3, 2, 1]),
-        });
+        };
 
         roundtrip(&upd, &(RangeCfg::from(..), ()));
     }

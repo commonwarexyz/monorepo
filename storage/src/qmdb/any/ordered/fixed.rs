@@ -65,7 +65,7 @@ mod test {
         index::Unordered as _,
         mmr::{mem::Mmr, Position, StandardHasher as Standard},
         qmdb::{
-            any::{KeyData, OrderedUpdate},
+            any::OrderedUpdate,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -151,11 +151,11 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(OrderedUpdate(KeyData {
+                ops.push(Operation::Update(OrderedUpdate {
                     key,
                     value,
                     next_key,
-                })));
+                }));
                 prev_key = key;
             }
         }
@@ -167,7 +167,7 @@ mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.0.key, data.0.value).await.unwrap();
+                    db.update(data.key, data.value).await.unwrap();
                 }
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
@@ -822,11 +822,11 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(OrderedUpdate(KeyData {
+            let changed_op = Operation::Update(OrderedUpdate {
                 key: Sha256::hash(b"key1"),
                 value: Sha256::hash(b"value1"),
                 next_key: Sha256::hash(b"key2"),
-            }));
+            });
             {
                 let mut ops = ops.clone();
                 ops[0] = changed_op.clone();

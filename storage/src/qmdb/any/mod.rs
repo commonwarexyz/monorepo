@@ -26,7 +26,7 @@ use std::{
 };
 
 mod update;
-pub use update::{KeyData, OrderedUpdate, UnorderedUpdate};
+pub use update::{OrderedUpdate, UnorderedUpdate};
 
 mod db;
 
