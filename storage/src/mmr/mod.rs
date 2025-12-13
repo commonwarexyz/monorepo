@@ -55,7 +55,7 @@
 //!   Hash(14,                                                  // first peak
 //!     Hash(6,
 //!       Hash(2, Hash(0, element_0), Hash(1, element_1)),
-//!       Hash(5, Hash(3, element_2), Hash(4, element_4))
+//!       Hash(5, Hash(3, element_3), Hash(4, element_4))
 //!     )
 //!     Hash(13,
 //!       Hash(9, Hash(7, element_7), Hash(8, element_8)),
