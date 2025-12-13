@@ -72,32 +72,8 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use crate::Block;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-use std::sync::Arc;
-
-/// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SchemeProvider: Clone + Send + Sync + 'static {
-    /// The signing scheme to provide.
-    type Scheme: Scheme;
-
-    /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
-
-    /// Return a certificate verifier that can validate certificates independent of epoch.
-    ///
-    /// This method allows implementations to provide a verifier that can validate
-    /// certificates from any epoch (without epoch-specific state). For example,
-    /// [`bls12381_threshold::Scheme`](crate::simplex::signing_scheme::bls12381_threshold::Scheme)
-    /// maintains a static public key across epochs that can be used to verify certificates from any
-    /// epoch, even after the committee has rotated and the underlying secret shares have been refreshed.
-    ///
-    /// The default implementation returns `None`. Callers should fall back to
-    /// [`SchemeProvider::scheme`] for epoch-specific verification.
-    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
-        None
-    }
-}
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
@@ -128,14 +104,14 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
-        SchemeProvider,
     };
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
+        scheme::{Scheme, SchemeProvider},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
-            signing_scheme::{bls12381_threshold, Scheme},
+            scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round, View, ViewDelta},
@@ -165,7 +141,6 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::{Duration, Instant},
@@ -226,7 +201,7 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
-        let config: Config<B, _, _> = Config {
+        let config = Config {
             scheme_provider,
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
@@ -239,7 +214,6 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            _marker: PhantomData,
         };
 
         // Create the resolver

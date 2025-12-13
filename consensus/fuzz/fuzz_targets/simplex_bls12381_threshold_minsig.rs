@@ -2,7 +2,7 @@
 
 use commonware_consensus::simplex::{
     mocks::fixtures::{bls12381_threshold, Fixture},
-    signing_scheme::bls12381_threshold as threshold_scheme,
+    scheme::bls12381_threshold as threshold_scheme,
 };
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{

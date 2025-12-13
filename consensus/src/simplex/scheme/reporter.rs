@@ -19,7 +19,8 @@
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Activity},
+    scheme::Scheme,
+    simplex::{scheme::SimplexScheme, types::Activity},
     Reporter,
 };
 use commonware_cryptography::Digest;
@@ -70,7 +71,7 @@ impl<
 
 impl<
         E: Clone + Rng + CryptoRng + Send + 'static,
-        S: Scheme,
+        S: SimplexScheme<D>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
     > Reporter for AttributableReporter<E, S, D, R>
@@ -117,7 +118,7 @@ mod tests {
     use crate::{
         simplex::{
             mocks::fixtures::{bls12381_threshold, ed25519, Fixture},
-            signing_scheme::Scheme,
+            scheme::Scheme,
             types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},

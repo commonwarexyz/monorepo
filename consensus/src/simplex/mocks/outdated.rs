@@ -1,8 +1,9 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
+    scheme::Scheme,
     simplex::{
-        signing_scheme::Scheme,
+        scheme::SimplexScheme,
         types::{Finalize, Notarize, Proposal, Vote},
     },
     types::{View, ViewDelta},
@@ -34,7 +35,12 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
+impl<E, S, H> Outdated<E, S, H>
+where
+    E: Clock + Rng + CryptoRng + Spawner,
+    S: SimplexScheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

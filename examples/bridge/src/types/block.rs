@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        simplex::{scheme::bls12381_threshold, types::Proposal},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{

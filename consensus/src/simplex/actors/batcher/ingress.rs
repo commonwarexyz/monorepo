@@ -1,7 +1,4 @@
-use crate::{
-    simplex::{signing_scheme::Scheme, types::Vote},
-    types::View,
-};
+use crate::{scheme::Scheme, simplex::types::Vote, types::View};
 use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},

@@ -7,12 +7,13 @@
 //! (as it must be sent by said participant) but can't be used by an external observer.
 
 use crate::{
+    scheme::{self, SignatureVerification},
     simplex::{
-        signing_scheme::{
-            self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            seed_namespace_and_message, vote_namespace_and_message,
+        scheme::{
+            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+            seed_namespace_and_message, vote_namespace_and_message, SeededScheme,
         },
-        types::{self, Finalization, Notarization, SignatureVerification, Subject},
+        types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -369,11 +370,11 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
     }
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
+    type Context<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
-    type Seed = Seed<V>;
 
     fn me(&self) -> Option<u32> {
         match self {
@@ -390,15 +391,15 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-    ) -> Option<types::Signature<Self>> {
+    ) -> Option<scheme::Signature<Self>> {
         let share = self.share()?;
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let vote_signature =
             partial_sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
                 .value;
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
                 .value;
@@ -408,7 +409,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             seed_signature,
         };
 
-        Some(types::Signature {
+        Some(scheme::Signature {
             signer: share.index,
             signature,
         })
@@ -416,7 +417,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = types::Signature<Self>>,
+        I: IntoIterator<Item = scheme::Signature<Self>>,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
             .into_iter()
@@ -456,14 +457,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        signature: &types::Signature<Self>,
+        signature: &scheme::Signature<Self>,
     ) -> bool {
         let Ok(evaluated) = self.polynomial().partial_public(signature.signer) else {
             return false;
         };
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
         let sig = aggregate_signatures::<V, _>(&[
             signature.signature.vote_signature,
@@ -492,7 +493,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = types::Signature<Self>>,
+        I: IntoIterator<Item = scheme::Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
@@ -512,7 +513,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             .unzip();
 
         let polynomial = self.polynomial();
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(vote_namespace.as_ref()),
@@ -524,7 +525,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             }
         }
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(seed_namespace.as_ref()),
@@ -541,7 +542,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| types::Signature {
+            .map(|(vote, seed)| scheme::Signature {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
@@ -565,8 +566,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     ) -> bool {
         let identity = self.identity();
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
         let signature =
             aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);
@@ -662,10 +663,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         .is_ok()
     }
 
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
-        Some(Seed::new(round, certificate.seed_signature))
-    }
-
     fn is_attributable(&self) -> bool {
         false
     }
@@ -675,13 +672,21 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
 }
 
+impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
+    type Seed = Seed<V>;
+
+    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
+        Some(Seed::new(round, certificate.seed_signature))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         simplex::{
             mocks::fixtures::{bls12381_threshold, ed25519_participants, Fixture},
-            signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
+            scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Subject},
         },
         types::{Round, View},

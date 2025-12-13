@@ -1,8 +1,9 @@
 use super::round::Round;
 use crate::{
+    scheme::Scheme,
     simplex::{
         interesting, min_active,
-        signing_scheme::Scheme,
+        scheme::SimplexScheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,
@@ -41,7 +42,7 @@ pub struct Config<S: Scheme> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: SimplexScheme<D>, D: Digest> {
     context: E,
     scheme: S,
     namespace: Vec<u8>,
@@ -60,7 +61,7 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: SimplexScheme<D>, D: Digest> State<E, S, D> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();

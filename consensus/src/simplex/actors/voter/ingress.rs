@@ -1,6 +1,6 @@
-use crate::simplex::{
-    signing_scheme::Scheme,
-    types::{Certificate, Proposal},
+use crate::{
+    scheme::Scheme,
+    simplex::types::{Certificate, Proposal},
 };
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};

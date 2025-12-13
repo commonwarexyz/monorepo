@@ -2,9 +2,10 @@
 
 use super::relay::Relay;
 use crate::{
+    scheme::Scheme,
     simplex::{
+        scheme::SimplexScheme,
         select_leader,
-        signing_scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Round, View},
@@ -24,7 +25,7 @@ pub struct Config<S: Scheme, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
+pub struct Equivocator<E: Clock + Rng + Spawner, S: SimplexScheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
@@ -34,7 +35,7 @@ pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
+impl<E: Clock + Rng + Spawner, S: SimplexScheme<H::Digest>, H: Hasher> Equivocator<E, S, H> {
     pub fn new(context: E, cfg: Config<S, H>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -103,7 +104,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
 
             // Check if we are the leader for the next view, otherwise move on
             let (_, leader) =
-                select_leader::<S, _>(self.scheme.participants().as_ref(), next_round, seed);
+                select_leader::<S>(self.scheme.participants().as_ref(), next_round, seed);
             if leader != self.scheme.me().unwrap() {
                 continue;
             }

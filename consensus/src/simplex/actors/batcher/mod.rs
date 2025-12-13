@@ -4,7 +4,7 @@ mod round;
 mod verifier;
 
 use crate::{
-    simplex::signing_scheme::Scheme,
+    scheme::Scheme,
     types::{Epoch, ViewDelta},
     Reporter,
 };
@@ -37,6 +37,7 @@ mod tests {
                 self,
                 fixtures::{bls12381_multisig, ed25519, Fixture},
             },
+            scheme::SimplexScheme,
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -66,7 +67,7 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    fn build_notarization<S: Scheme>(
+    fn build_notarization<S: SimplexScheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -81,7 +82,7 @@ mod tests {
             .expect("notarization requires a quorum of votes")
     }
 
-    fn build_nullification<S: Scheme>(
+    fn build_nullification<S: SimplexScheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         round: Round,
@@ -96,7 +97,7 @@ mod tests {
             .expect("nullification requires a quorum of votes")
     }
 
-    fn build_finalization<S: Scheme>(
+    fn build_finalization<S: SimplexScheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -113,7 +114,7 @@ mod tests {
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -272,7 +273,7 @@ mod tests {
 
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -415,7 +416,7 @@ mod tests {
     /// Test that if both votes and a certificate arrive, only one certificate is sent to voter.
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -604,7 +605,7 @@ mod tests {
 
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 7;
@@ -803,7 +804,7 @@ mod tests {
     /// the proposal is forwarded to the voter (when we are not the leader).
     fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -927,7 +928,7 @@ mod tests {
     /// the proposal is forwarded to the voter once the leader is set (when we are not the leader).
     fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1052,7 +1053,7 @@ mod tests {
     /// 3. With gaps in recent views (with sufficient data), returns inactive
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;

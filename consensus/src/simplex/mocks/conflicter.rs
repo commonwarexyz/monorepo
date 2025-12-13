@@ -1,8 +1,11 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
-use crate::simplex::{
-    signing_scheme::Scheme,
-    types::{Finalize, Notarize, Proposal, Vote},
+use crate::{
+    scheme::Scheme,
+    simplex::{
+        scheme::SimplexScheme,
+        types::{Finalize, Notarize, Proposal, Vote},
+    },
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Hasher;
@@ -25,7 +28,12 @@ pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S, H> {
+impl<E, S, H> Conflicter<E, S, H>
+where
+    E: Clock + Rng + CryptoRng + Spawner,
+    S: SimplexScheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

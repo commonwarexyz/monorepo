@@ -153,7 +153,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_consensus::simplex::signing_scheme::bls12381_threshold;
+use commonware_consensus::simplex::scheme::bls12381_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 
 pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
