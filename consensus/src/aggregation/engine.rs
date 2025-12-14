@@ -511,13 +511,12 @@ impl<
         acks.insert(ack.signature.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
-        let count = acks
+        let filtered = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
-            .count();
-
-        if count >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, acks.values()) {
+            .collect::<Vec<_>>();
+        if filtered.len() >= quorum as usize {
+            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered) {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
             }
