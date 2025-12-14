@@ -592,7 +592,7 @@ pub enum Error {
     FailedToCreateInclusionProof(MmrError),
 }
 
-const NAMESPACE: &[u8] = b"commonware-zoda";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {

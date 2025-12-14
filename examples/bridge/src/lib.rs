@@ -163,7 +163,7 @@ pub mod application;
 #[doc(hidden)]
 pub mod types;
 #[doc(hidden)]
-pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_BRIDGE";
+pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE";
 #[doc(hidden)]
 pub const P2P_SUFFIX: &[u8] = b"_P2P";
 #[doc(hidden)]
