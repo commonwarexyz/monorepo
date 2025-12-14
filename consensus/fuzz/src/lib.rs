@@ -159,6 +159,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             participants,
             schemes,
             verifier: _,
+            ..
         } = P::fixture(&mut context, n);
 
         let mut registrations = register(&mut oracle, &participants).await;

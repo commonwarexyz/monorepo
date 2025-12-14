@@ -273,6 +273,9 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
+#[cfg(feature = "mocks")]
+pub mod mocks;
+
 /// Bitmap wrapper that tracks which validators signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.

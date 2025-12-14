@@ -1366,6 +1366,7 @@ mod tests {
                 participants,
                 schemes,
                 verifier: _,
+                ..
             } = fixture(&mut context, n);
 
             // Figure out who the leader will be for view 2
