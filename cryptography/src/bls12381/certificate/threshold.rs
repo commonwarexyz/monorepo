@@ -377,7 +377,7 @@ mod macros {
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
             > {
-                generic: $crate::certificate::bls12381_threshold::Generic<P, V>,
+                generic: $crate::bls12381::certificate::threshold::Generic<P, V>,
             }
 
             impl<
@@ -391,7 +391,7 @@ mod macros {
                     share: $crate::bls12381::primitives::group::Share,
                 ) -> Option<Self> {
                     Some(Self {
-                        generic: $crate::certificate::bls12381_threshold::Generic::signer(
+                        generic: $crate::bls12381::certificate::threshold::Generic::signer(
                             participants,
                             polynomial,
                             share,
@@ -405,7 +405,7 @@ mod macros {
                     polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 ) -> Self {
                     Self {
-                        generic: $crate::certificate::bls12381_threshold::Generic::verifier(
+                        generic: $crate::bls12381::certificate::threshold::Generic::verifier(
                             participants,
                             polynomial,
                         ),
@@ -415,7 +415,7 @@ mod macros {
                 /// Creates a lightweight verifier that only checks recovered certificates.
                 pub const fn certificate_verifier(identity: V::Public) -> Self {
                     Self {
-                        generic: $crate::certificate::bls12381_threshold::Generic::certificate_verifier(
+                        generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
                             identity,
                         ),
                     }
@@ -527,7 +527,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::certificate::bls12381_threshold::Generic::<P, V>::certificate_codec_config_unbounded()
+                    $crate::bls12381::certificate::threshold::Generic::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };

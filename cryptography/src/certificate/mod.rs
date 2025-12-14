@@ -59,11 +59,14 @@ use commonware_utils::ordered::Set;
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
-pub mod bls12381_multisig;
-pub mod bls12381_threshold;
-pub mod ed25519;
 pub mod utils;
 
+#[cfg(feature = "std")]
+pub use crate::bls12381::certificate::{
+    multisig as bls12381_multisig, threshold as bls12381_threshold,
+};
+#[cfg(feature = "std")]
+pub use crate::ed25519::certificate as ed25519;
 pub use crate::{
     impl_bls12381_multisig_certificate, impl_bls12381_threshold_certificate,
     impl_ed25519_certificate,

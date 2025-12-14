@@ -328,7 +328,7 @@ impl<V: Variant> Read for Certificate<V> {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "cryptography::certificate::bls12381_multisig::Certificate",
+                "cryptography::bls12381::certificate::multisig::Certificate",
                 "Certificate contains no signers",
             ));
         }
@@ -371,7 +371,7 @@ mod macros {
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
             > {
-                generic: $crate::certificate::bls12381_multisig::Generic<P, V>,
+                generic: $crate::bls12381::certificate::multisig::Generic<P, V>,
             }
 
             impl<
@@ -384,7 +384,7 @@ mod macros {
                     private_key: $crate::bls12381::primitives::group::Private,
                 ) -> Option<Self> {
                     Some(Self {
-                        generic: $crate::certificate::bls12381_multisig::Generic::signer(
+                        generic: $crate::bls12381::certificate::multisig::Generic::signer(
                             participants,
                             private_key,
                         )?,
@@ -396,7 +396,7 @@ mod macros {
                     participants: commonware_utils::ordered::BiMap<P, V::Public>,
                 ) -> Self {
                     Self {
-                        generic: $crate::certificate::bls12381_multisig::Generic::verifier(
+                        generic: $crate::bls12381::certificate::multisig::Generic::verifier(
                             participants,
                         ),
                     }
@@ -410,7 +410,7 @@ mod macros {
                 type Context<'a, D: $crate::Digest> = $context;
                 type PublicKey = P;
                 type Signature = V::Signature;
-                type Certificate = $crate::certificate::bls12381_multisig::Certificate<V>;
+                type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
 
                 fn me(&self) -> Option<u32> {
                     self.generic.me()
@@ -497,7 +497,7 @@ mod macros {
                 }
 
                 fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::certificate::bls12381_multisig::Generic::<P, V>::certificate_codec_config_unbounded()
+                    $crate::bls12381::certificate::multisig::Generic::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -1105,6 +1105,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::bls12381::primitives::variant::MinSig;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

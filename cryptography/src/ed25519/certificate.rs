@@ -2,9 +2,10 @@
 //!
 //! This module provides both the generic Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
+
+use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
     certificate::{utils::Signers, Context, Scheme, Signature, SignatureVerification},
-    ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 use bytes::{Buf, BufMut};
@@ -21,17 +22,14 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Generic {
     /// Participants in the committee.
-    pub participants: Set<ed25519::PublicKey>,
+    pub participants: Set<PublicKey>,
     /// Key used for generating signatures.
-    pub signer: Option<(u32, ed25519::PrivateKey)>,
+    pub signer: Option<(u32, PrivateKey)>,
 }
 
 impl Generic {
     /// Creates a new generic Ed25519 scheme instance.
-    pub fn signer(
-        participants: Set<ed25519::PublicKey>,
-        private_key: ed25519::PrivateKey,
-    ) -> Option<Self> {
+    pub fn signer(participants: Set<PublicKey>, private_key: PrivateKey) -> Option<Self> {
         let signer = participants
             .index(&private_key.public_key())
             .map(|index| (index, private_key))?;
@@ -43,7 +41,7 @@ impl Generic {
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
-    pub const fn verifier(participants: Set<ed25519::PublicKey>) -> Self {
+    pub const fn verifier(participants: Set<PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -62,7 +60,7 @@ impl Generic {
         context: S::Context<'_, D>,
     ) -> Option<Signature<S>>
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         D: Digest,
     {
         let (index, private_key) = self.signer.as_ref()?;
@@ -84,7 +82,7 @@ impl Generic {
         signature: &Signature<S>,
     ) -> bool
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         D: Digest,
     {
         let Some(public_key) = self.participants.key(signature.signer) else {
@@ -104,7 +102,7 @@ impl Generic {
         signatures: I,
     ) -> SignatureVerification<S>
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         R: Rng + CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Signature<S>>,
@@ -157,7 +155,7 @@ impl Generic {
     /// Assembles a certificate from a collection of votes.
     pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<Certificate>
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         I: IntoIterator<Item = Signature<S>>,
     {
         // Collect the signers and signatures.
@@ -289,7 +287,7 @@ pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.
     pub signers: Signers,
     /// Ed25519 signatures emitted by the respective validators ordered by signer index.
-    pub signatures: Vec<ed25519::Signature>,
+    pub signatures: Vec<Ed25519Signature>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -297,7 +295,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .map(|_| u.arbitrary::<Ed25519Signature>())
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -326,15 +324,15 @@ impl Read for Certificate {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "cryptography::certificate::ed25519::Certificate",
+                "cryptography::ed25519::certificate::Certificate",
                 "Certificate contains no signers",
             ));
         }
 
-        let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
-                "cryptography::certificate::ed25519::Certificate",
+                "cryptography::ed25519::certificate::Certificate",
                 "Signers and signatures counts differ",
             ));
         }
@@ -362,7 +360,7 @@ mod macros {
             /// Ed25519 signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme {
-                generic: $crate::certificate::ed25519::Generic,
+                generic: $crate::ed25519::certificate::Generic,
             }
 
             impl Scheme {
@@ -380,7 +378,7 @@ mod macros {
                     private_key: $crate::ed25519::PrivateKey,
                 ) -> Option<Self> {
                     Some(Self {
-                        generic: $crate::certificate::ed25519::Generic::signer(
+                        generic: $crate::ed25519::certificate::Generic::signer(
                             participants,
                             private_key,
                         )?,
@@ -394,7 +392,7 @@ mod macros {
                     participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
                 ) -> Self {
                     Self {
-                        generic: $crate::certificate::ed25519::Generic::verifier(participants),
+                        generic: $crate::ed25519::certificate::Generic::verifier(participants),
                     }
                 }
             }
@@ -403,7 +401,7 @@ mod macros {
                 type Context<'a, D: $crate::Digest> = $context;
                 type PublicKey = $crate::ed25519::PublicKey;
                 type Signature = $crate::ed25519::Signature;
-                type Certificate = $crate::certificate::ed25519::Certificate;
+                type Certificate = $crate::ed25519::certificate::Certificate;
 
                 fn me(&self) -> Option<u32> {
                     self.generic.me()
@@ -496,7 +494,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::certificate::ed25519::Generic::certificate_codec_config_unbounded()
+                    $crate::ed25519::certificate::Generic::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -507,10 +505,7 @@ mod macros {
 mod tests {
     use super::*;
     use crate::{
-        certificate::Scheme as _,
-        ed25519::{PrivateKey, PublicKey},
-        impl_ed25519_certificate,
-        sha256::Digest as Sha256Digest,
+        certificate::Scheme as _, impl_ed25519_certificate, sha256::Digest as Sha256Digest,
     };
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
