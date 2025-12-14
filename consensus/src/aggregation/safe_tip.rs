@@ -649,12 +649,12 @@ mod tests {
     #[test]
     fn test_update_internal_case_3_move_lo_to_hi() {
         // Test Case 3 in update: Value must move from lo to hi heap with rebalancing
-        let (mut safe_tip, _) = setup_with_tips(4, &[5, 15, 25, 35]);
+        let (mut safe_tip, validators) = setup_with_tips(4, &[5, 15, 25, 35]);
         assert_eq!(safe_tip.get(), 25);
 
         // With n=4, f=1: hi has [35], lo has [5, 15, 25]
         // Update tip 5 to 40 - should move to hi and cause rebalancing
-        safe_tip.update(key(1), 40);
+        safe_tip.update(validators[0].clone(), 40);
 
         // The 40 goes to hi, min_hi (35) moves to lo
         assert!(safe_tip.hi.contains_key(&40));
@@ -664,13 +664,13 @@ mod tests {
 
     #[test]
     fn test_update_edge_cases() {
-        let (mut safe_tip, _) = setup_with_tips(7, &[0, 0, 0, 0, 0, 10, 20]);
+        let (mut safe_tip, validators) = setup_with_tips(7, &[0, 0, 0, 0, 0, 10, 20]);
 
         // Test updating when hi heap might be empty after rebalancing
         // With n=7, f=2: initially hi has [10, 20], lo has [0, 0, 0, 0, 0]
 
         // Update one of the 0s to a very high value
-        safe_tip.update(key(1), 100);
+        safe_tip.update(validators[0].clone(), 100);
 
         // This should cause rebalancing
         assert!(safe_tip.hi.contains_key(&100));
