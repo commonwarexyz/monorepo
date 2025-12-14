@@ -1,15 +1,20 @@
-use crate::commitment::{commit_state_root, AccountChange, StateChanges};
-use crate::types::{StateRoot, Tx};
-use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
-use alloy_evm::revm::{
-    context::TxEnv,
-    context_interface::result::ResultAndState,
-    precompile::{PrecompileId, PrecompileOutput, PrecompileSpecId, Precompiles},
-    primitives::{Address, Bytes, TxKind, B256, U256},
-    state::{Account, EvmState},
-    DatabaseCommit,
+use crate::{
+    commitment::{commit_state_root, AccountChange, StateChanges},
+    types::{StateRoot, Tx},
 };
-use alloy_evm::{eth::EthEvmBuilder, Database as AlloyDatabase, Evm, EvmEnv};
+use alloy_evm::{
+    eth::EthEvmBuilder,
+    precompiles::{DynPrecompile, PrecompilesMap},
+    revm::{
+        context::TxEnv,
+        context_interface::result::ResultAndState,
+        precompile::{PrecompileId, PrecompileOutput, PrecompileSpecId, Precompiles},
+        primitives::{Address, Bytes, TxKind, B256, U256},
+        state::{Account, EvmState},
+        DatabaseCommit,
+    },
+    Database as AlloyDatabase, Evm, EvmEnv,
+};
 use anyhow::Context as _;
 use std::collections::BTreeMap;
 
@@ -112,18 +117,18 @@ where
         None => 0,
     };
 
-    let mut tx_env = TxEnv::default();
-    tx_env.caller = tx.from;
-    tx_env.kind = TxKind::Call(tx.to);
-    tx_env.value = tx.value;
-    tx_env.gas_limit = tx.gas_limit;
-    tx_env.data = tx.data.clone();
-    tx_env.nonce = nonce;
-    tx_env.chain_id = Some(chain_id);
-    tx_env.gas_price = 0;
-    tx_env.gas_priority_fee = None;
-
-    Ok(tx_env)
+    Ok(TxEnv {
+        caller: tx.from,
+        kind: TxKind::Call(tx.to),
+        value: tx.value,
+        gas_limit: tx.gas_limit,
+        data: tx.data.clone(),
+        nonce,
+        chain_id: Some(chain_id),
+        gas_price: 0,
+        gas_priority_fee: None,
+        ..Default::default()
+    })
 }
 
 fn state_changes_from_evm_state(state: &EvmState) -> StateChanges {
@@ -302,16 +307,18 @@ mod tests {
         // Execute (deploy contract)
         let create_nonce = nonce(evm.db_mut(), caller);
 
-        let mut create = TxEnv::default();
-        create.caller = caller;
-        create.kind = TxKind::Create;
-        create.value = U256::ZERO;
-        create.gas_limit = 500_000;
-        create.data = init.clone();
-        create.nonce = create_nonce;
-        create.chain_id = Some(evm.chain_id());
-        create.gas_price = 0;
-        create.gas_priority_fee = None;
+        let create = TxEnv {
+            caller,
+            kind: TxKind::Create,
+            value: U256::ZERO,
+            gas_limit: 500_000,
+            data: init,
+            nonce: create_nonce,
+            chain_id: Some(evm.chain_id()),
+            gas_price: 0,
+            gas_priority_fee: None,
+            ..Default::default()
+        };
 
         let ResultAndState {
             result: create_result,
@@ -329,16 +336,18 @@ mod tests {
         // Execute (call deployed contract)
         let call_nonce = nonce(evm.db_mut(), caller);
 
-        let mut call = TxEnv::default();
-        call.caller = caller;
-        call.kind = TxKind::Call(deployed);
-        call.value = U256::ZERO;
-        call.gas_limit = 200_000;
-        call.data = Bytes::new();
-        call.nonce = call_nonce;
-        call.chain_id = Some(evm.chain_id());
-        call.gas_price = 0;
-        call.gas_priority_fee = None;
+        let call = TxEnv {
+            caller,
+            kind: TxKind::Call(deployed),
+            value: U256::ZERO,
+            gas_limit: 200_000,
+            data: Bytes::new(),
+            nonce: call_nonce,
+            chain_id: Some(evm.chain_id()),
+            gas_price: 0,
+            gas_priority_fee: None,
+            ..Default::default()
+        };
 
         let ResultAndState {
             result: call_result,

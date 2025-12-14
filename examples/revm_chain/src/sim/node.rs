@@ -2,6 +2,7 @@ use super::{
     genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
     CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
+use crate::{application, consensus};
 use anyhow::Context as _;
 use commonware_consensus::types::{Epoch, ViewDelta};
 use commonware_cryptography::ed25519;
@@ -11,8 +12,6 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::channel::mpsc;
 use governor::Quota;
 use std::time::Duration;
-
-use crate::{application, consensus};
 
 type Peer = ed25519::PublicKey;
 type ChannelSender = simulated::Sender<Peer>;
@@ -35,6 +34,27 @@ struct NodeChannels {
     blocks: (ChannelSender, ChannelReceiver),
 }
 
+struct NodeInit<'a> {
+    index: usize,
+    public_key: Peer,
+    scheme: ThresholdScheme,
+    quota: Quota,
+    buffer_pool: PoolRef,
+    finalized_tx: mpsc::UnboundedSender<consensus::FinalizationEvent>,
+    genesis: &'a genesis::GenesisTransfer,
+}
+
+struct SimplexStart {
+    index: usize,
+    scheme: ThresholdScheme,
+    blocker: simulated::Control<Peer>,
+    mailbox: consensus::Mailbox,
+    buffer_pool: PoolRef,
+    votes: (ChannelSender, ChannelReceiver),
+    certs: (ChannelSender, ChannelReceiver),
+    resolver: (ChannelSender, ChannelReceiver),
+}
+
 pub(super) async fn start_all_nodes(
     context: &deterministic::Context,
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
@@ -55,13 +75,15 @@ pub(super) async fn start_all_nodes(
         let handle = start_node(
             context,
             oracle,
-            i,
-            pk,
-            schemes[i].clone(),
-            quota,
-            buffer_pool.clone(),
-            finalized_tx.clone(),
-            genesis,
+            NodeInit {
+                index: i,
+                public_key: pk,
+                scheme: schemes[i].clone(),
+                quota,
+                buffer_pool: buffer_pool.clone(),
+                finalized_tx: finalized_tx.clone(),
+                genesis,
+            },
         )
         .await?;
         nodes.push(handle);
@@ -73,14 +95,18 @@ pub(super) async fn start_all_nodes(
 async fn start_node(
     context: &deterministic::Context,
     oracle: &mut simulated::Oracle<Peer>,
-    index: usize,
-    public_key: Peer,
-    scheme: ThresholdScheme,
-    quota: Quota,
-    buffer_pool: PoolRef,
-    finalized_tx: mpsc::UnboundedSender<consensus::FinalizationEvent>,
-    genesis: &genesis::GenesisTransfer,
+    init: NodeInit<'_>,
 ) -> anyhow::Result<application::Handle> {
+    let NodeInit {
+        index,
+        public_key,
+        scheme,
+        quota,
+        buffer_pool,
+        finalized_tx,
+        genesis,
+    } = init;
+
     let mut control = oracle.control(public_key.clone());
     let blocker = control.clone();
 
@@ -100,14 +126,16 @@ async fn start_node(
 
     start_simplex_engine(
         context,
-        index,
-        scheme,
-        blocker,
-        consensus_mailbox,
-        buffer_pool,
-        votes,
-        certs,
-        resolver,
+        SimplexStart {
+            index,
+            scheme,
+            blocker,
+            mailbox: consensus_mailbox,
+            buffer_pool,
+            votes,
+            certs,
+            resolver,
+        },
     );
 
     Ok(handle)
@@ -193,17 +221,17 @@ fn spawn_application(
         });
 }
 
-fn start_simplex_engine(
-    context: &deterministic::Context,
-    index: usize,
-    scheme: ThresholdScheme,
-    blocker: simulated::Control<Peer>,
-    mailbox: consensus::Mailbox,
-    buffer_pool: PoolRef,
-    votes: (ChannelSender, ChannelReceiver),
-    certs: (ChannelSender, ChannelReceiver),
-    resolver: (ChannelSender, ChannelReceiver),
-) {
+fn start_simplex_engine(context: &deterministic::Context, start: SimplexStart) {
+    let SimplexStart {
+        index,
+        scheme,
+        blocker,
+        mailbox,
+        buffer_pool,
+        votes,
+        certs,
+        resolver,
+    } = start;
     let engine = simplex::Engine::new(
         context.with_label(&format!("engine_{index}")),
         simplex_config(index, scheme, blocker, mailbox, buffer_pool),

@@ -147,8 +147,8 @@ impl EncodeSize for StateChanges {
         self.accounts.len().encode_size()
             + self
                 .accounts
-                .iter()
-                .map(|(_, change)| 20 + change.encode_size())
+                .values()
+                .map(|change| 20 + change.encode_size())
                 .sum::<usize>()
     }
 }

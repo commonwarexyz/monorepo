@@ -1,9 +1,9 @@
-use crate::types::{Block, BlockId};
-use alloy_evm::revm::database::InMemoryDB;
-use alloy_evm::revm::primitives::B256;
+use crate::{
+    consensus::ConsensusDigest,
+    types::{Block, BlockId},
+};
+use alloy_evm::revm::{database::InMemoryDB, primitives::B256};
 use std::collections::BTreeMap;
-
-use crate::consensus::ConsensusDigest;
 
 #[derive(Clone, Debug)]
 pub(super) struct BlockEntry {

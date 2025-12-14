@@ -2,9 +2,11 @@ use super::{
     store::{BlockEntry, ChainStore},
     ApplicationRequest, BlockCodecCfg, Handle,
 };
-use crate::consensus::{ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey};
-use crate::execution::{evm_env, execute_txs};
-use crate::types::{block_id, Block, BlockId, StateRoot, Tx};
+use crate::{
+    consensus::{ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey},
+    execution::{evm_env, execute_txs},
+    types::{block_id, Block, BlockId, StateRoot, Tx},
+};
 use alloy_evm::revm::{
     database::InMemoryDB,
     primitives::{keccak256, Address, B256, U256},
@@ -12,8 +14,10 @@ use alloy_evm::revm::{
     Database as _,
 };
 use bytes::Bytes;
-use commonware_consensus::simplex::signing_scheme::bls12381_threshold::Seedable as _;
-use commonware_consensus::simplex::types::{Activity, Context};
+use commonware_consensus::simplex::{
+    signing_scheme::bls12381_threshold::Seedable as _,
+    types::{Activity, Context},
+};
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
     channel::{mpsc, oneshot},
@@ -22,6 +26,8 @@ use futures::{
 use std::collections::BTreeMap;
 
 type ThresholdActivity = <crate::consensus::Mailbox as commonware_consensus::Reporter>::Activity;
+type PendingVerify = (Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>);
+type PendingVerifies = BTreeMap<ConsensusDigest, Vec<PendingVerify>>;
 
 /// Chain application actor.
 pub struct Application<S> {
@@ -32,18 +38,15 @@ pub struct Application<S> {
     genesis_tx: Option<Tx>,
     store: ChainStore,
     received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: BTreeMap<
-        ConsensusDigest,
-        Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>,
-    >,
+    pending_verifies: PendingVerifies,
     gossip: S,
     consensus: mpsc::Receiver<ConsensusRequest>,
     control: mpsc::Receiver<ApplicationRequest>,
 }
 
 enum Input {
-    Consensus(ConsensusRequest),
-    Control(ApplicationRequest),
+    Consensus(Box<ConsensusRequest>),
+    Control(Box<ApplicationRequest>),
 }
 
 struct Runtime<S> {
@@ -54,10 +57,7 @@ struct Runtime<S> {
     genesis_tx: Option<Tx>,
     store: ChainStore,
     received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: BTreeMap<
-        ConsensusDigest,
-        Vec<(Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>)>,
-    >,
+    pending_verifies: PendingVerifies,
     gossip: S,
 }
 
@@ -88,7 +88,7 @@ where
                 store: ChainStore::default(),
                 received: BTreeMap::new(),
                 pending_verifies: BTreeMap::new(),
-                gossip: gossip.clone(),
+                gossip,
                 consensus,
                 control,
             },
@@ -104,7 +104,7 @@ where
         hasher.finalize()
     }
 
-    fn genesis_block() -> Block {
+    const fn genesis_block() -> Block {
         Block {
             parent: BlockId(B256::ZERO),
             height: 0,
@@ -114,7 +114,7 @@ where
         }
     }
 
-    fn block_cfg(codec: BlockCodecCfg) -> crate::types::BlockCfg {
+    const fn block_cfg(codec: BlockCodecCfg) -> crate::types::BlockCfg {
         crate::types::BlockCfg {
             max_txs: codec.max_txs,
             tx: crate::types::TxCfg {
@@ -163,12 +163,10 @@ where
 
     fn try_verify_and_insert(
         store: &mut ChainStore,
-        genesis_tx: &mut Option<Tx>,
         expected_digest: ConsensusDigest,
         context: &Context<ConsensusDigest, PublicKey>,
         block: Block,
     ) -> anyhow::Result<bool> {
-        let clears_genesis_tx = block.height == 1;
         if Self::digest_for_block(&block) != expected_digest {
             return Ok(false);
         }
@@ -202,9 +200,6 @@ where
                 seed: None,
             },
         );
-        if clears_genesis_tx {
-            *genesis_tx = None;
-        }
         Ok(true)
     }
 
@@ -214,7 +209,7 @@ where
     }
 
     pub async fn run(self) {
-        let Application {
+        let Self {
             node,
             codec,
             finalized,
@@ -240,8 +235,10 @@ where
             pending_verifies,
             gossip,
         };
-        let mut inbox =
-            futures::stream::select(consensus.map(Input::Consensus), control.map(Input::Control));
+        let mut inbox = futures::stream::select(
+            consensus.map(|m| Input::Consensus(Box::new(m))),
+            control.map(|m| Input::Control(Box::new(m))),
+        );
 
         while let Some(event) = inbox.next().await {
             runtime.handle_input(event).await;
@@ -255,8 +252,8 @@ where
 {
     async fn handle_input(&mut self, input: Input) {
         match input {
-            Input::Consensus(message) => self.handle_consensus(message).await,
-            Input::Control(message) => self.handle_control(message),
+            Input::Consensus(message) => self.handle_consensus(*message).await,
+            Input::Control(message) => self.handle_control(*message),
         }
     }
 
@@ -384,11 +381,7 @@ where
         };
         let child = Application::<S>::build_child_block(&parent.block, prevrandao, txs);
         if let Ok((digest, entry)) = Application::<S>::execute_block(&parent, child) {
-            let clears_genesis_tx = entry.block.height == 1;
             self.store.insert(digest, entry);
-            if clears_genesis_tx {
-                self.genesis_tx = None;
-            }
             let _ = response.send(digest);
         }
     }
@@ -405,14 +398,9 @@ where
         }
 
         if let Some(block) = self.received.get(&digest).cloned() {
-            let ok = Application::<S>::try_verify_and_insert(
-                &mut self.store,
-                &mut self.genesis_tx,
-                digest,
-                &context,
-                block,
-            )
-            .unwrap_or(false);
+            let ok =
+                Application::<S>::try_verify_and_insert(&mut self.store, digest, &context, block)
+                    .unwrap_or(false);
             if ok {
                 self.received.remove(&digest);
             }
@@ -464,14 +452,9 @@ where
                     continue;
                 }
             };
-            let ok = Application::<S>::try_verify_and_insert(
-                &mut self.store,
-                &mut self.genesis_tx,
-                digest,
-                &context,
-                block,
-            )
-            .unwrap_or(false);
+            let ok =
+                Application::<S>::try_verify_and_insert(&mut self.store, digest, &context, block)
+                    .unwrap_or(false);
             if ok {
                 self.received.remove(&digest);
             }
@@ -506,6 +489,11 @@ where
                     finalization.proposal.payload,
                     Self::seed_hash_from_seed(finalization.seed()),
                 );
+                if let Some(entry) = self.store.get_by_digest(&finalization.proposal.payload) {
+                    if entry.block.height == 1 {
+                        self.genesis_tx = None;
+                    }
+                }
                 let _ = self
                     .finalized
                     .unbounded_send((self.node, finalization.proposal.payload));

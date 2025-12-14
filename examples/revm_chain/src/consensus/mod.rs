@@ -6,9 +6,8 @@
 
 mod ingress;
 
-pub use ingress::{ConsensusRequest, Mailbox};
-
 use commonware_cryptography::{ed25519, sha256};
+pub use ingress::{ConsensusRequest, Mailbox};
 
 pub type ConsensusDigest = sha256::Digest;
 pub type PublicKey = ed25519::PublicKey;

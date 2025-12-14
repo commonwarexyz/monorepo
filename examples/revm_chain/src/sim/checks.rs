@@ -1,6 +1,5 @@
 use super::{genesis, ConsensusDigest};
-use crate::application::Handle;
-use crate::consensus;
+use crate::{application::Handle, consensus};
 use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
 
