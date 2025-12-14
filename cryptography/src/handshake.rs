@@ -474,7 +474,7 @@ mod test {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::{Ack, Syn, SynAck};
+        use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
