@@ -6,8 +6,8 @@
 use crate::types::Epoch;
 pub use commonware_cryptography::{
     certificate::{
-        bls12381_multisig, bls12381_threshold, ed25519, utils, Context, Scheme, Signature,
-        SignatureVerification,
+        bls12381_multisig, bls12381_threshold, ed25519, Context, Scheme, Signature,
+        SignatureVerification, Signers,
     },
     impl_bls12381_multisig_certificate as impl_bls12381_multisig_scheme,
     impl_bls12381_threshold_certificate as impl_bls12381_threshold_scheme,
