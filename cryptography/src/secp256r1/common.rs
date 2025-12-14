@@ -121,13 +121,13 @@ impl From<SigningKey> for PrivateKeyInner {
 
 impl Debug for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("PrivateKey([REDACTED])")
     }
 }
 
 impl Display for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 

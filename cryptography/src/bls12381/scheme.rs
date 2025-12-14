@@ -125,13 +125,13 @@ impl From<Scalar> for PrivateKey {
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("PrivateKey([REDACTED])")
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
