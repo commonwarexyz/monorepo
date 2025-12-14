@@ -383,7 +383,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, transcript::Transcript, PrivateKeyExt as _, Signer};
+    use crate::{ed25519::PrivateKey, transcript::Transcript, Signer};
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
     use rand::SeedableRng;
@@ -443,8 +443,8 @@ mod test {
     #[test]
     fn test_mismatched_namespace_fails() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let dialer_crypto = PrivateKey::from_rng(&mut rng);
-        let listener_crypto = PrivateKey::from_rng(&mut rng);
+        let dialer_crypto = PrivateKey::random(&mut rng);
+        let listener_crypto = PrivateKey::random(&mut rng);
 
         let (_, msg1) = dial_start(
             &mut rng,
@@ -474,6 +474,7 @@ mod test {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
+        use super::{Ack, Syn, SynAck};
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
