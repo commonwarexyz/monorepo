@@ -1062,13 +1062,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "share index must match participant index")]
+    #[should_panic(expected = "share index must match participant indices")]
     fn test_signer_shares_must_match_participant_indices_min_pk() {
         signer_shares_must_match_participant_indices::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "share index must match participant index")]
+    #[should_panic(expected = "share index must match participant indices")]
     fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
@@ -1078,7 +1078,7 @@ mod tests {
         n: u32,
     ) -> Set<ed25519::PublicKey> {
         (0..n)
-            .map(|_| Ed25519PrivateKey::random(rng.clone()).public_key())
+            .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()
             .expect("participants are unique")
     }
@@ -1095,13 +1095,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_signer_polynomial_threshold_must_equal_quorum_min_pk() {
         signer_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_signer_polynomial_threshold_must_equal_quorum_min_sig() {
         signer_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
@@ -1116,13 +1116,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
         verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }

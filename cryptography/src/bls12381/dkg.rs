@@ -297,7 +297,7 @@ use commonware_math::{
 };
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    quorum, TryCollect, NZU32,
+    TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -1503,7 +1503,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{max_faults, TryCollect};
+    use commonware_utils::{max_faults, quorum, TryCollect};
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
