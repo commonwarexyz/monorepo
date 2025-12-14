@@ -120,7 +120,6 @@ where
         .collect();
 
     let signers: BiMap<_, _> = participants
-        .clone()
         .into_iter()
         .zip(bls_public)
         .try_collect()
