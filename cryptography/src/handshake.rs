@@ -297,12 +297,11 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
         ok_timestamps,
-        transcript,
+        mut transcript,
     } = ctx;
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
-    let mut transcript = transcript;
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(my_identity.public_key().encode())
