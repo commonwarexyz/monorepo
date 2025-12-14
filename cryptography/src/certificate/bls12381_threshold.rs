@@ -8,8 +8,7 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
-use crate::scheme::{Context, Scheme, Signature, SignatureVerification};
-use commonware_cryptography::{
+use crate::{
     bls12381::primitives::{
         group::Share,
         ops::{
@@ -19,6 +18,7 @@ use commonware_cryptography::{
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
+    certificate::{Context, Scheme, Signature, SignatureVerification},
     Digest, PublicKey,
 };
 use commonware_utils::ordered::Set;
@@ -366,32 +366,32 @@ mod macros {
     ///
     /// # Example
     /// ```ignore
-    /// impl_bls12381_threshold_scheme!(VoteContext<'a, D>);
+    /// impl_bls12381_threshold_certificate!(VoteContext<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_bls12381_threshold_scheme {
+    macro_rules! impl_bls12381_threshold_certificate {
         ($context:ty) => {
             /// BLS12-381 threshold signature scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme<
-                P: commonware_cryptography::PublicKey,
-                V: commonware_cryptography::bls12381::primitives::variant::Variant,
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant,
             > {
-                generic: $crate::scheme::bls12381_threshold::Generic<P, V>,
+                generic: $crate::certificate::bls12381_threshold::Generic<P, V>,
             }
 
             impl<
-                P: commonware_cryptography::PublicKey,
-                V: commonware_cryptography::bls12381::primitives::variant::Variant,
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant,
             > Scheme<P, V> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
                 pub fn signer(
                     participants: commonware_utils::ordered::Set<P>,
-                    polynomial: commonware_cryptography::bls12381::primitives::sharing::Sharing<V>,
-                    share: commonware_cryptography::bls12381::primitives::group::Share,
+                    polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                    share: $crate::bls12381::primitives::group::Share,
                 ) -> Option<Self> {
                     Some(Self {
-                        generic: $crate::scheme::bls12381_threshold::Generic::signer(
+                        generic: $crate::certificate::bls12381_threshold::Generic::signer(
                             participants,
                             polynomial,
                             share,
@@ -402,10 +402,10 @@ mod macros {
                 /// Creates a verifier that can authenticate partial signatures.
                 pub fn verifier(
                     participants: commonware_utils::ordered::Set<P>,
-                    polynomial: commonware_cryptography::bls12381::primitives::sharing::Sharing<V>,
+                    polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 ) -> Self {
                     Self {
-                        generic: $crate::scheme::bls12381_threshold::Generic::verifier(
+                        generic: $crate::certificate::bls12381_threshold::Generic::verifier(
                             participants,
                             polynomial,
                         ),
@@ -415,7 +415,7 @@ mod macros {
                 /// Creates a lightweight verifier that only checks recovered certificates.
                 pub const fn certificate_verifier(identity: V::Public) -> Self {
                     Self {
-                        generic: $crate::scheme::bls12381_threshold::Generic::certificate_verifier(
+                        generic: $crate::certificate::bls12381_threshold::Generic::certificate_verifier(
                             identity,
                         ),
                     }
@@ -427,16 +427,16 @@ mod macros {
                 }
 
                 /// Returns the local share if this instance can generate partial signatures.
-                pub const fn share(&self) -> Option<&commonware_cryptography::bls12381::primitives::group::Share> {
+                pub const fn share(&self) -> Option<&$crate::bls12381::primitives::group::Share> {
                     self.generic.share()
                 }
             }
 
             impl<
-                P: commonware_cryptography::PublicKey,
-                V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync,
-            > $crate::scheme::Scheme for Scheme<P, V> {
-                type Context<'a, D: commonware_cryptography::Digest> = $context;
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
+            > $crate::certificate::Scheme for Scheme<P, V> {
+                type Context<'a, D: $crate::Digest> = $context;
                 type PublicKey = P;
                 type Signature = V::Signature;
                 type Certificate = V::Signature;
@@ -449,19 +449,19 @@ mod macros {
                     self.generic.participants()
                 }
 
-                fn sign_vote<D: commonware_cryptography::Digest>(
+                fn sign_vote<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                ) -> Option<$crate::scheme::Signature<Self>> {
+                ) -> Option<$crate::certificate::Signature<Self>> {
                     self.generic.sign_vote::<_, D>(namespace, context)
                 }
 
-                fn verify_vote<D: commonware_cryptography::Digest>(
+                fn verify_vote<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
-                    signature: &$crate::scheme::Signature<Self>,
+                    signature: &$crate::certificate::Signature<Self>,
                 ) -> bool {
                     self.generic.verify_vote::<_, D>(namespace, context, signature)
                 }
@@ -472,25 +472,25 @@ mod macros {
                     namespace: &[u8],
                     context: Self::Context<'_, D>,
                     signatures: I,
-                ) -> $crate::scheme::SignatureVerification<Self>
+                ) -> $crate::certificate::SignatureVerification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
+                    D: $crate::Digest,
+                    I: IntoIterator<Item = $crate::certificate::Signature<Self>>,
                 {
                     self.generic.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::certificate::Signature<Self>>,
                 {
                     self.generic.assemble_certificate(signatures)
                 }
 
                 fn verify_certificate<
                     R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
+                    D: $crate::Digest,
                 >(
                     &self,
                     rng: &mut R,
@@ -509,7 +509,7 @@ mod macros {
                 ) -> bool
                 where
                     R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
+                    D: $crate::Digest,
                     I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
                 {
                     self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
@@ -527,7 +527,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::scheme::bls12381_threshold::Generic::<P, V>::certificate_codec_config_unbounded()
+                    $crate::certificate::bls12381_threshold::Generic::<P, V>::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -537,9 +537,7 @@ mod macros {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{impl_bls12381_threshold_scheme, scheme::Scheme as _};
-    use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
+    use crate::{
         bls12381::{
             dkg,
             primitives::{
@@ -547,10 +545,13 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
+        certificate::Scheme as _,
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
+        impl_bls12381_threshold_certificate,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
@@ -571,7 +572,7 @@ mod tests {
     }
 
     // Use the macro to generate the test scheme
-    impl_bls12381_threshold_scheme!(TestContext<'a>);
+    impl_bls12381_threshold_certificate!(TestContext<'a>);
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(

@@ -1,4 +1,4 @@
-//! Utilities for signing schemes.
+//! Utilities for certificate schemes.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, Write};
