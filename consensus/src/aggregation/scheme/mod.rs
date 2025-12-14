@@ -14,8 +14,7 @@
 //!   certificates regardless of committee size.
 
 use super::types::Item;
-use crate::scheme::Scheme;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;

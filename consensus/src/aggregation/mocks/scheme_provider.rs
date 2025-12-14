@@ -4,10 +4,8 @@
 //! used in tests. It allows registering signing schemes for specific epochs
 //! and retrieving them later.
 
-use crate::{
-    scheme::{self, Scheme},
-    types::Epoch,
-};
+use crate::{scheme::SchemeProvider as SchemeProviderTrait, types::Epoch};
+use commonware_cryptography::certificate::Scheme;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -43,7 +41,7 @@ impl<S: Scheme> SchemeProvider<S> {
     }
 }
 
-impl<S: Scheme> scheme::SchemeProvider for SchemeProvider<S> {
+impl<S: Scheme> SchemeProviderTrait for SchemeProvider<S> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

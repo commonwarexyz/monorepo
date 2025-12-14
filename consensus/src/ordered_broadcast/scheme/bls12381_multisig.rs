@@ -5,6 +5,7 @@
 //! Certificates contain signer indices alongside an aggregated signature,
 //! enabling secure per-validator activity tracking and conflict detection.
 
-use crate::{ordered_broadcast::types::AckContext, scheme::impl_bls12381_multisig_scheme};
+use crate::ordered_broadcast::types::AckContext;
+use commonware_cryptography::impl_bls12381_multisig_certificate;
 
-impl_bls12381_multisig_scheme!(AckContext<'a, P, D>);
+impl_bls12381_multisig_certificate!(AckContext<'a, P, D>);

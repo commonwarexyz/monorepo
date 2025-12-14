@@ -5,7 +5,7 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-use crate::{ordered_broadcast::types::AckContext, scheme::impl_ed25519_scheme};
-use commonware_cryptography::ed25519;
+use crate::ordered_broadcast::types::AckContext;
+use commonware_cryptography::{ed25519, impl_ed25519_certificate};
 
-impl_ed25519_scheme!(AckContext<'a, ed25519::PublicKey, D>);
+impl_ed25519_certificate!(AckContext<'a, ed25519::PublicKey, D>);

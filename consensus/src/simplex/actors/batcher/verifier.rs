@@ -1,11 +1,8 @@
-use crate::{
-    scheme::SignatureVerification,
-    simplex::{
-        scheme::SimplexScheme,
-        types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
-    },
+use crate::simplex::{
+    scheme::SimplexScheme,
+    types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::SignatureVerification, Digest};
 use rand::{CryptoRng, Rng};
 
 /// `Verifier` is a utility for tracking and batch verifying consensus messages.

@@ -19,11 +19,10 @@
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
 use crate::{
-    scheme::Scheme,
     simplex::{scheme::SimplexScheme, types::Activity},
     Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use rand::{CryptoRng, Rng};
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.

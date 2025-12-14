@@ -4,11 +4,11 @@ mod round;
 mod verifier;
 
 use crate::{
-    scheme::Scheme,
     types::{Epoch, ViewDelta},
     Reporter,
 };
 pub use actor::Actor;
+use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;

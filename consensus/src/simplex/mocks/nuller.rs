@@ -1,14 +1,11 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::{
-    scheme::Scheme,
-    simplex::{
-        scheme::SimplexScheme,
-        types::{Finalize, Nullify, Vote},
-    },
+use crate::simplex::{
+    scheme::SimplexScheme,
+    types::{Finalize, Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;

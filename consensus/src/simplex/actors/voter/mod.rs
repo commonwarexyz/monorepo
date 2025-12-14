@@ -5,13 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    scheme::Scheme,
     simplex::types::Activity,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::Mailbox;

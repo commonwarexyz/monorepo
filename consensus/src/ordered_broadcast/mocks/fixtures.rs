@@ -2,7 +2,7 @@
 
 use crate::{
     ordered_broadcast::scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme},
-    scheme::{Scheme, SchemeProvider},
+    scheme::SchemeProvider,
     types::Epoch,
 };
 use commonware_cryptography::{
@@ -10,6 +10,7 @@ use commonware_cryptography::{
         dkg::deal,
         primitives::{group, variant::Variant},
     },
+    certificate::Scheme,
     ed25519, Signer,
 };
 use commonware_math::algebra::Random;

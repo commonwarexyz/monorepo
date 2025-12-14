@@ -149,8 +149,8 @@
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
-//! the [crate::scheme::Scheme] trait, allowing deployments to employ approaches that best match their
-//! requirements (or to provide their own without modifying any consensus logic). The following [crate::scheme::Scheme]s
+//! the [commonware_cryptography::certificate::Scheme] trait, allowing deployments to employ approaches that best match their
+//! requirements (or to provide their own without modifying any consensus logic). The following schemes
 //! are supported out-of-the-box:
 //!
 //! ### [scheme::ed25519]

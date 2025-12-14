@@ -1,9 +1,9 @@
 use super::types::Ack;
-use crate::{
-    scheme::{Scheme, Signature},
-    types::Epoch,
+use crate::types::Epoch;
+use commonware_cryptography::{
+    certificate::{Scheme, Signature},
+    Digest, PublicKey,
 };
-use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
@@ -149,12 +149,10 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
-    use crate::{
-        ordered_broadcast::{mocks, scheme::OrderedBroadcastScheme, types::Chunk},
-        scheme::Scheme,
-    };
+    use crate::ordered_broadcast::{mocks, scheme::OrderedBroadcastScheme, types::Chunk};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::Scheme,
         ed25519::PublicKey,
         Hasher, Sha256,
     };

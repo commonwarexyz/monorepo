@@ -14,8 +14,7 @@
 //!   certificates regardless of committee size.
 
 use super::types::AckContext;
-use crate::scheme::Scheme;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;

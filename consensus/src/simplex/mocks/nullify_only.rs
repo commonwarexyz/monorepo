@@ -4,15 +4,12 @@
 //! `Notarize` proposal for some round, it broadcasts a signed `Nullify` for that
 //! same round. It does not emit any `Finalize` messages.
 
-use crate::{
-    scheme::Scheme,
-    simplex::{
-        scheme::SimplexScheme,
-        types::{Nullify, Vote},
-    },
+use crate::simplex::{
+    scheme::SimplexScheme,
+    types::{Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;

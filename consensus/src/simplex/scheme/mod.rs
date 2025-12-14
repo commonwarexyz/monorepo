@@ -32,13 +32,12 @@ cfg_if::cfg_if! {
     }
 }
 
-use crate::{
-    scheme::{Context, Scheme},
-    simplex::types::Subject,
-    types::Round,
-};
+use crate::{simplex::types::Subject, types::Round};
 use commonware_codec::Encode;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{
+    certificate::{Context, Scheme},
+    Digest,
+};
 use commonware_utils::union;
 
 impl<'a, D: Digest> Context for Subject<'a, D> {

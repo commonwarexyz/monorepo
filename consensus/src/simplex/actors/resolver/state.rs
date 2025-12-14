@@ -1,10 +1,9 @@
 use crate::{
-    scheme::Scheme,
     simplex::types::{Certificate, Nullification},
     types::View,
     Viewable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
 use std::collections::BTreeMap;

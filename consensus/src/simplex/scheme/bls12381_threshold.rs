@@ -7,7 +7,6 @@
 //! (as it must be sent by said participant) but can't be used by an external observer.
 
 use crate::{
-    scheme::{self, SignatureVerification},
     simplex::{
         scheme::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
@@ -33,6 +32,9 @@ use commonware_cryptography::{
             variant::{PartialSignature, Variant},
         },
         tle,
+    },
+    certificate::{
+        Scheme as SchemeTrait, Signature as CertificateSignature, SignatureVerification,
     },
     Digest, PublicKey,
 };
@@ -370,7 +372,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
     }
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
     type Context<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
@@ -391,7 +393,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-    ) -> Option<scheme::Signature<Self>> {
+    ) -> Option<CertificateSignature<Self>> {
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
@@ -409,7 +411,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
             seed_signature,
         };
 
-        Some(scheme::Signature {
+        Some(CertificateSignature {
             signer: share.index,
             signature,
         })
@@ -417,7 +419,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
 
     fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = scheme::Signature<Self>>,
+        I: IntoIterator<Item = CertificateSignature<Self>>,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
             .into_iter()
@@ -457,7 +459,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        signature: &scheme::Signature<Self>,
+        signature: &CertificateSignature<Self>,
     ) -> bool {
         let Ok(evaluated) = self.polynomial().partial_public(signature.signer) else {
             return false;
@@ -493,7 +495,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = scheme::Signature<Self>>,
+        I: IntoIterator<Item = CertificateSignature<Self>>,
     {
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
@@ -542,7 +544,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> scheme::Scheme for Scheme<P, V> {
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| scheme::Signature {
+            .map(|(vote, seed)| CertificateSignature {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
@@ -686,7 +688,7 @@ mod tests {
     use crate::{
         simplex::{
             mocks::fixtures::{bls12381_threshold, ed25519_participants, Fixture},
-            scheme::{notarize_namespace, seed_namespace, Scheme as _},
+            scheme::{notarize_namespace, seed_namespace},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Subject},
         },
         types::{Round, View},

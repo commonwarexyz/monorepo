@@ -2,7 +2,6 @@
 
 use super::relay::Relay;
 use crate::{
-    scheme::Scheme,
     simplex::{
         scheme::SimplexScheme,
         select_leader,
@@ -11,7 +10,7 @@ use crate::{
     types::{Epoch, Round, View},
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{seq::IteratorRandom, Rng};

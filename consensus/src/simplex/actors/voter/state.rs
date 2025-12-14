@@ -1,6 +1,5 @@
 use super::round::Round;
 use crate::{
-    scheme::Scheme,
     simplex::{
         interesting, min_active,
         scheme::SimplexScheme,
@@ -12,7 +11,7 @@ use crate::{
     types::{Epoch, Round as Rnd, View, ViewDelta},
     Viewable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{CryptoRng, Rng};

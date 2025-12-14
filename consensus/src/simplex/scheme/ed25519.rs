@@ -6,12 +6,12 @@
 //! per-validator activity tracking and fault detection.
 
 use crate::{
-    scheme::impl_ed25519_scheme,
     simplex::{scheme::SeededScheme, types::Subject},
     types::Round,
 };
+use commonware_cryptography::impl_ed25519_certificate;
 
-impl_ed25519_scheme!(Subject<'a, D>);
+impl_ed25519_certificate!(Subject<'a, D>);
 
 impl SeededScheme for Scheme {
     type Seed = ();
@@ -24,7 +24,6 @@ impl SeededScheme for Scheme {
 #[cfg(test)]
 mod tests {
     use crate::{
-        scheme::Scheme as _,
         simplex::{
             mocks::fixtures::{ed25519, Fixture},
             scheme::SeededScheme,
@@ -32,7 +31,7 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
     use commonware_utils::quorum_from_slice;
     use rand::{rngs::StdRng, SeedableRng};
 

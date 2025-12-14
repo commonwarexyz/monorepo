@@ -1,10 +1,10 @@
 use super::types::{Activity, Index};
 use crate::{
-    scheme::{Scheme, SchemeProvider},
+    scheme::SchemeProvider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::NonZeroDuration;

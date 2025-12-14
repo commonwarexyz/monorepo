@@ -108,7 +108,7 @@ mod tests {
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
-        scheme::{Scheme, SchemeProvider},
+        scheme::SchemeProvider,
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
             scheme::bls12381_threshold,
@@ -120,6 +120,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
+        certificate::Scheme,
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,

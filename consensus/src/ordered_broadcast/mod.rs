@@ -72,11 +72,11 @@ mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
         ordered_broadcast::scheme::OrderedBroadcastScheme,
-        scheme::Scheme,
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::Scheme,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer as _,

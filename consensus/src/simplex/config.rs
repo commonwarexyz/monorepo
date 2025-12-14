@@ -1,10 +1,9 @@
 use super::types::{Activity, Context};
 use crate::{
-    scheme::Scheme,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;

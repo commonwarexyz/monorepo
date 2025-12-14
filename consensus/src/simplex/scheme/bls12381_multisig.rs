@@ -6,13 +6,14 @@
 //! enabling secure per-validator activity tracking and conflict detection.
 
 use crate::{
-    scheme::impl_bls12381_multisig_scheme,
     simplex::{scheme::SeededScheme, types::Subject},
     types::Round,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, impl_bls12381_multisig_certificate, PublicKey,
+};
 
-impl_bls12381_multisig_scheme!(Subject<'a, D>);
+impl_bls12381_multisig_certificate!(Subject<'a, D>);
 
 impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
     type Seed = ();
@@ -25,7 +26,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        scheme::Scheme as _,
         simplex::{
             mocks::fixtures::{bls12381_multisig, Fixture},
             scheme::SeededScheme,
@@ -35,6 +35,7 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        certificate::Scheme as _,
         sha256::Digest as Sha256Digest,
     };
     use commonware_utils::quorum_from_slice;

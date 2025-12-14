@@ -1,10 +1,10 @@
 use crate::{
-    scheme::Scheme,
     simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
     Block,
 };
 use commonware_codec::Codec;
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},

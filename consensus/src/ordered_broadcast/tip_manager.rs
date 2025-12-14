@@ -1,6 +1,5 @@
 use super::types::Node;
-use crate::scheme::Scheme;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.

@@ -1,15 +1,14 @@
 //! Types used in [aggregation](super).
 
-use crate::{
-    aggregation::scheme::AggregationScheme,
-    scheme::{Context, Scheme, Signature},
-    types::Epoch,
-};
+use crate::{aggregation::scheme::AggregationScheme, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{
+    certificate::{Context, Scheme, Signature},
+    Digest,
+};
 use commonware_utils::union;
 use futures::channel::oneshot;
 use rand::{CryptoRng, Rng};

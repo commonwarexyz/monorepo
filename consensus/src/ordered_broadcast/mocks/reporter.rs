@@ -3,11 +3,10 @@ use crate::{
         scheme::OrderedBroadcastScheme,
         types::{Activity, Chunk, Lock, Proposal},
     },
-    scheme::Scheme,
     types::Epoch,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

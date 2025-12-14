@@ -6,6 +6,7 @@
 //! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
 //! (as it must be sent by said participant) but can't be used by an external observer.
 
-use crate::{ordered_broadcast::types::AckContext, scheme::impl_bls12381_threshold_scheme};
+use crate::ordered_broadcast::types::AckContext;
+use commonware_cryptography::impl_bls12381_threshold_certificate;
 
-impl_bls12381_threshold_scheme!(AckContext<'a, P, D>);
+impl_bls12381_threshold_certificate!(AckContext<'a, P, D>);

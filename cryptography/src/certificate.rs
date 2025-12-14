@@ -52,14 +52,6 @@
 //! (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
 //! for an example of a scheme that uses the same key for both purposes.
 
-use crate::{Digest, PublicKey};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_utils::bitmap::BitMap;
-use commonware_utils::ordered::Set;
-use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
-
 #[cfg(feature = "std")]
 pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
@@ -70,6 +62,12 @@ pub use crate::{
     impl_bls12381_multisig_certificate, impl_bls12381_threshold_certificate,
     impl_ed25519_certificate,
 };
+use crate::{Digest, PublicKey};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_utils::{bitmap::BitMap, ordered::Set};
+use rand::{CryptoRng, Rng};
+use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]

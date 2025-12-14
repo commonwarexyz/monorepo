@@ -1,7 +1,6 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
-    scheme::Scheme,
     simplex::{
         scheme::{SeededScheme, SimplexScheme},
         select_leader,
@@ -14,7 +13,7 @@ use crate::{
     Monitor, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};

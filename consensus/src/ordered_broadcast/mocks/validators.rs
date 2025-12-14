@@ -1,8 +1,5 @@
-use crate::{
-    scheme::{Scheme, SchemeProvider},
-    types::Epoch,
-};
-use commonware_cryptography::PublicKey;
+use crate::{scheme::SchemeProvider, types::Epoch};
+use commonware_cryptography::{certificate::Scheme, PublicKey};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

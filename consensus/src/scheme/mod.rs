@@ -1,18 +1,11 @@
-//! Re-export of cryptographic certificate schemes and consensus-specific providers.
+//! Consensus-specific certificate scheme provider.
 //!
-//! This module re-exports types from [`commonware_cryptography::certificate`] and adds
-//! consensus-specific traits like [`SchemeProvider`] that depend on consensus types.
+//! This module provides the [`SchemeProvider`] trait that supplies signing schemes
+//! for consensus operations. For the underlying certificate types and traits, import
+//! directly from [`commonware_cryptography::certificate`].
 
 use crate::types::Epoch;
-pub use commonware_cryptography::{
-    certificate::{
-        bls12381_multisig, bls12381_threshold, ed25519, Context, Scheme, Signature,
-        SignatureVerification, Signers,
-    },
-    impl_bls12381_multisig_certificate as impl_bls12381_multisig_scheme,
-    impl_bls12381_threshold_certificate as impl_bls12381_threshold_scheme,
-    impl_ed25519_certificate as impl_ed25519_scheme,
-};
+use commonware_cryptography::certificate::Scheme;
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.

@@ -1,14 +1,16 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    scheme::{Scheme, Signature},
     simplex::scheme::SimplexScheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{
+    certificate::{Scheme, Signature},
+    Digest, PublicKey,
+};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 

@@ -5,6 +5,7 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-use crate::{aggregation::types::Item, scheme::impl_ed25519_scheme};
+use crate::aggregation::types::Item;
+use commonware_cryptography::impl_ed25519_certificate;
 
-impl_ed25519_scheme!(&'a Item<D>);
+impl_ed25519_certificate!(&'a Item<D>);
