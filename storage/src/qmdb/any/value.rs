@@ -19,7 +19,7 @@ mod sealed {
 pub(crate) use sealed::ValueEncoding;
 
 /// A fixed-size, clonable value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedEncoding<V: FixedValue>(PhantomData<V>);
 
 impl<V: FixedValue> sealed::ValueEncoding for FixedEncoding<V> {
@@ -27,7 +27,7 @@ impl<V: FixedValue> sealed::ValueEncoding for FixedEncoding<V> {
 }
 
 /// A variable-size, clonable value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariableEncoding<V: VariableValue>(PhantomData<V>);
 
 impl<V: VariableValue> sealed::ValueEncoding for VariableEncoding<V> {
