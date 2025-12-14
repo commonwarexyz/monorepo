@@ -2101,7 +2101,7 @@ mod tests {
     /// immediately rather than waiting for the timeout.
     fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
