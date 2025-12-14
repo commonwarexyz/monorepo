@@ -484,8 +484,14 @@ Conformance tests verify that implementations maintain backward compatibility by
 # Run all conformance tests
 just test-conformance
 
+# Run conformance tests for specific crates
+just test-conformance -p commonware-codec -p commonware-cryptography
+
 # Regenerate fixtures (use only for INTENTIONAL format changes)
 just regenerate-conformance
+
+# Regenerate fixtures for specific crates only
+just regenerate-conformance -p commonware-codec -p commonware-storage
 ```
 
 **WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking change. Only use this when you have intentionally changed the format and have verified that the change is correct. This will update the hash values in `conformance.toml` files throughout the repository.

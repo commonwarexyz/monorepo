@@ -85,10 +85,10 @@ check-features:
 fix-features:
     zepter && zepter format features --fix
 
-# Test conformance
-test-conformance:
-    just test --features arbitrary --profile conformance
+# Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
+test-conformance *args='':
+    just test --features arbitrary --profile conformance {{ args }}
 
-# Regenerate conformance fixtures
-regenerate-conformance:
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance
+# Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
+regenerate-conformance *args='':
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}

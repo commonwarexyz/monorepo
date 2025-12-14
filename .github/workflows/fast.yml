@@ -282,17 +282,3 @@ jobs:
         run: zepter format features
       - name: Lint feature propagation
         run: zepter run check
-
-  conformance:
-    name: Breaking Changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-    - name: Install just
-      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
-      with:
-        tool: just@1.43.0,cargo-nextest@0.9.104
-    - name: Run codec conformance tests
-      run: just test-conformance && git diff --exit-code

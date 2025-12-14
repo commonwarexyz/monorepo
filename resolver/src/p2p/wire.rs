@@ -36,6 +36,18 @@ impl<Key: Span> Read for Message<Key> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<Key: Span> arbitrary::Arbitrary<'_> for Message<Key>
+where
+    Key: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let id = u.arbitrary::<u64>()?;
+        let payload = u.arbitrary::<Payload<Key>>()?;
+        Ok(Self { id, payload })
+    }
+}
+
 /// Represents the contents of a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Payload<Key: Span> {
@@ -104,6 +116,29 @@ impl<Key: Span> Read for Payload<Key> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<Key: Span> arbitrary::Arbitrary<'_> for Payload<Key>
+where
+    Key: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => {
+                let key = u.arbitrary::<Key>()?;
+                Ok(Self::Request(key))
+            }
+            1 => {
+                let size = u.int_in_range(0..=1024)?;
+                let bytes = u.bytes(size)?;
+                Ok(Self::Response(Bytes::from(bytes.to_vec())))
+            }
+            2 => Ok(Self::Error),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +171,16 @@ mod tests {
         let encoded = original.encode();
         let decoded = Message::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Message<u8>>,
+            CodecConformance<Payload<u8>>,
+        }
     }
 }

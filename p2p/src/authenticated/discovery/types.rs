@@ -136,10 +136,28 @@ impl<C: PublicKey> Read for Payload<C> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey> arbitrary::Arbitrary<'_> for Payload<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::BitVec(u.arbitrary()?)),
+            1 => Ok(Self::Peers(u.arbitrary()?)),
+            2 => Ok(Self::Data(u.arbitrary()?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// BitVec is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct BitVec {
     /// The index that the bit vector applies to.
     pub index: u64,
@@ -260,6 +278,27 @@ impl<C: PublicKey> Read for Info<C> {
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
+        Ok(Self {
+            socket,
+            timestamp,
+            public_key,
+            signature,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey> arbitrary::Arbitrary<'_> for Info<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let socket = u.arbitrary()?;
+        let timestamp = u.arbitrary()?;
+        let public_key = u.arbitrary()?;
+        let signature = u.arbitrary()?;
+
         Ok(Self {
             socket,
             timestamp,
@@ -711,5 +750,17 @@ mod tests {
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::InvalidSignature));
         });
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Payload<PublicKey>>,
+            CodecConformance<BitVec>,
+            CodecConformance<Info<PublicKey>>,
+        }
     }
 }

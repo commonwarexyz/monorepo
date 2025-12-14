@@ -85,6 +85,21 @@ impl<V: VariableValue> Display for Operation<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: VariableValue> arbitrary::Arbitrary<'_> for Operation<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => Ok(Self::Append(V::arbitrary(u)?)),
+            1 => Ok(Self::Commit(Option::<V>::arbitrary(u)?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +144,15 @@ mod tests {
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Operation<U64>>
+        }
     }
 }

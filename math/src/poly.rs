@@ -612,4 +612,14 @@ mod test {
             assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
         }
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Poly<F>>
+        }
+    }
 }

@@ -55,5 +55,9 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-math/arbitrary",
+	"commonware-p2p/arbitrary",
+	"commonware-resolver/arbitrary",
+	"commonware-storage/arbitrary",
+	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]

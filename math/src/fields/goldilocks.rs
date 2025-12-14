@@ -41,6 +41,14 @@ impl core::fmt::Debug for F {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for F {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let x = u.arbitrary::<u64>()?;
+        Ok(F::reduce_64(x))
+    }
+}
+
 impl F {
     // The following constants are not randomly chosen, but computed in a specific
     // way. They could be computed at compile time, with each definition actually
@@ -488,5 +496,15 @@ mod test {
     #[test]
     fn test_field() {
         algebra::test_suites::test_field(file!(), &F::arbitrary());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<F>
+        }
     }
 }

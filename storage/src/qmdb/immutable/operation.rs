@@ -122,6 +122,26 @@ impl<K: Array, V: VariableValue> Display for Operation<K, V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: VariableValue> arbitrary::Arbitrary<'_> for Operation<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => {
+                let key = K::arbitrary(u)?;
+                let value = V::arbitrary(u)?;
+                Ok(Self::Set(key, value))
+            }
+            1 => Ok(Self::Commit(Option::<V>::arbitrary(u)?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +290,16 @@ mod tests {
             let decoded = Operation::<U64, U64>::decode(encoded.clone()).unwrap();
             assert_eq!(op, decoded, "Failed to roundtrip: {op:?}");
             assert_eq!(encoded.len(), op.encode_size(), "Size mismatch for: {op:?}");
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Operation<U64, U64>>
         }
     }
 }
