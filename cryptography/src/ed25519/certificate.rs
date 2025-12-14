@@ -5,7 +5,7 @@
 
 use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
-    certificate::{utils::Signers, Context, Scheme, Signature, SignatureVerification},
+    certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 use bytes::{Buf, BufMut};

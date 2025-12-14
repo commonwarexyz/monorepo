@@ -12,7 +12,7 @@ use crate::{
         },
         variant::Variant,
     },
-    certificate::{utils::Signers, Context, Scheme, Signature, SignatureVerification},
+    certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
     Digest, PublicKey,
 };
 use bytes::{Buf, BufMut};
