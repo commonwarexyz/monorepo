@@ -591,6 +591,19 @@ pub enum Error {
 
 _Generally, we try to minimize the length of functions and variables._
 
+### Namespace Conventions
+Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
+```
+_COMMONWARE_<CRATE>_<OPERATION>
+```
+
+Examples:
+- `_COMMONWARE_CODING_ZODA` - ZODA encoding in the coding crate
+- `_COMMONWARE_STREAM_HANDSHAKE` - Handshake protocol in the stream crate
+- `_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG` - BLS12-381 DKG in the cryptography crate
+
+This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
+
 ### Trait Patterns
 ```rust
 // Comprehensive trait bounds
