@@ -1,8 +1,11 @@
 use super::ThresholdScheme;
 use commonware_consensus::simplex;
 use commonware_cryptography::{
-    bls12381::{dkg, primitives::variant::MinSig},
-    ed25519, PrivateKeyExt as _, Signer as _,
+    bls12381::{
+        dkg,
+        primitives::{sharing::Mode, variant::MinSig},
+    },
+    ed25519, Signer as _,
 };
 use commonware_utils::{ordered::Set, TryCollect as _};
 use rand::{rngs::StdRng, SeedableRng as _};
@@ -21,14 +24,13 @@ pub(super) fn threshold_schemes(
     seed: u64,
     n: usize,
 ) -> anyhow::Result<(Vec<ed25519::PublicKey>, Vec<ThresholdScheme>)> {
-    let mut rng = StdRng::seed_from_u64(seed);
-
     let participants: Set<ed25519::PublicKey> = (0..n)
-        .map(|_| ed25519::PrivateKey::from_rng(&mut rng).public_key())
+        .map(|i| ed25519::PrivateKey::from_seed(seed.wrapping_add(i as u64)).public_key())
         .try_collect()
         .expect("participant public keys are unique");
 
-    let (output, shares) = dkg::deal::<MinSig, _>(&mut rng, participants.clone())
+    let mut rng = StdRng::seed_from_u64(seed);
+    let (output, shares) = dkg::deal::<MinSig, _>(&mut rng, Mode::default(), participants.clone())
         .map_err(|e| anyhow::anyhow!("dkg deal failed: {e:?}"))?;
 
     let mut schemes = Vec::with_capacity(n);
@@ -36,7 +38,7 @@ pub(super) fn threshold_schemes(
         let share = shares.get_value(pk).expect("share exists").clone();
         let scheme = simplex::signing_scheme::bls12381_threshold::Scheme::signer(
             participants.clone(),
-            output.public(),
+            output.public().clone(),
             share,
         )
         .expect("signer should exist");
