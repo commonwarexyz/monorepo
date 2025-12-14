@@ -7,7 +7,7 @@ use futures::{
     SinkExt,
 };
 
-/// Message types that can be sent to the `Mailbox`
+/// Message types that can be sent to the [`Mailbox`]
 pub enum Message<P: PublicKey, M: Committable + Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
     ///
