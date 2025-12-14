@@ -169,4 +169,4 @@ pub const P2P_SUFFIX: &[u8] = b"_P2P";
 #[doc(hidden)]
 pub const CONSENSUS_SUFFIX: &[u8] = b"_CONSENSUS";
 #[doc(hidden)]
-pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_INDEXER";
+pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE_INDEXER";
