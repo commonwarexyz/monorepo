@@ -87,8 +87,8 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just test --features arbitrary --profile conformance $@
+    just test --features arbitrary --profile conformance {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance $@
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
