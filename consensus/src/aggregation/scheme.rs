@@ -1,0 +1,65 @@
+//! Signing scheme implementations for `aggregation`.
+//!
+//! This module provides protocol-specific wrappers around the generic signing schemes
+//! in [`crate::scheme`]. Each wrapper binds the scheme's context type to
+//! [`Item`], which represents the data being aggregated and signed.
+//!
+//! # Available Schemes
+//!
+//! - Ed25519: Attributable signatures with individual verification. HSM-friendly,
+//!   no trusted setup required.
+//! - BLS12-381 multi-signature: Attributable signatures with aggregated verification.
+//!   Compact certificates while preserving attribution.
+//! - BLS12-381 threshold: Non-attributable threshold signatures. Constant-size
+//!   certificates regardless of committee size.
+
+use super::types::Item;
+use commonware_cryptography::{certificate::Scheme, Digest};
+
+/// Marker trait for signing schemes compatible with `aggregation`.
+///
+/// This trait binds a [`Scheme`] to the [`Item`] context type used by the
+/// aggregation protocol. It is automatically implemented for any scheme
+/// whose context type matches `&'a Item<D>`.
+pub trait AggregationScheme<D: Digest>: for<'a> Scheme<Context<'a, D> = &'a Item<D>> {}
+
+impl<D: Digest, S> AggregationScheme<D> for S where S: for<'a> Scheme<Context<'a, D> = &'a Item<D>> {}
+
+pub mod ed25519 {
+    //! Ed25519 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
+    //! for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults.
+
+    use super::Item;
+    use commonware_cryptography::impl_ed25519_certificate;
+
+    impl_ed25519_certificate!(&'a Item<D>);
+}
+
+pub mod bls12381_multisig {
+    //! BLS12-381 multi-signature implementation of the
+    //! [`Scheme`](commonware_cryptography::certificate::Scheme) trait for `aggregation`.
+    //!
+    //! This scheme is attributable: certificates are compact while still preserving
+    //! per-validator attribution.
+
+    use super::Item;
+    use commonware_cryptography::impl_bls12381_multisig_certificate;
+
+    impl_bls12381_multisig_certificate!(&'a Item<D>);
+}
+
+pub mod bls12381_threshold {
+    //! BLS12-381 threshold implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme)
+    //! trait for `aggregation`.
+    //!
+    //! This scheme is non-attributable: partial signatures should not be exposed as
+    //! third-party evidence.
+
+    use super::Item;
+    use commonware_cryptography::impl_bls12381_threshold_certificate;
+
+    impl_bls12381_threshold_certificate!(&'a Item<D>);
+}
