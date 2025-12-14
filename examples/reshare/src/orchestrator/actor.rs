@@ -8,7 +8,6 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
-    scheme::Scheme,
     simplex::{
         self,
         scheme::SimplexScheme,
@@ -18,7 +17,9 @@ use commonware_consensus::{
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},

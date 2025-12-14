@@ -2,13 +2,10 @@
 //! [commonware_consensus::scheme::SchemeProvider] implementation.
 
 use crate::orchestrator::EpochTransition;
-use commonware_consensus::{
-    scheme::{self, Scheme},
-    simplex,
-    types::Epoch,
-};
+use commonware_consensus::{scheme, simplex, types::Epoch};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
+    certificate::Scheme,
     ed25519, PublicKey, Signer,
 };
 use std::{
