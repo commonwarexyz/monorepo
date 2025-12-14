@@ -53,6 +53,16 @@ impl<V: Codec> EncodeSize for Record<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Codec> arbitrary::Arbitrary<'_> for Record<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary()?, u.arbitrary()?))
+    }
+}
+
 /// Implementation of `Cache` storage.
 pub struct Cache<E: Storage + Metrics, V: Codec> {
     items_per_blob: u64,
@@ -316,5 +326,15 @@ impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.get(*key).await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<u64>>,
     }
 }

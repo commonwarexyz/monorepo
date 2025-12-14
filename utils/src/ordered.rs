@@ -231,6 +231,17 @@ impl<T> From<Set<T>> for Vec<T> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<T> arbitrary::Arbitrary<'_> for Set<T>
+where
+    T: for<'a> arbitrary::Arbitrary<'a> + Ord,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let vec = Vec::<T>::arbitrary(u)?;
+        Ok(Self::from_iter_dedup(vec))
+    }
+}
+
 /// Extension trait for [`Set`] participant sets providing quorum and index utilities.
 pub trait Quorum {
     /// The type of items in this set.
@@ -588,6 +599,18 @@ impl<K, V> DoubleEndedIterator for MapIntoIter<K, V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K, V> arbitrary::Arbitrary<'_> for Map<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let vec = Vec::<(K, V)>::arbitrary(u)?;
+        Ok(Self::from_iter_dedup(vec))
+    }
+}
+
 /// An ordered, deduplicated collection of key-value pairs with unique values.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BiMap<K, V> {
@@ -825,6 +848,22 @@ impl<'a, K, V> IntoIterator for &'a BiMap<K, V> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter().zip(self.inner.values().iter())
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<K, V> arbitrary::Arbitrary<'_> for BiMap<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Eq + Hash,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut vec = Vec::<(K, V)>::arbitrary(u)?;
+        vec.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        vec.dedup_by(|l, r| l.0 == r.0);
+        vec.sort_by(|(_, lv), (_, rv)| lv.cmp(rv));
+        vec.dedup_by(|l, r| l.1 == r.1);
+        Self::try_from_iter(vec).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -1109,5 +1148,17 @@ mod test {
         let map = result.unwrap();
         assert_eq!(map.keys().iter().copied().collect::<Vec<_>>(), keys);
         assert_eq!(map.values(), values.as_slice());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Set<u32>>,
+            CodecConformance<Map<u32, u32>>,
+            CodecConformance<BiMap<u32, u32>>,
+        }
     }
 }

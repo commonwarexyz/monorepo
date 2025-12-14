@@ -1,0 +1,75 @@
+["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
+n_cases = 65536
+hash = "892ba87ed9fa60ee60f694f927de60c3ee7fcdddd5a04d330c7511533cc2ca8d"
+
+["commonware_storage::archive::prunable::storage::conformance::CodecConformance<Record<U64,Vec<u8>>>"]
+n_cases = 65536
+hash = "e681f76832577cad99b881684c56d820f9059d117ed1fef9fa3c7735c2eb24f9"
+
+["commonware_storage::bmt::tests::conformance::CodecConformance<Bounds<Sha256Digest>>"]
+n_cases = 65536
+hash = "927da8204f16522162168efcae8ca126b927c96fb08289e805859071647b9333"
+
+["commonware_storage::bmt::tests::conformance::CodecConformance<Proof<Sha256>>"]
+n_cases = 65536
+hash = "fcb0baa781f374ca04f2c967abc3c82c7b99d26239b387472de23c85aebd2790"
+
+["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256>>"]
+n_cases = 65536
+hash = "035babcc7aa34c3d4b263924865c4da8206b226e7c372484b89e5430166068c3"
+
+["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
+n_cases = 65536
+hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
+
+["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
+n_cases = 65536
+hash = "2066c89982e914e02272e613a7577bd22d15f4f7ce0a03c6b2fb5d3bdaff78fd"
+
+["commonware_storage::freezer::storage::conformance::CodecConformance<Cursor>"]
+n_cases = 65536
+hash = "074b9674e0997e724949866ca8ae5c52a15d270140c1ae82626ea6d917e089f8"
+
+["commonware_storage::freezer::storage::conformance::CodecConformance<Entry>"]
+n_cases = 65536
+hash = "8c43d6d3a0ffb749db46d02a461cdc131c14b331aed670ee36e76bd716cdbaec"
+
+["commonware_storage::freezer::storage::conformance::CodecConformance<Record<U64,U64>>"]
+n_cases = 65536
+hash = "b4f2eb51a158d964317fb1714dbe708ffbe6673453dc648eabdd72409fb30440"
+
+["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
+n_cases = 65536
+hash = "e3e6735a810f1002164333013fbff442c91a690483e75fe7a78618a96d5afd62"
+
+["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
+n_cases = 65536
+hash = "07a88b442e9f86b5395a73584211cb6abbb58e51c6f3954b29095c56d77d370c"
+
+["commonware_storage::qmdb::any::ordered::operation::tests::conformance::CodecConformance<FixedOperation<U64,U64>>"]
+n_cases = 65536
+hash = "3256e6553b9d4f0eb7230b8a70c8c9d6366cd01fe1c284e355445c9a26cb3210"
+
+["commonware_storage::qmdb::any::ordered::operation::tests::conformance::CodecConformance<VariableOperation<U64,Vec<u8>>>"]
+n_cases = 65536
+hash = "1cf77ea327f4785cebf25d5d854a985cd84d07fc84f0c295cc845078ed1f0b40"
+
+["commonware_storage::qmdb::any::unordered::operation::tests::conformance::CodecConformance<FixedOperation<U64,U64>>"]
+n_cases = 65536
+hash = "6fe29c8b0ca576ab04c8beedb314c123ab003099aaa6d90680469f7e58f0acad"
+
+["commonware_storage::qmdb::any::unordered::operation::tests::conformance::CodecConformance<VariableOperation<U64,Vec<u8>>>"]
+n_cases = 65536
+hash = "c483b36790002dbbe4e5d4cd937dbd96659df946d74ee173b113f19d47984d30"
+
+["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<U64,U64>>"]
+n_cases = 65536
+hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
+
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<U64>>"]
+n_cases = 65536
+hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
+
+["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<sha256::Digest>>"]
+n_cases = 65536
+hash = "48e2131a0dffcb40a0a29581aa7bb0e39160212117eadb661b629030a58373d6"

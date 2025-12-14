@@ -28,6 +28,7 @@ impl<H> std::fmt::Debug for NoCoding<H> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Shard(Vec<u8>);
 
 impl EncodeSize for Shard {
@@ -54,6 +55,7 @@ impl Read for Shard {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct ReShard(());
 
 impl EncodeSize for ReShard {
@@ -138,3 +140,14 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 }
 
 impl<H: Hasher> crate::ValidatingScheme for NoCoding<H> {}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Shard>,
+        CodecConformance<ReShard>
+    }
+}

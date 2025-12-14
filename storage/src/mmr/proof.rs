@@ -110,6 +110,19 @@ impl<D: Digest> Default for Proof<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Proof<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            size: u.arbitrary()?,
+            digests: u.arbitrary()?,
+        })
+    }
+}
+
 impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
     /// with root digest `root`.
@@ -1610,6 +1623,17 @@ mod tests {
 
             let result = nodes_required_for_multi_proof(Position::new(size), &[loc]);
             assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Proof<Sha256Digest>>,
         }
     }
 }

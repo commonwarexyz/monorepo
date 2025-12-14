@@ -1063,8 +1063,10 @@ dependencies = [
 name = "commonware-coding"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-math",
  "commonware-storage",
@@ -1135,12 +1137,21 @@ dependencies = [
 name = "commonware-conformance"
 version = "0.0.63"
 dependencies = [
+ "commonware-conformance-macros",
  "commonware-macros",
  "futures",
- "paste",
  "serde",
  "sha2 0.10.9",
  "toml",
+]
+
+[[package]]
+name = "commonware-conformance-macros"
+version = "0.0.63"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1206,7 +1217,6 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
- "commonware-macros",
  "commonware-math",
  "commonware-utils",
  "criterion",
@@ -1357,6 +1367,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-utils",
  "proptest",
  "rand 0.8.5",
@@ -1369,8 +1380,10 @@ dependencies = [
 name = "commonware-p2p"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
@@ -1444,9 +1457,11 @@ dependencies = [
 name = "commonware-resolver"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bimap",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1511,9 +1526,11 @@ name = "commonware-storage"
 version = "0.0.63"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
@@ -1613,9 +1630,11 @@ dependencies = [
 name = "commonware-utils"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "criterion",
  "futures",
  "getrandom 0.2.16",
@@ -3280,6 +3299,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
+ "arbitrary",
  "num-integer",
  "num-traits",
 ]

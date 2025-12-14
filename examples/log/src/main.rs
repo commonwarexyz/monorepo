@@ -64,7 +64,7 @@ use std::{
 };
 
 /// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_LOG";
 
 fn main() {
     // Parse arguments

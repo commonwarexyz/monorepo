@@ -57,6 +57,21 @@ pub struct KeyData<K: Array + Ord, V: Codec> {
     pub next_key: K,
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array + Ord, V: Codec> arbitrary::Arbitrary<'_> for KeyData<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            key: u.arbitrary()?,
+            value: u.arbitrary()?,
+            next_key: u.arbitrary()?,
+        })
+    }
+}
+
 /// The return type of the `Any::update_loc` method.
 enum UpdateLocResult<K: Array, V: VariableValue> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.

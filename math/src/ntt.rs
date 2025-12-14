@@ -337,6 +337,18 @@ impl IndexMut<(usize, usize)> for Matrix {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Matrix {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let rows = u.int_in_range(1..=16)?;
+        let cols = u.int_in_range(1..=16)?;
+        let data = (0..rows * cols)
+            .map(|_| F::arbitrary(u))
+            .collect::<arbitrary::Result<Vec<F>>>()?;
+        Ok(Self { rows, cols, data })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct NTTPolynomial {
     coefficients: Vec<F>,
@@ -1066,6 +1078,16 @@ mod test {
         #[test]
         fn test_recovery(setup in RecoverySetup::any(128, 128, 4)) {
             setup.test();
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Matrix>,
         }
     }
 }
