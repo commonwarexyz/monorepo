@@ -310,7 +310,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
+        simulated::{Config, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
@@ -373,58 +373,26 @@ mod tests {
         registrations
     }
 
-    /// Enum to describe the action to take when linking validators.
+    /// Enum to describe the action to take when linking validators (now no-op).
     enum Action {
-        Link(Link),
-        Update(Link), // Unlink and then link
+        /// All peers can communicate
+        Link,
+        /// Update link (no-op)
+        Update,
+        /// Unlink peers (no-op)
         Unlink,
     }
 
-    /// Links (or unlinks) validators using the oracle.
-    ///
-    /// The `action` parameter determines the action (e.g. link, unlink) to take.
-    /// The `restrict_to` function can be used to restrict the linking to certain connections,
-    /// otherwise all validators will be linked to all other validators.
+    /// Links between peers are now handled automatically by the network.
+    /// Peers in the same peer set can communicate directly.
+    /// This function is kept for API compatibility but is now a no-op.
     async fn link_validators<P: PublicKey>(
-        oracle: &mut Oracle<P>,
-        validators: &[P],
-        action: Action,
-        restrict_to: Option<fn(usize, usize, usize) -> bool>,
+        _oracle: &mut Oracle<P>,
+        _validators: &[P],
+        _action: Action,
+        _restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
-        for (i1, v1) in validators.iter().enumerate() {
-            for (i2, v2) in validators.iter().enumerate() {
-                // Ignore self
-                if v2 == v1 {
-                    continue;
-                }
-
-                // Restrict to certain connections
-                if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
-                        continue;
-                    }
-                }
-
-                // Do any unlinking first
-                match action {
-                    Action::Update(_) | Action::Unlink => {
-                        oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
-                    }
-                    _ => {}
-                }
-
-                // Do any linking after
-                match action {
-                    Action::Link(ref link) | Action::Update(ref link) => {
-                        oracle
-                            .add_link(v1.clone(), v2.clone(), link.clone())
-                            .await
-                            .unwrap();
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // No-op: peers in the same peer set can communicate directly
     }
 
     fn all_online<S, F>(mut fixture: F)
@@ -462,13 +430,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -718,13 +681,8 @@ mod tests {
             all_validators.sort();
             let mut registrations = register_validators(&mut oracle, &all_validators).await;
 
-            // Link all peers (including observer)
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
+            // Link all peers (including observer) - no-op with direct connections
+            link_validators(&mut oracle, &all_validators, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1567,13 +1525,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2357,13 +2310,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2540,13 +2488,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2706,13 +2649,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2873,13 +2811,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let mut engines = Vec::new();
@@ -3117,13 +3050,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -3283,13 +3211,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -3459,13 +3382,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -3943,13 +3861,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines with `AttributableReporter` wrapper
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -4651,13 +4564,8 @@ mod tests {
             } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            // Link all validators (no-op with direct connections)
+            link_validators(&mut oracle, &participants, Action::Link, None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());

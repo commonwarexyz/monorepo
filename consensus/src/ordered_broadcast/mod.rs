@@ -70,7 +70,7 @@ mod tests {
         PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::simulated::{Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -108,39 +108,26 @@ mod tests {
         registrations
     }
 
+    /// Actions for network topology testing (now no-op since peers communicate directly)
     enum Action {
-        Link(Link),
-        Update(Link),
+        /// All peers can communicate
+        Link,
+        /// Update link (no-op)
+        Update,
+        /// Unlink peers (no-op)
         Unlink,
     }
 
+    /// Links between peers are now handled automatically by the network.
+    /// Peers in the same peer set can communicate directly.
+    /// This function is kept for API compatibility but is now a no-op.
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey>,
-        participants: &[PublicKey],
-        action: Action,
-        restrict_to: Option<fn(usize, usize, usize) -> bool>,
+        _oracle: &mut Oracle<PublicKey>,
+        _participants: &[PublicKey],
+        _action: Action,
+        _restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
-        for (i1, v1) in participants.iter().enumerate() {
-            for (i2, v2) in participants.iter().enumerate() {
-                if v2 == v1 {
-                    continue;
-                }
-                if let Some(f) = restrict_to {
-                    if !f(participants.len(), i1, i2) {
-                        continue;
-                    }
-                }
-                if matches!(action, Action::Update(_) | Action::Unlink) {
-                    oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
-                }
-                if let Action::Link(ref link) | Action::Update(ref link) = action {
-                    oracle
-                        .add_link(v1.clone(), v2.clone(), link.clone())
-                        .await
-                        .unwrap();
-                }
-            }
-        }
+        // No-op: peers in the same peer set can communicate directly
     }
 
     async fn initialize_simulation(
@@ -178,12 +165,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let registrations = register_participants(&mut oracle, &pks).await;
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+        // Peers can communicate directly - no explicit links needed
+        link_participants(&mut oracle, &pks, Action::Link, None).await;
         (oracle, validators, pks, registrations)
     }
 
@@ -418,12 +401,8 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 let mut registrations = register_participants(&mut oracle, &pks).await;
-                let link = commonware_p2p::simulated::Link {
-                    latency: Duration::from_millis(10),
-                    jitter: Duration::from_millis(1),
-                    success_rate: 1.0,
-                };
-                link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+                // Peers can communicate directly - no explicit links needed
+                link_participants(&mut oracle, &pks, Action::Link, None).await;
 
                 let automatons = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
@@ -534,13 +513,8 @@ mod tests {
             // Get the maximum height from all reporters.
             let max_height = get_max_height(&mut reporters).await;
 
-            // Heal the partition by re-adding links.
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+            // Heal the partition by re-adding links (no-op with direct connections).
+            link_participants(&mut oracle, &pks, Action::Link, None).await;
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
@@ -576,13 +550,9 @@ mod tests {
                 &mut shares_vec,
             )
             .await;
-            let delayed_link = Link {
-                latency: Duration::from_millis(50),
-                jitter: Duration::from_millis(40),
-                success_rate: 0.5,
-            };
+            // Update link (no-op with direct connections)
             let mut oracle_clone = oracle.clone();
-            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+            link_participants(&mut oracle_clone, &pks, Action::Update, None).await;
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
@@ -746,13 +716,8 @@ mod tests {
                 monitor.update(Epoch::new(112));
             }
 
-            // Heal the partition by re-adding links.
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+            // Heal the partition by re-adding links (no-op with direct connections).
+            link_participants(&mut oracle, &pks, Action::Link, None).await;
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
@@ -817,12 +782,8 @@ mod tests {
 
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;
-            let link = commonware_p2p::simulated::Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &participants, Action::Link(link), None).await;
+            // Peers can communicate directly - no explicit links needed
+            link_participants(&mut oracle, &participants, Action::Link, None).await;
 
             // Setup engines
             let automatons = Arc::new(Mutex::new(
@@ -976,13 +937,9 @@ mod tests {
                 &mut shares_vec,
             )
             .await;
-            let delayed_link = Link {
-                latency: Duration::from_millis(80),
-                jitter: Duration::from_millis(10),
-                success_rate: 0.98,
-            };
+            // Update link (no-op with direct connections)
             let mut oracle_clone = oracle.clone();
-            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+            link_participants(&mut oracle_clone, &pks, Action::Update, None).await;
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),

@@ -20,7 +20,7 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+use commonware_p2p::simulated::{Config as NetworkConfig, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
@@ -160,15 +160,11 @@ fn run<P: Simplex>(input: FuzzInput) {
 
         let mut registrations = register(&mut oracle, &participants).await;
 
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
+        // Peers can communicate directly - no explicit links needed
         link_peers(
             &mut oracle,
             &participants,
-            Action::Link(link),
+            Action::Link,
             input.partition.filter(),
         )
         .await;

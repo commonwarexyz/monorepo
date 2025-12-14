@@ -229,37 +229,34 @@ let (vote_sender, vote_receiver) = oracle.register(pk, 0).await.unwrap();
 let (certificate_sender, certificate_receiver) = oracle.register(pk, 1).await.unwrap();
 let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap();
 
-// Configure network links with realistic conditions
-oracle.add_link(pk1, pk2, Link {
-    latency: Duration::from_millis(10),
-    jitter: Duration::from_millis(3),
-    success_rate: 0.95, // 95% success
-}).await.unwrap();
+// Peers in the same peer set can communicate directly - no explicit links needed
+// For realistic network simulation with latency/jitter/bandwidth, use the runtime's
+// multihead mode with configured link characteristics via runtime::simulated::Router
 ```
 
 #### Dynamic Network Conditions
+For realistic network simulation (latency, jitter, bandwidth limiting), use the runtime's
+multihead mode with `runtime::simulated::Router`:
 ```rust
-// Test network partitions
-fn separated(n: usize, a: usize, b: usize) -> bool {
-    let m = n / 2;
-    (a < m && b >= m) || (a >= m && b < m)
-}
-link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await;
+use commonware_runtime::simulated::{Router, Link};
 
-// Update links dynamically
-let degraded_link = Link {
-    latency: Duration::from_secs(3), // Simulate slow network
-    jitter: Duration::from_millis(0),
-    success_rate: 1.0,
-};
-oracle.update_link(pk1, pk2, degraded_link).await.unwrap();
+let mut router = Router::new();
 
-// Test with lossy networks
-let lossy_link = Link {
-    latency: Duration::from_millis(200),
-    jitter: Duration::from_millis(150),
-    success_rate: 0.5, // 50% packet loss
-};
+// Configure link with latency, jitter, and success rate
+let link = Link::new(
+    Duration::from_millis(10),  // latency
+    Duration::from_millis(3),   // jitter
+    0.95,                        // 95% success rate
+);
+router.add_link(peer1, peer2, link);
+
+// Update existing links dynamically
+let degraded_link = Link::new(
+    Duration::from_secs(3),
+    Duration::ZERO,
+    1.0,
+);
+router.update_link(peer1, peer2, degraded_link);
 ```
 
 ### Byzantine Testing Patterns

@@ -454,7 +454,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle},
+        simulated::{self, Network, Oracle},
         Recipients,
     };
     use bytes::Bytes;
@@ -462,15 +462,10 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
     use governor::Quota;
-    use std::{num::NonZeroU32, time::Duration};
+    use std::num::NonZeroU32;
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
-    const LINK: Link = Link {
-        latency: Duration::from_millis(0),
-        jitter: Duration::from_millis(0),
-        success_rate: 1.0,
-    };
     const CAPACITY: usize = 5usize;
 
     /// Default rate limit set high enough to not interfere with normal operation
@@ -493,12 +488,6 @@ mod tests {
     /// Create a public key from a seed.
     fn pk(seed: u64) -> Pk {
         PrivateKey::from_seed(seed).public_key()
-    }
-
-    /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk>, a: Pk, b: Pk) {
-        oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
-        oracle.add_link(b, a, LINK).await.unwrap();
     }
 
     /// Create a peer and register it with the oracle.
@@ -616,7 +605,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             let (_, mut sub_rx1) = handle1.register(7).await.unwrap();
             let (mut sub_tx2, _) = handle2.register(7).await.unwrap();
@@ -642,7 +631,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             let (_, mut rx_a) = handle1.register(10).await.unwrap();
             let (_, mut rx_b) = handle1.register(20).await.unwrap();
@@ -680,7 +669,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(99).await.unwrap();
@@ -711,7 +700,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(99).await.unwrap();
@@ -742,7 +731,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(1).await.unwrap();
@@ -769,7 +758,7 @@ mod tests {
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2, mut backup2, _) =
                 create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(1).await.unwrap();
@@ -797,7 +786,7 @@ mod tests {
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, _handle2, mut backup2, mut global_sender2) =
                 create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, mut rx1) = handle1.register(1).await.unwrap();
@@ -839,7 +828,7 @@ mod tests {
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(1).await.unwrap();
@@ -879,7 +868,7 @@ mod tests {
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2, backup2, _) =
                 create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Peers in the same network can communicate directly (no explicit links needed)
 
             // Explicitly drop the backup receiver.
             drop(backup2);

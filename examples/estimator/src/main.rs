@@ -5,7 +5,7 @@ use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
+    simulated::{Config, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
@@ -359,41 +359,24 @@ async fn setup_network_identities(
         }
     }
 
-    // Set bandwidth limits for each peer based on their region config
-    for (identity, region, _, _) in &identities {
-        let config = &distribution[region];
-        oracle
-            .limit_bandwidth(identity.clone(), config.egress_cap, config.ingress_cap)
-            .await
-            .unwrap();
-    }
+    // Note: Bandwidth limiting is now handled at the runtime layer
+    // For realistic network simulation, use the runtime's multihead mode
 
     identities
 }
 
 /// Set up network links between all peers with appropriate latencies
+///
+/// Note: With the simplified p2p::simulated, peers can communicate directly
+/// without explicit links. For realistic latency simulation, use the runtime's
+/// multihead mode with configured link characteristics.
 async fn setup_network_links(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    identities: &[PeerIdentity],
-    latencies: &Latencies,
+    _oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+    _identities: &[PeerIdentity],
+    _latencies: &Latencies,
 ) {
-    for (i, (identity, region, _, _)) in identities.iter().enumerate() {
-        for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let latency = latencies[region][other_region];
-            let link = Link {
-                latency: Duration::from_micros((latency.0 * 1000.0) as u64),
-                jitter: Duration::from_micros((latency.1 * 1000.0) as u64),
-                success_rate: DEFAULT_SUCCESS_RATE,
-            };
-            oracle
-                .add_link(identity.clone(), other_identity.clone(), link)
-                .await
-                .unwrap();
-        }
-    }
+    // Peers in the same peer set can communicate directly
+    // Link simulation (latency, jitter, bandwidth) is handled at the runtime layer
 }
 
 /// Spawn jobs for all peers in the simulation

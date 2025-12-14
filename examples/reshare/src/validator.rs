@@ -169,7 +169,7 @@ mod test {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{self, Link, Network, Oracle},
+        simulated::{self, Network, Oracle},
         utils::mux,
         Message, Receiver,
     };
@@ -414,21 +414,10 @@ mod test {
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
-            link: Link,
             updates: mpsc::Sender<TeamUpdate>,
         ) {
-            // Add links between all participants
-            for v1 in self.participants.keys() {
-                for v2 in self.participants.keys() {
-                    if v1 == v2 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(v1.clone(), v2.clone(), link.clone())
-                        .await
-                        .unwrap();
-                }
-            }
+            // Peers in the same peer set can communicate directly
+            // No explicit links needed - network handles connections
 
             // Start all participants (even if not active at first)
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
@@ -477,8 +466,6 @@ mod test {
         total: u32,
         /// Number of participants per round (cycles through the list).
         per_round: Vec<u32>,
-        /// Network link configuration (latency, jitter, packet loss).
-        link: Link,
         /// Whether to run in DKG or reshare mode.
         mode: Mode,
         /// Optional crash simulation configuration.
@@ -522,8 +509,7 @@ mod test {
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-            team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
-                .await;
+            team.start(&ctx, &mut oracle, updates_in.clone()).await;
 
             // Set up crash ticker if needed
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
@@ -686,11 +672,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
@@ -719,11 +700,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
@@ -752,11 +728,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
@@ -772,11 +743,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(1),
             crash: None,
             failures: HashSet::new(),
@@ -792,11 +758,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
@@ -812,11 +773,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
@@ -832,11 +788,6 @@ mod test {
             seed: 0,
             total: 8,
             per_round: vec![3, 4, 5],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
@@ -852,11 +803,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.7,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::new(),
@@ -872,11 +818,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.7,
-            },
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
@@ -892,11 +833,6 @@ mod test {
             seed: 0,
             total: 8,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(4),
             crash: None,
             failures: HashSet::new(),
@@ -912,11 +848,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
@@ -936,11 +867,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(4),
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
@@ -960,11 +886,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
@@ -984,11 +905,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(4),
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
@@ -1008,11 +924,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(1),
             crash: None,
             failures: HashSet::from([0]),
@@ -1028,11 +939,6 @@ mod test {
             seed: 0,
             total: 8,
             per_round: vec![4, 5],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Reshare(3),
             crash: None,
             failures: HashSet::from([0, 2, 3]),
@@ -1048,11 +954,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0]),
@@ -1068,11 +969,6 @@ mod test {
             seed: 0,
             total: 4,
             per_round: vec![4],
-            link: Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0, 1]),

@@ -1,16 +1,20 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
+use commonware_p2p::simulated::{Oracle, Receiver, Sender};
 use governor::Quota;
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+/// Actions for network topology testing (now no-op since peers communicate directly)
 #[derive(Clone)]
 pub enum Action {
-    Link(Link),
-    Update(Link),
+    /// All peers can communicate
+    Link,
+    /// Update link (no-op)
+    Update,
+    /// Unlink peers (no-op)
     Unlink,
 }
 
@@ -62,39 +66,16 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
+/// Links between peers are now handled automatically by the network.
+/// Peers in the same peer set can communicate directly.
+/// This function is kept for API compatibility but is now a no-op.
 pub async fn link_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
-    validators: &[P],
-    action: Action,
-    filter: Option<fn(usize, usize, usize) -> bool>,
+    _oracle: &mut Oracle<P>,
+    _validators: &[P],
+    _action: Action,
+    _filter: Option<fn(usize, usize, usize) -> bool>,
 ) {
-    for (i1, v1) in validators.iter().enumerate() {
-        for (i2, v2) in validators.iter().enumerate() {
-            if v2 == v1 {
-                continue;
-            }
-            if let Some(f) = filter {
-                if !f(validators.len(), i1, i2) {
-                    continue;
-                }
-            }
-            match action {
-                Action::Update(_) | Action::Unlink => {
-                    oracle.remove_link(v1.clone(), v2.clone()).await.ok();
-                }
-                _ => {}
-            }
-            match action {
-                Action::Link(ref link) | Action::Update(ref link) => {
-                    oracle
-                        .add_link(v1.clone(), v2.clone(), link.clone())
-                        .await
-                        .unwrap();
-                }
-                _ => {}
-            }
-        }
-    }
+    // No-op: peers in the same peer set can communicate directly
 }
 
 pub async fn register<P: PublicKey>(

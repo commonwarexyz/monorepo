@@ -9,9 +9,6 @@ use futures::{
 use governor::Quota;
 use std::net::SocketAddr;
 
-// Re-export Link from runtime
-pub use commonware_runtime::simulated::Link;
-
 pub enum Message<P: PublicKey> {
     Register {
         channel: Channel,
@@ -31,23 +28,6 @@ pub enum Message<P: PublicKey> {
     Subscribe {
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
     },
-    LimitBandwidth {
-        public_key: P,
-        egress_cap: Option<usize>,
-        ingress_cap: Option<usize>,
-        result: oneshot::Sender<()>,
-    },
-    AddLink {
-        sender: P,
-        receiver: P,
-        link: Link,
-        result: oneshot::Sender<Result<(), Error>>,
-    },
-    RemoveLink {
-        sender: P,
-        receiver: P,
-        result: oneshot::Sender<Result<(), Error>>,
-    },
     Block {
         /// The public key of the peer sending the block request.
         from: P,
@@ -61,8 +41,8 @@ pub enum Message<P: PublicKey> {
 
 /// Interface for modifying the simulated network.
 ///
-/// At any point, peers can be added/removed and links
-/// between said peers can be modified.
+/// Peers that are part of a registered peer set can communicate
+/// directly without explicit link setup.
 #[derive(Debug, Clone)]
 pub struct Oracle<P: PublicKey> {
     sender: mpsc::UnboundedSender<Message<P>>,
@@ -105,82 +85,6 @@ impl<P: PublicKey> Oracle<P> {
         let (s, r) = oneshot::channel();
         self.sender
             .send(Message::Blocked { result: s })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Set bandwidth limits for a peer.
-    ///
-    /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
-    /// rates in bytes per second. Use `None` for unlimited bandwidth.
-    ///
-    /// Bandwidth can be specified before a peer is registered or linked.
-    pub async fn limit_bandwidth(
-        &mut self,
-        public_key: P,
-        egress_cap: Option<usize>,
-        ingress_cap: Option<usize>,
-    ) -> Result<(), Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::LimitBandwidth {
-                public_key,
-                egress_cap,
-                ingress_cap,
-                result: sender,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
-    }
-
-    /// Create a unidirectional link between two peers.
-    ///
-    /// Link can be called multiple times for the same sender/receiver. The latest
-    /// setting will be used.
-    ///
-    /// Link can be called before a peer is registered or bandwidth is specified.
-    pub async fn add_link(&mut self, sender: P, receiver: P, link: Link) -> Result<(), Error> {
-        // Sanity checks
-        if sender == receiver {
-            return Err(Error::LinkingSelf);
-        }
-        if link.success_rate < 0.0 || link.success_rate > 1.0 {
-            return Err(Error::InvalidSuccessRate(link.success_rate));
-        }
-
-        // Wait for update to complete
-        let (s, r) = oneshot::channel();
-        self.sender
-            .send(Message::AddLink {
-                sender,
-                receiver,
-                link,
-                result: s,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Remove a unidirectional link between two peers.
-    ///
-    /// If no link exists, this will return an error.
-    pub async fn remove_link(&mut self, sender: P, receiver: P) -> Result<(), Error> {
-        // Sanity checks
-        if sender == receiver {
-            return Err(Error::LinkingSelf);
-        }
-
-        // Wait for update to complete
-        let (s, r) = oneshot::channel();
-        self.sender
-            .send(Message::RemoveLink {
-                sender,
-                receiver,
-                result: s,
-            })
             .await
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?

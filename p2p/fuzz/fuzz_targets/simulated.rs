@@ -49,25 +49,10 @@ enum Operation {
     },
     /// Attempt to receive pending messages from all peers.
     ReceiveMessages,
-    /// Add or update a network link between two peers with specific characteristics.
-    AddLink {
-        /// Index of the sender peer.
-        from_idx: u8,
-        /// Index of the receiver peer.
-        to_idx: u8,
-        /// Base latency in milliseconds.
-        latency_ms: u16,
-        /// Latency jitter in milliseconds.
-        jitter: u16,
-        /// Success rate (0-255 maps to 0.0-1.0).
-        success_rate: u8,
-    },
-    /// Remove a network link between two peers.
-    RemoveLink {
-        /// Index of the sender peer.
-        from_idx: u8,
-        /// Index of the receiver peer.
-        to_idx: u8,
+    /// Sleep for a random duration to allow message propagation.
+    Sleep {
+        /// Sleep duration in milliseconds (0-255).
+        duration_ms: u8,
     },
 }
 
@@ -267,38 +252,9 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                Operation::AddLink {
-                    from_idx,
-                    to_idx,
-                    latency_ms,
-                    jitter,
-                    success_rate,
-                } => {
-                    // Normalize sender and receiver indices to valid ranges
-                    let from_idx = (from_idx as usize) % peer_pks.len();
-                    let to_idx = (to_idx as usize) % peer_pks.len();
-
-                    // Create link with specified characteristics
-                    // success_rate is normalized from u8 (0-255) to f64 (0.0-1.0)
-                    let link = simulated::Link {
-                        latency: Duration::from_millis(latency_ms as u64),
-                        jitter: Duration::from_millis(jitter as u64),
-                        success_rate: (success_rate as f64) / 255.0,
-                    };
-                    let _ = oracle
-                        .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)
-                        .await;
-                }
-
-                Operation::RemoveLink { from_idx, to_idx } => {
-                    // Normalize sender and receiver indices to valid ranges
-                    let from_idx = (from_idx as usize) % peer_pks.len();
-                    let to_idx = (to_idx as usize) % peer_pks.len();
-
-                    // Remove link to simulate network partition
-                    let _ = oracle
-                        .remove_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone())
-                        .await;
+                Operation::Sleep { duration_ms } => {
+                    // Sleep for a random duration to allow message propagation
+                    context.sleep(Duration::from_millis(duration_ms as u64)).await;
                 }
             }
         }

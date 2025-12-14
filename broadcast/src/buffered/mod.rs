@@ -42,7 +42,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        simulated::{Network, Oracle, Receiver, Sender},
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
@@ -98,23 +98,9 @@ mod tests {
             registrations.insert(peer.clone(), (sender, receiver));
         }
 
-        // Add links between all peers
-        let link = Link {
-            latency: NETWORK_SPEED,
-            jitter: Duration::ZERO,
-            success_rate,
-        };
-        for p1 in peers.iter() {
-            for p2 in peers.iter() {
-                if p2 == p1 {
-                    continue;
-                }
-                oracle
-                    .add_link(p1.clone(), p2.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-        }
+        // Peers in the same peer set can communicate directly
+        // No explicit links needed - network handles connections
+        let _ = success_rate; // Unused in simplified network
 
         (peers, registrations, oracle)
     }

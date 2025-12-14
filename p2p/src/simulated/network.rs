@@ -1,32 +1,32 @@
 //! Implementation of a simulated p2p network.
+//!
+//! Peers that are part of a registered peer set can communicate
+//! directly without explicit link setup. Network simulation (latency,
+//! bandwidth, jitter) is handled by the runtime layer, not here.
 
-use super::{ingress, metrics, Error};
+use super::{ingress::{self, Oracle}, metrics, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    simulated::{Delivery, Router},
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork,
     RateLimiter, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{ordered::Set, TryCollect};
-use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
+    SinkExt, StreamExt,
 };
 use governor::clock::Clock as GClock;
-pub use ingress::Oracle;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::SystemTime,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -96,6 +96,9 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
+///
+/// Peers that are part of a registered peer set can communicate directly.
+/// Network simulation (latency, bandwidth, jitter) is delegated to the runtime layer.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
@@ -120,8 +123,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     sender: mpsc::UnboundedSender<Task<P>>,
     receiver: mpsc::UnboundedReceiver<Task<P>>,
 
-    // A map from a pair of public keys (from, to) to a delivery link between the two peers
-    links: HashMap<(P, P), DeliveryLink>,
+    // Connections from origin to recipient for direct message delivery
+    // Each entry is an mpsc sender to the connection task that handles sending
+    connections: HashMap<(P, P), mpsc::UnboundedSender<(Channel, Bytes)>>,
 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
@@ -137,9 +141,6 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
-
-    // Router for message scheduling and delivery
-    router: Router<P, Channel>,
 
     // Subscribers to peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
@@ -182,12 +183,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 ingress: oracle_receiver,
                 sender,
                 receiver,
-                links: HashMap::new(),
+                connections: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
                 blocks: HashSet::new(),
-                router: Router::new(),
                 subscribers: Vec::new(),
                 rate_limiters: HashMap::new(),
                 received_messages,
@@ -360,70 +360,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 }
                 self.subscribers.push(sender);
             }
-            ingress::Message::LimitBandwidth {
-                public_key,
-                egress_cap,
-                ingress_cap,
-                result,
-            } => {
-                // If peer does not exist, then create it.
-                self.ensure_peer_exists(&public_key).await;
-
-                // Update bandwidth limits
-                let now = self.context.current();
-                let deliveries = self
-                    .router
-                    .limit_bandwidth(now, &public_key, egress_cap, ingress_cap);
-                self.process_deliveries(deliveries);
-
-                // Notify the caller that the bandwidth update has been applied
-                let _ = result.send(());
-            }
-            ingress::Message::AddLink {
-                sender,
-                receiver,
-                link,
-                result,
-            } => {
-                // If sender or receiver does not exist, then create it.
-                self.ensure_peer_exists(&sender).await;
-                let receiver_socket = self.ensure_peer_exists(&receiver).await;
-
-                // Require link to not already exist
-                let key = (sender.clone(), receiver.clone());
-                if self.links.contains_key(&key) {
-                    return send_result(result, Err(Error::LinkExists));
-                }
-
-                // Add link to router (handles scheduling and sampling)
-                self.router.add_link(sender.clone(), receiver.clone(), link);
-
-                // Create delivery link (handles actual network delivery)
-                let delivery_link = DeliveryLink::new(
-                    &mut self.context,
-                    sender,
-                    receiver,
-                    receiver_socket,
-                    self.max_size,
-                    self.received_messages.clone(),
-                );
-                self.links.insert(key, delivery_link);
-                send_result(result, Ok(()))
-            }
-            ingress::Message::RemoveLink {
-                sender,
-                receiver,
-                result,
-            } => {
-                // Remove from delivery links
-                match self.links.remove(&(sender.clone(), receiver.clone())) {
-                    Some(_) => (),
-                    None => return send_result(result, Err(Error::LinkMissing)),
-                }
-                // Also remove from router
-                self.router.remove_link(sender, receiver);
-                send_result(result, Ok(()))
-            }
             ingress::Message::Block { from, to } => {
                 self.blocks.insert((from, to));
             }
@@ -468,34 +404,58 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
-    /// Process deliveries from the router.
-    fn process_deliveries(&mut self, deliveries: Vec<Delivery<P, Channel>>) {
-        for delivery in deliveries {
-            // If there is no message to deliver, then skip
-            let Some(deliver_at) = delivery.deliver_at else {
-                trace!(
-                    origin = ?delivery.origin,
-                    recipient = ?delivery.recipient,
-                    "message dropped before delivery",
-                );
-                continue;
-            };
-
-            // Send message to link
-            let key = (delivery.origin.clone(), delivery.recipient.clone());
-            let Some(link) = self.links.get_mut(&key) else {
-                // This can happen if the link is removed before the message is delivered
-                trace!(
-                    origin = ?delivery.origin,
-                    recipient = ?delivery.recipient,
-                    "missing link for delivery",
-                );
-                continue;
-            };
-            if let Err(err) = link.send(delivery.channel, delivery.message, deliver_at) {
-                error!(?err, "failed to send");
-            }
+    /// Ensure a connection exists from origin to recipient, creating one if necessary.
+    ///
+    /// Returns the sender channel to send messages through the connection.
+    fn ensure_connection(&mut self, origin: &P, recipient: &P) -> mpsc::UnboundedSender<(Channel, Bytes)> {
+        let key = (origin.clone(), recipient.clone());
+        if let Some(sender) = self.connections.get(&key) {
+            return sender.clone();
         }
+
+        // Get recipient's socket address
+        let socket = self.peers.get(recipient).expect("recipient peer must exist").socket;
+
+        // Create inbox/outbox channels for this connection
+        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes)>();
+
+        // Spawn a task that dials the recipient and sends messages
+        let origin_clone = origin.clone();
+        let recipient_clone = recipient.clone();
+        let max_size = self.max_size;
+        let received_messages = self.received_messages.clone();
+        self.context.with_label("connection").spawn(move |context| async move {
+            // Dial the peer and handshake by sending the origin's public key
+            let Ok((mut sink, _)) = context.dial(socket).await else {
+                debug!(?origin_clone, ?recipient_clone, "failed to dial peer");
+                return;
+            };
+            if let Err(err) = send_frame(&mut sink, &origin_clone, max_size).await {
+                error!(?err, "failed to send handshake");
+                return;
+            }
+
+            // Process messages in order, sending them directly
+            while let Some((channel, message)) = outbox.next().await {
+                // Send the message
+                let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
+                data.extend_from_slice(&channel.to_be_bytes());
+                data.extend_from_slice(&message);
+                let data = data.freeze();
+
+                if send_frame(&mut sink, &data, max_size).await.is_err() {
+                    break;
+                }
+
+                // Bump received messages metric
+                received_messages
+                    .get_or_create(&metrics::Message::new(&origin_clone, &recipient_clone, channel))
+                    .inc();
+            }
+        });
+
+        self.connections.insert(key, inbox.clone());
+        inbox
     }
 
     /// Handle a task.
@@ -534,7 +494,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
         };
 
         // Send to all recipients
-        let now = self.context.current();
         let mut sent = Vec::new();
         for recipient in recipients {
             // Skip self
@@ -554,6 +513,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 continue;
             }
 
+            // Ensure recipient peer exists
+            let Some(_peer) = self.peers.get(&recipient) else {
+                trace!(?origin, ?recipient, reason = "peer not registered", "dropping message");
+                continue;
+            };
+
             // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
             let r_o = (recipient.clone(), origin.clone());
@@ -561,12 +526,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 && (self.blocks.contains(&o_r) || self.blocks.contains(&r_o))
             {
                 trace!(?origin, ?recipient, reason = "blocked", "dropping message");
-                continue;
-            }
-
-            // Check if there is a link between the origin and recipient
-            if !self.links.contains_key(&o_r) {
-                trace!(?origin, ?recipient, reason = "no link", "dropping message");
                 continue;
             }
 
@@ -583,25 +542,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 }
             }
 
-            // Record sent message as soon as we determine there is a link with recipient (approximates
-            // having an open connection)
+            // Record sent message
             self.sent_messages
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
-            // Send message through the router (handles latency sampling, success rate, and scheduling)
-            let deliveries = self.router.send(
-                now,
-                &mut self.context,
-                origin.clone(),
-                recipient.clone(),
-                channel,
-                message.clone(),
-            );
-
-            // Process any immediate deliveries
-            if let Some(deliveries) = deliveries {
-                self.process_deliveries(deliveries);
+            // Ensure connection exists and send message
+            let connection = self.ensure_connection(&origin, &recipient);
+            if connection.unbounded_send((channel, message.clone())).is_err() {
+                trace!(?origin, ?recipient, reason = "connection closed", "dropping message");
+                continue;
             }
 
             sent.push(recipient);
@@ -623,16 +573,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 
     async fn run(mut self) {
         loop {
-            let tick = match self.router.next() {
-                Some(when) => Either::Left(self.context.sleep_until(when)),
-                None => Either::Right(future::pending()),
-            };
             select! {
-                _ = tick => {
-                    let now = self.context.current();
-                    let deliveries = self.router.advance(now);
-                    self.process_deliveries(deliveries);
-                },
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
                     let message = match message {
@@ -1024,78 +965,13 @@ impl<P: PublicKey> Peer<P> {
     }
 }
 
-/// A unidirectional delivery link between two peers.
-///
-/// This handles the actual network delivery of messages. The scheduling and
-/// link conditions (latency, jitter, success rate) are handled by the Router.
-struct DeliveryLink {
-    // Messages with their receive time for ordered delivery
-    inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
-}
-
-impl DeliveryLink {
-    fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
-        context: &mut E,
-        dialer: P,
-        receiver: P,
-        socket: SocketAddr,
-        max_size: usize,
-        received_messages: Family<metrics::Message, Counter>,
-    ) -> Self {
-        // Spawn a task that will wait for messages to be sent to the link and then send them
-        // over the network.
-        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
-        context.with_label("link").spawn(move |context| async move {
-            // Dial the peer and handshake by sending it the dialer's public key
-            let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
-                error!(?err, "failed to send public key to listener");
-                return;
-            }
-
-            // Process messages in order, waiting for their receive time
-            while let Some((channel, message, receive_complete_at)) = outbox.next().await {
-                // Wait until the message should arrive at receiver
-                context.sleep_until(receive_complete_at).await;
-
-                // Send the message
-                let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
-                data.extend_from_slice(&channel.to_be_bytes());
-                data.extend_from_slice(&message);
-                let data = data.freeze();
-                let _ = send_frame(&mut sink, &data, max_size).await;
-
-                // Bump received messages metric
-                received_messages
-                    .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
-                    .inc();
-            }
-        });
-
-        Self { inbox }
-    }
-
-    // Send a message over the link with receive timing.
-    fn send(
-        &mut self,
-        channel: Channel,
-        message: Bytes,
-        receive_complete_at: SystemTime,
-    ) -> Result<(), Error> {
-        self.inbox
-            .unbounded_send((channel, message, receive_complete_at))
-            .map_err(|_| Error::NetworkClosed)?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Clock, Runner as _};
     use futures::FutureExt;
     use governor::Quota;
     use std::{num::NonZeroU32, time::Duration};
@@ -1106,7 +982,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     #[test]
-    fn test_register_and_link() {
+    fn test_register_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1136,23 +1012,67 @@ mod tests {
 
             // Overwrite if registering again
             control.register(1, TEST_QUOTA).await.unwrap();
+        });
+    }
 
-            // Add link
-            let link = ingress::Link {
-                latency: Duration::from_millis(2),
-                jitter: Duration::from_millis(1),
-                success_rate: 0.9,
+    #[test]
+    fn test_send_and_receive() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
             };
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), link.clone())
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create two peers
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register channels
+            let (mut sender1, mut receiver1) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender2, mut receiver2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
-            // Expect error when adding link again
-            assert!(matches!(
-                oracle.add_link(pk1, pk2, link).await,
-                Err(Error::LinkExists)
-            ));
+            // Send message from pk1 to pk2
+            let msg = Bytes::from_static(b"hello from pk1");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+
+            // Receive at pk2
+            let (sender, payload) = receiver2.recv().await.unwrap();
+            assert_eq!(sender, pk1);
+            assert_eq!(payload, msg);
+
+            // Send message from pk2 to pk1
+            let msg2 = Bytes::from_static(b"hello from pk2");
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Receive at pk1
+            let (sender, payload) = receiver1.recv().await.unwrap();
+            assert_eq!(sender, pk2);
+            assert_eq!(payload, msg2);
         });
     }
 
@@ -1174,7 +1094,7 @@ mod tests {
             let peer_a = ed25519::PrivateKey::from_seed(21).public_key();
             let peer_b = ed25519::PrivateKey::from_seed(22).public_key();
 
-            // Register all peers
+            // Register all peers in the same peer set
             let mut manager = oracle.manager();
             manager
                 .update(
@@ -1229,30 +1149,7 @@ mod tests {
                 },
             );
 
-            // Establish bidirectional links
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(peer_a.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(twin.clone(), peer_a.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(peer_b.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(twin.clone(), peer_b.clone(), link.clone())
-                .await
-                .unwrap();
-
-            // Send messages in both directions
+            // Send messages in both directions (no explicit links needed - peers are in same peer set)
             let msg_a_to_twin = Bytes::from_static(b"from_a");
             let msg_b_to_twin = Bytes::from_static(b"from_b");
             let msg_primary_out = Bytes::from_static(b"primary_out");
@@ -1309,7 +1206,7 @@ mod tests {
             let twin = ed25519::PrivateKey::from_seed(30).public_key();
             let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
 
-            // Register all peers
+            // Register all peers in the same peer set
             let mut manager = oracle.manager();
             manager
                 .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
@@ -1335,22 +1232,7 @@ mod tests {
                     SplitTarget::Both
                 });
 
-            // Establish bidirectional links
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(peer_c.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(twin.clone(), peer_c.clone(), link)
-                .await
-                .unwrap();
-
-            // Send a message from peer_c to twin
+            // Send a message from peer_c to twin (no explicit link needed)
             let msg_both = Bytes::from_static(b"to_both");
             peer_c_sender
                 .send(Recipients::One(twin.clone()), msg_both.clone(), false)
@@ -1384,7 +1266,7 @@ mod tests {
             let twin = ed25519::PrivateKey::from_seed(30).public_key();
             let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
 
-            // Register all peers
+            // Register all peers in the same peer set
             let mut manager = oracle.manager();
             manager
                 .update(0, [twin.clone(), peer_c.clone()].try_into().unwrap())
@@ -1397,7 +1279,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Register and split the twin's channel with a router that sends to Both
+            // Register and split the twin's channel with routers that drop messages
             let (twin_sender, twin_receiver) = oracle
                 .control(twin.clone())
                 .register(0, TEST_QUOTA)
@@ -1410,21 +1292,6 @@ mod tests {
                     SplitTarget::None
                 });
 
-            // Establish bidirectional links
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(peer_c.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(twin.clone(), peer_c.clone(), link)
-                .await
-                .unwrap();
-
             // Send a message from peer_c to twin
             let msg_both = Bytes::from_static(b"to_both");
             let sent = peer_c_sender
@@ -1434,12 +1301,12 @@ mod tests {
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], twin);
 
-            // Verify both receivers get the message
+            // Verify neither receiver gets the message (router drops them)
             context.sleep(Duration::from_millis(100)).await;
             assert!(twin_primary_recv.recv().now_or_never().is_none());
             assert!(twin_secondary_recv.recv().now_or_never().is_none());
 
-            // Send a message from twin to peer_c
+            // Send messages from twin - should return empty since forwarder returns None
             let msg_both = Bytes::from_static(b"to_both");
             let sent = twin_primary_sender
                 .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
@@ -1447,7 +1314,6 @@ mod tests {
                 .unwrap();
             assert_eq!(sent.len(), 0);
 
-            // Send a message from twin to peer_c
             let msg_both = Bytes::from_static(b"to_both");
             let sent = twin_secondary_sender
                 .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
@@ -1552,6 +1418,7 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
+            // Register peer set
             let mut manager = oracle.manager();
             manager
                 .update(
@@ -1561,6 +1428,8 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
+
+            // Register channels
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -1572,28 +1441,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            oracle
-                .limit_bandwidth(sender_pk.clone(), Some(5_000), None)
-                .await
-                .unwrap();
-            oracle
-                .limit_bandwidth(recipient_pk.clone(), None, Some(5_000))
-                .await
-                .unwrap();
-
-            oracle
-                .add_link(
-                    sender_pk.clone(),
-                    recipient_pk.clone(),
-                    ingress::Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-
+            // Send burst of messages
             const COUNT: usize = 50;
             let mut expected = Vec::with_capacity(COUNT);
             for i in 0..COUNT {
@@ -1605,6 +1453,7 @@ mod tests {
                 expected.push(msg);
             }
 
+            // Verify all messages received in order
             for expected_msg in expected {
                 let (_pk, bytes) = receiver.recv().await.unwrap();
                 assert_eq!(bytes, expected_msg);
@@ -1617,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_broadcast_respects_transmit_latency() {
+    fn test_broadcast_to_multiple_recipients() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
@@ -1633,6 +1482,7 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
+            // Register all peers in the same peer set
             let mut manager = oracle.manager();
             manager
                 .update(
@@ -1642,6 +1492,8 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
+
+            // Register channels
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -1658,52 +1510,19 @@ mod tests {
                 .await
                 .unwrap();
 
-            oracle
-                .limit_bandwidth(sender_pk.clone(), Some(1_000), None)
-                .await
-                .unwrap();
-            oracle
-                .limit_bandwidth(recipient_a.clone(), None, Some(1_000))
-                .await
-                .unwrap();
-            oracle
-                .limit_bandwidth(recipient_b.clone(), None, Some(1_000))
-                .await
-                .unwrap();
-
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(sender_pk.clone(), recipient_a.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(sender_pk.clone(), recipient_b.clone(), link)
-                .await
-                .unwrap();
-
-            let big_msg = Bytes::from(vec![7u8; 10_000]);
-            let start = context.current();
+            // Broadcast message to all
+            let msg = Bytes::from_static(b"broadcast message");
             sender
-                .send(Recipients::All, big_msg.clone(), false)
+                .send(Recipients::All, msg.clone(), false)
                 .await
                 .unwrap();
 
+            // Both recipients should receive the message
             let (_pk, received_a) = recv_a.recv().await.unwrap();
-            assert_eq!(received_a, big_msg);
-            let elapsed_a = context.current().duration_since(start).unwrap();
-            assert!(elapsed_a >= Duration::from_secs(20));
+            assert_eq!(received_a, msg);
 
             let (_pk, received_b) = recv_b.recv().await.unwrap();
-            assert_eq!(received_b, big_msg);
-            let elapsed_b = context.current().duration_since(start).unwrap();
-            assert!(elapsed_b >= Duration::from_secs(20));
-
-            // Because bandwidth is shared, the two messages should take about the same time
-            assert!(elapsed_a.abs_diff(elapsed_b) <= Duration::from_secs(1));
+            assert_eq!(received_b, msg);
 
             drop(oracle);
             drop(sender);

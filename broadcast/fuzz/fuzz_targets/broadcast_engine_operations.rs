@@ -135,9 +135,6 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 #[derive(Debug)]
 pub struct FuzzInput {
     peer_seeds: Vec<u64>,
-    network_success_rate: f64,
-    network_latency_ms: u64,
-    network_jitter_ms: u64,
     cache_size: usize,
     actions: Vec<BroadcastAction>,
 }
@@ -146,9 +143,6 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
-        let network_latency_ms = u.int_in_range(1..=100)?;
-        let network_jitter_ms = u.int_in_range(0..=50)?;
         let cache_size = u.int_in_range(5..=10)?;
 
         let num_actions = u.int_in_range(1..=10)?;
@@ -158,9 +152,6 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
 
         Ok(FuzzInput {
             peer_seeds,
-            network_success_rate,
-            network_latency_ms,
-            network_jitter_ms,
             cache_size,
             actions,
         })
@@ -233,19 +224,8 @@ fn fuzz(input: FuzzInput) {
             engine.start((sender, receiver));
         }
 
-        // Add links between peers
-        let link = commonware_p2p::simulated::Link {
-            latency: Duration::from_millis(input.network_latency_ms),
-            jitter: Duration::from_millis(input.network_jitter_ms),
-            success_rate: input.network_success_rate,
-        };
-        for p1 in &peers {
-            for p2 in &peers {
-                if p1 != p2 {
-                    let _ = oracle.add_link(p1.clone(), p2.clone(), link.clone()).await;
-                }
-            }
-        }
+        // Peers in the same peer set can communicate directly
+        // No explicit links needed - network handles connections
 
         // Execute fuzzed actions
         for action in input.actions {

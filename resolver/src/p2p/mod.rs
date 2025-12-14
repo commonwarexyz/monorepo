@@ -81,7 +81,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        simulated::{Network, Oracle, Receiver, Sender},
         Blocker, Manager,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -95,16 +95,6 @@ mod tests {
     const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
-    const LINK: Link = Link {
-        latency: Duration::from_millis(10),
-        jitter: Duration::from_millis(1),
-        success_rate: 1.0,
-    };
-    const LINK_UNRELIABLE: Link = Link {
-        latency: Duration::from_millis(10),
-        jitter: Duration::from_millis(1),
-        success_rate: 0.5,
-    };
 
     async fn setup_network_and_peers(
         context: &deterministic::Context,
@@ -146,22 +136,8 @@ mod tests {
         (oracle, schemes, peers, connections)
     }
 
-    async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
-        link: Link,
-        peers: &[PublicKey],
-        from: usize,
-        to: usize,
-    ) {
-        oracle
-            .add_link(peers[from].clone(), peers[to].clone(), link.clone())
-            .await
-            .unwrap();
-        oracle
-            .add_link(peers[to].clone(), peers[from].clone(), link)
-            .await
-            .unwrap();
-    }
+    // Note: Peers in the same peer set can now communicate directly
+    // No explicit links needed - network handles connections
 
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
@@ -207,7 +183,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(2);
             let mut prod2 = Producer::default();
@@ -302,8 +278,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             let prod1 = Producer::default();
             let prod2 = Producer::default();
@@ -461,8 +436,7 @@ mod tests {
             .await;
 
             // Add choppy links between the requester and the two producers
-            add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             // Run the fetches multiple times to ensure that the peer tries both of its peers
             for _ in 0..10 {
@@ -508,7 +482,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(6);
             let mut prod2 = Producer::default();
@@ -590,9 +564,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 1, 2).await;
+            // Peers can communicate directly in the same peer set
 
             let key_a = Key(1);
             let key_b = Key(2);
@@ -702,7 +674,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(5);
             let mut prod2 = Producer::default();
@@ -770,8 +742,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             let key1 = Key(1);
             let key2 = Key(2);
@@ -859,8 +830,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(1);
             let invalid_data = Bytes::from("invalid data");
@@ -952,9 +922,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(1);
 
@@ -1041,9 +1009,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+            // Peers can communicate directly in the same peer set
 
             let key1 = Key(1);
             let key2 = Key(2);
@@ -1163,8 +1129,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             let key = Key(1);
             let valid_data = Bytes::from("valid data");
@@ -1299,7 +1264,7 @@ mod tests {
             }
 
             // Now add link so fetches can complete
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Fetch same key again, if fetch timers wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
@@ -1378,7 +1343,7 @@ mod tests {
             }
 
             // Now add link so fetches can complete
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Fetch same key again, if fetch_timers wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored

@@ -57,7 +57,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        simulated::{Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -70,16 +70,6 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     const MAILBOX_SIZE: usize = 1024;
-    const LINK: Link = Link {
-        latency: Duration::from_millis(10),
-        jitter: Duration::from_millis(1),
-        success_rate: 1.0,
-    };
-    const LINK_SLOW: Link = Link {
-        latency: Duration::from_secs(1),
-        jitter: Duration::from_millis(1),
-        success_rate: 1.0,
-    };
 
     async fn setup_network_and_peers(
         context: &deterministic::Context,
@@ -120,22 +110,8 @@ mod tests {
         (oracle, schemes, peers, connections)
     }
 
-    async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
-        link: Link,
-        peers: &[PublicKey],
-        from: usize,
-        to: usize,
-    ) {
-        oracle
-            .add_link(peers[from].clone(), peers[to].clone(), link.clone())
-            .await
-            .unwrap();
-        oracle
-            .add_link(peers[to].clone(), peers[from].clone(), link)
-            .await
-            .unwrap();
-    }
+    // Note: Peers in the same peer set can now communicate directly
+    // No explicit links needed - network handles connections
 
     #[allow(clippy::type_complexity)]
     async fn setup_and_spawn_engine(
@@ -177,8 +153,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the two peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme = schemes.next().unwrap();
@@ -244,8 +219,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the two peers
-            add_link(&mut oracle, LINK_SLOW.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme = schemes.next().unwrap();
@@ -312,9 +286,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
@@ -407,8 +379,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
@@ -479,8 +450,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
@@ -562,8 +532,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
@@ -762,10 +731,7 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Link all peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 1, 2).await;
+            // Peers can communicate directly in the same peer set
 
             // Setup peer 1 (originator)
             let scheme1 = schemes.next().unwrap();
