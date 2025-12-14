@@ -15,9 +15,9 @@
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
 //! - Requesting externally synchronized [commonware_cryptography::Digest]s
-//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
+//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::variant::PartialSignature]
 //! - Multicasting partial signatures to other validators
-//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Recovering [commonware_cryptography::bls12381::primitives::variant::Variant::Signature]s from a quorum of partial signatures
 //! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
@@ -74,16 +74,16 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg,
             primitives::{
                 group::Share,
-                poly,
+                sharing::Sharing,
                 variant::{MinPk, MinSig, Variant},
             },
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -92,12 +92,13 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{NZUsize, NonZeroDuration, NZU32};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -107,6 +108,9 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -124,7 +128,7 @@ mod tests {
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
@@ -196,9 +200,9 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
-        polynomial: poly::Public<V>,
-        validator_pks: &[PublicKey],
-        validators: &[(PublicKey, PrivateKey, Share)],
+        polynomial: Sharing<V>,
+        all_validators: &[PublicKey], // All validators in the system
+        online_validators: &[(PublicKey, PrivateKey, Share)], // Only the validators to spawn
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
@@ -209,18 +213,18 @@ mod tests {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        for (i, (validator, _, share)) in validators.iter().enumerate() {
+        for (i, (validator, _, share)) in online_validators.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(Epoch::new(111));
             monitors.insert(validator.clone(), monitor.clone());
             let supervisor = {
-                let identity = *poly::public::<V>(&polynomial);
+                let identity = *polynomial.public();
                 let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                 s.add_epoch(
                     Epoch::new(111),
                     share.clone(),
                     polynomial.clone(),
-                    validator_pks.to_vec(),
+                    all_validators.to_vec(), // Use all validators, not just online ones
                 );
                 s
             };
@@ -236,7 +240,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                 namespace,
-                validator_pks.len() as u32,
+                polynomial.total().get(),
                 polynomial.clone(),
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -256,7 +260,7 @@ mod tests {
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     activity_timeout: 100,
-                    journal_partition: format!("aggregation/{validator}"),
+                    journal_partition: format!("aggregation-{validator}"),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -325,12 +329,11 @@ mod tests {
     /// Test aggregation consensus with all validators online.
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -374,12 +377,11 @@ mod tests {
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -425,7 +427,6 @@ mod tests {
     fn unclean_byzantine_shutdown<V: Variant>() {
         // Test parameters
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let target_index = 200; // Target multiple rounds of signing
         let min_shutdowns = 4; // Minimum number of shutdowns per validator
         let max_shutdowns = 10; // Maximum number of shutdowns per validator
@@ -441,8 +442,8 @@ mod tests {
         // Generate shares once
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
-        let identity = *poly::public::<V>(&polynomial);
+            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(num_validators));
+        let identity = *polynomial.public();
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
@@ -523,7 +524,7 @@ mod tests {
                                 epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 activity_timeout: 1_024, // ensure we don't drop any certificates
-                                journal_partition: format!("unclean_shutdown_test/{validator}"),
+                                journal_partition: format!("unclean_shutdown_test_{validator}"),
                                 journal_write_buffer: NZUsize!(4096),
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -599,7 +600,6 @@ mod tests {
     fn unclean_shutdown_with_unsigned_index<V: Variant>() {
         // Test parameters
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let skip_index = 50u64; // Index where no one will sign
         let window = 10u64;
         let target_index = 100u64;
@@ -609,8 +609,8 @@ mod tests {
         let all_validators = Arc::new(Mutex::new(Vec::new()));
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
-        let identity = *poly::public::<V>(&polynomial);
+            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(num_validators));
+        let identity = *polynomial.public();
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // First run: let validators skip signing at skip_index and reach beyond it
@@ -684,7 +684,7 @@ mod tests {
                             epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                             window: std::num::NonZeroU64::new(window).unwrap(),
                             activity_timeout: 100,
-                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_partition: format!("unsigned_index_test_{validator}"),
                             journal_write_buffer: NZUsize!(4096),
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -774,7 +774,7 @@ mod tests {
                             epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                             window: std::num::NonZeroU64::new(10).unwrap(),
                             activity_timeout: 100,
-                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_partition: format!("unsigned_index_test_{validator}"),
                             journal_write_buffer: NZUsize!(4096),
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -813,7 +813,6 @@ mod tests {
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(120)));
@@ -821,7 +820,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Use degraded network links with realistic conditions
@@ -893,34 +892,33 @@ mod tests {
 
     fn one_offline<V: Variant>() {
         let num_validators: u32 = 5;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
+            let (mut oracle, validators, all_validators, mut registrations) =
+                initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec,
+                    RELIABLE_LINK,
+                )
+                .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
 
             // Start only 4 out of 5 validators (one offline)
             let online_validators: Vec<_> = validators.iter().take(4).cloned().collect();
-            let online_pks: Vec<_> = pks.iter().take(4).cloned().collect();
 
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
-                &online_pks,
-                &online_validators,
+                &all_validators,    // All validators (5)
+                &online_validators, // Online validators to spawn (4)
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
@@ -947,12 +945,11 @@ mod tests {
     /// Test consensus recovery after a network partition.
     fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -1025,14 +1022,13 @@ mod tests {
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<V: Variant>() {
         let num_validators: u32 = 5;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(15));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-            let identity = *poly::public::<V>(&polynomial);
+            let identity = *polynomial.public();
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
@@ -1088,7 +1084,7 @@ mod tests {
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         window: std::num::NonZeroU64::new(10).unwrap(),
                         activity_timeout: 100,
-                        journal_partition: format!("aggregation/{validator}"),
+                        journal_partition: format!("aggregation-{validator}"),
                         journal_write_buffer: NZUsize!(4096),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),

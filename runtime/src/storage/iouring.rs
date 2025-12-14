@@ -100,6 +100,8 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
+        super::validate_partition_name(partition)?;
+
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
@@ -146,6 +148,8 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        super::validate_partition_name(partition)?;
+
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -164,6 +168,8 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        super::validate_partition_name(partition)?;
+
         let path = self.storage_directory.join(partition);
 
         let entries =

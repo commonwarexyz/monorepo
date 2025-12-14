@@ -74,6 +74,7 @@ impl From<PrivateKey> for PublicKey {
 
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
 impl_public_key_wrapper!(PublicKey);
@@ -220,6 +221,25 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(private_key.sign(&[], &message))
     }
 }
 
@@ -667,5 +687,15 @@ mod tests {
             }
         };
         assert!(expected);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Signature>,
+        }
     }
 }

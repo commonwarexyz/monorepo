@@ -6,13 +6,10 @@ use crate::authenticated::discovery::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
 };
-use commonware_utils::{set::Ordered, SystemTimeExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -54,8 +51,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
-    #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<C, E>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -176,7 +172,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) -> bool {
+    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -221,7 +217,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+    pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.sets.get(index).map(Deref::deref)
     }
 
@@ -263,9 +259,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
-    /// Returns all tracked peers.
-    pub fn tracked(&self) -> Ordered<C> {
-        self.peers.keys().cloned().collect()
+    /// Returns all peers that are part of at least one peer set.
+    pub fn tracked(&self) -> OrderedSet<C> {
+        self.peers
+            .iter()
+            .filter(|(_, r)| r.sets() > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("HashMap keys are unique")
     }
 
     /// Returns the sharable information for a given peer.

@@ -6,7 +6,12 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
+    bls12381::primitives::{
+        group::Share,
+        ops,
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
+    },
     Digest,
 };
 use commonware_utils::union;
@@ -122,6 +127,18 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Item<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary::<u64>()?;
+        let digest = u.arbitrary::<D>()?;
+        Ok(Self { index, digest })
+    }
+}
+
 /// Acknowledgment (ack) represents a validator's partial signature on an item.
 /// Multiple acks can be recovered into a threshold signature for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -139,12 +156,12 @@ impl<V: Variant, D: Digest> Ack<V, D> {
     ///
     /// Returns `true` if the signature is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let Some(public) = polynomial.get(self.signature.index as usize) else {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Sharing<V>) -> bool {
+        let Ok(public) = polynomial.partial_public(self.signature.index) else {
             return false;
         };
         ops::verify_message::<V>(
-            public,
+            &public,
             Some(ack_namespace(namespace).as_ref()),
             self.item.encode().as_ref(),
             &self.signature.value,
@@ -203,6 +220,24 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    PartialSignature<V>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let item = u.arbitrary::<Item<D>>()?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = u.arbitrary::<PartialSignature<V>>()?;
+        Ok(Self {
+            item,
+            epoch,
+            signature,
+        })
+    }
+}
+
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's partial signature with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -234,6 +269,19 @@ impl<V: Variant, D: Digest> Read for TipAck<V, D> {
 impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
     fn encode_size(&self) -> usize {
         UInt(self.tip).encode_size() + self.ack.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for TipAck<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tip = u.arbitrary::<u64>()?;
+        let ack = u.arbitrary::<Ack<V, D>>()?;
+        Ok(Self { tip, ack })
     }
 }
 
@@ -282,6 +330,19 @@ impl<V: Variant, D: Digest> Certificate<V, D> {
             &self.signature,
         )
         .is_ok()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Certificate<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let item = u.arbitrary::<Item<D>>()?;
+        let signature = u.arbitrary::<V::Signature>()?;
+        Ok(Self { item, signature })
     }
 }
 
@@ -345,6 +406,24 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    Ack<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Certificate<V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::Ack(u.arbitrary::<Ack<V, D>>()?)),
+            1 => Ok(Self::Certified(u.arbitrary::<Certificate<V, D>>()?)),
+            2 => Ok(Self::Tip(u.arbitrary::<u64>()?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,11 +431,12 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops::{self, evaluate_all},
+            dkg,
             primitives::{ops::sign_message, variant::MinSig},
         },
         Hasher, Sha256,
     };
+    use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -370,8 +450,8 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
-        let polynomial = evaluate_all::<MinSig>(&public, 4);
+        let (public, shares) =
+            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(4));
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),
@@ -383,8 +463,8 @@ mod tests {
 
         // Test Ack creation, signing, verification, and codec
         let ack: Ack<MinSig, _> = Ack::sign(namespace, Epoch::new(1), &shares[0], item.clone());
-        assert!(ack.verify(namespace, &polynomial));
-        assert!(!ack.verify(b"wrong", &polynomial));
+        assert!(ack.verify(namespace, &public));
+        assert!(!ack.verify(b"wrong", &public));
 
         let restored_ack: Ack<MinSig, <Sha256 as Hasher>::Digest> =
             Ack::decode(ack.encode()).unwrap();
@@ -408,7 +488,7 @@ mod tests {
         assert_eq!(activity_ack, restored_activity_ack);
 
         // Test Activity codec - Certified variant
-        let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
+        let signature = sign_message::<MinSig>(shares[0].as_ref(), Some(b"test"), b"message");
         let activity_certified = Activity::Certified(Certificate { item, signature });
         let restored_activity_certified: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_certified.encode()).unwrap();
@@ -434,5 +514,20 @@ mod tests {
                 "Invalid type"
             ))
         ));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Item<Sha256Digest>>,
+            CodecConformance<Ack<MinSig, Sha256Digest>>,
+            CodecConformance<TipAck<MinSig, Sha256Digest>>,
+            CodecConformance<Certificate<MinSig, Sha256Digest>>,
+            CodecConformance<Activity<MinSig, Sha256Digest>>,
+        }
     }
 }

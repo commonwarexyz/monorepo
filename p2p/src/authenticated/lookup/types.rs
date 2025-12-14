@@ -18,6 +18,7 @@ pub const DATA_MESSAGE_PREFIX: u8 = 1;
 
 /// The messages that can be sent between peers.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
     Ping,
     Data(Data),
@@ -119,5 +120,15 @@ mod tests {
 
         let result = Message::decode_cfg(encoded, &4);
         assert!(matches!(result, Err(Error::InvalidLength(5))));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Message>,
+        }
     }
 }

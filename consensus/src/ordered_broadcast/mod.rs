@@ -58,16 +58,16 @@ mod tests {
     use crate::types::{Epoch, EpochDelta};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg,
             primitives::{
                 group::Share,
-                poly,
+                sharing::Sharing,
                 variant::{MinPk, MinSig, Variant},
             },
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -76,12 +76,13 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::{NZUsize, NZU32};
     use futures::{channel::oneshot, future::join_all};
+    use governor::Quota;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -89,6 +90,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
@@ -99,8 +101,8 @@ mod tests {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register(0).await.unwrap();
-            let (b1, b2) = control.register(1).await.unwrap();
+            let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
@@ -188,7 +190,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
-        polynomial: poly::Public<V>,
+        polynomial: Sharing<V>,
         sequencer_pks: &[PublicKey],
         validator_pks: &[PublicKey],
         validators: &[(PublicKey, PrivateKey, Share)],
@@ -217,7 +219,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                 namespace,
-                *poly::public::<V>(&polynomial),
+                *polynomial.public(),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -242,7 +244,7 @@ mod tests {
                     journal_heights_per_section: 10,
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
-                    journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                    journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
@@ -327,12 +329,11 @@ mod tests {
 
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -377,10 +378,9 @@ mod tests {
 
     fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(num_validators));
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
@@ -494,12 +494,11 @@ mod tests {
 
     fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Configure the network
@@ -561,7 +560,6 @@ mod tests {
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(40)));
@@ -569,7 +567,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -644,12 +642,11 @@ mod tests {
 
     fn invalid_signature_injection<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -695,12 +692,11 @@ mod tests {
 
     fn updated_epoch<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Setup network
@@ -775,12 +771,11 @@ mod tests {
 
     fn external_sequencer<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = quorum(3);
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Generate validator shares
             let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
@@ -859,7 +854,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.public(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -884,7 +879,7 @@ mod tests {
                         journal_heights_per_section: 10,
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
-                        journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                        journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
@@ -905,7 +900,7 @@ mod tests {
                 let (reporter, reporter_mailbox) =
                     mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        *polynomial.public(),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -936,7 +931,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
-                            "ordered-broadcast-seq/{}/",
+                            "ordered-broadcast-seq-{}-",
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
@@ -967,13 +962,12 @@ mod tests {
 
     fn run_1k<V: Variant>() {
         let num_validators: u32 = 10;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_anonymous::<V>(&mut context, Default::default(), NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(

@@ -18,7 +18,7 @@ use commonware_cryptography::{
     ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use commonware_utils::set::{Ordered, OrderedQuorum};
+use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Scheme {
     /// Participants in the committee.
-    participants: Ordered<ed25519::PublicKey>,
+    participants: Set<ed25519::PublicKey>,
     /// Key used for generating signatures.
     signer: Option<(u32, ed25519::PrivateKey)>,
 }
@@ -36,26 +36,26 @@ impl Scheme {
     ///
     /// Participants use the same key for both identity and consensus.
     ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(
-        participants: Ordered<ed25519::PublicKey>,
+    /// Returns `None` if the provided private key does not match any participant
+    /// in the committee.
+    pub fn signer(
+        participants: Set<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
-    ) -> Self {
+    ) -> Option<Self> {
         let signer = participants
             .position(&private_key.public_key())
-            .map(|index| (index as u32, private_key));
+            .map(|index| (index as u32, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
     ///
     /// Participants use the same key for both identity and consensus.
-    pub const fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    pub const fn verifier(participants: Set<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -147,6 +147,20 @@ impl Read for Certificate {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Certificate {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signatures = (0..signers.count())
+            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            signers,
+            signatures,
+        })
+    }
+}
+
 impl signing_scheme::Scheme for Scheme {
     type PublicKey = ed25519::PublicKey;
     type Signature = ed25519::Signature;
@@ -157,7 +171,7 @@ impl signing_scheme::Scheme for Scheme {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> &Set<Self::PublicKey> {
         &self.participants
     }
 
@@ -350,7 +364,7 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
 
-    fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
+    fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Set<ed25519::PublicKey>) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
             participants,
@@ -358,7 +372,7 @@ mod tests {
             ..
         } = ed25519(&mut rng, n);
 
-        (schemes, participants.into())
+        (schemes, participants.try_into().unwrap())
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -1028,5 +1042,15 @@ mod tests {
         .into_iter();
 
         assert!(!verifier.verify_certificates(&mut thread_rng(), NAMESPACE, &mut iter));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate>,
+        }
     }
 }

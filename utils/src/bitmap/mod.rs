@@ -770,6 +770,18 @@ impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
 
 impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 
+#[cfg(feature = "arbitrary")]
+impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let size = u.int_in_range(0..=1024)?;
+        let mut bits = Self::with_capacity(size);
+        for _ in 0..size {
+            bits.push(u.arbitrary::<bool>()?);
+        }
+        Ok(bits)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,5 +2128,15 @@ mod tests {
         assert_eq!(prunable.pruned_chunks(), 0);
         assert_eq!(prunable.len(), Prunable::<4>::CHUNK_SIZE_BITS);
         assert_eq!(prunable.get_chunk_containing(0), &chunk);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<BitMap>
+        }
     }
 }

@@ -440,4 +440,28 @@ mod tests {
             &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
         );
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<u8>,
+            CodecConformance<u16>,
+            CodecConformance<u32>,
+            CodecConformance<u64>,
+            CodecConformance<u128>,
+            CodecConformance<i8>,
+            CodecConformance<i16>,
+            CodecConformance<i32>,
+            CodecConformance<i64>,
+            CodecConformance<i128>,
+            CodecConformance<f32>,
+            CodecConformance<f64>,
+            CodecConformance<bool>,
+            CodecConformance<[u8; 32]>,
+            CodecConformance<Option<u64>>,
+            CodecConformance<()>,
+        }
+    }
 }

@@ -137,6 +137,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    fail_verification: bool,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -167,6 +168,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 propose_latency,
                 verify_latency,
+                fail_verification: false,
 
                 pending: HashMap::new(),
 
@@ -174,6 +176,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             },
             Mailbox::new(sender),
         )
+    }
+
+    pub const fn set_fail_verification(&mut self, fail: bool) {
+        self.fail_verification = fail;
     }
 
     fn panic(&self, msg: &str) -> ! {
@@ -222,6 +228,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
+
+        // Check if we should fail verification
+        if self.fail_verification {
+            return false;
+        }
 
         // Verify contents
         let (parsed_round, parent, _) =

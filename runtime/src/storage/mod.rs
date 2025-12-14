@@ -7,6 +7,21 @@ pub mod metered;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
 pub mod tokio;
 
+/// Validate that a partition name contains only allowed characters.
+///
+/// Partition names must only contain alphanumeric characters, dashes ('-'),
+/// or underscores ('_').
+pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
+    if partition.is_empty()
+        || partition
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
+    {
+        return Err(crate::Error::PartitionNameInvalid(partition.into()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{Blob, Storage};
@@ -31,6 +46,7 @@ pub(crate) mod tests {
         test_read_empty_blob(&storage).await;
         test_overlapping_writes(&storage).await;
         test_resize_then_open(&storage).await;
+        test_partition_name_validation(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -367,5 +383,74 @@ pub(crate) mod tests {
         // Read back the data
         let read = blob.read_at(vec![0; 5], 0).await.unwrap();
         assert_eq!(read.as_ref(), b"hello", "Resized data is incorrect");
+    }
+
+    /// Test that partition names are validated correctly.
+    async fn test_partition_name_validation<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        // Valid partition names should not return PartitionNameInvalid
+        for valid in [
+            "partition",
+            "my_partition",
+            "my-partition",
+            "partition123",
+            "A1",
+        ] {
+            assert!(
+                !matches!(
+                    storage.open(valid, b"blob").await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by open"
+            );
+            assert!(
+                !matches!(
+                    storage.remove(valid, None).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by remove"
+            );
+            assert!(
+                !matches!(
+                    storage.scan(valid).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Valid partition name '{valid}' should be accepted by scan"
+            );
+        }
+
+        // Invalid partition names should return PartitionNameInvalid
+        for invalid in [
+            "my/partition",
+            "my.partition",
+            "my partition",
+            "../escape",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    storage.open(invalid, b"blob").await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by open"
+            );
+            assert!(
+                matches!(
+                    storage.remove(invalid, None).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by remove"
+            );
+            assert!(
+                matches!(
+                    storage.scan(invalid).await,
+                    Err(crate::Error::PartitionNameInvalid(_))
+                ),
+                "Invalid partition name '{invalid}' should be rejected by scan"
+            );
+        }
     }
 }

@@ -50,7 +50,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher as _, PrivateKeyExt, Sha256, Signer,
+        Hasher as _, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -60,7 +60,11 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use std::time::Duration;
+    use governor::Quota;
+    use std::{num::NonZeroU32, time::Duration};
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     fn build_notarization<S: Scheme>(
         schemes: &[S],
@@ -139,7 +143,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -165,15 +169,15 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Create a peer to inject certificates
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
-                .register(1)
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -298,7 +302,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -324,9 +328,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -341,7 +345,7 @@ mod tests {
                     participant_senders.push(None);
                     continue;
                 }
-                let (sender, _receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, _receiver) = oracle.control(pk.clone()).register(0, TEST_QUOTA).await.unwrap();
                 oracle
                     .add_link(pk.clone(), me.clone(), link.clone())
                     .await
@@ -441,7 +445,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -467,9 +471,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -483,7 +487,7 @@ mod tests {
                     participant_senders.push(None);
                     continue;
                 }
-                let (sender, _receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, _receiver) = oracle.control(pk.clone()).register(0, TEST_QUOTA).await.unwrap();
                 oracle
                     .add_link(pk.clone(), me.clone(), link.clone())
                     .await
@@ -495,7 +499,7 @@ mod tests {
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
-                .register(1)
+                .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
             oracle
@@ -629,7 +633,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -655,9 +659,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -672,7 +676,7 @@ mod tests {
                     participant_senders.push(None);
                     continue;
                 }
-                let (sender, _receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                let (sender, _receiver) = oracle.control(pk.clone()).register(0, TEST_QUOTA).await.unwrap();
                 oracle
                     .add_link(pk.clone(), me.clone(), link.clone())
                     .await
@@ -828,7 +832,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -854,9 +858,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -866,7 +870,7 @@ mod tests {
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -952,7 +956,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -978,9 +982,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -990,7 +994,7 @@ mod tests {
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -1078,7 +1082,7 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().into(),
+                participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -1104,9 +1108,9 @@ mod tests {
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -1116,7 +1120,7 @@ mod tests {
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await

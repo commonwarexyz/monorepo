@@ -260,4 +260,14 @@ mod tests {
 
         assert_eq!(map1.encode(), map2.encode());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<BTreeMap<u32, u32>>,
+        }
+    }
 }

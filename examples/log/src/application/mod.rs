@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Hasher,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 
 mod actor;
 pub use actor::Application;
@@ -21,7 +21,7 @@ pub struct Config<H: Hasher> {
     pub hasher: H,
 
     /// Participants active in consensus.
-    pub participants: Ordered<PublicKey>,
+    pub participants: Set<PublicKey>,
 
     /// Our private key.
     pub private_key: PrivateKey,

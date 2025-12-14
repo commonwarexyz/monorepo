@@ -10,7 +10,7 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -30,6 +30,12 @@ pub enum Error {
     Closed,
     #[error("recv failed")]
     RecvFailed,
+}
+
+/// Parse a muxed message into its subchannel and payload.
+pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
+    let subchannel: Channel = UInt::read(&mut bytes)?.into();
+    Ok((subchannel, bytes))
 }
 
 /// Control messages for the [Muxer].
@@ -137,11 +143,10 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             },
             // Process network messages.
             message = self.receiver.recv() => {
-                let (pk, mut bytes) = message?;
-
-                // Decode message: varint(subchannel) || bytes
-                let subchannel: Channel = match UInt::read(&mut bytes) {
-                    Ok(v) => v.into(),
+                // Decode the message.
+                let (pk, bytes) = message?;
+                let (subchannel, bytes) = match parse(bytes) {
+                    Ok(parsed) => parsed,
                     Err(_) => {
                         debug!(?pk, "invalid message: missing subchannel");
                         continue;
@@ -453,10 +458,11 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
-    use std::time::Duration;
+    use governor::Quota;
+    use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
@@ -466,6 +472,9 @@ mod tests {
         success_rate: 1.0,
     };
     const CAPACITY: usize = 5usize;
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
@@ -493,8 +502,8 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -502,15 +511,19 @@ mod tests {
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer_with_backup_and_global_sender<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer_with_backup_and_global_sender(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -520,7 +533,11 @@ mod tests {
         GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()

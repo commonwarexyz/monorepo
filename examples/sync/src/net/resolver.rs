@@ -3,7 +3,7 @@ use crate::net::request_id;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::{adb::sync, mmr::Location};
+use commonware_storage::{mmr::Location, qmdb::sync};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

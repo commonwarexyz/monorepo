@@ -48,6 +48,17 @@ pub trait Span:
 {
 }
 
+impl Span for u8 {}
+impl Span for u16 {}
+impl Span for u32 {}
+impl Span for u64 {}
+impl Span for u128 {}
+impl Span for i8 {}
+impl Span for i16 {}
+impl Span for i32 {}
+impl Span for i64 {}
+impl Span for i128 {}
+
 /// Types that can be fallibly read from a fixed-size byte sequence.
 ///
 /// `Array` is typically used to parse things like `PublicKeys` and `Signatures`

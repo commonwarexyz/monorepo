@@ -1,9 +1,10 @@
 //! Database-specific modules for the sync example.
 
 use crate::Key;
+use commonware_codec::Encode;
 use commonware_storage::{
-    adb::{self, operation::Keyed},
     mmr::{Location, Proof},
+    qmdb::{self, operation::Operation},
 };
 use std::{future::Future, num::NonZeroU64};
 
@@ -43,7 +44,7 @@ impl DatabaseType {
 /// Helper trait for databases that can be synced.
 pub trait Syncable {
     /// The type of operations in the database.
-    type Operation: Keyed + Sync + 'static;
+    type Operation: Operation + Encode + Sync + 'static;
 
     /// Create test operations with the given count and seed.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
@@ -52,10 +53,10 @@ pub trait Syncable {
     fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), adb::Error>>;
+    ) -> impl Future<Output = Result<(), qmdb::Error>>;
 
     /// Commit pending operations to the database.
-    fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
+    fn commit(&mut self) -> impl Future<Output = Result<(), qmdb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;
@@ -72,7 +73,7 @@ pub trait Syncable {
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;

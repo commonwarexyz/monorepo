@@ -9,8 +9,8 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
         ops,
-        poly::{self, PartialSignature},
-        variant::Variant,
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
     },
     Digest, PublicKey, Signer,
 };
@@ -237,6 +237,24 @@ impl<P: PublicKey, D: Digest> EncodeSize for Chunk<P, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Chunk<P, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let sequencer = P::arbitrary(u)?;
+        let height = u.arbitrary::<u64>()?;
+        let payload = D::arbitrary(u)?;
+        Ok(Self {
+            sequencer,
+            height,
+            payload,
+        })
+    }
+}
+
 /// Parent is a message that contains information about the parent (previous height) of a Chunk.
 ///
 /// The sequencer and height are not provided as they are implied by the sequencer and height of the current chunk.
@@ -295,6 +313,24 @@ impl<V: Variant, D: Digest> Read for Parent<V, D> {
 impl<V: Variant, D: Digest> EncodeSize for Parent<V, D> {
     fn encode_size(&self) -> usize {
         self.digest.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Parent<V, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let digest = D::arbitrary(u)?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = V::Signature::arbitrary(u)?;
+        Ok(Self {
+            digest,
+            epoch,
+            signature,
+        })
     }
 }
 
@@ -475,6 +511,30 @@ impl<C: PublicKey, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
 
 impl<C: PublicKey, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Node<C, V, D>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<C, D>::arbitrary(u)?;
+        let signature = C::Signature::arbitrary(u)?;
+        let parent = if chunk.height == 0 {
+            None
+        } else {
+            Some(Parent::<V, D>::arbitrary(u)?)
+        };
+        Ok(Self {
+            chunk,
+            signature,
+            parent,
+        })
+    }
+}
+
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
 /// When a validator receives and validates a chunk, it sends an Ack containing:
@@ -527,7 +587,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// using the provided polynomial (which contains the BLS public polynomial).
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], polynomial: &poly::Public<V>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Sharing<V>) -> bool {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
         let message = Self::payload(&self.chunk, &self.epoch);
@@ -587,6 +647,25 @@ impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, V, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<P, D>::arbitrary(u)?;
+        let epoch = u.arbitrary::<Epoch>()?;
+        let signature = PartialSignature::<V>::arbitrary(u)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            signature,
+        })
+    }
+}
+
 /// Activity is the type associated with the [crate::Reporter] trait.
 ///
 /// This enum represents the two main types of activities that are reported:
@@ -641,6 +720,22 @@ impl<C: PublicKey, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
         1 + match self {
             Self::Tip(proposal) => proposal.encode_size(),
             Self::Lock(lock) => lock.encode_size(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, V, D>
+where
+    Proposal<C, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Lock<C, V, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=1)?;
+        match choice {
+            0 => Ok(Self::Tip(Proposal::<C, D>::arbitrary(u)?)),
+            1 => Ok(Self::Lock(Lock::<C, V, D>::arbitrary(u)?)),
+            _ => unreachable!(),
         }
     }
 }
@@ -718,6 +813,19 @@ impl<C: PublicKey, D: Digest> PartialEq for Proposal<C, D> {
 
 /// This is needed to implement `Eq` for `Proposal`.
 impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
+
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Proposal<C, D>
+where
+    Chunk<C, D>: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let chunk = Chunk::<C, D>::arbitrary(u)?;
+        let signature = C::Signature::arbitrary(u)?;
+        Ok(Self { chunk, signature })
+    }
+}
 
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 ///
@@ -802,25 +910,40 @@ impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey, V: Variant, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, V, D>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            chunk: u.arbitrary()?,
+            epoch: u.arbitrary()?,
+            signature: u.arbitrary()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg::{self, deal_anonymous},
             primitives::{
-                group::{Element, Share},
                 ops::{partial_sign_message, threshold_signature_recover},
-                poly::{self, public},
                 variant::{MinPk, MinSig},
             },
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
-    use commonware_utils::quorum;
+    use commonware_math::algebra::CryptoGroup;
+    use commonware_utils::{quorum, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
@@ -835,16 +958,6 @@ mod tests {
         PrivateKey::from_seed(v)
     }
 
-    // Helper function to generate BLS shares and polynomial
-    fn generate_test_data<V: Variant>(
-        n: usize,
-        t: u32,
-        seed: u64,
-    ) -> (poly::Public<V>, Vec<Share>) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        ops::generate_shares::<_, V>(&mut rng, None, n as u32, t)
-    }
-
     #[test]
     fn test_chunk_encode_decode() {
         let public_key = sample_scheme(0).public_key();
@@ -857,8 +970,9 @@ mod tests {
     fn parent_encode_decode<V: Variant>() {
         // Generate proper BLS shares and keys
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
@@ -875,7 +989,7 @@ mod tests {
             .collect();
 
         // Recover threshold signature
-        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create and test parent
         let parent = Parent::new(sample_digest(1), epoch, signature);
@@ -884,7 +998,7 @@ mod tests {
         assert_eq!(parent, decoded);
 
         // Verify the signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = &polynomial.public();
         let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -913,8 +1027,9 @@ mod tests {
 
         // Test with parent - generate a proper threshold signature
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -930,7 +1045,7 @@ mod tests {
             .collect();
 
         // Recover threshold signature for parent
-        let parent_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let parent_signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create proper parent with valid threshold signature
         let parent = Some(Parent::new(
@@ -953,7 +1068,7 @@ mod tests {
         assert_eq!(decoded2.parent, node2.parent);
 
         // Verify that the parent signature is valid
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         let lock = Lock::<_, V, _>::new(parent_chunk, parent_epoch, parent_signature);
         assert!(lock.verify(NAMESPACE, identity));
     }
@@ -966,8 +1081,8 @@ mod tests {
 
     fn ack_encode_decode<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1016,8 +1131,9 @@ mod tests {
 
         // Test Lock with proper threshold signature
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let epoch = Epoch::new(5);
         // Generate partial signatures for the chunk
@@ -1030,11 +1146,11 @@ mod tests {
             .collect();
 
         // Recover threshold signature
-        let bls_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let bls_signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create lock and verify it
         let lock = Lock::new(chunk.clone(), epoch, bls_signature);
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
@@ -1088,8 +1204,9 @@ mod tests {
 
         // Generate proper BLS shares and threshold signature
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Generate partial signatures for the chunk
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1101,7 +1218,7 @@ mod tests {
             .collect();
 
         // Recover threshold signature
-        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create lock, encode and decode
         let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
@@ -1113,7 +1230,7 @@ mod tests {
         assert_eq!(decoded.signature, lock.signature);
 
         // Verify the signature in the decoded lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(decoded.verify(NAMESPACE, identity));
     }
 
@@ -1127,9 +1244,9 @@ mod tests {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
-        let identity = public::<V>(&polynomial);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         // Test genesis node (no parent)
         let node = Node::<PublicKey, V, Sha256Digest>::sign(
@@ -1154,7 +1271,8 @@ mod tests {
             .iter()
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let parent_threshold = threshold_signature_recover::<V, _>(t, &parent_sigs).unwrap();
+        let parent_threshold =
+            threshold_signature_recover::<V, _>(&polynomial, &parent_sigs).unwrap();
 
         let parent = Some(Parent::new(
             parent_chunk.payload,
@@ -1182,8 +1300,8 @@ mod tests {
 
     fn ack_sign_verify<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1204,8 +1322,9 @@ mod tests {
 
     fn threshold_recovery<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1222,13 +1341,13 @@ mod tests {
         let partials: Vec<_> = acks.iter().map(|a| a.signature.clone()).collect();
 
         // Recover threshold signature
-        let threshold = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create lock with threshold signature
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
         assert!(lock.verify(NAMESPACE, identity));
     }
 
@@ -1240,9 +1359,10 @@ mod tests {
 
     fn lock_verify<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
-        let identity = poly::public::<V>(&polynomial);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1256,7 +1376,7 @@ mod tests {
             .take(t as usize)
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let threshold = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create lock
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
@@ -1304,8 +1424,9 @@ mod tests {
 
         // Generate a valid parent signature
         let n = 4;
-        let t = quorum(n as u32);
-        let (_, shares) = generate_test_data::<MinSig>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            deal_anonymous::<MinSig>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = Epoch::new(5);
@@ -1318,7 +1439,8 @@ mod tests {
                 partial_sign_message::<MinSig>(s, Some(ack_namespace.as_ref()), &parent_message)
             })
             .collect();
-        let parent_signature = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
+        let parent_signature =
+            threshold_signature_recover::<MinSig, _>(&polynomial, &partials).unwrap();
 
         let parent = Parent::new(sample_digest(0), parent_epoch, parent_signature);
 
@@ -1345,9 +1467,9 @@ mod tests {
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, _) = generate_test_data::<V>(n, t, 0);
-        let identity = poly::public::<V>(&polynomial);
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
+        let identity = polynomial.public();
 
         // Create a valid chunk
         let chunk = Chunk::new(public_key, 0, sample_digest(1));
@@ -1386,8 +1508,9 @@ mod tests {
 
         // Generate BLS keys for threshold signature verification
         let n = 4;
-        let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (commitment, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -1402,7 +1525,7 @@ mod tests {
             .take(t as usize)
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(&commitment, &partials).unwrap();
 
         // Create parent with valid threshold signature
         let parent = Parent::new(parent_chunk.payload, epoch, signature);
@@ -1418,14 +1541,14 @@ mod tests {
         );
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&commitment);
+        let identity = &commitment.public();
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a parent with invalid threshold signature
-        // Generate a different set of BLS keys/shares
-        let (_, wrong_shares) = generate_test_data::<V>(n, t, 1);
+        let (polynomial, wrong_shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
@@ -1433,7 +1556,7 @@ mod tests {
             .take(t as usize)
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let wrong_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let wrong_signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create parent with wrong threshold signature
         let wrong_parent = Parent::new(parent_chunk.payload, epoch, wrong_signature);
@@ -1460,8 +1583,8 @@ mod tests {
 
     fn ack_verify_invalid_signature<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1476,7 +1599,7 @@ mod tests {
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature;
-        invalid_signature.value.add(&V::Signature::one());
+        invalid_signature.value += &V::Signature::generator();
         let invalid_ack = Ack::<_, V, _>::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
@@ -1491,11 +1614,11 @@ mod tests {
 
     fn ack_verify_wrong_validator<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
-        // Create another set of BLS shares with a different polynomial
-        let (wrong_polynomial, _) = generate_test_data::<V>(n, t, 1);
+        let (wrong_polynomial, _) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1520,8 +1643,9 @@ mod tests {
 
     fn lock_verify_invalid_signature<V: Variant>() {
         let n = 4;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let t = quorum(n);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1535,19 +1659,19 @@ mod tests {
             .take(t as usize)
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(&polynomial, &partials).unwrap();
 
         // Create lock
         let lock = Lock::<_, V, _>::new(chunk.clone(), epoch, signature);
 
         // Get the BLS public key from the commitment
-        let identity = poly::public::<V>(&polynomial);
+        let identity = polynomial.public();
 
         // Verification should succeed
         assert!(lock.verify(NAMESPACE, identity));
 
-        // Create another set of BLS shares with a different polynomial
-        let (wrong_polynomial, wrong_shares) = generate_test_data::<V>(n, t, 1);
+        let (wrong_polynomial, wrong_shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), Default::default(), NZU32!(n));
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
@@ -1555,7 +1679,8 @@ mod tests {
             .take(t as usize)
             .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let wrong_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let wrong_signature =
+            threshold_signature_recover::<V, _>(&wrong_polynomial, &partials).unwrap();
 
         // Create lock with wrong signature
         let wrong_lock = Lock::<_, V, _>::new(chunk, epoch, wrong_signature);
@@ -1564,7 +1689,7 @@ mod tests {
         assert!(!wrong_lock.verify(NAMESPACE, identity));
 
         // But succeed with the matching wrong identity
-        let wrong_identity = poly::public::<V>(&wrong_polynomial);
+        let wrong_identity = &wrong_polynomial.public();
         assert!(wrong_lock.verify(NAMESPACE, wrong_identity));
     }
 
@@ -1620,15 +1745,18 @@ mod tests {
 
         // Create a parent with a random BLS signature (content doesn't matter for this test)
         let n = 4;
-        let t = quorum(n as u32);
-        let (_, shares) = generate_test_data::<V>(n, t, 0);
+        let (public, shares) =
+            dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), Default::default(), NZU32!(n));
 
         let dummy_message = vec![0u8; 32];
-        let dummy_sig = partial_sign_message::<V>(&shares[0], None, &dummy_message);
 
         // Convert the partial signature to a full signature
-        let signatures = vec![dummy_sig];
-        let full_sig = threshold_signature_recover::<V, _>(1, &signatures).unwrap();
+        let signatures = shares
+            .iter()
+            .take(public.required() as usize)
+            .map(|share| partial_sign_message::<V>(share, None, &dummy_message))
+            .collect::<Vec<_>>();
+        let full_sig = threshold_signature_recover(&public, &signatures).unwrap();
 
         let parent = Parent::new(sample_digest(0), Epoch::new(5), full_sig);
 
@@ -1667,5 +1795,21 @@ mod tests {
     fn test_node_non_genesis_without_parent_fails() {
         node_non_genesis_without_parent_fails::<MinPk>();
         node_non_genesis_without_parent_fails::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Chunk<PublicKey, Sha256Digest>>,
+            CodecConformance<Parent<MinPk, Sha256Digest>>,
+            CodecConformance<Node<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Ack<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Activity<PublicKey, MinPk, Sha256Digest>>,
+            CodecConformance<Proposal<PublicKey, Sha256Digest>>,
+            CodecConformance<Lock<PublicKey, MinPk, Sha256Digest>>,
+        }
     }
 }

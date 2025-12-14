@@ -78,7 +78,14 @@ fn fuzz(input: FuzzInput) {
                 }
                 MetadataOperation::Keys { prefix } => {
                     let mut a: Vec<u64> = metadata
-                        .keys(prefix.as_deref())
+                        .keys()
+                        .filter(|k| {
+                            if let Some(p) = prefix {
+                                k.as_ref().starts_with(p)
+                            } else {
+                                true
+                            }
+                        })
                         .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
                         .collect();
                     let mut b: Vec<u64> = model
@@ -97,7 +104,7 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(a, b);
                 }
                 MetadataOperation::RemovePrefix { prefix } => {
-                    metadata.remove_prefix(prefix);
+                    metadata.retain(|k, _| !k.as_ref().starts_with(prefix));
                     model.retain(|k, _| !bytes_u64(*k).starts_with(prefix));
                 }
                 MetadataOperation::PutLargeValue { key } => {
@@ -113,7 +120,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let mut a: Vec<u64> = metadata
-            .keys(None)
+            .keys()
             .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
             .collect();
         let mut b: Vec<u64> = model.keys().copied().collect();

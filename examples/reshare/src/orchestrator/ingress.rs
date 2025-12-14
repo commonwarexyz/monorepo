@@ -2,10 +2,10 @@
 
 use commonware_consensus::{types::Epoch, Reporter};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
+    bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     PublicKey,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
@@ -20,11 +20,11 @@ pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The epoch to transition to.
     pub epoch: Epoch,
     /// The public polynomial for the epoch.
-    pub poly: Option<Public<V>>,
+    pub poly: Option<Sharing<V>>,
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
     /// The dealers for the epoch.
-    pub dealers: Ordered<P>,
+    pub dealers: Set<P>,
 }
 
 /// Inbound communication channel for epoch transitions.

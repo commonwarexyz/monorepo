@@ -177,6 +177,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes peer proposal verification after the automaton returns.
+    ///
+    /// Returns `true` if the slot was updated, `false` if we already broadcast nullify
+    /// or the slot was in an invalid state (e.g., we received a certificate for a
+    /// conflicting proposal).
     pub fn verified(&mut self) -> bool {
         if self.broadcast_nullify {
             return false;
@@ -387,7 +391,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -414,7 +419,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }

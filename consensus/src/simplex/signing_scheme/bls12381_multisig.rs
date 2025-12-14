@@ -25,7 +25,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
+use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
@@ -33,7 +33,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     /// Participants in the committee.
-    participants: OrderedAssociated<P, V::Public>,
+    participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
     signer: Option<(u32, Private)>,
 }
@@ -45,20 +45,20 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// signing and verification.
     ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
+    /// Returns `None` if the provided private key does not match any consensus key
+    /// in the committee.
+    pub fn signer(participants: BiMap<P, V::Public>, private_key: Private) -> Option<Self> {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
             .position(|p| p == &public_key)
-            .map(|index| (index as u32, private_key));
+            .map(|index| (index as u32, private_key))?;
 
-        Self {
+        Some(Self {
             participants,
-            signer,
-        }
+            signer: Some(signer),
+        })
     }
 
     /// Builds a verifier that can authenticate votes and certificates.
@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Participants have both an identity key and a consensus key. The identity key
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
-    pub const fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
+    pub const fn verifier(participants: BiMap<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
@@ -115,6 +115,18 @@ impl<V: Variant> Read for Certificate<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let signers = Signers::arbitrary(u)?;
+        let signature = V::Signature::arbitrary(u)?;
+        Ok(Self { signers, signature })
+    }
+}
+
 impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
     type PublicKey = P;
     type Signature = V::Signature;
@@ -125,7 +137,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> &Set<Self::PublicKey> {
         &self.participants
     }
 
@@ -324,14 +336,12 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::Element,
-            variant::{MinPk, MinSig, Variant},
-        },
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_math::algebra::Additive;
     use commonware_utils::quorum_from_slice;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -346,7 +356,7 @@ mod tests {
         seed: u64,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
-        OrderedAssociated<ed25519::PublicKey, V::Public>,
+        BiMap<ed25519::PublicKey, V::Public>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, n);
@@ -1109,5 +1119,15 @@ mod tests {
     fn test_certificate_decode_checks_sorted_unique_signers() {
         certificate_decode_checks_sorted_unique_signers::<MinPk>();
         certificate_decode_checks_sorted_unique_signers::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
+        }
     }
 }
