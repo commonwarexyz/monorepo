@@ -61,13 +61,14 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
@@ -2092,5 +2093,213 @@ mod tests {
         no_resolver_boomerang(bls12381_multisig::<MinPk, _>);
         no_resolver_boomerang(bls12381_multisig::<MinSig, _>);
         no_resolver_boomerang(ed25519);
+    }
+
+    /// Tests that when proposal verification fails, the voter emits a nullify vote
+    /// immediately rather than waiting for the timeout.
+    fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Use participant[0] as the voter
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (10.0, 0.0), // 10ms verification latency
+            };
+            let (mut actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+
+            // Configure application to always fail verification
+            actor.set_fail_verification(true);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_verify_fail_test_{me}"),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                // Use long timeouts to prove nullify comes immediately, not from timeout
+                leader_timeout: Duration::from_secs(10),
+                notarization_timeout: Duration::from_secs(10),
+                nullify_retry: Duration::from_secs(10),
+                activity_timeout,
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let (vote_sender, _vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (certificate_sender, _certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for initial batcher update
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                _ => panic!("expected Update message"),
+            }
+
+            // Advance views until we find one where we're NOT the leader (so we verify
+            // rather than propose). Keep track of the previous view's proposal for parent.
+            let mut current_view = View::new(1);
+            let mut prev_proposal = Proposal::new(
+                Round::new(Epoch::new(333), current_view),
+                View::zero(),
+                Sha256::hash(b"v0"),
+            );
+
+            let (target_view, leader) = loop {
+                // Send finalization to advance to next view
+                let (_, finalization) =
+                    build_finalization(&schemes, &namespace, &prev_proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                // Wait for the view update
+                let (new_view, leader) = loop {
+                    match batcher_receiver.next().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } => {
+                            active.send(true).unwrap();
+                            if current > current_view {
+                                break (current, leader);
+                            }
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    }
+                };
+
+                current_view = new_view;
+
+                // Check if we're NOT the leader for this view
+                if leader != 0 {
+                    break (current_view, participants[leader as usize].clone());
+                }
+
+                // We're the leader, advance to next view
+                prev_proposal = Proposal::new(
+                    Round::new(Epoch::new(333), current_view),
+                    current_view.previous().unwrap(),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+            };
+
+            // Create proposal for the target view (where we are a verifier)
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+
+            // Broadcast the payload contents so verification can complete (the automaton waits
+            // for the contents via the relay).
+            let parent_payload = Sha256::hash(
+                target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice(),
+            );
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents.into()))
+                .await;
+            mailbox.proposal(proposal).await;
+
+            // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
+            // within 1s proves it came from verification failure, not timeout.
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                                break;
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!("expected nullify for view {} within 1s (timeouts are 10s)", target_view);
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_failure_emits_nullify_immediately() {
+        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(ed25519);
     }
 }
