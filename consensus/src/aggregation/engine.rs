@@ -616,10 +616,10 @@ impl<
         // Validate sender matches the signer
         let scheme = self.scheme(ack.epoch)?;
         let participants = scheme.participants();
-        if ack.signature.signer as usize >= participants.len() {
+        let Some(signer) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
-        }
-        if participants.get(ack.signature.signer as usize) != Some(sender) {
+        };
+        if signer != ack.signature.signer {
             return Err(Error::PeerMismatch);
         }
 
