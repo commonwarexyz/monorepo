@@ -8,6 +8,25 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
 [![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
 
+## Status
+
+_Stabilized primitives guarantee no wire/storage format changes until the next minor release._
+
+* [broadcast](./broadcast/README.md): Alpha, not stabilized
+* [codec](./codec/README.md): Alpha, not stabilized
+* [coding](./coding/README.md): Alpha, not stabilized
+* [collector](./collector/README.md): Alpha, not stabilized
+* [conformance](./conformance/README.md): Alpha, not stabilized
+* [consensus](./consensus/README.md): Alpha, not stabilized
+* [cryptography](./cryptography/README.md): Alpha, not stabilized
+* [deployer](./deployer/README.md): Alpha, not stabilized
+* [math](./math/README.md): Alpha, not stabilized
+* [p2p](./p2p/README.md): Alpha, not stabilized
+* [resolver](./resolver/README.md): Alpha, not stabilized
+* [runtime](./runtime/README.md): Alpha, not stabilized
+* [storage](./storage/README.md): Alpha, not stabilized
+* [stream](./stream/README.md): Alpha, not stabilized
+
 ## Primitives
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
