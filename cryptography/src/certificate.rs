@@ -1,4 +1,4 @@
-//! Cryptographic certificate schemes for multi-party signing.
+//! Cryptographic primitives for generating and verifying certificates.
 //!
 //! This module provides the [`Scheme`] trait and implementations for producing
 //! signatures, validating them (individually or in batches), assembling
@@ -6,7 +6,7 @@
 //!
 //! # Pluggable Cryptography
 //!
-//! Applications are generic over the signing scheme, allowing users to choose
+//! Certificates are generic over the signing scheme, allowing users to choose
 //! the scheme best suited for their requirements:
 //!
 //! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly, no trusted
