@@ -459,10 +459,10 @@ mod macros {
     ///
     /// # Example
     /// ```ignore
-    /// impl_ed25519_certificate!(VoteSubject<'a, D>);
+    /// impl_certificate_ed25519!(VoteSubject<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_ed25519_certificate {
+    macro_rules! impl_certificate_ed25519 {
         ($subject:ty) => {
             /// Generates a test fixture with Ed25519 identities and signing schemes.
             ///
@@ -629,7 +629,7 @@ mod macros {
 mod tests {
     use super::*;
     use crate::{
-        certificate::Scheme as _, impl_ed25519_certificate, sha256::Digest as Sha256Digest,
+        certificate::Scheme as _, impl_certificate_ed25519, sha256::Digest as Sha256Digest,
     };
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
@@ -652,7 +652,7 @@ mod tests {
     }
 
     // Use the macro to generate the test scheme
-    impl_ed25519_certificate!(TestSubject<'a>);
+    impl_certificate_ed25519!(TestSubject<'a>);
 
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);

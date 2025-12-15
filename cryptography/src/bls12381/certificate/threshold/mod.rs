@@ -371,10 +371,10 @@ mod macros {
     ///
     /// # Example
     /// ```ignore
-    /// impl_bls12381_threshold_certificate!(VoteSubject<'a, D>);
+    /// impl_certificate_bls12381_threshold!(VoteSubject<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_bls12381_threshold_certificate {
+    macro_rules! impl_certificate_bls12381_threshold {
         ($subject:ty) => {
             /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
             ///
@@ -574,7 +574,7 @@ mod tests {
         },
         certificate::Scheme as _,
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_bls12381_threshold_certificate,
+        impl_certificate_bls12381_threshold,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
@@ -599,7 +599,7 @@ mod tests {
     }
 
     // Use the macro to generate the test scheme
-    impl_bls12381_threshold_certificate!(TestSubject<'a>);
+    impl_certificate_bls12381_threshold!(TestSubject<'a>);
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(

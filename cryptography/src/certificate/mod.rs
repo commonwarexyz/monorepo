@@ -56,8 +56,8 @@
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
-    impl_bls12381_multisig_certificate, impl_bls12381_threshold_certificate,
-    impl_ed25519_certificate,
+    impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
+    impl_certificate_ed25519,
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
@@ -465,7 +465,7 @@ mod tests {
         }
 
         // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
-        impl_ed25519_certificate!(TestSubject<'a>);
+        impl_certificate_ed25519!(TestSubject<'a>);
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,

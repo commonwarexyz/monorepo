@@ -25,9 +25,9 @@ pub mod bls12381_multisig {
     //! enabling secure per-validator activity tracking and conflict detection.
 
     use crate::ordered_broadcast::types::AckSubject;
-    use commonware_cryptography::impl_bls12381_multisig_certificate;
+    use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-    impl_bls12381_multisig_certificate!(AckSubject<'a, P, D>);
+    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>);
 }
 
 pub mod bls12381_threshold {
@@ -40,9 +40,9 @@ pub mod bls12381_threshold {
     //! (as it must be sent by said participant) but can't be used by an external observer.
 
     use crate::ordered_broadcast::types::AckSubject;
-    use commonware_cryptography::impl_bls12381_threshold_certificate;
+    use commonware_cryptography::impl_certificate_bls12381_threshold;
 
-    impl_bls12381_threshold_certificate!(AckSubject<'a, P, D>);
+    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>);
 }
 
 pub mod ed25519 {
@@ -54,9 +54,9 @@ pub mod ed25519 {
     //! per-validator activity tracking and fault detection.
 
     use crate::ordered_broadcast::types::AckSubject;
-    use commonware_cryptography::{ed25519, impl_ed25519_certificate};
+    use commonware_cryptography::{ed25519, impl_certificate_ed25519};
 
-    impl_ed25519_certificate!(AckSubject<'a, ed25519::PublicKey, D>);
+    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>);
 }
 
 /// Marker trait for signing schemes compatible with `ordered_broadcast`.

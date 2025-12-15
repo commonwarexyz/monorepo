@@ -35,10 +35,10 @@ pub mod bls12381_multisig {
         types::Round,
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::Variant, impl_bls12381_multisig_certificate, PublicKey,
+        bls12381::primitives::variant::Variant, impl_certificate_bls12381_multisig, PublicKey,
     };
 
-    impl_bls12381_multisig_certificate!(Subject<'a, D>);
+    impl_certificate_bls12381_multisig!(Subject<'a, D>);
 
     impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
         type Seed = ();
@@ -1716,9 +1716,9 @@ pub mod ed25519 {
         simplex::{scheme::SeededScheme, types::Subject},
         types::Round,
     };
-    use commonware_cryptography::impl_ed25519_certificate;
+    use commonware_cryptography::impl_certificate_ed25519;
 
-    impl_ed25519_certificate!(Subject<'a, D>);
+    impl_certificate_ed25519!(Subject<'a, D>);
 
     impl SeededScheme for Scheme {
         type Seed = ();

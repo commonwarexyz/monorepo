@@ -362,10 +362,10 @@ mod macros {
     ///
     /// # Example
     /// ```ignore
-    /// impl_bls12381_multisig_certificate!(VoteSubject<'a, D>);
+    /// impl_certificate_bls12381_multisig!(VoteSubject<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_bls12381_multisig_certificate {
+    macro_rules! impl_certificate_bls12381_multisig {
         ($subject:ty) => {
             /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
             ///
@@ -539,7 +539,7 @@ mod tests {
         },
         certificate::Scheme as _,
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_bls12381_multisig_certificate,
+        impl_certificate_bls12381_multisig,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
@@ -564,7 +564,7 @@ mod tests {
     }
 
     // Use the macro to generate the test scheme
-    impl_bls12381_multisig_certificate!(TestSubject<'a>);
+    impl_certificate_bls12381_multisig!(TestSubject<'a>);
 
     fn setup_signers<V: Variant>(
         n: u32,
