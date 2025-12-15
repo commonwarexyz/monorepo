@@ -48,12 +48,6 @@ const N3C2F1: (u32, u32, u32) = (3, 2, 1);
 const N4C1F3: (u32, u32, u32) = (4, 1, 3);
 const MAX_RAW_BYTES: usize = 4096;
 
-const EXPECTED_PANICS: [&str; 3] = [
-    "invalid payload:",
-    "invalid parent (in payload):",
-    "invalid round (in payload)",
-];
-
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
@@ -324,27 +318,13 @@ fn run<P: Simplex>(input: FuzzInput) {
     });
 }
 
-fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
-    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        return false;
-    };
-
-    EXPECTED_PANICS.iter().any(|pattern| msg.contains(pattern))
-}
-
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
     let seed = input.seed;
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
-            if !is_expected_panic(&payload) {
-                println!("Panicked with seed: {}", seed);
-                panic::resume_unwind(payload);
-            }
+            println!("Panicked with seed: {}", seed);
+            panic::resume_unwind(payload);
         }
     }
 }

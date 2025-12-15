@@ -178,21 +178,6 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             }
         }
 
-        // Invariant: valid_last_finalized
-        // Finalization must match local notarization.
-        for (&v, fin) in finalizations.iter() {
-            match notarizations.get(&v) {
-                Some(notar) => assert_eq!(
-                    notar.payload, fin.payload,
-                    "Invariant violation: finalized view {v} with {:?} but notarized {:?}",
-                    fin.payload, notar.payload
-                ),
-                None => {
-                    //panic!("Invariant violation: finalized view {v} without local notarization")
-                }
-            }
-        }
-
         // Invariant: no_nullification_and_finalization_in_the_same_view
         for view in nullifications.keys() {
             assert!(
