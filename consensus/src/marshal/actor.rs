@@ -12,7 +12,6 @@ use crate::{
         store::{Blocks, Certificates},
         Update,
     },
-    scheme::Provider,
     simplex::{
         scheme::SimplexScheme,
         types::{Finalization, Notarization},
@@ -22,7 +21,10 @@ use crate::{
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{certificate::Scheme, PublicKey};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    PublicKey,
+};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;

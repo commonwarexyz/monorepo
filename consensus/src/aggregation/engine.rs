@@ -8,11 +8,13 @@ use super::{
 };
 use crate::{
     aggregation::{scheme::AggregationScheme, types::Certificate},
-    scheme::Provider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest,
+};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},

@@ -16,12 +16,14 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
-    scheme::Provider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{certificate::Scheme, Digest, PublicKey, Signer};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest, PublicKey, Signer,
+};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},

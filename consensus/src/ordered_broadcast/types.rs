@@ -1,13 +1,13 @@
 //! Types used in [crate::ordered_broadcast].
 
 use super::scheme::OrderedBroadcastScheme;
-use crate::{scheme::Provider, types::Epoch};
+use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{self, Scheme, Signature},
+    certificate::{self, Provider, Scheme, Signature},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};

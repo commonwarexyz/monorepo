@@ -15,7 +15,6 @@ use commonware_cryptography::{Committable, Digestible};
 
 pub mod aggregation;
 pub mod ordered_broadcast;
-pub mod scheme;
 pub mod simplex;
 pub mod types;
 pub mod utils;

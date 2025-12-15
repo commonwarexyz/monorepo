@@ -1,8 +1,8 @@
 use crate::{
-    scheme::Provider,
     types::{Epoch, ViewDelta},
     Block,
 };
+use commonware_cryptography::certificate::Provider;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 

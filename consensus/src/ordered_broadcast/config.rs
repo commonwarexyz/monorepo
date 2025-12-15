@@ -1,10 +1,9 @@
 use super::types::{Activity, Context, SequencersProvider};
 use crate::{
-    scheme::Provider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
-use commonware_cryptography::{Digest, Signer};
+use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
