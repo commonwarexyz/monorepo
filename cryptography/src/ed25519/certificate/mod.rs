@@ -3,6 +3,9 @@
 //! This module provides both the generic Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
 
+#[cfg(feature = "mocks")]
+pub mod mocks;
+
 use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
     certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
@@ -371,7 +374,12 @@ mod macros {
             where
                 R: rand::RngCore + rand::CryptoRng,
             {
-                $crate::certificate::mocks::ed25519(rng, n, Scheme::signer, Scheme::verifier)
+                $crate::ed25519::certificate::mocks::fixtures(
+                    rng,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
             }
 
             /// Ed25519 signing scheme wrapper.

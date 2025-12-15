@@ -3,6 +3,9 @@
 //! This module provides both the generic BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
+#[cfg(feature = "mocks")]
+pub mod mocks;
+
 use crate::{
     bls12381::primitives::{
         group::Private,
@@ -382,7 +385,7 @@ mod macros {
                 V: $crate::bls12381::primitives::variant::Variant,
                 R: rand::RngCore + rand::CryptoRng,
             {
-                $crate::certificate::mocks::bls12381_multisig::<_, V, _>(
+                $crate::bls12381::certificate::multisig::mocks::fixtures::<_, V, _>(
                     rng,
                     n,
                     Scheme::signer,

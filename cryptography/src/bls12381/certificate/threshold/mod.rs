@@ -8,6 +8,9 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
+#[cfg(feature = "mocks")]
+pub mod mocks;
+
 use crate::{
     bls12381::primitives::{
         group::Share,
@@ -389,7 +392,7 @@ mod macros {
                 V: $crate::bls12381::primitives::variant::Variant,
                 R: rand::RngCore + rand::CryptoRng,
             {
-                $crate::certificate::mocks::bls12381_threshold::<_, V, _>(
+                $crate::bls12381::certificate::threshold::mocks::fixtures::<_, V, _>(
                     rng,
                     n,
                     Scheme::signer,

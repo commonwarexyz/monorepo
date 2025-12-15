@@ -324,7 +324,7 @@ pub mod bls12381_threshold {
         V: Variant,
         R: rand::RngCore + rand::CryptoRng,
     {
-        commonware_cryptography::certificate::mocks::bls12381_threshold::<_, V, _>(
+        commonware_cryptography::bls12381::certificate::threshold::mocks::fixtures::<_, V, _>(
             rng,
             n,
             Scheme::signer,
@@ -840,8 +840,9 @@ pub mod bls12381_threshold {
                     variant::{MinPk, MinSig, Variant},
                 },
             },
-            certificate::mocks::{ed25519_participants, Fixture},
+            certificate::mocks::Fixture,
             ed25519,
+            ed25519::certificate::mocks::participants as ed25519_participants,
             sha256::Digest as Sha256Digest,
             Hasher, Sha256,
         };
