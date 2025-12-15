@@ -373,15 +373,16 @@ where
 
     /// Returns an [IndexedLog] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
-    /// inactivity floor.
+    /// inactivity floor. The last operation is assumed to be a commit.
     async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
-        last_commit_loc: Location,
     ) -> Result<Self, Error> {
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        assert!(log.read(last_commit_loc).await?.is_commit());
 
         Ok(Self {
             log,

@@ -97,8 +97,7 @@ where
         .await?;
         // Build the snapshot from the log.
         let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
-        let db =
-            Self::from_components(range.start, log, snapshot, Location::new_unchecked(0)).await?;
+        let db = Self::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }
