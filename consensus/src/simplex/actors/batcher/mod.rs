@@ -33,7 +33,7 @@ mod tests {
     use crate::{
         simplex::{
             actors::voter,
-            mocks,
+            mocks, scheme as certificate,
             scheme::{bls12381_multisig, SimplexScheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -43,7 +43,6 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
-    use crate::simplex::scheme as certificate;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},

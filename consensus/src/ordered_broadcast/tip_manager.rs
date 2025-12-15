@@ -57,9 +57,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme,
-        },
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
         types::Chunk,
     };
     use commonware_cryptography::{

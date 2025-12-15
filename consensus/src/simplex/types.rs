@@ -2411,9 +2411,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519, SimplexScheme,
-    };
+    use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, SimplexScheme};
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},

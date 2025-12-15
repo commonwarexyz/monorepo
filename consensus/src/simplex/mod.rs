@@ -289,6 +289,7 @@ mod tests {
     use crate::{
         simplex::{
             mocks::twins::Strategy,
+            scheme as certificate,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, SimplexScheme,
             },
@@ -301,7 +302,6 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use crate::simplex::scheme as certificate;
     use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{

@@ -151,9 +151,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks,
-        scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme,
-        },
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
         types::Chunk,
     };
     use commonware_cryptography::{
