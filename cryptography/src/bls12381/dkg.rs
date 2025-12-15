@@ -2061,22 +2061,25 @@ mod test_plan {
                 }
                 let observer_output = observe_result?;
 
-                // Verify revealed set is correct
+                // Verify revealed set matches expected based on test specification.
+                // The no_acks/bad_shares use (dealer_key_idx, player_position) format where
+                // player_position is the index into the sorted player public key list.
                 let selection =
                     selection_result.expect("select should succeed if observe succeeded");
-                let selected_dealer_indices: BTreeSet<u32> = selection
+
+                // Map selected dealer public keys back to their key indices
+                let selected_dealers: BTreeSet<u32> = selection
                     .keys()
                     .iter()
-                    .map(|pk| {
+                    .filter_map(|pk| {
                         keys.iter()
-                            .position(|k| k.public_key() == *pk)
-                            .expect("selected dealer must be in keys")
-                            as u32
+                            .position(|k| &k.public_key() == pk)
+                            .map(|i| i as u32)
                     })
                     .collect();
 
-                // Build sorted order of player public keys (matches Map iteration order)
-                let sorted_player_pks: Vec<ed25519::PublicKey> = {
+                // Map player positions to public keys (sorted order matches Map iteration)
+                let player_by_position: Vec<_> = {
                     let mut pks: Vec<_> = round
                         .players
                         .iter()
@@ -2086,37 +2089,29 @@ mod test_plan {
                     pks
                 };
 
-                // Calculate expected reveals per player based on selected dealers.
-                // Note: player indices in no_acks/bad_shares are used as position indices
-                // via round.players[i_player] in the test code.
-                let mut expected_reveal_counts: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
-                for &(dealer, player_pos) in round.no_acks.iter().chain(round.bad_shares.iter()) {
-                    if selected_dealer_indices.contains(&dealer)
-                        && (player_pos as usize) < sorted_player_pks.len()
-                    {
-                        let player_pk = sorted_player_pks[player_pos as usize].clone();
-                        *expected_reveal_counts.entry(player_pk).or_insert(0) += 1;
+                // Count expected reveals from test spec
+                let mut expected_reveals: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
+                for &(dealer_idx, player_pos) in round.no_acks.iter().chain(round.bad_shares.iter())
+                {
+                    if selected_dealers.contains(&dealer_idx) {
+                        if let Some(pk) = player_by_position.get(player_pos as usize) {
+                            *expected_reveals.entry(pk.clone()).or_insert(0) += 1;
+                        }
                     }
                 }
 
-                let max_faults_val = max_faults(round.players.len() as u32);
-                let expected_revealed: BTreeSet<ed25519::PublicKey> = expected_reveal_counts
-                    .into_iter()
-                    .filter_map(|(player_pk, count)| {
-                        if count > max_faults_val {
-                            Some(player_pk)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                let actual_revealed: BTreeSet<ed25519::PublicKey> =
-                    observer_output.revealed().into_iter().cloned().collect();
-                assert_eq!(
-                    expected_revealed, actual_revealed,
-                    "Round {i_round}: revealed set mismatch"
-                );
+                // Verify each player's revealed status
+                let threshold = max_faults(round.players.len() as u32);
+                for player_pk in player_set.iter() {
+                    let count = expected_reveals.get(player_pk).copied().unwrap_or(0);
+                    let should_be_revealed = count > threshold;
+                    let is_revealed = observer_output.revealed().position(player_pk).is_some();
+                    assert_eq!(
+                        should_be_revealed, is_revealed,
+                        "Round {i_round}: reveal mismatch (count={}, threshold={})",
+                        count, threshold
+                    );
+                }
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
