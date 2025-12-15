@@ -23,6 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::iouring::{self, should_retry};
+use bytes::BytesMut;
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -32,7 +33,6 @@ use futures::{
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
-    mem::MaybeUninit,
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
@@ -224,63 +224,73 @@ impl Sink {
     }
 }
 
-const MAX_IOV: usize = 16;
-
-/// Converts a slice of byte slices to a slice of [`libc::iovec`]s on the stack.
-///
-/// If the number of buffers exceeds [MAX_IOV], an error is returned.
-#[inline(always)]
-fn io_vecs(bufs: &[&[u8]]) -> Result<[MaybeUninit<libc::iovec>; MAX_IOV], crate::Error> {
-    if bufs.len() > MAX_IOV {
-        return Err(crate::Error::SendFailed);
-    }
-
-    let mut io_vecs: [MaybeUninit<libc::iovec>; MAX_IOV] = [MaybeUninit::uninit(); MAX_IOV];
-
-    for (i, buf) in bufs.iter().enumerate() {
-        io_vecs[i].write(libc::iovec {
-            iov_base: buf.as_ptr() as *mut libc::c_void,
-            iov_len: buf.len(),
-        });
-    }
-
-    Ok(io_vecs)
-}
-
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: &[&[u8]]) -> Result<(), crate::Error> {
-        // Convert the buffers to io_vec s, required for Linux ABI compatibility.
-        let iovecs = io_vecs(bufs)?;
+        // In-order to keep the memory stable for the duration of the kernel's
+        // use of the data, we must re-allocate into a stable buffer that
+        // is owned by the `io_uring` thread. Even if the caller cancels
+        // this future, the memory will be kept alive until the kernel
+        // yields a result.
+        let mut msg: StableBuf = {
+            let len = bufs.iter().map(|b| b.len()).sum::<usize>();
+            let mut buf = BytesMut::with_capacity(len);
+            for b in bufs {
+                buf.extend_from_slice(b);
+            }
+            buf.into()
+        };
 
-        // Create the io_uring writev operation
-        let op = io_uring::opcode::Writev::new(
-            self.as_raw_fd(),
-            iovecs.as_ptr() as *const libc::iovec,
-            bufs.len() as u32,
-        )
-        .build();
+        let mut bytes_sent = 0;
+        let msg_len = msg.len();
 
-        // Submit the operation to the io_uring event loop
-        let (tx, rx) = oneshot::channel();
-        self.submitter
-            .send(crate::iouring::Op {
-                work: op,
-                sender: tx,
-                buffer: None, // Caller keeps buffers alive via borrows
-            })
-            .await
-            .map_err(|_| crate::Error::SendFailed)?;
+        while bytes_sent < msg_len {
+            // Figure out how much is left to send and where to send from.
+            //
+            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
+            // `bytes_sent` is always < `msg_len` due to the loop condition, so
+            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
+            // correctly represents the remaining valid bytes.
+            let remaining = unsafe {
+                std::slice::from_raw_parts(
+                    msg.as_mut_ptr().add(bytes_sent) as *const u8,
+                    msg_len - bytes_sent,
+                )
+            };
 
-        // Wait for the operation to complete
-        let (result, _) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            // Create the io_uring send operation
+            let op = io_uring::opcode::Send::new(
+                self.as_raw_fd(),
+                remaining.as_ptr(),
+                remaining.len() as u32,
+            )
+            .build();
 
-        // Non-positive result indicates an error or EOF.
-        // Note: We don't retry EAGAIN here since writev on a socket should
-        // complete fully or fail.
-        if result <= 0 {
-            return Err(crate::Error::SendFailed);
+            // Submit the operation to the io_uring event loop
+            let (tx, rx) = oneshot::channel();
+            self.submitter
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(msg),
+                })
+                .await
+                .map_err(|_| crate::Error::SendFailed)?;
+
+            // Wait for the operation to complete
+            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            msg = got_msg.unwrap();
+            if should_retry(result) {
+                continue;
+            }
+
+            // Non-positive result indicates an error or EOF.
+            if result <= 0 {
+                return Err(crate::Error::SendFailed);
+            }
+
+            // Mark bytes as sent.
+            bytes_sent += result as usize;
         }
-
         Ok(())
     }
 }
