@@ -415,12 +415,12 @@ cfg_if::cfg_if! {
 use crate::{simplex::types::Subject, types::Round};
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Scheme, Subject as CertSubject},
+    certificate::{self, Scheme},
     Digest,
 };
 use commonware_utils::union;
 
-impl<'a, D: Digest> CertSubject for Subject<'a, D> {
+impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         vote_namespace_and_message(namespace, self)
     }
