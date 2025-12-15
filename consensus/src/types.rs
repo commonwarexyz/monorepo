@@ -400,22 +400,16 @@ impl EpochConfig {
     ///
     /// Returns `None` if the height is not covered by any range.
     pub fn epoch_length_at(&self, height: u64) -> Option<u64> {
-        self.ranges.iter().rev().find_map(|(start, length)| {
-            if height >= *start {
-                let has_next = self
-                    .ranges
-                    .iter()
-                    .any(|(next_start, _)| *next_start > *start && height >= *next_start);
-
-                if !has_next {
-                    Some(*length)
-                } else {
-                    None
+        for i in 0..self.ranges.len() {
+            let (start, length) = self.ranges[i];
+            if height >= start {
+                let next_start = self.ranges.get(i + 1).map(|(start, _)| *start);
+                if next_start.is_none_or(|next| height < next) {
+                    return Some(length);
                 }
-            } else {
-                None
             }
-        })
+        }
+        None
     }
 }
 
