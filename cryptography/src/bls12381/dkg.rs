@@ -2034,8 +2034,8 @@ mod test_plan {
                 }
 
                 // Make sure that bad dealers are not selected.
-                let selection_result = select(&info, dealer_logs.clone());
-                if let Ok(ref selection) = selection_result {
+                let selection = select(&info, dealer_logs.clone());
+                if let Ok(ref selection) = selection {
                     let good_pks = selection
                         .iter_pairs()
                         .map(|(pk, _)| pk.clone())
@@ -2056,14 +2056,9 @@ mod test_plan {
                     continue;
                 }
                 let observer_output = observe_result?;
+                let selection = selection.expect("select should succeed if observe succeeded");
 
-                // Verify revealed set matches expected based on test specification.
-                // The no_acks/bad_shares use (dealer_key_idx, player_position) format where
-                // player_position is the index into the sorted player public key list.
-                let selection =
-                    selection_result.expect("select should succeed if observe succeeded");
-
-                // Map selected dealer public keys back to their key indices
+                // Map selected dealers and players to their key indices
                 let selected_dealers: BTreeSet<u32> = selection
                     .keys()
                     .iter()
@@ -2073,26 +2068,21 @@ mod test_plan {
                             .map(|i| i as u32)
                     })
                     .collect();
+                let selected_players: Set<ed25519::PublicKey> = round
+                    .players
+                    .iter()
+                    .map(|&i| keys[i as usize].public_key())
+                    .try_collect()
+                    .expect("players are unique");
 
-                // Map player positions to public keys (sorted order matches Map iteration)
-                let player_by_position: Vec<_> = {
-                    let mut pks: Vec<_> = round
-                        .players
-                        .iter()
-                        .map(|&i| keys[i as usize].public_key())
-                        .collect();
-                    pks.sort();
-                    pks
-                };
-
-                // Count expected reveals from test spec
+                // Compute expected reveals
                 let mut expected_reveals: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
                 for &(dealer_idx, player_pos) in round.no_acks.iter().chain(round.bad_shares.iter())
                 {
                     if !selected_dealers.contains(&dealer_idx) {
                         continue;
                     }
-                    let Some(pk) = player_by_position.get(player_pos as usize) else {
+                    let Some(pk) = selected_players.key(player_pos) else {
                         continue;
                     };
                     *expected_reveals.entry(pk.clone()).or_insert(0) += 1;
@@ -2100,14 +2090,13 @@ mod test_plan {
 
                 // Verify each player's revealed status
                 let threshold = max_faults(round.players.len() as u32);
-                for player_pk in player_set.iter() {
-                    let count = expected_reveals.get(player_pk).copied().unwrap_or(0);
-                    let should_be_revealed = count > threshold;
-                    let is_revealed = observer_output.revealed().position(player_pk).is_some();
+                for player in player_set.iter() {
+                    let expected = expected_reveals.get(player).copied().unwrap_or(0);
+                    let is_revealed = observer_output.revealed().position(player).is_some();
                     assert_eq!(
-                        should_be_revealed, is_revealed,
-                        "Round {i_round}: reveal mismatch (count={}, threshold={})",
-                        count, threshold
+                        expected > threshold,
+                        is_revealed,
+                        "Unexpected reveal for player {player:?}"
                     );
                 }
 
