@@ -474,4 +474,15 @@ mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<FixedOperation<U64, U64>>,
+            CodecConformance<VariableOperation<U64, Vec<u8>>>,
+        }
+    }
 }

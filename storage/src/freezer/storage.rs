@@ -20,6 +20,7 @@ const RESIZE_THRESHOLD: u64 = 50;
 /// This can be used to directly access the data for a given
 /// key-value pair (rather than walking the journal chain).
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
 
@@ -105,6 +106,7 @@ impl std::fmt::Display for Cursor {
 /// This can be used to restore the [Freezer] to a consistent
 /// state after shutdown.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Checkpoint {
     /// The epoch of the last committed operation.
     epoch: u64,
@@ -162,6 +164,7 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 struct Entry {
     // Epoch in which this slot was written
     epoch: u64,
@@ -280,6 +283,21 @@ impl<K: Array, V: Codec> Read for Record<K, V> {
 impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
     fn encode_size(&self) -> usize {
         K::SIZE + self.value.encode_size() + self.next.encode_size()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            key: K::arbitrary(u)?,
+            value: V::arbitrary(u)?,
+            next: Option::<(u64, u32)>::arbitrary(u)?,
+        })
     }
 }
 
@@ -1047,5 +1065,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersis
 
     async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_utils::sequence::U64;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Cursor>,
+        CodecConformance<Checkpoint>,
+        CodecConformance<Entry>,
+        CodecConformance<Record<U64, U64>>
     }
 }

@@ -338,6 +338,18 @@ impl<H: Hasher> Proof<H> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Proof<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            siblings: u.arbitrary()?,
+        })
+    }
+}
+
 /// A pair of sibling digests, one on the left boundary and one on the right boundary.
 #[derive(Clone, Debug, Eq)]
 pub struct Bounds<D: Digest> {
@@ -378,6 +390,19 @@ impl<D: Digest> EncodeSize for Bounds<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Bounds<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            left: u.arbitrary()?,
+            right: u.arbitrary()?,
+        })
+    }
+}
+
 /// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq)]
 pub struct RangeProof<H: Hasher> {
@@ -400,6 +425,18 @@ where
 impl<H: Hasher> Default for RangeProof<H> {
     fn default() -> Self {
         Self { siblings: vec![] }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for RangeProof<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            siblings: u.arbitrary()?,
+        })
     }
 }
 
@@ -1673,5 +1710,18 @@ mod tests {
         assert!(proof
             .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
             .is_ok());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Proof<Sha256>>,
+            CodecConformance<RangeProof<Sha256>>,
+            CodecConformance<Bounds<Sha256Digest>>,
+        }
     }
 }

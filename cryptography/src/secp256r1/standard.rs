@@ -63,6 +63,7 @@ impl From<PrivateKey> for PublicKey {
 
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
 impl_public_key_wrapper!(PublicKey);

@@ -10,7 +10,7 @@ hash = "a75d6312366816126114abdc9d7fbd246891cab210eeae6a02781625aa1ad6a4"
 n_cases = 65536
 hash = "0081c641fd7d19194dcb85e69527d4e4fb6f722f10029ed754813e97da825e89"
 
-["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerLog<MinPk, ed25519::PublicKey>>"]
+["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerLog<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "c4a3575f319b605d8479c569f04cdf73224f6067e5f6f6bab7ac2485245c0382"
 
@@ -26,7 +26,7 @@ hash = "3ec46a7e3d5627d15285c6b51e669348bfe988829c7ea493a4bacf5d98d632f7"
 n_cases = 65536
 hash = "06cd5f1dca291e1812e01a82474926520794c8844813d64882c9a1cd6106e771"
 
-["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<Output<MinPk, ed25519::PublicKey>>"]
+["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<Output<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "aa59e152a5402fe91de7af791ee90d0301ac788904b3ee2232c97e049ceacb80"
 
@@ -34,7 +34,7 @@ hash = "aa59e152a5402fe91de7af791ee90d0301ac788904b3ee2232c97e049ceacb80"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
-["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<SignedDealerLog<MinPk, ed25519::PrivateKey>>"]
+["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<SignedDealerLog<MinPk,ed25519::PrivateKey>>"]
 n_cases = 65536
 hash = "b4e91bface5ddaa1fac0287e9495e51152b809350a7a42ffb042d43526180146"
 
@@ -53,14 +53,6 @@ hash = "d112d774a4c9b012b53e44dc2a3487a0e2f87cd7b14fb8433ec7cea4997f440a"
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Share>"]
 n_cases = 65536
 hash = "169550a1597994aad7ba634091b89633424be84f6753fe95542d2f3fd4108b9f"
-
-["commonware_cryptography::bls12381::primitives::poly::tests::arbitrary_tests::CodecConformance<Eval<Scalar>>"]
-n_cases = 65536
-hash = "169550a1597994aad7ba634091b89633424be84f6753fe95542d2f3fd4108b9f"
-
-["commonware_cryptography::bls12381::primitives::poly::tests::arbitrary_tests::CodecConformance<Poly<Scalar>>"]
-n_cases = 65536
-hash = "6b9cc50d4e055367a4f830285f084d030d2221414d5448d48e9db58251f8df7c"
 
 ["commonware_cryptography::bls12381::scheme::tests::conformance::CodecConformance<PrivateKey>"]
 n_cases = 65536

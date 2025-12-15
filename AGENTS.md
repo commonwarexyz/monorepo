@@ -484,8 +484,14 @@ Conformance tests verify that implementations maintain backward compatibility by
 # Run all conformance tests
 just test-conformance
 
+# Run conformance tests for specific crates
+just test-conformance -p commonware-codec -p commonware-cryptography
+
 # Regenerate fixtures (use only for INTENTIONAL format changes)
 just regenerate-conformance
+
+# Regenerate fixtures for specific crates only
+just regenerate-conformance -p commonware-codec -p commonware-storage
 ```
 
 **WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking change. Only use this when you have intentionally changed the format and have verified that the change is correct. This will update the hash values in `conformance.toml` files throughout the repository.
@@ -584,6 +590,19 @@ pub enum Error {
 - **Traits**: Action-oriented names (`Signer`, `Verifier`) or `-able` suffix (`Viewable`)
 
 _Generally, we try to minimize the length of functions and variables._
+
+### Namespace Conventions
+Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
+```
+_COMMONWARE_<CRATE>_<OPERATION>
+```
+
+Examples:
+- `_COMMONWARE_CODING_ZODA` - ZODA encoding in the coding crate
+- `_COMMONWARE_STREAM_HANDSHAKE` - Handshake protocol in the stream crate
+- `_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG` - BLS12-381 DKG in the cryptography crate
+
+This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
 
 ### Trait Patterns
 ```rust

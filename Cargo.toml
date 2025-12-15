@@ -4,6 +4,7 @@ members = [
     "codec",
     "coding",
     "collector",
+    "conformance/macros",
     "conformance",
     "consensus",
     "cryptography",
@@ -81,6 +82,7 @@ commonware-codec = { version = "0.0.63", path = "codec", default-features = fals
 commonware-coding = { version = "0.0.63", path = "coding" }
 commonware-collector = { version = "0.0.63", path = "collector" }
 commonware-conformance = { version = "0.0.63", path = "conformance" }
+commonware-conformance-macros = { version = "0.0.63", path = "conformance/macros" }
 commonware-consensus = { version = "0.0.63", path = "consensus" }
 commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }

@@ -48,6 +48,23 @@ impl<D: Digest> Read for Target<D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<D: Digest> arbitrary::Arbitrary<'_> for Target<D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::mmr::MAX_LOCATION;
+        let root = u.arbitrary()?;
+        let lower = u.int_in_range(0..=MAX_LOCATION - 1)?;
+        let upper = u.int_in_range(lower + 1..=MAX_LOCATION)?;
+        Ok(Self {
+            root,
+            range: Location::new_unchecked(lower)..Location::new_unchecked(upper),
+        })
+    }
+}
+
 /// Validate a target update against the current target
 pub fn validate_update<U, D>(
     old_target: &Target<D>,
@@ -200,6 +217,16 @@ mod tests {
                 ) => {}
                 _ => panic!("Error type mismatch: got {actual_err:?}, expected {expected_err:?}"),
             },
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Target<sha256::Digest>>,
         }
     }
 }

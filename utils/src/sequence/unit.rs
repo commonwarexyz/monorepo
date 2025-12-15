@@ -8,6 +8,7 @@ use core::{
 
 /// An `Array` implementation for the unit type `()`.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Unit;
 
 impl Write for Unit {
@@ -81,5 +82,15 @@ mod test {
 
         let decoded = Unit::read_cfg(&mut encoded, &()).unwrap();
         assert_eq!(decoded, Unit);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Unit>,
+        }
     }
 }

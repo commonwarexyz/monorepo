@@ -13,6 +13,17 @@ use std::fmt;
 #[derive(Clone, PartialEq, Debug)]
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: ValueEncoding> arbitrary::Arbitrary<'_> for UnorderedUpdate<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?, u.arbitrary()?))
+    }
+}
+
 impl<K: Array, V: ValueEncoding> Sealed for UnorderedUpdate<K, V> {}
 
 impl<K: Array, V: ValueEncoding> Update<K, V> for UnorderedUpdate<K, V> {

@@ -56,6 +56,17 @@ impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: CodecFixed<Cfg = ()>> arbitrary::Arbitrary<'_> for Record<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = V::arbitrary(u)?;
+        Ok(Self::new(value))
+    }
+}
+
 /// Implementation of [Ordinal].
 pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
@@ -440,5 +451,15 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreP
 
     async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<u32>>
     }
 }

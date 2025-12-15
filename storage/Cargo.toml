@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
@@ -32,6 +33,7 @@ tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
@@ -56,6 +58,12 @@ std = [
 	"thiserror/std",
 	"tracing",
 	"zstd",
+]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
 ]
 fuzzing = []
 

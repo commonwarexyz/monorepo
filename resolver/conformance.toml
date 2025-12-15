@@ -1,0 +1,7 @@
+["commonware_resolver::p2p::wire::tests::conformance::CodecConformance<Message<u8>>"]
+n_cases = 65536
+hash = "2b555e7786d7fb7e3a06076b2a6aba09099d698c1bee4a651715868f078dd874"
+
+["commonware_resolver::p2p::wire::tests::conformance::CodecConformance<Payload<u8>>"]
+n_cases = 65536
+hash = "7210a48f7133849a3a57b34800abd01c7c556c0020151e52dadb12bb61bc1237"

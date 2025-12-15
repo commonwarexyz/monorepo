@@ -17,6 +17,21 @@ pub struct OrderedUpdate<K: Array + Ord, V: ValueEncoding> {
     pub next_key: K,
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array + Ord, V: ValueEncoding> arbitrary::Arbitrary<'_> for OrderedUpdate<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            key: u.arbitrary()?,
+            value: u.arbitrary()?,
+            next_key: u.arbitrary()?,
+        })
+    }
+}
+
 impl<K: Array, V: ValueEncoding> Sealed for OrderedUpdate<K, V> {}
 
 impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {

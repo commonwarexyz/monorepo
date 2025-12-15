@@ -26,6 +26,24 @@ pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
     CommitFloor(Option<V::Value>, Location),
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::Delete(u.arbitrary()?)),
+            1 => Ok(Self::Update(u.arbitrary()?)),
+            2 => Ok(Self::CommitFloor(u.arbitrary()?, u.arbitrary()?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
 where
     K: Array,
@@ -190,5 +208,18 @@ mod tests {
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
         roundtrip(&commit, &cfg);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<OrderedOperation<U64, FixedEncoding<U64>>>,
+            CodecConformance<OrderedOperation<U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<UnorderedOperation<U64, FixedEncoding<U64>>>,
+            CodecConformance<UnorderedOperation<U64, VariableEncoding<Vec<u8>>>>,
+        }
     }
 }

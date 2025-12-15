@@ -69,7 +69,7 @@ use std::{
 use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
 
 #[doc(hidden)]
 fn main() {

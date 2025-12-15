@@ -1,4 +1,4 @@
-["commonware_codec::types::btree_map::tests::conformance::CodecConformance<BTreeMap<u32, u32>>"]
+["commonware_codec::types::btree_map::tests::conformance::CodecConformance<BTreeMap<u32,u32>>"]
 n_cases = 65536
 hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
@@ -10,7 +10,7 @@ hash = "7160fdb6ba4817a5d266a9cf9e6ff3433887aabb1c6f2b713e2befa05959ae8c"
 n_cases = 65536
 hash = "7f034c22d0f258e8bf599ba629b66476a608566941eace272901021013b5b72c"
 
-["commonware_codec::types::hash_map::tests::conformance::CodecConformance<HashMap<u32, u32>>"]
+["commonware_codec::types::hash_map::tests::conformance::CodecConformance<HashMap<u32,u32>>"]
 n_cases = 65536
 hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 
@@ -46,7 +46,7 @@ hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
 n_cases = 65536
 hash = "56298a7f298dfae99947dbdb5691aea48e3a183733d93964b53de858d448ecd2"
 
-["commonware_codec::types::primitives::tests::conformance::CodecConformance<[u8; 32]>"]
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<[u8;32]>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
@@ -102,23 +102,23 @@ hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 n_cases = 65536
 hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
-["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32)>"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32)>"]
 n_cases = 65536
 hash = "9f3fbde186c4164d91b0b3cabba62b5bdbcb6113a2c8dd836dccb730f116066e"
 
-["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32)>"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32,u32)>"]
 n_cases = 65536
 hash = "41068be34f5a7e4271763103477b34cb2e04c00004061383cf4f057c09417046"
 
-["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32)>"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32,u32,u32)>"]
 n_cases = 65536
 hash = "cc5c7bc39d9dc4605d1ad63548dcb23e42cec0becb847563f7b5454f3c355961"
 
-["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32, u32)>"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32,u32,u32,u32)>"]
 n_cases = 65536
 hash = "001a3dc913afa87be11bd4f4bdd98cf8571a89d19548af5efcfa9290f4f3773d"
 
-["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32, u32, u32, u32, u32, u32)>"]
+["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32,u32,u32,u32,u32)>"]
 n_cases = 65536
 hash = "c0d2818d6db2e34cc531ab8f161eaf7109163c65c533927aa37b0483ab0ddf31"
 
@@ -133,3 +133,35 @@ hash = "dcb27e675ccce4ba82dd6979036b04198235bec00d3cefbc8e25a639ab4a162e"
 ["commonware_codec::types::vec::tests::conformance::CodecConformance<Vec<u8>>"]
 n_cases = 65536
 hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<SInt<i128>>"]
+n_cases = 65536
+hash = "42320f03747b52912d8dbb129a5958fe00ebd434a3381e3aa7daca2f48981113"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<SInt<i16>>"]
+n_cases = 65536
+hash = "c2e6da214e9447b09327dfe6356eb765d753c4faa5430920b01ee0dab6870514"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<SInt<i32>>"]
+n_cases = 65536
+hash = "24c94e3ee52cd4e9838b2e092fe328d94d6d5cee56690070f70c322849e1d2a6"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<SInt<i64>>"]
+n_cases = 65536
+hash = "2f24c93ed0351071f864d22d2f5782f7395569da09eabc42341807dbd5422d72"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u128>>"]
+n_cases = 65536
+hash = "29b319cdfd0c760440086a14ebb5bec17e34de582d3d94f127ccb6e292b8b779"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u16>>"]
+n_cases = 65536
+hash = "aa339ca7dadc09fed8de62561dfad318b44d0c43a7348d5f73dd0db286ec6658"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u32>>"]
+n_cases = 65536
+hash = "f0b66ee345e9e295c50b522d9cf3501d95cd70cecfe7bfd315c970ffa78ede40"
+
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u64>>"]
+n_cases = 65536
+hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"

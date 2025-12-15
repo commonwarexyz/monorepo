@@ -123,6 +123,14 @@ impl Field for F {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for F {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let byte = u.arbitrary::<u8>()? % P;
+        Ok(Self(byte))
+    }
+}
+
 /// A prime group of order 89.
 ///
 /// This is constructed as a subgroup of the units in F_179.
@@ -228,6 +236,13 @@ impl CryptoGroup for G {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for G {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(G::generator() * &u.arbitrary::<F>()?)
+    }
+}
+
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod test {
@@ -273,6 +288,17 @@ mod test {
         #[test]
         fn test_g_codec(x: G) {
             assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<F>,
+            CodecConformance<G>
         }
     }
 }

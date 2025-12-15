@@ -816,24 +816,23 @@ impl<
                     let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
 
-                    // Try to use result
-                    match verified {
-                        Ok(verified) => {
-                            if !verified {
-                                debug!(round = ?context.round, "proposal failed verification");
-                                continue;
-                            }
-                        },
+                    // Handle verification result
+                    let valid = match verified {
+                        Ok(valid) => valid,
                         Err(err) => {
                             debug!(?err, round = ?context.round, "failed to verify proposal");
                             continue;
                         }
                     };
-
-                    // Handle verified proposal
                     view = context.view();
-                    if !self.state.verified(view) {
-                        continue;
+                    if valid {
+                        // Mark verification complete
+                        self.state.verified(view);
+                    } else {
+                        // Verification failed for current view proposal, treat as immediate timeout
+                        debug!(round = ?context.round, "proposal failed verification");
+                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                            .await;
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {

@@ -1,0 +1,19 @@
+["commonware_p2p::authenticated::data::tests::conformance::CodecConformance<Data>"]
+n_cases = 65536
+hash = "9ac108602dd289884580649d0362ab6b291fc8b9afbe9085ad98e61087f8263e"
+
+["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<BitVec>"]
+n_cases = 65536
+hash = "6e3772525660cd57a4223330b548ab47656d68ab0bfb8014d4efbeb9c1646508"
+
+["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Info<PublicKey>>"]
+n_cases = 65536
+hash = "4cf9d3e1505ac252c6986b26e021041126990979e5093b215c5552cbc22b790e"
+
+["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Payload<PublicKey>>"]
+n_cases = 65536
+hash = "c6da67f9d277623f62da4e03b05facb3d476260bebad2aaf57d0f9d75f7a8636"
+
+["commonware_p2p::authenticated::lookup::types::tests::conformance::CodecConformance<Message>"]
+n_cases = 65536
+hash = "eb759619caf694dd7b9864e62c0952b9180da43badb47b90b5d47ce0c73d2175"

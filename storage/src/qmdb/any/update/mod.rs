@@ -92,4 +92,17 @@ mod tests {
 
         roundtrip(&upd, &(RangeCfg::from(..), ()));
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<OrderedUpdate<U64, FixedEncoding<U64>>>,
+            CodecConformance<OrderedUpdate<U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<UnorderedUpdate<U64, FixedEncoding<U64>>>,
+            CodecConformance<UnorderedUpdate<U64, VariableEncoding<Vec<u8>>>>,
+        }
+    }
 }
