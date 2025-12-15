@@ -704,8 +704,8 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.scheme_provider
-            .certificate_verifier()
-            .or_else(|| self.scheme_provider.scheme(epoch))
+            .all()
+            .or_else(|| self.scheme_provider.keyed(epoch))
     }
 
     // -------------------- Waiters --------------------

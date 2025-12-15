@@ -286,19 +286,19 @@ pub trait Provider: Clone + Send + Sync + 'static {
     type Scheme: Scheme;
 
     /// Return the signing scheme that corresponds to `key`.
-    fn scheme(&self, key: Self::Key) -> Option<Arc<Self::Scheme>>;
+    fn keyed(&self, key: Self::Key) -> Option<Arc<Self::Scheme>>;
 
-    /// Return a certificate verifier that can validate certificates independent of key.
+    /// Return a certificate verifier that can validate certificates from all keys.
     ///
     /// This method allows implementations to provide a verifier that can validate
-    /// certificates from any key (without key-specific state). For example,
+    /// certificates from all keys (without key-specific state). For example,
     /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
     /// can be used to verify certificates from any epoch, even after the committee
     /// has rotated and the underlying secret shares have been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
-    /// [`Provider::scheme`] for key-specific verification.
-    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+    /// [`Provider::keyed`] for key-specific verification.
+    fn all(&self) -> Option<Arc<Self::Scheme>> {
         None
     }
 }

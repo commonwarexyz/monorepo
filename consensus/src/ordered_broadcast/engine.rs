@@ -530,7 +530,7 @@ impl<
             .await;
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_scheme_provider.scheme(self.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.keyed(self.epoch) else {
             return Err(Error::UnknownScheme(self.epoch));
         };
 
@@ -611,7 +611,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.keyed(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -832,7 +832,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators_scheme_provider.scheme(epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.keyed(epoch) else {
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
@@ -907,7 +907,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.keyed(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 

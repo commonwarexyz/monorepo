@@ -57,7 +57,7 @@ impl<S: Scheme, C: Signer> ProviderTrait for MockProvider<S, C> {
     type Key = Epoch;
     type Scheme = S;
 
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn keyed(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }

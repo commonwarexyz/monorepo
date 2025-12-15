@@ -200,7 +200,7 @@ impl<
     /// Gets the scheme for a given epoch, returning an error if unavailable.
     fn scheme(&self, epoch: Epoch) -> Result<Arc<P::Scheme>, Error> {
         self.scheme_provider
-            .scheme(epoch)
+            .keyed(epoch)
             .ok_or(Error::UnknownEpoch(epoch))
     }
 

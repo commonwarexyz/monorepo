@@ -42,11 +42,11 @@ impl<S: Scheme, K: Clone + Send + Sync + 'static> crate::certificate::Provider
     type Key = K;
     type Scheme = S;
 
-    fn scheme(&self, _: K) -> Option<Arc<S>> {
+    fn keyed(&self, _: K) -> Option<Arc<S>> {
         Some(self.scheme.clone())
     }
 
-    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+    fn all(&self) -> Option<Arc<Self::Scheme>> {
         Some(self.scheme.clone())
     }
 }
@@ -96,7 +96,7 @@ impl<S: Scheme, K: Clone + Send + Sync + 'static> crate::certificate::Provider
     type Key = K;
     type Scheme = S;
 
-    fn scheme(&self, _: K) -> Option<Arc<S>> {
+    fn keyed(&self, _: K) -> Option<Arc<S>> {
         self.scheme.read().unwrap().clone()
     }
 }

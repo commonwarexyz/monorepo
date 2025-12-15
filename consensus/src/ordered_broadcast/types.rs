@@ -479,7 +479,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
 
         // Verify parent certificate using the scheme for the parent's epoch
         let parent_scheme = scheme_provider
-            .scheme(parent.epoch)
+            .keyed(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);
         let ack_ctx = AckSubject {
@@ -542,7 +542,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             let epoch = Epoch::read(reader)?;
 
             // Get scheme for parent's epoch
-            let scheme = provider.scheme(epoch).ok_or_else(|| {
+            let scheme = provider.keyed(epoch).ok_or_else(|| {
                 CodecError::Wrapped(
                     "consensus::ordered_broadcast::Node::read_staged",
                     Box::new(Error::UnknownScheme(epoch)),
