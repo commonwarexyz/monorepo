@@ -20,7 +20,7 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, Scheme as CertificateScheme},
+    certificate::{self, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     Sha256,
@@ -51,7 +51,7 @@ const EXPECTED_PANICS: [&str; 3] = [
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as CertificateScheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;

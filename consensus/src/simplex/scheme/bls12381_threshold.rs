@@ -33,7 +33,7 @@ use commonware_cryptography::{
         },
         tle,
     },
-    certificate::{Part as CertificatePart, Scheme as SchemeTrait, Verification},
+    certificate::{self, Part, Verification},
     Digest, PublicKey,
 };
 use commonware_utils::ordered::Set;
@@ -393,7 +393,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
     }
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
+impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
@@ -410,11 +410,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         self.participants()
     }
 
-    fn sign<D: Digest>(
-        &self,
-        namespace: &[u8],
-        subject: Subject<'_, D>,
-    ) -> Option<CertificatePart<Self>> {
+    fn sign<D: Digest>(&self, namespace: &[u8], subject: Subject<'_, D>) -> Option<Part<Self>> {
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
@@ -432,7 +428,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
             seed_signature,
         };
 
-        Some(CertificatePart {
+        Some(Part {
             signer: share.index,
             signature,
         })
@@ -442,7 +438,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        part: &CertificatePart<Self>,
+        part: &Part<Self>,
     ) -> bool {
         let Ok(evaluated) = self.polynomial().partial_public(part.signer) else {
             return false;
@@ -478,7 +474,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = CertificatePart<Self>>,
+        I: IntoIterator<Item = Part<Self>>,
     {
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = parts
@@ -527,7 +523,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| CertificatePart {
+            .map(|(vote, seed)| Part {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
@@ -542,7 +538,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
 
     fn assemble<I>(&self, parts: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = CertificatePart<Self>>,
+        I: IntoIterator<Item = Part<Self>>,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = parts
             .into_iter()
@@ -723,7 +719,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::mocks::Fixture,
+        certificate::{mocks::Fixture, Scheme as _},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
         sha256::Digest as Sha256Digest,

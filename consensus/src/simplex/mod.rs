@@ -289,8 +289,10 @@ mod tests {
     use crate::{
         simplex::{
             mocks::twins::Strategy,
-            scheme as certificate,
-            scheme::{bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, Scheme},
+            scheme::{
+                bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
+                Scheme,
+            },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
@@ -305,9 +307,9 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
-        ed25519,
+        ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
-        Hasher as _, PublicKey, Sha256, Signer as _,
+        Hasher as _, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
@@ -334,13 +336,13 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Register a validator with the oracle.
-    async fn register_validator<P: PublicKey>(
-        oracle: &mut Oracle<P>,
-        validator: P,
+    async fn register_validator(
+        oracle: &mut Oracle<PublicKey>,
+        validator: PublicKey,
     ) -> (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
     ) {
         let mut control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
@@ -355,15 +357,15 @@ mod tests {
     }
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: PublicKey>(
-        oracle: &mut Oracle<P>,
-        validators: &[P],
+    async fn register_validators(
+        oracle: &mut Oracle<PublicKey>,
+        validators: &[PublicKey],
     ) -> HashMap<
-        P,
+        PublicKey,
         (
-            (Sender<P>, Receiver<P>),
-            (Sender<P>, Receiver<P>),
-            (Sender<P>, Receiver<P>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
         ),
     > {
         let mut registrations = HashMap::new();
@@ -386,9 +388,9 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: PublicKey>(
-        oracle: &mut Oracle<P>,
-        validators: &[P],
+    async fn link_validators(
+        oracle: &mut Oracle<PublicKey>,
+        validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
@@ -430,7 +432,7 @@ mod tests {
 
     fn all_online<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -672,12 +674,12 @@ mod tests {
         all_online(bls12381_threshold::fixture::<MinSig, _>);
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
-        all_online(certificate::ed25519::fixture);
+        all_online(ed25519::fixture);
     }
 
     fn observer<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -710,7 +712,7 @@ mod tests {
             } = fixture(&mut context, n_active);
 
             // Add observer (no share)
-            let private_key_observer = ed25519::PrivateKey::from_seed(n_active as u64);
+            let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
             // Register all (including observer) with the network
@@ -832,12 +834,12 @@ mod tests {
         observer(bls12381_threshold::fixture::<MinSig, _>);
         observer(bls12381_multisig::fixture::<MinPk, _>);
         observer(bls12381_multisig::fixture::<MinSig, _>);
-        observer(certificate::ed25519::fixture);
+        observer(ed25519::fixture);
     }
 
     fn unclean_shutdown<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
     {
         // Create context
@@ -1021,12 +1023,12 @@ mod tests {
         unclean_shutdown(bls12381_threshold::fixture::<MinSig, _>);
         unclean_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown(certificate::ed25519::fixture);
+        unclean_shutdown(ed25519::fixture);
     }
 
     fn backfill<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1273,12 +1275,12 @@ mod tests {
         backfill(bls12381_threshold::fixture::<MinSig, _>);
         backfill(bls12381_multisig::fixture::<MinPk, _>);
         backfill(bls12381_multisig::fixture::<MinSig, _>);
-        backfill(certificate::ed25519::fixture);
+        backfill(ed25519::fixture);
     }
 
     fn one_offline<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1531,12 +1533,12 @@ mod tests {
         one_offline(bls12381_threshold::fixture::<MinSig, _>);
         one_offline(bls12381_multisig::fixture::<MinPk, _>);
         one_offline(bls12381_multisig::fixture::<MinSig, _>);
-        one_offline(certificate::ed25519::fixture);
+        one_offline(ed25519::fixture);
     }
 
     fn slow_validator<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1713,12 +1715,12 @@ mod tests {
         slow_validator(bls12381_threshold::fixture::<MinSig, _>);
         slow_validator(bls12381_multisig::fixture::<MinPk, _>);
         slow_validator(bls12381_multisig::fixture::<MinSig, _>);
-        slow_validator(certificate::ed25519::fixture);
+        slow_validator(ed25519::fixture);
     }
 
     fn all_recovery<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1920,12 +1922,12 @@ mod tests {
         all_recovery(bls12381_threshold::fixture::<MinSig, _>);
         all_recovery(bls12381_multisig::fixture::<MinPk, _>);
         all_recovery(bls12381_multisig::fixture::<MinSig, _>);
-        all_recovery(certificate::ed25519::fixture);
+        all_recovery(ed25519::fixture);
     }
 
     fn partition<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2117,12 +2119,12 @@ mod tests {
         partition(bls12381_threshold::fixture::<MinSig, _>);
         partition(bls12381_multisig::fixture::<MinPk, _>);
         partition(bls12381_multisig::fixture::<MinSig, _>);
-        partition(certificate::ed25519::fixture);
+        partition(ed25519::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2273,7 +2275,7 @@ mod tests {
         slow_and_lossy_links(0, bls12381_threshold::fixture::<MinSig, _>);
         slow_and_lossy_links(0, bls12381_multisig::fixture::<MinPk, _>);
         slow_and_lossy_links(0, bls12381_multisig::fixture::<MinSig, _>);
-        slow_and_lossy_links(0, certificate::ed25519::fixture);
+        slow_and_lossy_links(0, ed25519::fixture);
     }
 
     #[test_group("slow")]
@@ -2302,8 +2304,8 @@ mod tests {
                 slow_and_lossy_links(seed, bls12381_multisig::fixture::<MinSig, _>);
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            let ed_state_1 = slow_and_lossy_links(seed, certificate::ed25519::fixture);
-            let ed_state_2 = slow_and_lossy_links(seed, certificate::ed25519::fixture);
+            let ed_state_1 = slow_and_lossy_links(seed, ed25519::fixture);
+            let ed_state_2 = slow_and_lossy_links(seed, ed25519::fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
@@ -2327,7 +2329,7 @@ mod tests {
 
     fn conflicter<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2504,13 +2506,13 @@ mod tests {
             conflicter(seed, bls12381_threshold::fixture::<MinSig, _>);
             conflicter(seed, bls12381_multisig::fixture::<MinPk, _>);
             conflicter(seed, bls12381_multisig::fixture::<MinSig, _>);
-            conflicter(seed, certificate::ed25519::fixture);
+            conflicter(seed, ed25519::fixture);
         }
     }
 
     fn invalid<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2670,13 +2672,13 @@ mod tests {
             invalid(seed, bls12381_threshold::fixture::<MinSig, _>);
             invalid(seed, bls12381_multisig::fixture::<MinPk, _>);
             invalid(seed, bls12381_multisig::fixture::<MinSig, _>);
-            invalid(seed, certificate::ed25519::fixture);
+            invalid(seed, ed25519::fixture);
         }
     }
 
     fn impersonator<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2837,13 +2839,13 @@ mod tests {
             impersonator(seed, bls12381_threshold::fixture::<MinSig, _>);
             impersonator(seed, bls12381_multisig::fixture::<MinPk, _>);
             impersonator(seed, bls12381_multisig::fixture::<MinSig, _>);
-            impersonator(seed, certificate::ed25519::fixture);
+            impersonator(seed, ed25519::fixture);
         }
     }
 
     fn equivocator<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3109,13 +3111,13 @@ mod tests {
     #[test_traced]
     fn test_equivocator_ed25519() {
         for seed in 0..5 {
-            equivocator(seed, certificate::ed25519::fixture);
+            equivocator(seed, ed25519::fixture);
         }
     }
 
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3275,13 +3277,13 @@ mod tests {
             reconfigurer(seed, bls12381_threshold::fixture::<MinSig, _>);
             reconfigurer(seed, bls12381_multisig::fixture::<MinPk, _>);
             reconfigurer(seed, bls12381_multisig::fixture::<MinSig, _>);
-            reconfigurer(seed, certificate::ed25519::fixture);
+            reconfigurer(seed, ed25519::fixture);
         }
     }
 
     fn nuller<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3451,13 +3453,13 @@ mod tests {
             nuller(seed, bls12381_threshold::fixture::<MinSig, _>);
             nuller(seed, bls12381_multisig::fixture::<MinPk, _>);
             nuller(seed, bls12381_multisig::fixture::<MinSig, _>);
-            nuller(seed, certificate::ed25519::fixture);
+            nuller(seed, ed25519::fixture);
         }
     }
 
     fn outdated<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3610,13 +3612,13 @@ mod tests {
             outdated(seed, bls12381_threshold::fixture::<MinSig, _>);
             outdated(seed, bls12381_multisig::fixture::<MinPk, _>);
             outdated(seed, bls12381_multisig::fixture::<MinSig, _>);
-            outdated(seed, certificate::ed25519::fixture);
+            outdated(seed, ed25519::fixture);
         }
     }
 
     fn run_1k<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3778,12 +3780,12 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_ed25519() {
-        run_1k(certificate::ed25519::fixture);
+        run_1k(ed25519::fixture);
     }
 
     fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3933,7 +3935,7 @@ mod tests {
         engine_shutdown(bls12381_threshold::fixture::<MinSig, _>, false);
         engine_shutdown(bls12381_multisig::fixture::<MinPk, _>, false);
         engine_shutdown(bls12381_multisig::fixture::<MinSig, _>, false);
-        engine_shutdown(certificate::ed25519::fixture, false);
+        engine_shutdown(ed25519::fixture, false);
     }
 
     #[test_traced]
@@ -3942,12 +3944,12 @@ mod tests {
         engine_shutdown(bls12381_threshold::fixture::<MinSig, _>, true);
         engine_shutdown(bls12381_multisig::fixture::<MinPk, _>, true);
         engine_shutdown(bls12381_multisig::fixture::<MinSig, _>, true);
-        engine_shutdown(certificate::ed25519::fixture, true);
+        engine_shutdown(ed25519::fixture, true);
     }
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
@@ -4136,12 +4138,12 @@ mod tests {
         attributable_reporter_filtering(bls12381_threshold::fixture::<MinSig, _>);
         attributable_reporter_filtering(bls12381_multisig::fixture::<MinPk, _>);
         attributable_reporter_filtering(bls12381_multisig::fixture::<MinSig, _>);
-        attributable_reporter_filtering(certificate::ed25519::fixture);
+        attributable_reporter_filtering(ed25519::fixture);
     }
 
     fn split_views_no_lockup<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Scenario:
@@ -4332,7 +4334,7 @@ mod tests {
             let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
             // Create an 11th non-participant injector and obtain senders
-            let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -4505,7 +4507,7 @@ mod tests {
         split_views_no_lockup(bls12381_threshold::fixture::<MinSig, _>);
         split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>);
         split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup(certificate::ed25519::fixture);
+        split_views_no_lockup(ed25519::fixture);
     }
 
     fn tle<V: Variant>() {
@@ -4652,7 +4654,7 @@ mod tests {
 
     fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -5036,15 +5038,15 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_ed25519() {
         assert_eq!(
-            hailstorm(0, 10, ViewDelta::new(15), certificate::ed25519::fixture),
-            hailstorm(0, 10, ViewDelta::new(15), certificate::ed25519::fixture)
+            hailstorm(0, 10, ViewDelta::new(15), ed25519::fixture),
+            hailstorm(0, 10, ViewDelta::new(15), ed25519::fixture)
         );
     }
 
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let faults = max_faults(n);
@@ -5355,7 +5357,7 @@ mod tests {
 
     fn test_twins<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         for strategy in [
@@ -5409,7 +5411,7 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
-        test_twins(certificate::ed25519::fixture);
+        test_twins(ed25519::fixture);
     }
 
     #[test_group("slow")]
