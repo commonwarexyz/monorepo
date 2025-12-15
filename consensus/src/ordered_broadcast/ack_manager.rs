@@ -12,9 +12,9 @@ struct Partials<S: Scheme, D: Digest> {
     // The set of signer indices that have voted for the payload.
     pub signers: HashSet<u32>,
 
-    // A map from payload digest to votes.
+    // A map from payload digest to attestations.
     // Each signer should only vote once for each sequencer/height/epoch.
-    pub parts: HashMap<D, Vec<Attestation<S>>>,
+    pub attestations: HashMap<D, Vec<Attestation<S>>>,
 }
 
 /// Evidence for a chunk.
@@ -28,7 +28,7 @@ impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
-            parts: HashMap::new(),
+            attestations: HashMap::new(),
         })
     }
 }
@@ -79,14 +79,14 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
                 }
 
                 // Add the vote
-                let attestations = p.parts.entry(ack.chunk.payload).or_default();
+                let attestations = p.attestations.entry(ack.chunk.payload).or_default();
                 attestations.push(ack.attestation.clone());
 
                 // Try to assemble certificate
                 let certificate = scheme.assemble(attestations.iter().cloned())?;
 
                 // Take ownership of the votes, which must exist
-                p.parts.remove(&ack.chunk.payload);
+                p.attestations.remove(&ack.chunk.payload);
 
                 Some(certificate)
             }
