@@ -45,7 +45,7 @@ where
             let update = Self::get_update(&self.log, loc).await?;
             let (k, v) = (update.0, update.1);
             if &k == key {
-                return Ok(Some((v.clone(), loc)));
+                return Ok(Some((v, loc)));
             }
         }
 

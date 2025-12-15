@@ -97,6 +97,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<OrderedUpdate<U64, FixedEncoding<U64>>>,

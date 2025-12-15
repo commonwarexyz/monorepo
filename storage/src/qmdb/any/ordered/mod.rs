@@ -477,12 +477,13 @@ mod test {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use crate::qmdb::any::{FixedEncoding, OrderedOperation, VariableEncoding};
         use commonware_codec::conformance::CodecConformance;
+        use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<FixedOperation<U64, U64>>,
-            CodecConformance<VariableOperation<U64, Vec<u8>>>,
+            CodecConformance<OrderedOperation<U64, FixedEncoding<U64>>>,
+            CodecConformance<OrderedOperation<U64, VariableEncoding<Vec<u8>>>>,
         }
     }
 }

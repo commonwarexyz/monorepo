@@ -173,7 +173,7 @@ impl<
     pub async fn get_span(
         &self,
         key: &K,
-    ) -> Result<Option<(Location, OrderedUpdate<K, V>)>, Error> {
+    ) -> Result<Option<(Location, OrderedUpdate<K, FixedEncoding<V>>)>, Error> {
         self.any.get_span(key).await
     }
 
@@ -1385,7 +1385,7 @@ pub mod test {
                 // it's a key-updating operation.
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
                 let (key, value) = match op {
-                    Operation::Update(key_data) => (key_data.0.key, key_data.0.value),
+                    Operation::Update(key_data) => (key_data.key, key_data.value),
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };

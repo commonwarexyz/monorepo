@@ -31,8 +31,7 @@ pub use update::{OrderedUpdate, UnorderedUpdate};
 mod db;
 
 mod operation;
-pub use operation::Operation;
-pub use operation::{OrderedOperation, UnorderedOperation};
+pub use operation::{Operation, OrderedOperation, UnorderedOperation};
 
 mod value;
 pub use value::{FixedEncoding, FixedValue, VariableEncoding, VariableValue};

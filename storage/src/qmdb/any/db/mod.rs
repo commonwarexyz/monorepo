@@ -387,6 +387,7 @@ impl<
     > IndexedLog<E, Op, C, I, H>
 {
     /// Returns a FloorHelper wrapping the current state of the log.
+    #[allow(clippy::type_complexity)]
     pub(crate) const fn as_floor_helper(
         &mut self,
     ) -> FloorHelper<'_, I, authenticated::Journal<E, C, H, Clean<H::Digest>>> {
