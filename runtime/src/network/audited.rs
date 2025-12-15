@@ -11,14 +11,15 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: impl Into<StableBuf> + Send) -> Result<(), Error> {
-        let data = data.into();
+    async fn send(&mut self, bufs: &[&[u8]]) -> Result<(), Error> {
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(data.as_ref());
+            for buf in bufs {
+                hasher.update(buf);
+            }
         });
 
-        self.inner.send(data).await.inspect_err(|e| {
+        self.inner.send(bufs).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -261,7 +262,7 @@ mod tests {
                 assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
 
                 // Send response
-                sink.send(Vec::from(SERVER_MSG)).await.unwrap();
+                sink.send(&[SERVER_MSG.as_bytes()]).await.unwrap();
             });
             server_handles.push(handle);
         }
@@ -275,7 +276,7 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
-                sink.send(Vec::from(CLIENT_MSG)).await.unwrap();
+                sink.send(&[CLIENT_MSG.as_bytes()]).await.unwrap();
 
                 // Receive response
                 let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();

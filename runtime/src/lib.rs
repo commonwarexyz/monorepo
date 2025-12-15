@@ -436,11 +436,15 @@ pub trait Listener: Sync + Send + 'static {
 /// Interface that any runtime must implement to send
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
-    /// Send a message to the sink.
-    fn send(
-        &mut self,
-        msg: impl Into<StableBuf> + Send,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Send messages to the sink using vectored I/O.
+    ///
+    /// All buffers are written in order as if they were concatenated
+    /// into a single contiguous message. The implementation guarantees
+    /// that either all bytes are written or an error is returned.
+    ///
+    /// Implementations restrict the maximum number of buffers that can be
+    /// written at once to `16`.
+    fn send(&mut self, bufs: &[&[u8]]) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -545,7 +549,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     use crate::telemetry::traces::collector::TraceStorage;
-    use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
     use futures::{
         channel::{mpsc, oneshot},
@@ -2600,7 +2603,7 @@ mod tests {
                     let request = format!(
                         "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
                     );
-                    sink.send(Bytes::from(request).to_vec()).await.unwrap();
+                    sink.send(&[request.as_bytes()]).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

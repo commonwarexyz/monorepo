@@ -1,5 +1,5 @@
 use crate::Error;
-use bytes::{BufMut as _, Bytes, BytesMut};
+use bytes::Bytes;
 use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a 4-byte length prefix.
@@ -15,12 +15,10 @@ pub async fn send_frame<S: Sink>(
         return Err(Error::SendTooLarge(n));
     }
 
-    // Prefix `buf` with its length and send it
-    let mut prefixed_buf = BytesMut::with_capacity(4 + buf.len());
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
-    prefixed_buf.put_u32(len);
-    prefixed_buf.extend_from_slice(buf);
-    sink.send(prefixed_buf).await.map_err(Error::SendFailed)
+    sink.send(&[len.to_be_bytes().as_slice(), buf])
+        .await
+        .map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a 4-byte length prefix.
@@ -46,6 +44,7 @@ pub async fn recv_frame<T: Stream>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{BufMut, BytesMut};
     use commonware_runtime::{deterministic, mocks, Runner};
     use rand::Rng;
 
@@ -141,10 +140,12 @@ mod tests {
             let mut msg = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut msg);
 
-            let mut buf = BytesMut::with_capacity(4 + msg.len());
-            buf.put_u32(MAX_MESSAGE_SIZE as u32);
-            buf.extend_from_slice(&msg);
-            sink.send(buf).await.unwrap();
+            sink.send(&[
+                (MAX_MESSAGE_SIZE as u32).to_be_bytes().as_slice(),
+                msg.as_slice(),
+            ])
+            .await
+            .unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE);
@@ -159,9 +160,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            let mut buf = BytesMut::with_capacity(4);
-            buf.put_u32(MAX_MESSAGE_SIZE as u32);
-            sink.send(buf).await.unwrap();
+            sink.send(&[(MAX_MESSAGE_SIZE as u32).to_be_bytes().as_slice()])
+                .await
+                .unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -180,7 +181,7 @@ mod tests {
             buf.put_u8(0x00);
             buf.put_u8(0x00);
 
-            sink.send(buf).await.unwrap();
+            sink.send(&[buf.as_ref()]).await.unwrap();
             drop(sink); // Close the sink to simulate a closed stream
 
             // Expect an error rather than a panic
