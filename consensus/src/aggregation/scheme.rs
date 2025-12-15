@@ -6,11 +6,11 @@
 //!
 //! # Available Schemes
 //!
-//! - Ed25519: Attributable signatures with individual verification. HSM-friendly,
+//! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
-//! - BLS12-381 multi-signature: Attributable signatures with aggregated verification.
+//! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
-//! - BLS12-381 threshold: Non-attributable threshold signatures. Constant-size
+//! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
 //!   certificates regardless of committee size.
 
 use super::types::Item;
