@@ -1,12 +1,11 @@
 //! Deterministic test fixtures for `aggregation` signing schemes.
 
 use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
+pub use certificate_mocks::{ed25519_participants, Fixture};
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::mocks as certificate_mocks, ed25519,
 };
 use rand::{CryptoRng, RngCore};
-
-pub use certificate_mocks::{ed25519_participants, Fixture};
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
 ///

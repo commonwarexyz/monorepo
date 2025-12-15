@@ -5,11 +5,13 @@ use crate::{
         dkg::deal,
         primitives::{group, ops::compute_public, sharing::Sharing, variant::Variant},
     },
+    certificate::{Scheme, SchemeProvider},
     ed25519, Signer as _,
 };
 use commonware_math::algebra::Random;
 use commonware_utils::{ordered::BiMap, TryCollect as _};
 use rand::{CryptoRng, RngCore};
+use std::sync::Arc;
 
 /// A deterministic test fixture containing identities, identity private keys, per-participant
 /// signing schemes, and a single verifier scheme.
@@ -187,5 +189,78 @@ where
         private_keys,
         schemes,
         verifier,
+    }
+}
+
+/// A scheme provider that always returns the same scheme regardless of epoch.
+///
+/// Useful for unit tests that don't need to test epoch transitions.
+#[derive(Clone, Debug)]
+pub struct SingleSchemeProvider<S: Scheme> {
+    scheme: Arc<S>,
+}
+
+impl<S: Scheme> SingleSchemeProvider<S> {
+    /// Creates a new provider that always returns the given scheme.
+    pub fn new(scheme: S) -> Self {
+        Self {
+            scheme: Arc::new(scheme),
+        }
+    }
+}
+
+impl<S: Scheme, E> SchemeProvider<E> for SingleSchemeProvider<S> {
+    type Scheme = S;
+
+    fn scheme(&self, _epoch: E) -> Option<Arc<S>> {
+        Some(self.scheme.clone())
+    }
+
+    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+        Some(self.scheme.clone())
+    }
+}
+
+/// A scheme provider that allows dynamically setting the returned scheme.
+///
+/// Useful for tests that need to modify the scheme during execution (e.g., to simulate
+/// epoch transitions or scheme failures).
+#[derive(Clone, Debug)]
+pub struct MockSchemeProvider<S: Scheme> {
+    scheme: Arc<std::sync::RwLock<Option<Arc<S>>>>,
+}
+
+impl<S: Scheme> Default for MockSchemeProvider<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Scheme> MockSchemeProvider<S> {
+    /// Creates a new mock provider with no scheme set.
+    pub fn new() -> Self {
+        Self {
+            scheme: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Creates a new mock provider with the given scheme.
+    pub fn with_scheme(scheme: S) -> Self {
+        Self {
+            scheme: Arc::new(std::sync::RwLock::new(Some(Arc::new(scheme)))),
+        }
+    }
+
+    /// Sets the scheme to return.
+    pub fn set(&self, scheme: Option<S>) {
+        *self.scheme.write().unwrap() = scheme.map(Arc::new);
+    }
+}
+
+impl<S: Scheme, E> SchemeProvider<E> for MockSchemeProvider<S> {
+    type Scheme = S;
+
+    fn scheme(&self, _epoch: E) -> Option<Arc<S>> {
+        self.scheme.read().unwrap().clone()
     }
 }

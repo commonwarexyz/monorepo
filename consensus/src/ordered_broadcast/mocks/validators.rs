@@ -1,5 +1,8 @@
-use crate::{scheme::SchemeProvider, types::Epoch};
-use commonware_cryptography::{certificate::Scheme, PublicKey};
+use crate::types::Epoch;
+use commonware_cryptography::{
+    certificate::{Scheme, SchemeProvider},
+    PublicKey,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -29,7 +32,7 @@ impl<P: PublicKey, S: Scheme> Validators<P, S> {
     }
 }
 
-impl<P: PublicKey, S: Scheme> SchemeProvider for Validators<P, S> {
+impl<P: PublicKey, S: Scheme> SchemeProvider<Epoch> for Validators<P, S> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {

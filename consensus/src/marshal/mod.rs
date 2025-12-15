@@ -108,7 +108,6 @@ mod tests {
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
-        scheme::SchemeProvider,
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
             scheme::bls12381_threshold,
@@ -120,7 +119,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
-        certificate::Scheme,
+        certificate::{mocks::SingleSchemeProvider, Scheme as _},
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
@@ -143,7 +142,6 @@ mod tests {
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},
-        sync::Arc,
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -153,26 +151,7 @@ mod tests {
     type K = PublicKey;
     type V = MinPk;
     type S = bls12381_threshold::Scheme<K, V>;
-    type P = ConstantSchemeProvider;
-
-    #[derive(Clone)]
-    struct ConstantSchemeProvider(Arc<S>);
-    impl SchemeProvider for ConstantSchemeProvider {
-        type Scheme = S;
-
-        fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
-            Some(self.0.clone())
-        }
-
-        fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
-            Some(self.0.clone())
-        }
-    }
-    impl From<S> for ConstantSchemeProvider {
-        fn from(scheme: S) -> Self {
-            Self(Arc::new(scheme))
-        }
-    }
+    type P = SingleSchemeProvider<S>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -458,7 +437,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -604,7 +583,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -692,7 +671,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 validator.clone(),
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -762,7 +741,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -817,7 +796,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -893,7 +872,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -961,7 +940,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1072,7 +1051,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1132,7 +1111,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1213,7 +1192,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1272,7 +1251,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1330,7 +1309,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1384,7 +1363,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1469,7 +1448,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me.clone(),
-                schemes[0].clone().into(),
+                SingleSchemeProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1597,7 +1576,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    SingleSchemeProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1708,7 +1687,7 @@ mod tests {
                 context.with_label(&format!("validator-{i}")),
                 &mut oracle,
                 validator.clone(),
-                schemes[i].clone().into(),
+                SingleSchemeProvider::new(schemes[i].clone()),
             )
             .await
             .1;
@@ -1735,7 +1714,7 @@ mod tests {
                 context.with_label(&format!("validator-{i}")),
                 &mut oracle,
                 validator.clone(),
-                schemes[i].clone().into(),
+                SingleSchemeProvider::new(schemes[i].clone()),
             )
             .await
             .1;

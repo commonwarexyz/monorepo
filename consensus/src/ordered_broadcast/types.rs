@@ -447,7 +447,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        scheme_provider: &impl SchemeProvider<Scheme = S>,
+        scheme_provider: &impl SchemeProvider<Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -528,7 +528,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// 5. Decodes the certificate using the epoch-specific bounded codec config
     pub fn read_staged(
         reader: &mut impl Buf,
-        provider: &impl SchemeProvider<Scheme = S>,
+        provider: &impl SchemeProvider<Epoch, Scheme = S>,
     ) -> Result<Self, CodecError> {
         // Decode chunk and signature
         let chunk = Chunk::read(reader)?;

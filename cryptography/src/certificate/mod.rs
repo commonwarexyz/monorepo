@@ -67,7 +67,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
+use std::{collections::BTreeSet, fmt::Debug, hash::Hash, sync::Arc};
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
@@ -273,6 +273,32 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
+/// Supplies the signing scheme for a given epoch.
+///
+/// This trait is generic over the epoch type `E`, allowing implementations to work
+/// with any epoch representation. The consensus crate provides a concrete `Epoch` type.
+pub trait SchemeProvider<E>: Clone + Send + Sync + 'static {
+    /// The signing scheme to provide.
+    type Scheme: Scheme;
+
+    /// Return the signing scheme that corresponds to `epoch`.
+    fn scheme(&self, epoch: E) -> Option<Arc<Self::Scheme>>;
+
+    /// Return a certificate verifier that can validate certificates independent of epoch.
+    ///
+    /// This method allows implementations to provide a verifier that can validate
+    /// certificates from any epoch (without epoch-specific state). For example,
+    /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
+    /// can be used to verify certificates from any epoch, even after the committee
+    /// has rotated and the underlying secret shares have been refreshed.
+    ///
+    /// The default implementation returns `None`. Callers should fall back to
+    /// [`SchemeProvider::scheme`] for epoch-specific verification.
+    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+        None
+    }
+}
+
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
@@ -416,6 +442,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
+    #[allow(dead_code)]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
@@ -432,7 +459,7 @@ mod tests {
             }
         }
 
-        // Use the macro to generate the test scheme
+        // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
         impl_ed25519_certificate!(TestContext<'a>);
 
         commonware_conformance::conformance_tests! {

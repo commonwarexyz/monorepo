@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    P: SchemeProvider,
+    P: SchemeProvider<Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
@@ -153,7 +153,7 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: SchemeProvider<Scheme: AggregationScheme<D>>,
+        P: SchemeProvider<Epoch, Scheme: AggregationScheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,

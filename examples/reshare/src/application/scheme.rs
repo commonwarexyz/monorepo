@@ -1,11 +1,11 @@
 //! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::scheme::SchemeProvider] implementation.
+//! [commonware_cryptography::certificate::SchemeProvider] implementation.
 
 use crate::orchestrator::EpochTransition;
-use commonware_consensus::{scheme, simplex, types::Epoch};
+use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
-    certificate::Scheme,
+    certificate::{Scheme, SchemeProvider as SchemeProviderTrait},
     ed25519, PublicKey, Signer,
 };
 use std::{
@@ -53,7 +53,7 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> scheme::SchemeProvider for SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> SchemeProviderTrait<Epoch> for SchemeProvider<S, C> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
