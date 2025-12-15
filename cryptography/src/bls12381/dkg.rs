@@ -85,6 +85,7 @@
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
 //! - The list of players who received shares,
+//! - The set of players whose shares may have been revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
 //! ## Trusted Dealing Functions
@@ -335,11 +336,6 @@ pub struct Output<V: Variant, P> {
     summary: Summary,
     players: Set<P>,
     public: Sharing<V>,
-    /// The set of players whose shares may have been revealed to an adversary.
-    ///
-    /// A player is included in this set if more than `max_faults` dealer shares
-    /// had to be recovered from public reveals. In this case, an adversary
-    /// controlling `max_faults` dealers could have reconstructed the share.
     revealed: Set<P>,
 }
 
