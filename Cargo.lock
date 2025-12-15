@@ -1509,6 +1509,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "xdp",
 ]
 
 [[package]]
@@ -5893,6 +5894,12 @@ dependencies = [
  "serde",
  "zeroize",
 ]
+
+[[package]]
+name = "xdp"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "855057bf4a9d1ebf97492e12cf96c93c66b6c832c44c0e65541aea9a72ac475a"
 
 [[package]]
 name = "xmlparser"

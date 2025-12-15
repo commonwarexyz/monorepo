@@ -108,6 +108,7 @@ futures-util = "0.3.31"
 governor = "0.10.2"
 hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
+xdp = "0.7.1"
 libc = "0.2.172"
 libfuzzer-sys = "0.4.9"
 num-bigint = { version = "0.4.6", default-features = false }

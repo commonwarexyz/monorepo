@@ -22,6 +22,7 @@ commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
+xdp = { workspace = true, optional = true }
 libc.workspace = true
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
@@ -54,6 +55,7 @@ external = [ "pin-project" ]
 test-utils = []
 iouring-storage = [ "io-uring" ]
 iouring-network = [ "io-uring" ]
+xdp-network = [ "xdp" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]

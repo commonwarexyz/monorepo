@@ -2,11 +2,18 @@ pub(crate) mod audited;
 pub(crate) mod deterministic;
 pub(crate) mod metered;
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "iouring-network"),
+    not(feature = "xdp-network")
+))]
 pub(crate) mod tokio;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "iouring-network"))]
 pub(crate) mod iouring;
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "xdp-network"))]
+pub(crate) mod xdp;
 
 #[cfg(test)]
 mod tests {

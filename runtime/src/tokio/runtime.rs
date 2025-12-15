@@ -1,4 +1,4 @@
-#[cfg(not(feature = "iouring-network"))]
+#[cfg(all(not(feature = "iouring-network"), not(feature = "xdp-network")))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
@@ -11,6 +11,8 @@ use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
+#[cfg(feature = "xdp-network")]
+use crate::network::xdp::{Config as XdpNetworkConfig, Network as XdpNetwork};
 use crate::{
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
@@ -46,6 +48,11 @@ const IOURING_NETWORK_SIZE: u32 = 1024;
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_FORCE_POLL: Duration = Duration::from_millis(100);
 
+#[cfg(feature = "xdp-network")]
+const XDP_DEFAULT_INTERFACE: &str = "eth0";
+#[cfg(feature = "xdp-network")]
+const XDP_DEFAULT_QUEUE_ID: u32 = 0;
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Family<Label, Counter>,
@@ -80,6 +87,26 @@ pub struct NetworkConfig {
 
     /// Read/write timeout for network operations.
     read_write_timeout: Duration,
+
+    /// XDP network interface name.
+    #[cfg(feature = "xdp-network")]
+    xdp_interface: String,
+
+    /// XDP queue ID to bind to.
+    #[cfg(feature = "xdp-network")]
+    xdp_queue_id: u32,
+
+    /// XDP zero-copy mode.
+    #[cfg(feature = "xdp-network")]
+    xdp_zero_copy: bool,
+
+    /// XDP local IP address.
+    #[cfg(feature = "xdp-network")]
+    xdp_local_ip: std::net::Ipv4Addr,
+
+    /// XDP local MAC address.
+    #[cfg(feature = "xdp-network")]
+    xdp_local_mac: [u8; 6],
 }
 
 impl Default for NetworkConfig {
@@ -87,6 +114,16 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: None,
             read_write_timeout: Duration::from_secs(60),
+            #[cfg(feature = "xdp-network")]
+            xdp_interface: XDP_DEFAULT_INTERFACE.to_string(),
+            #[cfg(feature = "xdp-network")]
+            xdp_queue_id: XDP_DEFAULT_QUEUE_ID,
+            #[cfg(feature = "xdp-network")]
+            xdp_zero_copy: false,
+            #[cfg(feature = "xdp-network")]
+            xdp_local_ip: std::net::Ipv4Addr::new(0, 0, 0, 0),
+            #[cfg(feature = "xdp-network")]
+            xdp_local_mac: [0; 6],
         }
     }
 }
@@ -174,6 +211,41 @@ impl Config {
     /// See [Config]
     pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
+        self
+    }
+
+    /// Sets the XDP network interface.
+    #[cfg(feature = "xdp-network")]
+    pub fn with_xdp_interface(mut self, interface: impl Into<String>) -> Self {
+        self.network_cfg.xdp_interface = interface.into();
+        self
+    }
+
+    /// Sets the XDP queue ID.
+    #[cfg(feature = "xdp-network")]
+    pub const fn with_xdp_queue_id(mut self, queue_id: u32) -> Self {
+        self.network_cfg.xdp_queue_id = queue_id;
+        self
+    }
+
+    /// Enables XDP zero-copy mode.
+    #[cfg(feature = "xdp-network")]
+    pub const fn with_xdp_zero_copy(mut self, enabled: bool) -> Self {
+        self.network_cfg.xdp_zero_copy = enabled;
+        self
+    }
+
+    /// Sets the XDP local IP address.
+    #[cfg(feature = "xdp-network")]
+    pub const fn with_xdp_local_ip(mut self, ip: std::net::Ipv4Addr) -> Self {
+        self.network_cfg.xdp_local_ip = ip;
+        self
+    }
+
+    /// Sets the XDP local MAC address.
+    #[cfg(feature = "xdp-network")]
+    pub const fn with_xdp_local_mac(mut self, mac: [u8; 6]) -> Self {
+        self.network_cfg.xdp_local_mac = mac;
         self
     }
 
@@ -311,12 +383,26 @@ impl crate::Runner for Runner {
                 };
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(config, iouring_registry).unwrap(),
-                runtime_registry,
-            );
-        } else {
-            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                    runtime_registry,
+                );
+            } else if #[cfg(feature = "xdp-network")] {
+                let xdp_registry = runtime_registry.sub_registry_with_prefix("xdp_network");
+                let config = XdpNetworkConfig::new(&self.cfg.network_cfg.xdp_interface)
+                    .with_queue_id(self.cfg.network_cfg.xdp_queue_id)
+                    .with_zero_copy(self.cfg.network_cfg.xdp_zero_copy)
+                    .with_local_ip(self.cfg.network_cfg.xdp_local_ip)
+                    .with_local_mac(self.cfg.network_cfg.xdp_local_mac)
+                    .with_recv_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_send_timeout(self.cfg.network_cfg.read_write_timeout);
+                let network = MeteredNetwork::new(
+                    XdpNetwork::start(config, xdp_registry).unwrap(),
+                    runtime_registry,
+                );
+            } else {
+                let config = TokioNetworkConfig::default()
+                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
                     TokioNetwork::from(config),
                     runtime_registry,
@@ -366,6 +452,8 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-network")] {
         type Network = MeteredNetwork<IoUringNetwork>;
+    } else if #[cfg(feature = "xdp-network")] {
+        type Network = MeteredNetwork<XdpNetwork>;
     } else {
         type Network = MeteredNetwork<TokioNetwork>;
     }
