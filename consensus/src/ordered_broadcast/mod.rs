@@ -202,7 +202,7 @@ mod tests {
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
             // Create Provider and register only this validator's scheme for the epoch
-            let validators_provider = mocks::Validators::new(fixture.participants.clone());
+            let validators_provider = mocks::Provider::new();
             assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
@@ -707,7 +707,7 @@ mod tests {
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
 
                 // Create and store Provider so we can register new epochs later
-                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                let validators_provider = mocks::Provider::new();
                 assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
                 validators_providers.insert(validator.clone(), validators_provider.clone());
 
@@ -858,7 +858,7 @@ mod tests {
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
                 // Create Provider and register this validator's scheme
-                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                let validators_provider = mocks::Provider::new();
                 assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
@@ -916,7 +916,7 @@ mod tests {
 
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
                 // But it needs the verifier to validate acks from validators
-                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                let validators_provider = mocks::Provider::new();
                 assert!(validators_provider.register(epoch, fixture.verifier.clone()));
 
                 let engine = Engine::new(

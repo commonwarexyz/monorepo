@@ -1,24 +1,22 @@
 use crate::types::Epoch;
-use commonware_cryptography::{
-    certificate::{Provider, Scheme},
-    PublicKey,
-};
+use commonware_cryptography::certificate;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+/// A mock [`certificate::Provider`] that allows registering different schemes per epoch.
+///
+/// Unlike [`certificate::ConstantProvider`] which returns the same scheme for all scopes,
+/// this mock supports epoch-specific schemes for multi-epoch testing scenarios.
 #[derive(Clone)]
-pub struct Validators<P: PublicKey, S: Scheme> {
-    _validators: Vec<P>,
+pub struct Provider<S: certificate::Scheme> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
 }
 
-impl<P: PublicKey, S: Scheme> Validators<P, S> {
-    pub fn new(mut validators: Vec<P>) -> Self {
-        validators.sort();
+impl<S: certificate::Scheme> Provider<S> {
+    pub fn new() -> Self {
         Self {
-            _validators: validators,
             schemes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -32,7 +30,13 @@ impl<P: PublicKey, S: Scheme> Validators<P, S> {
     }
 }
 
-impl<P: PublicKey, S: Scheme> Provider for Validators<P, S> {
+impl<S: certificate::Scheme> Default for Provider<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: certificate::Scheme> certificate::Provider for Provider<S> {
     type Scope = Epoch;
     type Scheme = S;
 
