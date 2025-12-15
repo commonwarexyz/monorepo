@@ -2075,20 +2075,36 @@ mod test_plan {
                     })
                     .collect();
 
-                // Calculate expected reveals per player based on selected dealers
-                let mut expected_reveal_counts: BTreeMap<u32, u32> = BTreeMap::new();
-                for &(dealer, player) in round.no_acks.iter().chain(round.bad_shares.iter()) {
-                    if selected_dealer_indices.contains(&dealer) {
-                        *expected_reveal_counts.entry(player).or_insert(0) += 1;
+                // Build sorted order of player public keys (matches Map iteration order)
+                let sorted_player_pks: Vec<ed25519::PublicKey> = {
+                    let mut pks: Vec<_> = round
+                        .players
+                        .iter()
+                        .map(|&i| keys[i as usize].public_key())
+                        .collect();
+                    pks.sort();
+                    pks
+                };
+
+                // Calculate expected reveals per player based on selected dealers.
+                // Note: player indices in no_acks/bad_shares are used as position indices
+                // via round.players[i_player] in the test code.
+                let mut expected_reveal_counts: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
+                for &(dealer, player_pos) in round.no_acks.iter().chain(round.bad_shares.iter()) {
+                    if selected_dealer_indices.contains(&dealer)
+                        && (player_pos as usize) < sorted_player_pks.len()
+                    {
+                        let player_pk = sorted_player_pks[player_pos as usize].clone();
+                        *expected_reveal_counts.entry(player_pk).or_insert(0) += 1;
                     }
                 }
 
                 let max_faults_val = max_faults(round.players.len() as u32);
                 let expected_revealed: BTreeSet<ed25519::PublicKey> = expected_reveal_counts
                     .into_iter()
-                    .filter_map(|(player_idx, count)| {
+                    .filter_map(|(player_pk, count)| {
                         if count > max_faults_val {
-                            Some(keys[player_idx as usize].public_key())
+                            Some(player_pk)
                         } else {
                             None
                         }
@@ -2097,7 +2113,6 @@ mod test_plan {
 
                 let actual_revealed: BTreeSet<ed25519::PublicKey> =
                     observer_output.revealed().into_iter().cloned().collect();
-
                 assert_eq!(
                     expected_revealed, actual_revealed,
                     "Round {i_round}: revealed set mismatch"
@@ -2415,12 +2430,24 @@ mod test {
     }
 
     #[test]
-    fn too_many_reveals() -> anyhow::Result<()> {
+    fn too_many_reveals_dealer() -> anyhow::Result<()> {
         Plan::new(NonZeroU32::new(4).unwrap())
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(0, 0)
                     .no_ack(0, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn too_many_reveals_player() -> anyhow::Result<()> {
+        Plan::new(NonZeroU32::new(4).unwrap())
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(0, 0)
+                    .no_ack(1, 0)
+                    .no_ack(3, 0),
             )
             .run::<MinPk>(0)
     }
