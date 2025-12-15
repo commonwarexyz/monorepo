@@ -1,6 +1,6 @@
 use crate::{
     ordered_broadcast::{
-        scheme::OrderedBroadcastScheme,
+        scheme,
         types::{Activity, Chunk, Lock, Proposal},
     },
     types::Epoch,
@@ -81,7 +81,7 @@ where
 
     pub async fn run(mut self)
     where
-        S: OrderedBroadcastScheme<C, D>,
+        S: scheme::Scheme<C, D>,
     {
         let mut misses = 0;
         while let Some(msg) = self.mailbox.next().await {

@@ -71,14 +71,12 @@ pub mod mocks;
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        ordered_broadcast::scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme,
-        },
+        ordered_broadcast::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{mocks::Fixture, Scheme},
+        certificate::{self, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer as _,
@@ -161,7 +159,7 @@ mod tests {
         success_rate: 1.0,
     };
 
-    async fn initialize_simulation<S: Scheme>(
+    async fn initialize_simulation<S: certificate::Scheme>(
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
@@ -193,7 +191,7 @@ mod tests {
         epoch: Epoch,
     ) -> BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
     {
         let mut reporters = BTreeMap::new();
         let namespace = b"my testing namespace";
@@ -254,7 +252,7 @@ mod tests {
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
         threshold: (u64, Epoch, bool),
     ) where
-        S: Scheme,
+        S: certificate::Scheme,
     {
         let (threshold_height, threshold_epoch, require_contiguous) =
             (threshold.0, threshold.1, threshold.2);
@@ -305,7 +303,7 @@ mod tests {
         }
     }
 
-    async fn get_max_height<S: Scheme>(
+    async fn get_max_height<S: certificate::Scheme>(
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
     ) -> u64 {
         let mut max_height = 0;
@@ -323,7 +321,7 @@ mod tests {
 
     fn all_online<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
@@ -369,7 +367,7 @@ mod tests {
 
     fn unclean_shutdown<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> Fixture<S> + Clone,
     {
         let mut prev_checkpoint = None;
@@ -455,7 +453,7 @@ mod tests {
 
     fn network_partition<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -517,7 +515,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
@@ -634,7 +632,7 @@ mod tests {
 
     fn invalid_signature_injection<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -680,7 +678,7 @@ mod tests {
 
     fn updated_epoch<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -812,7 +810,7 @@ mod tests {
 
     fn external_sequencer<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -977,7 +975,7 @@ mod tests {
 
     fn run_1k<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new();

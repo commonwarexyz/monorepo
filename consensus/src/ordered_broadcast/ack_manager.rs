@@ -151,12 +151,12 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
         types::Chunk,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{mocks::Fixture, Scheme},
+        certificate::mocks::Fixture,
         ed25519::PublicKey,
         Hasher, Sha256,
     };
@@ -180,7 +180,7 @@ mod tests {
             epoch: Epoch,
         ) -> Ack<PublicKey, S, <Sha256 as Hasher>::Digest>
         where
-            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+            S: Scheme<PublicKey, Sha256Digest>,
         {
             let context = AckSubject {
                 chunk: &chunk,
@@ -200,7 +200,7 @@ mod tests {
             indices: &[usize],
         ) -> Vec<Ack<PublicKey, S, <Sha256 as Hasher>::Digest>>
         where
-            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+            S: Scheme<PublicKey, Sha256Digest>,
         {
             indices
                 .iter()
@@ -218,7 +218,7 @@ mod tests {
             indices: &[usize],
         ) -> Option<S::Certificate>
         where
-            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+            S: Scheme<PublicKey, Sha256Digest>,
         {
             let acks = create_acks_for_indices(schemes, chunk, epoch, indices);
             let mut certificate = None;
@@ -243,7 +243,7 @@ mod tests {
     /// Different payloads for the same chunk produce distinct certificates.
     fn chunk_different_payloads<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         // Use 8 validators so quorum is 6
@@ -292,7 +292,7 @@ mod tests {
     /// Adding certificates for different heights prunes older entries.
     fn sequencer_different_heights<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -338,7 +338,7 @@ mod tests {
     /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
     fn sequencer_contiguous_heights<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -386,7 +386,7 @@ mod tests {
     /// For the same sequencer and height, the highest epoch's certificate is returned.
     fn chunk_different_epochs<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -432,7 +432,7 @@ mod tests {
     /// Adding the same certificate twice returns false.
     fn add_certificate<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -472,7 +472,7 @@ mod tests {
     /// Duplicate partial submissions are ignored.
     fn duplicate_partial_submission<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -500,7 +500,7 @@ mod tests {
     /// Once a certificate is reached, further acks are ignored.
     fn subsequent_acks_after_certificate_reached<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -537,7 +537,7 @@ mod tests {
     /// Acks for different sequencers are managed separately.
     fn multiple_sequencers<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -576,7 +576,7 @@ mod tests {
     /// If quorum is never reached, no certificate is produced.
     fn partial_quorum_never_reached<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
@@ -606,7 +606,7 @@ mod tests {
     /// Interleaved acks for different payloads are aggregated separately.
     fn interleaved_payloads<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         // Use 20 validators so quorum is 14

@@ -57,7 +57,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
         types::Chunk,
     };
     use commonware_cryptography::{
@@ -81,7 +81,7 @@ mod tests {
     }
 
     /// Creates a node for testing with a given scheme.
-    fn create_node<S: OrderedBroadcastScheme<PublicKey, Sha256Digest>>(
+    fn create_node<S: Scheme<PublicKey, Sha256Digest>>(
         fixture: &Fixture<S>,
         sequencer_idx: usize,
         height: u64,
@@ -113,7 +113,7 @@ mod tests {
 
     fn put_new_tip<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -138,7 +138,7 @@ mod tests {
 
     fn put_same_height_same_payload<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -164,7 +164,7 @@ mod tests {
 
     fn put_higher_tip<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -191,7 +191,7 @@ mod tests {
 
     fn put_lower_tip_panics<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -222,7 +222,7 @@ mod tests {
 
     fn put_same_height_different_payload_panics<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -258,7 +258,7 @@ mod tests {
 
     fn get_nonexistent<S>()
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
     {
         let manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let key = deterministic_public_key(6);
@@ -276,7 +276,7 @@ mod tests {
 
     fn multiple_sequencers<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -305,7 +305,7 @@ mod tests {
 
     fn put_multiple_updates<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);

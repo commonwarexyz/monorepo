@@ -1,6 +1,6 @@
 //! Types used in [crate::ordered_broadcast].
 
-use super::scheme::OrderedBroadcastScheme;
+use super::scheme;
 use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -451,7 +451,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
-        S: OrderedBroadcastScheme<P, D>,
+        S: scheme::Scheme<P, D>,
     {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
@@ -703,7 +703,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Returns true if the part is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
-        S: OrderedBroadcastScheme<P, D>,
+        S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
@@ -719,7 +719,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Returns None if the scheme cannot sign.
     pub fn sign(namespace: &[u8], scheme: &S, chunk: Chunk<P, D>, epoch: Epoch) -> Option<Self>
     where
-        S: OrderedBroadcastScheme<P, D>,
+        S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
@@ -975,7 +975,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
         R: Rng + CryptoRng,
-        S: OrderedBroadcastScheme<P, D>,
+        S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
@@ -1036,7 +1036,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks::Validators,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
@@ -1092,7 +1092,7 @@ mod tests {
     // Tests migrated to use Scheme-based API
     fn parent_encode_decode<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1138,7 +1138,7 @@ mod tests {
 
     fn node_encode_decode<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1216,7 +1216,7 @@ mod tests {
 
     fn node_read_staged<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1317,7 +1317,7 @@ mod tests {
 
     fn ack_encode_decode<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1353,7 +1353,7 @@ mod tests {
 
     fn activity_encode_decode<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1459,7 +1459,7 @@ mod tests {
 
     fn lock_encode_decode<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1513,7 +1513,7 @@ mod tests {
 
     fn node_sign_verify<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1585,7 +1585,7 @@ mod tests {
 
     fn ack_sign_verify<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1611,7 +1611,7 @@ mod tests {
 
     fn certificate_assembly<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1658,7 +1658,7 @@ mod tests {
 
     fn lock_verify<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1724,7 +1724,7 @@ mod tests {
 
     fn node_verify_invalid_signature<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1769,7 +1769,7 @@ mod tests {
 
     fn node_verify_invalid_parent_signature<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1864,7 +1864,7 @@ mod tests {
 
     fn ack_verify_invalid_signature<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -1913,7 +1913,7 @@ mod tests {
 
     fn ack_verify_wrong_validator<S, F>(f: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(4, 0, &f);
@@ -1946,7 +1946,7 @@ mod tests {
 
     fn lock_verify_invalid_signature<S, F>(f: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(4, 0, &f);
@@ -2050,7 +2050,7 @@ mod tests {
 
     fn node_genesis_with_parent_fails<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -2104,7 +2104,7 @@ mod tests {
 
     fn node_non_genesis_without_parent_fails<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -2135,7 +2135,7 @@ mod tests {
 
     fn node_genesis_with_parent_panics<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -2199,7 +2199,7 @@ mod tests {
 
     fn node_non_genesis_without_parent_panics<S, F>(fixture: F)
     where
-        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);

@@ -8,8 +8,7 @@
 //! - Notifying other actors of new chunks and certificates
 
 use super::{
-    metrics,
-    scheme::OrderedBroadcastScheme,
+    metrics, scheme,
     types::{
         Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal, SequencersProvider,
     },
@@ -66,7 +65,7 @@ pub struct Engine<
     E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
-    P: Provider<Scope = Epoch, Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+    P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
@@ -202,10 +201,7 @@ impl<
         E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: Provider<
-            Scope = Epoch,
-            Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>,
-        >,
+        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,

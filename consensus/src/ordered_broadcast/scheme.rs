@@ -14,7 +14,22 @@
 //!   certificates regardless of committee size.
 
 use super::types::AckSubject;
-use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_cryptography::{certificate, Digest, PublicKey};
+
+/// Marker trait for signing schemes compatible with `ordered_broadcast`.
+///
+/// This trait binds a [`certificate::Scheme`] to the [`AckSubject`] subject
+/// type used by the ordered broadcast protocol. It is automatically implemented
+/// for any scheme whose subject type matches `AckSubject<'a, P, D>`.
+pub trait Scheme<P: PublicKey, D: Digest>:
+    for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+{
+}
+
+impl<P: PublicKey, D: Digest, S> Scheme<P, D> for S where
+    S: for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+{
+}
 
 pub mod bls12381_multisig {
     //! BLS12-381 multi-signature implementation of the [`Scheme`] trait for `ordered_broadcast`.
@@ -57,19 +72,4 @@ pub mod ed25519 {
     use commonware_cryptography::{ed25519, impl_certificate_ed25519};
 
     impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>);
-}
-
-/// Marker trait for signing schemes compatible with `ordered_broadcast`.
-///
-/// This trait binds a [`Scheme`] to the [`AckSubject`] subject type used by the
-/// ordered broadcast protocol. It is automatically implemented for any scheme
-/// whose subject type matches `AckSubject<'a, P, D>`.
-pub trait OrderedBroadcastScheme<P: PublicKey, D: Digest>:
-    for<'a> Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
-{
-}
-
-impl<P: PublicKey, D: Digest, S> OrderedBroadcastScheme<P, D> for S where
-    S: for<'a> Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
-{
 }
