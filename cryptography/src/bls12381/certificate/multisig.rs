@@ -354,22 +354,23 @@ where
 mod macros {
     /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
     ///
-    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait
-    /// implementation. The only required parameter is the `Context` type, which varies
-    /// per protocol.
+    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+    /// implementation, and a `fixtures` function for testing.
+    /// The only required parameter is the `Context` type, which varies per protocol.
     ///
     /// # Example
     /// ```ignore
     /// impl_bls12381_multisig_certificate!(VoteContext<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_bls12381_multisig_certificate_fixtures {
-        () => {
+    macro_rules! impl_bls12381_multisig_certificate {
+        ($context:ty) => {
             /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
             #[cfg(feature = "mocks")]
+            #[allow(dead_code)]
             pub fn fixtures<V, R>(
                 rng: &mut R,
                 n: u32,
@@ -385,12 +386,7 @@ mod macros {
                     Scheme::verifier,
                 )
             }
-        };
-    }
 
-    #[macro_export]
-    macro_rules! impl_bls12381_multisig_certificate {
-        ($context:ty) => {
             /// BLS12-381 multi-signature signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme<

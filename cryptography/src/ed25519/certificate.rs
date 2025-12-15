@@ -347,7 +347,8 @@ impl Read for Certificate {
 mod macros {
     /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
     ///
-    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait implementation.
+    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+    /// implementation, and a `fixtures` function for testing.
     /// The only required parameter is the `Context` type, which varies per protocol.
     ///
     /// # Example
@@ -355,25 +356,21 @@ mod macros {
     /// impl_ed25519_certificate!(VoteContext<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_ed25519_certificate_fixtures {
-        () => {
+    macro_rules! impl_ed25519_certificate {
+        ($context:ty) => {
             /// Generates a test fixture with Ed25519 identities and signing schemes.
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
             #[cfg(feature = "mocks")]
+            #[allow(dead_code)]
             pub fn fixtures<R>(rng: &mut R, n: u32) -> $crate::certificate::mocks::Fixture<Scheme>
             where
                 R: rand::RngCore + rand::CryptoRng,
             {
                 $crate::certificate::mocks::ed25519(rng, n, Scheme::signer, Scheme::verifier)
             }
-        };
-    }
 
-    #[macro_export]
-    macro_rules! impl_ed25519_certificate {
-        ($context:ty) => {
             /// Ed25519 signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme {

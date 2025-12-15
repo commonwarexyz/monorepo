@@ -59,9 +59,8 @@ pub use crate::bls12381::certificate::{
 #[cfg(feature = "std")]
 pub use crate::ed25519::certificate as ed25519;
 pub use crate::{
-    impl_bls12381_multisig_certificate, impl_bls12381_multisig_certificate_fixtures,
-    impl_bls12381_threshold_certificate, impl_bls12381_threshold_certificate_fixtures,
-    impl_ed25519_certificate, impl_ed25519_certificate_fixtures,
+    impl_bls12381_multisig_certificate, impl_bls12381_threshold_certificate,
+    impl_ed25519_certificate,
 };
 use crate::{Digest, PublicKey};
 use bytes::{Buf, BufMut};

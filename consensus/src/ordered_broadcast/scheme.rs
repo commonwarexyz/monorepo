@@ -25,12 +25,9 @@ pub mod bls12381_multisig {
     //! enabling secure per-validator activity tracking and conflict detection.
 
     use crate::ordered_broadcast::types::AckContext;
-    use commonware_cryptography::{
-        impl_bls12381_multisig_certificate, impl_bls12381_multisig_certificate_fixtures,
-    };
+    use commonware_cryptography::impl_bls12381_multisig_certificate;
 
     impl_bls12381_multisig_certificate!(AckContext<'a, P, D>);
-    impl_bls12381_multisig_certificate_fixtures!();
 }
 
 pub mod bls12381_threshold {
@@ -43,12 +40,9 @@ pub mod bls12381_threshold {
     //! (as it must be sent by said participant) but can't be used by an external observer.
 
     use crate::ordered_broadcast::types::AckContext;
-    use commonware_cryptography::{
-        impl_bls12381_threshold_certificate, impl_bls12381_threshold_certificate_fixtures,
-    };
+    use commonware_cryptography::impl_bls12381_threshold_certificate;
 
     impl_bls12381_threshold_certificate!(AckContext<'a, P, D>);
-    impl_bls12381_threshold_certificate_fixtures!();
 }
 
 pub mod ed25519 {
@@ -60,12 +54,9 @@ pub mod ed25519 {
     //! per-validator activity tracking and fault detection.
 
     use crate::ordered_broadcast::types::AckContext;
-    use commonware_cryptography::{
-        ed25519, impl_ed25519_certificate, impl_ed25519_certificate_fixtures,
-    };
+    use commonware_cryptography::{ed25519, impl_ed25519_certificate};
 
     impl_ed25519_certificate!(AckContext<'a, ed25519::PublicKey, D>);
-    impl_ed25519_certificate_fixtures!();
 }
 
 /// Marker trait for signing schemes compatible with `ordered_broadcast`.
