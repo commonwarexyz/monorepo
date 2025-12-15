@@ -506,7 +506,7 @@ mod tests {
         Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
-    fn add_notarize<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn add_notarize<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -562,7 +562,7 @@ mod tests {
         add_notarize(generate_ed25519_schemes(5, 123));
     }
 
-    fn set_leader<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn set_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -594,7 +594,7 @@ mod tests {
         set_leader(generate_ed25519_schemes(5, 124));
     }
 
-    fn ready_and_verify_notarizes<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_notarizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -656,7 +656,7 @@ mod tests {
         ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
     }
 
-    fn add_nullify<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn add_nullify<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -677,7 +677,7 @@ mod tests {
         add_nullify(generate_ed25519_schemes(5, 127));
     }
 
-    fn ready_and_verify_nullifies<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_nullifies<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -712,7 +712,7 @@ mod tests {
         ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
     }
 
-    fn add_finalize<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn add_finalize<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -748,7 +748,7 @@ mod tests {
         add_finalize(generate_ed25519_schemes(5, 129));
     }
 
-    fn ready_and_verify_finalizes<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_finalizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -788,7 +788,7 @@ mod tests {
         ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
-    fn leader_proposal_filters_messages<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn leader_proposal_filters_messages<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -822,7 +822,7 @@ mod tests {
         leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
     }
 
-    fn set_leader_twice_panics<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn set_leader_twice_panics<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
         verifier.set_leader(0);
         verifier.set_leader(1);
@@ -839,7 +839,7 @@ mod tests {
     fn test_set_leader_twice_panics_ed() {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
-    fn notarizes_wait_for_quorum<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn notarizes_wait_for_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -872,7 +872,7 @@ mod tests {
         notarizes_wait_for_quorum(generate_ed25519_schemes(5, 203));
     }
 
-    fn ready_notarizes_without_leader<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -905,7 +905,7 @@ mod tests {
         ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
     }
 
-    fn ready_finalizes_without_leader<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -937,7 +937,7 @@ mod tests {
         ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
     }
 
-    fn verify_notarizes_empty<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn verify_notarizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -953,7 +953,7 @@ mod tests {
         verify_notarizes_empty(generate_ed25519_schemes(3, 206));
     }
 
-    fn verify_nullifies_empty<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn verify_nullifies_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -971,7 +971,7 @@ mod tests {
         verify_nullifies_empty(generate_ed25519_schemes(3, 207));
     }
 
-    fn verify_finalizes_empty<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn verify_finalizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -990,7 +990,7 @@ mod tests {
         verify_finalizes_empty(generate_ed25519_schemes(3, 208));
     }
 
-    fn ready_notarizes_exact_quorum<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -1032,7 +1032,7 @@ mod tests {
         ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
     }
 
-    fn ready_nullifies_exact_quorum<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_nullifies_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1054,7 +1054,7 @@ mod tests {
         ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
     }
 
-    fn ready_finalizes_exact_quorum<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1081,7 +1081,7 @@ mod tests {
         ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
     }
 
-    fn ready_notarizes_quorum_already_met_by_verified<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1123,7 +1123,7 @@ mod tests {
         ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(5, 212));
     }
 
-    fn ready_nullifies_quorum_already_met_by_verified<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_nullifies_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1157,7 +1157,7 @@ mod tests {
         ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(5, 213));
     }
 
-    fn ready_finalizes_quorum_already_met_by_verified<S: Scheme<Sha256> + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
