@@ -95,7 +95,7 @@ pub struct RangeProof<D: Digest> {
 }
 
 impl<D: Digest> RangeProof<D> {
-    /// Create a new range proof for the given operations.
+    /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher, S: Storage<H::Digest>, const N: usize>(
         hasher: &mut H,
         status: &CleanBitMap<H::Digest, N>,
@@ -108,7 +108,8 @@ impl<D: Digest> RangeProof<D> {
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+            // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
+            // in the proof.
             hasher.update(last_chunk);
             Some(hasher.finalize())
         } else {
@@ -293,25 +294,16 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
     let mmr_root = grafted_mmr.root(hasher).await?;
 
-    // The digest contains all information from the base mmr, and all information from the peak
-    // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
-    // all the information we need.
-
-    // Handle empty/fully pruned bitmap
-    if status.len() == status.pruned_bits() {
-        return Ok(mmr_root);
-    }
-
+    // If we are on a chunk boundary, then the mmr_root fully captures the state of the DB.
     let (last_chunk, next_bit) = status.last_chunk();
     if next_bit == CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
         // Last chunk is complete, no partial chunk to add
         return Ok(mmr_root);
     }
 
-    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that
-    // information into the root digest. We do so by computing a root in the same format as an
-    // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
-    // the last chunk and the digest of the last chunk.
+    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that information
+    // into the root digest to fully capture the database state. We do so by hashing the mmr root
+    // along with the number of bits within the last chunk and the digest of the last chunk.
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
