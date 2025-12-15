@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Scheme, Signature, Subject as CertificateSubject},
+    certificate::{self, Scheme, Signature},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -274,7 +274,7 @@ pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> CertificateSubject for AckSubject<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> certificate::Subject for AckSubject<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
@@ -1048,14 +1048,12 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks::Validators,
-        scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme,
-        },
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::mocks::{ConstantProvider, Fixture},
+        certificate::{mocks::Fixture, ConstantProvider},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer,
@@ -2237,9 +2235,7 @@ mod tests {
 
     #[test]
     fn test_node_non_genesis_without_parent_panics() {
-        assert!(
-            catch_unwind(|| node_non_genesis_without_parent_panics(ed25519::fixture)).is_err()
-        );
+        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(ed25519::fixture)).is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
             bls12381_multisig::fixture::<MinPk, _>
         ))
