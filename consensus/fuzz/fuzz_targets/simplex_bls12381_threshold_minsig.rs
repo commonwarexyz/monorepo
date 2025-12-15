@@ -15,7 +15,7 @@ impl Simplex for SimplexBls12381MinSig {
     type Scheme = threshold_scheme::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        threshold_scheme::fixtures::<MinSig, _>(context, n)
+        threshold_scheme::fixture::<MinSig, _>(context, n)
     }
 }
 

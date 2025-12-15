@@ -288,11 +288,11 @@ mod tests {
 
     #[test]
     fn test_chunk_different_payloads() {
-        chunk_different_payloads(ed_scheme::fixtures);
-        chunk_different_payloads(bls12381_multisig::fixtures::<MinPk, _>);
-        chunk_different_payloads(bls12381_multisig::fixtures::<MinSig, _>);
-        chunk_different_payloads(bls12381_threshold::fixtures::<MinPk, _>);
-        chunk_different_payloads(bls12381_threshold::fixtures::<MinSig, _>);
+        chunk_different_payloads(ed_scheme::fixture);
+        chunk_different_payloads(bls12381_multisig::fixture::<MinPk, _>);
+        chunk_different_payloads(bls12381_multisig::fixture::<MinSig, _>);
+        chunk_different_payloads(bls12381_threshold::fixture::<MinPk, _>);
+        chunk_different_payloads(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding certificates for different heights prunes older entries.
@@ -334,11 +334,11 @@ mod tests {
 
     #[test]
     fn test_sequencer_different_heights() {
-        sequencer_different_heights(ed_scheme::fixtures);
-        sequencer_different_heights(bls12381_multisig::fixtures::<MinPk, _>);
-        sequencer_different_heights(bls12381_multisig::fixtures::<MinSig, _>);
-        sequencer_different_heights(bls12381_threshold::fixtures::<MinPk, _>);
-        sequencer_different_heights(bls12381_threshold::fixtures::<MinSig, _>);
+        sequencer_different_heights(ed_scheme::fixture);
+        sequencer_different_heights(bls12381_multisig::fixture::<MinPk, _>);
+        sequencer_different_heights(bls12381_multisig::fixture::<MinSig, _>);
+        sequencer_different_heights(bls12381_threshold::fixture::<MinPk, _>);
+        sequencer_different_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
@@ -382,11 +382,11 @@ mod tests {
 
     #[test]
     fn test_sequencer_contiguous_heights() {
-        sequencer_contiguous_heights(ed_scheme::fixtures);
-        sequencer_contiguous_heights(bls12381_multisig::fixtures::<MinPk, _>);
-        sequencer_contiguous_heights(bls12381_multisig::fixtures::<MinSig, _>);
-        sequencer_contiguous_heights(bls12381_threshold::fixtures::<MinPk, _>);
-        sequencer_contiguous_heights(bls12381_threshold::fixtures::<MinSig, _>);
+        sequencer_contiguous_heights(ed_scheme::fixture);
+        sequencer_contiguous_heights(bls12381_multisig::fixture::<MinPk, _>);
+        sequencer_contiguous_heights(bls12381_multisig::fixture::<MinSig, _>);
+        sequencer_contiguous_heights(bls12381_threshold::fixture::<MinPk, _>);
+        sequencer_contiguous_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// For the same sequencer and height, the highest epoch's certificate is returned.
@@ -428,11 +428,11 @@ mod tests {
 
     #[test]
     fn test_chunk_different_epochs() {
-        chunk_different_epochs(ed_scheme::fixtures);
-        chunk_different_epochs(bls12381_multisig::fixtures::<MinPk, _>);
-        chunk_different_epochs(bls12381_multisig::fixtures::<MinSig, _>);
-        chunk_different_epochs(bls12381_threshold::fixtures::<MinPk, _>);
-        chunk_different_epochs(bls12381_threshold::fixtures::<MinSig, _>);
+        chunk_different_epochs(ed_scheme::fixture);
+        chunk_different_epochs(bls12381_multisig::fixture::<MinPk, _>);
+        chunk_different_epochs(bls12381_multisig::fixture::<MinSig, _>);
+        chunk_different_epochs(bls12381_threshold::fixture::<MinPk, _>);
+        chunk_different_epochs(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding the same certificate twice returns false.
@@ -468,11 +468,11 @@ mod tests {
 
     #[test]
     fn test_add_certificate() {
-        add_certificate(ed_scheme::fixtures);
-        add_certificate(bls12381_multisig::fixtures::<MinPk, _>);
-        add_certificate(bls12381_multisig::fixtures::<MinSig, _>);
-        add_certificate(bls12381_threshold::fixtures::<MinPk, _>);
-        add_certificate(bls12381_threshold::fixtures::<MinSig, _>);
+        add_certificate(ed_scheme::fixture);
+        add_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        add_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        add_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        add_certificate(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Duplicate partial submissions are ignored.
@@ -496,11 +496,11 @@ mod tests {
 
     #[test]
     fn test_duplicate_partial_submission() {
-        duplicate_partial_submission(ed_scheme::fixtures);
-        duplicate_partial_submission(bls12381_multisig::fixtures::<MinPk, _>);
-        duplicate_partial_submission(bls12381_multisig::fixtures::<MinSig, _>);
-        duplicate_partial_submission(bls12381_threshold::fixtures::<MinPk, _>);
-        duplicate_partial_submission(bls12381_threshold::fixtures::<MinSig, _>);
+        duplicate_partial_submission(ed_scheme::fixture);
+        duplicate_partial_submission(bls12381_multisig::fixture::<MinPk, _>);
+        duplicate_partial_submission(bls12381_multisig::fixture::<MinSig, _>);
+        duplicate_partial_submission(bls12381_threshold::fixture::<MinPk, _>);
+        duplicate_partial_submission(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Once a certificate is reached, further acks are ignored.
@@ -533,11 +533,11 @@ mod tests {
 
     #[test]
     fn test_subsequent_acks_after_certificate_reached() {
-        subsequent_acks_after_certificate_reached(ed_scheme::fixtures);
-        subsequent_acks_after_certificate_reached(bls12381_multisig::fixtures::<MinPk, _>);
-        subsequent_acks_after_certificate_reached(bls12381_multisig::fixtures::<MinSig, _>);
-        subsequent_acks_after_certificate_reached(bls12381_threshold::fixtures::<MinPk, _>);
-        subsequent_acks_after_certificate_reached(bls12381_threshold::fixtures::<MinSig, _>);
+        subsequent_acks_after_certificate_reached(ed_scheme::fixture);
+        subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinSig, _>);
+        subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Acks for different sequencers are managed separately.
@@ -572,11 +572,11 @@ mod tests {
 
     #[test]
     fn test_multiple_sequencers() {
-        multiple_sequencers(ed_scheme::fixtures);
-        multiple_sequencers(bls12381_multisig::fixtures::<MinPk, _>);
-        multiple_sequencers(bls12381_multisig::fixtures::<MinSig, _>);
-        multiple_sequencers(bls12381_threshold::fixtures::<MinPk, _>);
-        multiple_sequencers(bls12381_threshold::fixtures::<MinSig, _>);
+        multiple_sequencers(ed_scheme::fixture);
+        multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// If quorum is never reached, no certificate is produced.
@@ -602,11 +602,11 @@ mod tests {
 
     #[test]
     fn test_partial_quorum_never_reached() {
-        partial_quorum_never_reached(ed_scheme::fixtures);
-        partial_quorum_never_reached(bls12381_multisig::fixtures::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_multisig::fixtures::<MinSig, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixtures::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixtures::<MinSig, _>);
+        partial_quorum_never_reached(ed_scheme::fixture);
+        partial_quorum_never_reached(bls12381_multisig::fixture::<MinPk, _>);
+        partial_quorum_never_reached(bls12381_multisig::fixture::<MinSig, _>);
+        partial_quorum_never_reached(bls12381_threshold::fixture::<MinPk, _>);
+        partial_quorum_never_reached(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Interleaved acks for different payloads are aggregated separately.
@@ -659,10 +659,10 @@ mod tests {
 
     #[test]
     fn test_interleaved_payloads() {
-        interleaved_payloads(ed_scheme::fixtures);
-        interleaved_payloads(bls12381_multisig::fixtures::<MinPk, _>);
-        interleaved_payloads(bls12381_multisig::fixtures::<MinSig, _>);
-        interleaved_payloads(bls12381_threshold::fixtures::<MinPk, _>);
-        interleaved_payloads(bls12381_threshold::fixtures::<MinSig, _>);
+        interleaved_payloads(ed_scheme::fixture);
+        interleaved_payloads(bls12381_multisig::fixture::<MinPk, _>);
+        interleaved_payloads(bls12381_multisig::fixture::<MinSig, _>);
+        interleaved_payloads(bls12381_threshold::fixture::<MinPk, _>);
+        interleaved_payloads(bls12381_threshold::fixture::<MinSig, _>);
     }
 }

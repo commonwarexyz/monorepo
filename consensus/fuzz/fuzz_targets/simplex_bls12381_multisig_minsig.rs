@@ -15,7 +15,7 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = multisig_scheme::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        multisig_scheme::fixtures::<MinSig, _>(context, n)
+        multisig_scheme::fixture::<MinSig, _>(context, n)
     }
 }
 

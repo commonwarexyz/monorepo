@@ -348,7 +348,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{ed25519, Fixture},
+            mocks::fixture::{ed25519, Fixture},
             signing_scheme::Scheme as _,
             types::{Proposal, Subject},
         },

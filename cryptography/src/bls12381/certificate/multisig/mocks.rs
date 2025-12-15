@@ -10,7 +10,7 @@ use commonware_utils::{ordered::BiMap, TryCollect as _};
 use rand::{CryptoRng, RngCore};
 
 /// Builds ed25519 identities and matching BLS12-381 multisig schemes.
-pub fn fixtures<S, V, R>(
+pub fn fixture<S, V, R>(
     rng: &mut R,
     n: u32,
     signer: impl Fn(BiMap<ed25519::PublicKey, V::Public>, Private) -> Option<S>,

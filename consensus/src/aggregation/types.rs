@@ -550,11 +550,11 @@ mod tests {
 
     #[test]
     fn test_codec() {
-        codec(ed_scheme::fixtures);
-        codec(bls12381_multisig::fixtures::<MinPk, _>);
-        codec(bls12381_multisig::fixtures::<MinSig, _>);
-        codec(bls12381_threshold::fixtures::<MinPk, _>);
-        codec(bls12381_threshold::fixtures::<MinSig, _>);
+        codec(ed_scheme::fixture);
+        codec(bls12381_multisig::fixture::<MinPk, _>);
+        codec(bls12381_multisig::fixture::<MinSig, _>);
+        codec(bls12381_threshold::fixture::<MinPk, _>);
+        codec(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn activity_invalid_enum<S, F>(fixture: F)
@@ -579,11 +579,11 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        activity_invalid_enum(ed_scheme::fixtures);
-        activity_invalid_enum(bls12381_multisig::fixtures::<MinPk, _>);
-        activity_invalid_enum(bls12381_multisig::fixtures::<MinSig, _>);
-        activity_invalid_enum(bls12381_threshold::fixtures::<MinPk, _>);
-        activity_invalid_enum(bls12381_threshold::fixtures::<MinSig, _>);
+        activity_invalid_enum(ed_scheme::fixture);
+        activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
+        activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
+        activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);
+        activity_invalid_enum(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]

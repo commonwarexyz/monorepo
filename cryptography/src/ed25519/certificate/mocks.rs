@@ -25,7 +25,7 @@ where
 }
 
 /// Builds ed25519 identities alongside a caller-provided ed25519 certificate scheme wrapper.
-pub fn fixtures<S, R>(
+pub fn fixture<S, R>(
     rng: &mut R,
     n: u32,
     signer: impl Fn(commonware_utils::ordered::Set<PublicKey>, PrivateKey) -> Option<S>,

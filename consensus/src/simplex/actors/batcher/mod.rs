@@ -264,9 +264,9 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_forwarding_from_network() {
-        certificate_forwarding_from_network(bls12381_multisig::fixtures::<MinPk, _>);
-        certificate_forwarding_from_network(bls12381_multisig::fixtures::<MinSig, _>);
-        certificate_forwarding_from_network(ed_scheme::fixtures);
+        certificate_forwarding_from_network(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_forwarding_from_network(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_forwarding_from_network(ed_scheme::fixture);
     }
 
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
@@ -406,9 +406,9 @@ mod tests {
 
     #[test_traced]
     fn test_quorum_votes_construct_certificate() {
-        quorum_votes_construct_certificate(bls12381_multisig::fixtures::<MinPk, _>);
-        quorum_votes_construct_certificate(bls12381_multisig::fixtures::<MinSig, _>);
-        quorum_votes_construct_certificate(ed_scheme::fixtures);
+        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        quorum_votes_construct_certificate(ed_scheme::fixture);
     }
 
     /// Test that if both votes and a certificate arrive, only one certificate is sent to voter.
@@ -596,9 +596,9 @@ mod tests {
 
     #[test_traced]
     fn test_votes_and_certificate_deduplication() {
-        votes_and_certificate_deduplication(bls12381_multisig::fixtures::<MinPk, _>);
-        votes_and_certificate_deduplication(bls12381_multisig::fixtures::<MinSig, _>);
-        votes_and_certificate_deduplication(ed_scheme::fixtures);
+        votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinPk, _>);
+        votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinSig, _>);
+        votes_and_certificate_deduplication(ed_scheme::fixture);
     }
 
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
@@ -793,11 +793,9 @@ mod tests {
 
     #[test_traced]
     fn test_conflicting_votes_dont_produce_invalid_certificate() {
-        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixtures::<MinPk, _>);
-        conflicting_votes_dont_produce_invalid_certificate(
-            bls12381_multisig::fixtures::<MinSig, _>,
-        );
-        conflicting_votes_dont_produce_invalid_certificate(ed_scheme::fixtures);
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_votes_dont_produce_invalid_certificate(ed_scheme::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote AFTER setting the leader,
@@ -919,9 +917,9 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_after_leader_set() {
-        proposal_forwarded_after_leader_set(bls12381_multisig::fixtures::<MinPk, _>);
-        proposal_forwarded_after_leader_set(bls12381_multisig::fixtures::<MinSig, _>);
-        proposal_forwarded_after_leader_set(ed_scheme::fixtures);
+        proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_forwarded_after_leader_set(ed_scheme::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote BEFORE setting the leader,
@@ -1042,9 +1040,9 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_before_leader_set() {
-        proposal_forwarded_before_leader_set(bls12381_multisig::fixtures::<MinPk, _>);
-        proposal_forwarded_before_leader_set(bls12381_multisig::fixtures::<MinSig, _>);
-        proposal_forwarded_before_leader_set(ed_scheme::fixtures);
+        proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_forwarded_before_leader_set(ed_scheme::fixture);
     }
 
     /// Test that leader activity detection works correctly:
@@ -1190,8 +1188,8 @@ mod tests {
 
     #[test_traced]
     fn test_leader_activity_detection() {
-        leader_activity_detection(bls12381_multisig::fixtures::<MinPk, _>);
-        leader_activity_detection(bls12381_multisig::fixtures::<MinSig, _>);
-        leader_activity_detection(ed_scheme::fixtures);
+        leader_activity_detection(bls12381_multisig::fixture::<MinPk, _>);
+        leader_activity_detection(bls12381_multisig::fixture::<MinSig, _>);
+        leader_activity_detection(ed_scheme::fixture);
     }
 }

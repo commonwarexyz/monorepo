@@ -12,7 +12,7 @@ impl Simplex for SimplexEd25519 {
     type Scheme = ed25519_scheme::Scheme;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519_scheme::fixtures(context, n)
+        ed25519_scheme::fixture(context, n)
     }
 }
 

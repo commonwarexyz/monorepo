@@ -218,7 +218,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed_scheme::fixtures(&mut rng, 5);
+        } = ed_scheme::fixture(&mut rng, 5);
         (schemes, verifier)
     }
 

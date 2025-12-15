@@ -361,7 +361,7 @@ mod macros {
     /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
     ///
     /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixtures` function for testing.
+    /// implementation, and a `fixture` function for testing.
     /// The only required parameter is the `Context` type, which varies per protocol.
     ///
     /// # Example
@@ -377,7 +377,7 @@ mod macros {
             /// scheme instances share a consistent ordering.
             #[cfg(feature = "mocks")]
             #[allow(dead_code)]
-            pub fn fixtures<V, R>(
+            pub fn fixture<V, R>(
                 rng: &mut R,
                 n: u32,
             ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
@@ -385,7 +385,7 @@ mod macros {
                 V: $crate::bls12381::primitives::variant::Variant,
                 R: rand::RngCore + rand::CryptoRng,
             {
-                $crate::bls12381::certificate::multisig::mocks::fixtures::<_, V, _>(
+                $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
                     rng,
                     n,
                     Scheme::signer,

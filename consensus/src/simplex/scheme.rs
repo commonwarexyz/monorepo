@@ -67,7 +67,7 @@ pub mod bls12381_multisig {
 
         fn test_seed_returns_none<V: Variant + Send + Sync>() {
             let mut rng = StdRng::seed_from_u64(42);
-            let Fixture { schemes, .. } = bls12381_multisig::fixtures::<V, _>(&mut rng, 4);
+            let Fixture { schemes, .. } = bls12381_multisig::fixture::<V, _>(&mut rng, 4);
 
             let quorum = quorum_from_slice(&schemes) as usize;
 
@@ -314,7 +314,7 @@ pub mod bls12381_threshold {
     /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
     /// scheme instances share a consistent ordering.
     #[cfg(feature = "mocks")]
-    pub fn fixtures<V, R>(
+    pub fn fixture<V, R>(
         rng: &mut R,
         n: u32,
     ) -> commonware_cryptography::certificate::mocks::Fixture<
@@ -324,7 +324,7 @@ pub mod bls12381_threshold {
         V: Variant,
         R: rand::RngCore + rand::CryptoRng,
     {
-        commonware_cryptography::bls12381::certificate::threshold::mocks::fixtures::<_, V, _>(
+        commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
             rng,
             n,
             Scheme::signer,
@@ -858,7 +858,7 @@ pub mod bls12381_threshold {
             let mut rng = StdRng::seed_from_u64(seed);
             let Fixture {
                 schemes, verifier, ..
-            } = bls12381_threshold::fixtures::<V, _>(&mut rng, n);
+            } = bls12381_threshold::fixture::<V, _>(&mut rng, n);
 
             (schemes, verifier)
         }
@@ -1744,7 +1744,7 @@ pub mod ed25519 {
         #[test]
         fn test_seed_returns_none() {
             let mut rng = StdRng::seed_from_u64(42);
-            let Fixture { schemes, .. } = ed25519::fixtures(&mut rng, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
 
             let quorum = quorum_from_slice(&schemes) as usize;
 
@@ -1949,7 +1949,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519::fixtures(&mut rng, 4);
+                    } = ed25519::fixture(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -1985,7 +1985,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519::fixtures(&mut rng, 4);
+                    } = ed25519::fixture(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -2028,7 +2028,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = bls12381_threshold::fixtures::<MinPk, _>(&mut rng, 4);
+                    } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
 
                     assert!(
                         !verifier.is_attributable(),
@@ -2079,7 +2079,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = bls12381_threshold::fixtures::<MinPk, _>(&mut rng, 4);
+                    } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
 
                     assert!(
                         !verifier.is_attributable(),
@@ -2119,7 +2119,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519::fixtures(&mut rng, 4);
+                    } = ed25519::fixture(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
