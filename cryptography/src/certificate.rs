@@ -304,25 +304,6 @@ pub trait Provider: Clone + Send + Sync + 'static {
     }
 }
 
-#[cfg(feature = "mocks")]
-pub mod mocks {
-    //! Mocks for certificate signing schemes.
-
-    /// A fixture containing identities, identity private keys, per-participant
-    /// signing schemes, and a single verifier scheme.
-    #[derive(Clone, Debug)]
-    pub struct Fixture<S> {
-        /// A sorted vector of participant public identity keys.
-        pub participants: Vec<crate::ed25519::PublicKey>,
-        /// A sorted vector of participant private identity keys (matching order with `participants`).
-        pub private_keys: Vec<crate::ed25519::PrivateKey>,
-        /// A vector of per-participant scheme instances (matching order with `participants`).
-        pub schemes: Vec<S>,
-        /// A single scheme verifier.
-        pub verifier: S,
-    }
-}
-
 /// Bitmap wrapper that tracks which participants signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
@@ -441,6 +422,25 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 
     fn all(&self) -> Option<Arc<Self::Scheme>> {
         Some(self.scheme.clone())
+    }
+}
+
+#[cfg(feature = "mocks")]
+pub mod mocks {
+    //! Mocks for certificate signing schemes.
+
+    /// A fixture containing identities, identity private keys, per-participant
+    /// signing schemes, and a single verifier scheme.
+    #[derive(Clone, Debug)]
+    pub struct Fixture<S> {
+        /// A sorted vector of participant public identity keys.
+        pub participants: Vec<crate::ed25519::PublicKey>,
+        /// A sorted vector of participant private identity keys (matching order with `participants`).
+        pub private_keys: Vec<crate::ed25519::PrivateKey>,
+        /// A vector of per-participant scheme instances (matching order with `participants`).
+        pub schemes: Vec<S>,
+        /// A single scheme verifier.
+        pub verifier: S,
     }
 }
 
