@@ -3,7 +3,7 @@
 //! reject messages from an unexpected epoch.
 
 use crate::simplex::{
-    scheme::SimplexScheme,
+    scheme,
     types::{Finalize, Notarize, Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -28,7 +28,7 @@ pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
 impl<E, S, H> Reconfigurer<E, S, H>
 where
     E: Spawner,
-    S: SimplexScheme<H::Digest>,
+    S: scheme::Scheme<H::Digest>,
     H: Hasher,
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {

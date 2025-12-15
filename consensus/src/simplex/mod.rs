@@ -290,9 +290,7 @@ mod tests {
         simplex::{
             mocks::twins::Strategy,
             scheme as certificate,
-            scheme::{
-                bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, SimplexScheme,
-            },
+            scheme::{bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, Scheme},
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
@@ -432,7 +430,7 @@ mod tests {
 
     fn all_online<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -679,7 +677,7 @@ mod tests {
 
     fn observer<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -839,7 +837,7 @@ mod tests {
 
     fn unclean_shutdown<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
     {
         // Create context
@@ -1028,7 +1026,7 @@ mod tests {
 
     fn backfill<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1280,7 +1278,7 @@ mod tests {
 
     fn one_offline<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1538,7 +1536,7 @@ mod tests {
 
     fn slow_validator<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1720,7 +1718,7 @@ mod tests {
 
     fn all_recovery<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1927,7 +1925,7 @@ mod tests {
 
     fn partition<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2124,7 +2122,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2329,7 +2327,7 @@ mod tests {
 
     fn conflicter<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2512,7 +2510,7 @@ mod tests {
 
     fn invalid<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2678,7 +2676,7 @@ mod tests {
 
     fn impersonator<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2845,7 +2843,7 @@ mod tests {
 
     fn equivocator<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3117,7 +3115,7 @@ mod tests {
 
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3283,7 +3281,7 @@ mod tests {
 
     fn nuller<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3459,7 +3457,7 @@ mod tests {
 
     fn outdated<S, F>(seed: u64, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3618,7 +3616,7 @@ mod tests {
 
     fn run_1k<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3785,7 +3783,7 @@ mod tests {
 
     fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3949,7 +3947,7 @@ mod tests {
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
@@ -4143,7 +4141,7 @@ mod tests {
 
     fn split_views_no_lockup<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Scenario:
@@ -4654,7 +4652,7 @@ mod tests {
 
     fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -5046,7 +5044,7 @@ mod tests {
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let faults = max_faults(n);
@@ -5357,7 +5355,7 @@ mod tests {
 
     fn test_twins<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         for strategy in [

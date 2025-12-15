@@ -2,7 +2,7 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        scheme::{SeededScheme, SimplexScheme},
+        scheme::{self, SeededScheme},
         select_leader,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -99,7 +99,7 @@ where
 impl<E, S, D> crate::Reporter for Reporter<E, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
-    S: SimplexScheme<D>,
+    S: scheme::Scheme<D>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;

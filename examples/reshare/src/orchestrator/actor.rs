@@ -9,8 +9,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self,
-        scheme::SimplexScheme,
+        self, scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
@@ -94,7 +93,7 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
+    S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {

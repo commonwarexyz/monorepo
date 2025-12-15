@@ -13,7 +13,7 @@ use commonware_consensus::{
     simplex::{
         config,
         mocks::{application, relay, reporter},
-        scheme::SimplexScheme,
+        scheme::Scheme,
         Engine,
     },
     types::{Delta, Epoch, View},
@@ -53,7 +53,7 @@ pub trait Simplex: 'static
 where
     <<Self::Scheme as CertificateScheme>::Certificate as Read>::Cfg: Default,
 {
-    type Scheme: SimplexScheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 

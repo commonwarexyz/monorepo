@@ -1,7 +1,7 @@
 use super::Verifier;
 use crate::{
     simplex::{
-        scheme::SimplexScheme,
+        scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
@@ -17,7 +17,7 @@ use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
-    S: SimplexScheme<D>,
+    S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -48,7 +48,7 @@ pub struct Round<
 }
 
 impl<
-        S: SimplexScheme<D>,
+        S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,

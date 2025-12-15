@@ -6,9 +6,7 @@ use crate::{
     engine, namespace,
     setup::{ParticipantConfig, PeerConfig},
 };
-use commonware_consensus::{
-    marshal::resolver::p2p as marshal_resolver, simplex::scheme::SimplexScheme,
-};
+use commonware_consensus::{marshal::resolver::p2p as marshal_resolver, simplex::scheme::Scheme};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
@@ -41,7 +39,7 @@ pub async fn run<S>(
     args: super::ParticipantArgs,
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
-    S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
+    S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -327,7 +325,7 @@ mod test {
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
-            S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
+            S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {

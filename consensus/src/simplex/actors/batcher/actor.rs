@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        scheme::SimplexScheme,
+        scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
     types::{Epoch, View, ViewDelta},
@@ -27,7 +27,7 @@ use tracing::{debug, trace, warn};
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + Rng + CryptoRng,
-    S: SimplexScheme<D>,
+    S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -57,7 +57,7 @@ pub struct Actor<
 
 impl<
         E: Spawner + Metrics + Clock + Rng + CryptoRng,
-        S: SimplexScheme<D>,
+        S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,

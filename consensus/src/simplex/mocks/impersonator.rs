@@ -1,7 +1,7 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
 use crate::simplex::{
-    scheme::SimplexScheme,
+    scheme,
     types::{Finalize, Notarize, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -26,7 +26,7 @@ pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hash
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: SimplexScheme<H::Digest>, H: Hasher>
+impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
     Impersonator<E, S, H>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {

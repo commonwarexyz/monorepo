@@ -171,7 +171,7 @@ pub fn extract<E, S>(
 ) -> Vec<ReplicaState>
 where
     E: Rng + CryptoRng,
-    S: commonware_consensus::simplex::scheme::SimplexScheme<Sha256Digest>,
+    S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
 {
     reporters
         .iter()

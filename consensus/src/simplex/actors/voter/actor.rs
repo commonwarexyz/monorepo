@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         metrics::{self, Outbound},
-        scheme::SimplexScheme,
+        scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
@@ -50,7 +50,7 @@ enum Resolved {
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    S: SimplexScheme<D>,
+    S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -80,7 +80,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        S: SimplexScheme<D>,
+        S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,

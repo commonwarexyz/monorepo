@@ -1,7 +1,7 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::simplex::{
-    scheme::SimplexScheme,
+    scheme,
     types::{Finalize, Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -26,7 +26,7 @@ pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
 impl<E, S, H> Nuller<E, S, H>
 where
     E: Spawner,
-    S: SimplexScheme<H::Digest>,
+    S: scheme::Scheme<H::Digest>,
     H: Hasher,
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {

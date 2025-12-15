@@ -2,7 +2,7 @@
 
 use crate::{
     simplex::{
-        scheme::SimplexScheme,
+        scheme,
         types::{Finalize, Notarize, Proposal, Vote},
     },
     types::{View, ViewDelta},
@@ -37,7 +37,7 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
 impl<E, S, H> Outdated<E, S, H>
 where
     E: Clock + Rng + CryptoRng + Spawner,
-    S: SimplexScheme<H::Digest>,
+    S: scheme::Scheme<H::Digest>,
     H: Hasher,
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {

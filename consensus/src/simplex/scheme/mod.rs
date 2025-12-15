@@ -17,7 +17,7 @@
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
 //!
-//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely
+//! The [`certificate::Scheme::is_attributable()`] method signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
@@ -50,10 +50,10 @@ cfg_if::cfg_if! {
             //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
             use crate::{
-                simplex::{scheme::SimplexScheme, types::Activity},
+                simplex::{scheme::Scheme, types::Activity},
                 Reporter,
             };
-            use commonware_cryptography::{certificate::Scheme, Digest};
+            use commonware_cryptography::{certificate, Digest};
             use rand::{CryptoRng, Rng};
 
             /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -64,7 +64,7 @@ cfg_if::cfg_if! {
             #[derive(Clone)]
             pub struct AttributableReporter<
                 E: Clone + Rng + CryptoRng + Send + 'static,
-                S: Scheme,
+                S: certificate::Scheme,
                 D: Digest,
                 R: Reporter<Activity = Activity<S, D>>,
             > {
@@ -82,7 +82,7 @@ cfg_if::cfg_if! {
 
             impl<
                     E: Clone + Rng + CryptoRng + Send + 'static,
-                    S: Scheme,
+                    S: certificate::Scheme,
                     D: Digest,
                     R: Reporter<Activity = Activity<S, D>>,
                 > AttributableReporter<E, S, D, R>
@@ -101,7 +101,7 @@ cfg_if::cfg_if! {
 
             impl<
                     E: Clone + Rng + CryptoRng + Send + 'static,
-                    S: SimplexScheme<D>,
+                    S: Scheme<D>,
                     D: Digest,
                     R: Reporter<Activity = Activity<S, D>>,
                 > Reporter for AttributableReporter<E, S, D, R>
@@ -147,12 +147,13 @@ cfg_if::cfg_if! {
                 use super::*;
                 use crate::{
                     simplex::{
-                        scheme::{bls12381_threshold, ed25519, Scheme},
+                        scheme::{bls12381_threshold, ed25519},
                         types::{Notarization, Notarize, Proposal, Subject},
                     },
                     types::{Epoch, Round, View},
                 };
                 use commonware_cryptography::{
+                    certificate::{self, Scheme as _},
                     bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
                     sha256::Digest as Sha256Digest, Hasher, Sha256,
                 };
@@ -163,11 +164,11 @@ cfg_if::cfg_if! {
                 const NAMESPACE: &[u8] = b"test-reporter";
 
                 #[derive(Clone)]
-                struct MockReporter<S: Scheme, D: Digest> {
+                struct MockReporter<S: certificate::Scheme, D: Digest> {
                     activities: Arc<Mutex<Vec<Activity<S, D>>>>,
                 }
 
-                impl<S: Scheme, D: Digest> MockReporter<S, D> {
+                impl<S: certificate::Scheme, D: Digest> MockReporter<S, D> {
                     fn new() -> Self {
                         Self {
                             activities: Arc::new(Mutex::new(Vec::new())),
@@ -183,7 +184,7 @@ cfg_if::cfg_if! {
                     }
                 }
 
-                impl<S: Scheme, D: Digest> Reporter for MockReporter<S, D> {
+                impl<S: certificate::Scheme, D: Digest> Reporter for MockReporter<S, D> {
                     type Activity = Activity<S, D>;
 
                     async fn report(&mut self, activity: Self::Activity) {
@@ -402,10 +403,7 @@ cfg_if::cfg_if! {
 
 use crate::{simplex::types::Subject, types::Round};
 use commonware_codec::Encode;
-use commonware_cryptography::{
-    certificate::{self, Scheme},
-    Digest,
-};
+use commonware_cryptography::{certificate, Digest};
 use commonware_utils::union;
 
 impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
@@ -423,7 +421,7 @@ impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
 ///
 /// Schemes that do not support embedded randomness (like [`ed25519`] and [`bls12381_multisig`])
 /// implement this trait but return `None` from [`SeededScheme::seed`].
-pub trait SeededScheme: Scheme {
+pub trait SeededScheme: certificate::Scheme {
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
 
@@ -432,12 +430,14 @@ pub trait SeededScheme: Scheme {
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
 }
 
-pub trait SimplexScheme<D: Digest>: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
+/// Marker trait for signing schemes compatible with `simplex`.
+///
+/// This trait binds a [`certificate::Scheme`] to the [`Subject`] subject type
+/// used by the simplex protocol. It is automatically implemented for any scheme
+/// whose subject type matches `Subject<'a, D>`.
+pub trait Scheme<D: Digest>: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
 
-impl<D: Digest, S> SimplexScheme<D> for S where
-    S: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>>
-{
-}
+impl<D: Digest, S> Scheme<D> for S where S: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion

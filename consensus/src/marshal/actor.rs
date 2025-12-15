@@ -13,7 +13,7 @@ use crate::{
         Update,
     },
     simplex::{
-        scheme::SimplexScheme,
+        scheme::Scheme,
         types::{Finalization, Notarization},
     },
     types::{Epoch, Round, ViewDelta},
@@ -22,7 +22,7 @@ use crate::{
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme},
+    certificate::{Provider, Scheme as _},
     PublicKey,
 };
 use commonware_macros::select;
@@ -105,7 +105,7 @@ pub struct Actor<E, B, P, FC, FB, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
@@ -164,7 +164,7 @@ impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,

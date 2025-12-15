@@ -52,7 +52,7 @@ mod tests {
         simplex::{
             actors::{batcher, resolver},
             mocks, scheme as certificate,
-            scheme::{bls12381_multisig, bls12381_threshold, SimplexScheme},
+            scheme::{bls12381_multisig, bls12381_threshold, Scheme},
             select_leader,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
@@ -79,7 +79,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    fn build_notarization<S: SimplexScheme<Sha256Digest>>(
+    fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -98,7 +98,7 @@ mod tests {
         (votes, certificate)
     }
 
-    fn build_finalization<S: SimplexScheme<Sha256Digest>>(
+    fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -125,7 +125,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -356,7 +356,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -631,7 +631,7 @@ mod tests {
     /// Test that voter can process finalization from batcher without notarization.
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -801,7 +801,7 @@ mod tests {
 
     fn certificate_conflicts_proposal<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -992,7 +992,7 @@ mod tests {
 
     fn proposal_conflicts_certificate<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1166,7 +1166,7 @@ mod tests {
 
     fn certificate_verifies_proposal<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1339,7 +1339,7 @@ mod tests {
     /// 3. Our proposal should be dropped when the conflict is detected
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey, Seed = ()>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey, Seed = ()>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1549,7 +1549,7 @@ mod tests {
 
     fn populate_resolver_on_restart<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1772,7 +1772,7 @@ mod tests {
 
     fn finalization_from_resolver<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -1931,7 +1931,7 @@ mod tests {
     /// 3. Voter sends it back to resolver (unnecessary)
     fn no_resolver_boomerang<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -2099,7 +2099,7 @@ mod tests {
     /// immediately rather than waiting for the timeout.
     fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
     where
-        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;

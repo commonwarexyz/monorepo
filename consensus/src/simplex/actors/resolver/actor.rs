@@ -5,7 +5,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{resolver::state::State, voter},
-        scheme::SimplexScheme,
+        scheme::Scheme,
         types::Certificate,
     },
     types::{Epoch, View},
@@ -31,7 +31,7 @@ use tracing::debug;
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-    S: SimplexScheme<D>,
+    S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
 > {
@@ -52,7 +52,7 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-        S: SimplexScheme<D>,
+        S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
     > Actor<E, S, B, D>

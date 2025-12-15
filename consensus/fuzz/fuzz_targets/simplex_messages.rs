@@ -6,7 +6,7 @@ use commonware_consensus::simplex::{
     scheme::{
         bls12381_multisig,
         bls12381_threshold::{self},
-        ed25519, SimplexScheme,
+        ed25519, Scheme,
     },
     types::{Certificate, Vote},
 };
@@ -46,14 +46,14 @@ enum FuzzInput {
     ThresholdMinSigCertificate(Vec<u8>),
 }
 
-fn roundtrip_vote<S: SimplexScheme<sha256::Digest>>(data: &[u8]) {
+fn roundtrip_vote<S: Scheme<sha256::Digest>>(data: &[u8]) {
     if let Ok(vote) = Vote::<S, sha256::Digest>::decode(data) {
         let encoded = vote.encode();
         assert_eq!(data, encoded.as_ref());
     }
 }
 
-fn roundtrip_certificate<S: SimplexScheme<sha256::Digest>>(
+fn roundtrip_certificate<S: Scheme<sha256::Digest>>(
     data: &[u8],
     cfg: &<S::Certificate as Read>::Cfg,
 ) where

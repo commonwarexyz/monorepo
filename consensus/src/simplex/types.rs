@@ -1,7 +1,7 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    simplex::scheme::SimplexScheme,
+    simplex::scheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
@@ -751,7 +751,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self>
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         let part = scheme.sign::<D>(
             namespace,
@@ -768,7 +768,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// This ensures that the notarize signature is valid for the claimed proposal.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_part::<D>(
             namespace,
@@ -889,7 +889,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// This ensures that the certificate is valid for the claimed proposal.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
@@ -1006,7 +1006,7 @@ impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Option<Self>
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         let part = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
 
@@ -1018,7 +1018,7 @@ impl<S: Scheme> Nullify<S> {
     /// This ensures that the nullify signature is valid for the given round.
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_part::<D>(
             namespace,
@@ -1120,7 +1120,7 @@ impl<S: Scheme> Nullification<S> {
         namespace: &[u8],
     ) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
@@ -1214,7 +1214,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Signs a finalize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self>
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         let part = scheme.sign::<D>(
             namespace,
@@ -1231,7 +1231,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// This ensures that the finalize signature is valid for the claimed proposal.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_part::<D>(
             namespace,
@@ -1352,7 +1352,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// This ensures that the certificate is valid for the claimed proposal.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
@@ -1622,7 +1622,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     /// Verifies the certificates contained in this response against the signing scheme.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
@@ -1848,7 +1848,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// necessary before calling this method.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         match self {
             Self::Notarize(n) => n.verify(scheme, namespace),
@@ -2096,7 +2096,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         self.notarize_1.verify(scheme, namespace) && self.notarize_2.verify(scheme, namespace)
     }
@@ -2210,7 +2210,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         self.finalize_1.verify(scheme, namespace) && self.finalize_2.verify(scheme, namespace)
     }
@@ -2322,7 +2322,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: SimplexScheme<D>,
+        S: scheme::Scheme<D>,
     {
         self.nullify.verify(scheme, namespace) && self.finalize.verify(scheme, namespace)
     }
@@ -2393,7 +2393,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, SimplexScheme};
+    use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -2445,7 +2445,7 @@ mod tests {
 
     fn notarize_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2471,7 +2471,7 @@ mod tests {
 
     fn notarization_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2504,7 +2504,7 @@ mod tests {
 
     fn nullify_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2527,7 +2527,7 @@ mod tests {
 
     fn nullification_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2556,7 +2556,7 @@ mod tests {
 
     fn finalize_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2580,7 +2580,7 @@ mod tests {
 
     fn finalization_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2610,7 +2610,7 @@ mod tests {
 
     fn backfiller_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2672,7 +2672,7 @@ mod tests {
 
     fn response_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2722,7 +2722,7 @@ mod tests {
 
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2758,7 +2758,7 @@ mod tests {
 
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2794,7 +2794,7 @@ mod tests {
 
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2822,7 +2822,7 @@ mod tests {
 
     fn notarize_verify_wrong_namespace<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2845,7 +2845,7 @@ mod tests {
 
     fn notarize_verify_wrong_scheme<S, F>(f: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
@@ -2869,7 +2869,7 @@ mod tests {
 
     fn notarization_verify_wrong_scheme<S, F>(f: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
@@ -2904,7 +2904,7 @@ mod tests {
 
     fn notarization_verify_wrong_namespace<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2938,7 +2938,7 @@ mod tests {
 
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(5, fixture);
@@ -2970,7 +2970,7 @@ mod tests {
 
     fn conflicting_notarize_detection<S, F>(f: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
@@ -2999,7 +2999,7 @@ mod tests {
 
     fn nullify_finalize_detection<S, F>(f: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
@@ -3027,7 +3027,7 @@ mod tests {
 
     fn finalization_verify_wrong_scheme<S, F>(f: F)
     where
-        S: SimplexScheme<Sha256>,
+        S: Scheme<Sha256>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);

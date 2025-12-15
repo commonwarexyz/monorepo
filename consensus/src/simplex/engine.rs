@@ -3,7 +3,7 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::SimplexScheme, Automaton, Relay, Reporter};
+use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -15,7 +15,7 @@ use tracing::debug;
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    S: SimplexScheme<D>,
+    S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -36,7 +36,7 @@ pub struct Engine<
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        S: SimplexScheme<D>,
+        S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
