@@ -103,7 +103,7 @@ pub struct Actor<E, B, P, FC, FB, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: Provider<Key = Epoch, Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
@@ -162,7 +162,7 @@ impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: Provider<Key = Epoch, Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
@@ -705,7 +705,7 @@ where
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.scheme_provider
             .all()
-            .or_else(|| self.scheme_provider.keyed(epoch))
+            .or_else(|| self.scheme_provider.scoped(epoch))
     }
 
     // -------------------- Waiters --------------------

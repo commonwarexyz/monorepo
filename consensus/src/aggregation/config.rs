@@ -12,7 +12,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
-    P: Provider<Key = Epoch>,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,

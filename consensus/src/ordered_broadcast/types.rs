@@ -447,7 +447,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        scheme_provider: &impl Provider<Key = Epoch, Scheme = S>,
+        scheme_provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -479,7 +479,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
 
         // Verify parent certificate using the scheme for the parent's epoch
         let parent_scheme = scheme_provider
-            .keyed(parent.epoch)
+            .scoped(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);
         let ack_ctx = AckSubject {
@@ -528,7 +528,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// 5. Decodes the certificate using the epoch-specific bounded codec config
     pub fn read_staged(
         reader: &mut impl Buf,
-        provider: &impl Provider<Key = Epoch, Scheme = S>,
+        provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Self, CodecError> {
         // Decode chunk and signature
         let chunk = Chunk::read(reader)?;
@@ -542,7 +542,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             let epoch = Epoch::read(reader)?;
 
             // Get scheme for parent's epoch
-            let scheme = provider.keyed(epoch).ok_or_else(|| {
+            let scheme = provider.scoped(epoch).ok_or_else(|| {
                 CodecError::Wrapped(
                     "consensus::ordered_broadcast::Node::read_staged",
                     Box::new(Error::UnknownScheme(epoch)),

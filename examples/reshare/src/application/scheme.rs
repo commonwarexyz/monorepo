@@ -54,10 +54,10 @@ impl<S: Scheme, C: Signer> MockProvider<S, C> {
 }
 
 impl<S: Scheme, C: Signer> ProviderTrait for MockProvider<S, C> {
-    type Key = Epoch;
+    type Scope = Epoch;
     type Scheme = S;
 
-    fn keyed(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }

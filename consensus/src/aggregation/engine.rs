@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    P: Provider<Key = Epoch>,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
@@ -153,7 +153,7 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: Provider<Key = Epoch, Scheme: AggregationScheme<D>>,
+        P: Provider<Scope = Epoch, Scheme: AggregationScheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
@@ -200,7 +200,7 @@ impl<
     /// Gets the scheme for a given epoch, returning an error if unavailable.
     fn scheme(&self, epoch: Epoch) -> Result<Arc<P::Scheme>, Error> {
         self.scheme_provider
-            .keyed(epoch)
+            .scoped(epoch)
             .ok_or(Error::UnknownEpoch(epoch))
     }
 

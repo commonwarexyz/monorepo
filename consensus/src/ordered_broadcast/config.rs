@@ -12,7 +12,7 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config<
     C: Signer,
     S: SequencersProvider,
-    P: Provider<Key = Epoch>,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,

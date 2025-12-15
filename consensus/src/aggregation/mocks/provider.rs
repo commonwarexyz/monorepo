@@ -42,10 +42,10 @@ impl<S: Scheme> MockProvider<S> {
 }
 
 impl<S: Scheme> Provider for MockProvider<S> {
-    type Key = Epoch;
+    type Scope = Epoch;
     type Scheme = S;
 
-    fn keyed(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }

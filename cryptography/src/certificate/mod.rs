@@ -276,29 +276,29 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
-/// Supplies the signing scheme for a given key.
+/// Supplies the signing scheme for a given scope.
 ///
-/// This trait uses an associated `Key` type, allowing implementations to work
-/// with any key representation (e.g., epoch numbers, block heights, etc.).
+/// This trait uses an associated `Scope` type, allowing implementations to work
+/// with any scope representation (e.g., epoch numbers, block heights, etc.).
 pub trait Provider: Clone + Send + Sync + 'static {
-    /// The key type used to look up schemes.
-    type Key: Clone + Send + Sync + 'static;
+    /// The scope type used to look up schemes.
+    type Scope: Clone + Send + Sync + 'static;
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
-    /// Return the signing scheme that corresponds to `key`.
-    fn keyed(&self, key: Self::Key) -> Option<Arc<Self::Scheme>>;
+    /// Return the signing scheme that corresponds to `scope`.
+    fn scoped(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>>;
 
-    /// Return a certificate verifier that can validate certificates from all keys.
+    /// Return a certificate verifier that can validate certificates from all scopes.
     ///
     /// This method allows implementations to provide a verifier that can validate
-    /// certificates from all keys (without key-specific state). For example,
+    /// certificates from all scopes (without scope-specific state). For example,
     /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
     /// can be used to verify certificates from any epoch, even after the committee
     /// has rotated and the underlying secret shares have been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
-    /// [`Provider::keyed`] for key-specific verification.
+    /// [`Provider::scoped`] for scope-specific verification.
     fn all(&self) -> Option<Arc<Self::Scheme>> {
         None
     }

@@ -33,10 +33,10 @@ impl<P: PublicKey, S: Scheme> Validators<P, S> {
 }
 
 impl<P: PublicKey, S: Scheme> Provider for Validators<P, S> {
-    type Key = Epoch;
+    type Scope = Epoch;
     type Scheme = S;
 
-    fn keyed(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }
