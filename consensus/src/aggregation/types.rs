@@ -6,7 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Part, Scheme, Subject},
+    certificate::{Attestation, Scheme, Subject},
     Digest,
 };
 use commonware_utils::union;
@@ -150,7 +150,7 @@ pub struct Ack<S: Scheme, D: Digest> {
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
     /// Scheme-specific part material
-    pub part: Part<S>,
+    pub part: Attestation<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
@@ -162,7 +162,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_part::<D>(namespace, &self.item, &self.part)
+        scheme.verify_attestation::<D>(namespace, &self.item, &self.part)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -195,7 +195,7 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let part = Part::read(reader)?;
+        let part = Attestation::read(reader)?;
         Ok(Self { item, epoch, part })
     }
 }

@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
-    certificate::{Part, Scheme},
+    certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
 use rand::{CryptoRng, Rng};
@@ -744,7 +744,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub part: Part<S>,
+    pub part: Attestation<S>,
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
@@ -770,7 +770,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_part::<D>(
+        scheme.verify_attestation::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -818,7 +818,7 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let part = Part::read(reader)?;
+        let part = Attestation::read(reader)?;
 
         Ok(Self { proposal, part })
     }
@@ -984,7 +984,7 @@ pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific vote material.
-    pub part: Part<S>,
+    pub part: Attestation<S>,
 }
 
 impl<S: Scheme> PartialEq for Nullify<S> {
@@ -1020,7 +1020,7 @@ impl<S: Scheme> Nullify<S> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_part::<D>(
+        scheme.verify_attestation::<D>(
             namespace,
             Subject::Nullify { round: self.round },
             &self.part,
@@ -1051,7 +1051,7 @@ impl<S: Scheme> Read for Nullify<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let part = Part::read(reader)?;
+        let part = Attestation::read(reader)?;
 
         Ok(Self { round, part })
     }
@@ -1207,7 +1207,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub part: Part<S>,
+    pub part: Attestation<S>,
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
@@ -1233,7 +1233,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_part::<D>(
+        scheme.verify_attestation::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &self.proposal,
@@ -1281,7 +1281,7 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let part = Part::read(reader)?;
+        let part = Attestation::read(reader)?;
 
         Ok(Self { proposal, part })
     }

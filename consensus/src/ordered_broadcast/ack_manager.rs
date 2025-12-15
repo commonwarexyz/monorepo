@@ -1,7 +1,7 @@
 use super::types::Ack;
 use crate::types::Epoch;
 use commonware_cryptography::{
-    certificate::{Part, Scheme},
+    certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,7 +14,7 @@ struct Partials<S: Scheme, D: Digest> {
 
     // A map from payload digest to votes.
     // Each signer should only vote once for each sequencer/height/epoch.
-    pub parts: HashMap<D, Vec<Part<S>>>,
+    pub parts: HashMap<D, Vec<Attestation<S>>>,
 }
 
 /// Evidence for a chunk.

@@ -206,7 +206,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let proposal = &proposals[0];
 
-        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
             namespace,
             Subject::Notarize { proposal },
@@ -285,7 +285,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let round = nullifies[0].round;
 
-        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
             namespace,
             Subject::Nullify { round },
@@ -359,7 +359,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let proposal = &proposals[0];
 
-        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
             namespace,
             Subject::Finalize { proposal },

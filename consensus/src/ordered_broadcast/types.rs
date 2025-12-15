@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{self, Part, Provider, Scheme},
+    certificate::{self, Attestation, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -686,12 +686,12 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     ///
     /// This is a cryptographic part that can be combined with other parts
     /// to form a certificate once a quorum is reached.
-    pub part: Part<S>,
+    pub part: Attestation<S>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and part.
-    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, part: Part<S>) -> Self {
+    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, part: Attestation<S>) -> Self {
         Self { chunk, epoch, part }
     }
 
@@ -710,7 +710,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_part::<D>(&ack_namespace, ctx, &self.part)
+        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.part)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -745,7 +745,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let part = Part::read(reader)?;
+        let part = Attestation::read(reader)?;
         Ok(Self { chunk, epoch, part })
     }
 }

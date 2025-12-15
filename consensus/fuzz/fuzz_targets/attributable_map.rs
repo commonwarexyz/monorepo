@@ -8,7 +8,7 @@ use commonware_consensus::{
     },
     types::{Epoch, Round, View},
 };
-use commonware_cryptography::{certificate::Part, ed25519::PrivateKey, Signer};
+use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
 use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
@@ -42,7 +42,7 @@ fn make_vote(
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
         round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
-        part: Part {
+        part: Attestation {
             signer: data.signer,
             signature: sig,
         },

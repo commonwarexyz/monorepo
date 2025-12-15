@@ -74,7 +74,7 @@ hash = "47795d1da003840d57a425277356731bb3bebe5ac11c08ab7cb204f5e52b2d62"
 n_cases = 65536
 hash = "731c5d3dfb09b6e6f1cf50136ba82f036fffab855ec953be59877bb95a48e1dd"
 
-["commonware_cryptography::certificate::tests::conformance::CodecConformance<Part<Scheme>>"]
+["commonware_cryptography::certificate::tests::conformance::CodecConformance<Attestation<Scheme>>"]
 n_cases = 65536
 hash = "dcbe92d97768657dc0c779e2058b44669a985dd8a1dbbf94427237f0fb4b78d2"
 
