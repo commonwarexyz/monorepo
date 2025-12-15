@@ -449,18 +449,18 @@ mod tests {
 
         /// Test context type for generic scheme tests.
         #[derive(Clone, Debug)]
-        pub struct TestContext<'a> {
+        pub struct TestSubject<'a> {
             pub message: &'a [u8],
         }
 
-        impl<'a> Subject for TestContext<'a> {
+        impl<'a> Subject for TestSubject<'a> {
             fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 (namespace.to_vec(), self.message.to_vec())
             }
         }
 
         // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
-        impl_ed25519_certificate!(TestContext<'a>);
+        impl_ed25519_certificate!(TestSubject<'a>);
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,

@@ -168,7 +168,7 @@ mod tests {
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
         use super::*;
-        use crate::ordered_broadcast::types::{AckContext, Chunk};
+        use crate::ordered_broadcast::types::{AckSubject, Chunk};
         use commonware_cryptography::Hasher;
 
         pub type Sha256Digest = <Sha256 as Hasher>::Digest;
@@ -184,7 +184,7 @@ mod tests {
         where
             S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         {
-            let context = AckContext {
+            let context = AckSubject {
                 chunk: &chunk,
                 epoch,
             };

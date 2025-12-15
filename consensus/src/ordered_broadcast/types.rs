@@ -267,14 +267,14 @@ where
 /// This is used as the context type for `Scheme` implementations for validators.
 /// It contains the chunk being acknowledged and the epoch of the validator set.
 #[derive(Debug, Clone)]
-pub struct AckContext<'a, P: PublicKey, D: Digest> {
+pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
     pub chunk: &'a Chunk<P, D>,
     /// The epoch of the validator set.
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> CertificateSubject for AckContext<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> CertificateSubject for AckSubject<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
@@ -482,7 +482,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             .scheme(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);
-        let ack_ctx = AckContext {
+        let ack_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
@@ -710,7 +710,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
@@ -726,7 +726,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -990,7 +990,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
@@ -1115,7 +1115,7 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate acks from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1180,7 +1180,7 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Generate parent certificate
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
@@ -1264,7 +1264,7 @@ mod tests {
         // Non-genesis nodes have a parent with a certificate. read_staged must
         // look up the scheme for the parent's epoch to decode the certificate.
         let parent_epoch = Epoch::new(5);
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &genesis_chunk,
             epoch: parent_epoch,
         };
@@ -1338,7 +1338,7 @@ mod tests {
         let chunk = Chunk::new(fixture.participants[0].clone(), 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1403,7 +1403,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate votes from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1487,7 +1487,7 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate votes from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1558,7 +1558,7 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Create certificate for parent
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
@@ -1639,7 +1639,7 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create quorum votes
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1686,7 +1686,7 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create certificate
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1801,7 +1801,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate a valid certificate for the parent
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch,
         };
@@ -1837,7 +1837,7 @@ mod tests {
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
-        let wrong_ctx = AckContext {
+        let wrong_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: Epoch::new(99), // Different epoch to get different signatures
         };
@@ -1904,7 +1904,7 @@ mod tests {
         assert!(ack.verify(NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -1975,7 +1975,7 @@ mod tests {
         let quorum_size = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate certificate
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
@@ -2083,7 +2083,7 @@ mod tests {
         // Create a parent with a dummy certificate (content doesn't matter for this test)
         let dummy_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let dummy_epoch = Epoch::new(5);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &dummy_chunk,
             epoch: dummy_epoch,
         };
@@ -2168,7 +2168,7 @@ mod tests {
         // Generate a valid parent certificate
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = Epoch::new(5);
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };

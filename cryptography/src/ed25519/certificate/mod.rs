@@ -646,18 +646,18 @@ mod tests {
 
     /// Test context type for generic scheme tests.
     #[derive(Clone, Debug)]
-    pub struct TestContext<'a> {
+    pub struct TestSubject<'a> {
         pub message: &'a [u8],
     }
 
-    impl<'a> Subject for TestContext<'a> {
+    impl<'a> Subject for TestSubject<'a> {
         fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
             (namespace.to_vec(), self.message.to_vec())
         }
     }
 
     // Use the macro to generate the test scheme
-    impl_ed25519_certificate!(TestContext<'a>);
+    impl_ed25519_certificate!(TestSubject<'a>);
 
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -684,11 +684,11 @@ mod tests {
         let scheme = &schemes[0];
 
         let signature = scheme
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_vote::<Sha256Digest>(
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &signature
         ));
     }
@@ -697,7 +697,7 @@ mod tests {
     fn test_verifier_cannot_sign() {
         let (_, verifier) = setup_signers(4, 43);
         assert!(verifier
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .is_none());
     }
 
@@ -710,7 +710,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -719,7 +719,7 @@ mod tests {
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             signatures.clone(),
         );
         assert!(result.invalid_signers.is_empty());
@@ -731,7 +731,7 @@ mod tests {
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             votes_corrupted,
         );
         assert_eq!(result.invalid_signers, vec![999]);
@@ -743,7 +743,7 @@ mod tests {
         let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             votes_corrupted,
         );
         // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
@@ -760,7 +760,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -779,13 +779,13 @@ mod tests {
         // Create votes in non-sorted order (indices 2, 0, 1)
         let signatures = vec![
             schemes[2]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
             schemes[0]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
             schemes[1]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
         ];
 
@@ -807,7 +807,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -818,7 +818,7 @@ mod tests {
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -832,7 +832,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -843,7 +843,7 @@ mod tests {
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
 
@@ -853,7 +853,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &corrupted
         ));
     }
@@ -867,7 +867,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -887,7 +887,7 @@ mod tests {
             .iter()
             .take(sub_quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -904,7 +904,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -924,7 +924,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -940,7 +940,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -953,7 +953,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -966,7 +966,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -984,7 +984,7 @@ mod tests {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
@@ -994,7 +994,7 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+            .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(57);
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
@@ -1013,7 +1013,7 @@ mod tests {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
@@ -1026,7 +1026,7 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+            .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(59);
         assert!(
@@ -1043,7 +1043,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -1064,7 +1064,7 @@ mod tests {
         let signer = schemes[0].clone();
         assert!(
             signer
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_some(),
             "signer should produce votes"
         );
@@ -1073,7 +1073,7 @@ mod tests {
         let verifier = Scheme::verifier(participants);
         assert!(
             verifier
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_none(),
             "verifier should not produce votes"
         );
@@ -1088,7 +1088,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -1136,7 +1136,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
     }
@@ -1168,7 +1168,7 @@ mod tests {
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -1179,7 +1179,7 @@ mod tests {
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
 
@@ -1191,7 +1191,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
     }
