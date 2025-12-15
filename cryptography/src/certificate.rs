@@ -62,7 +62,7 @@ pub use crate::{
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
@@ -148,7 +148,7 @@ impl<S: Scheme> Verification<S> {
 /// Identifies the subject of a signature or certificate.
 pub trait Subject: Clone + Debug + Send + Sync {
     /// Returns the namespace and message for the subject, given some base namespace.
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>);
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes);
 }
 
 /// Cryptographic surface for multi-party certificate schemes.
@@ -503,8 +503,8 @@ mod tests {
         }
 
         impl<'a> Subject for TestSubject<'a> {
-            fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-                (namespace.to_vec(), self.message.to_vec())
+            fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+                (namespace.to_vec().into(), self.message.to_vec().into())
             }
         }
 

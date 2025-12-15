@@ -1,7 +1,7 @@
 //! Types used in [aggregation](super).
 
 use crate::{aggregation::scheme, types::Epoch};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
@@ -124,8 +124,8 @@ impl<D: Digest> EncodeSize for Item<D> {
 }
 
 impl<D: Digest> Subject for &Item<D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        (ack_namespace(namespace), self.encode().to_vec())
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+        (ack_namespace(namespace).into(), self.encode().freeze())
     }
 }
 

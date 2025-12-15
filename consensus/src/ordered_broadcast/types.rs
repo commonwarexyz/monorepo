@@ -2,7 +2,7 @@
 
 use super::scheme;
 use crate::types::Epoch;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
@@ -275,12 +275,13 @@ pub struct AckSubject<'a, P: PublicKey, D: Digest> {
 }
 
 impl<'a, P: PublicKey, D: Digest> certificate::Subject for AckSubject<'a, P, D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+        let mut message =
+            BytesMut::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
         self.epoch.write(&mut message);
 
-        (ack_namespace(namespace), message)
+        (ack_namespace(namespace).into(), message.freeze())
     }
 }
 

@@ -637,6 +637,7 @@ mod tests {
     use crate::{
         certificate::Scheme as _, impl_certificate_ed25519, sha256::Digest as Sha256Digest,
     };
+    use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::{ordered::Set, quorum, TryCollect};
@@ -652,8 +653,8 @@ mod tests {
     }
 
     impl<'a> Subject for TestSubject<'a> {
-        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-            (namespace.to_vec(), self.message.to_vec())
+        fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+            (namespace.to_vec().into(), self.message.to_vec().into())
         }
     }
 

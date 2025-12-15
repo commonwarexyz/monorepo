@@ -23,6 +23,7 @@
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 use crate::{simplex::types::Subject, types::Round};
+use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
 use commonware_utils::union;
@@ -35,7 +36,7 @@ pub mod ed25519;
 pub mod reporter;
 
 impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
         vote_namespace_and_message(namespace, self)
     }
 }
@@ -110,15 +111,19 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
     subject: &Subject<'_, D>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Bytes, Bytes) {
     match subject {
-        Subject::Notarize { proposal } => {
-            (notarize_namespace(namespace), proposal.encode().to_vec())
+        Subject::Notarize { proposal } => (
+            notarize_namespace(namespace).into(),
+            proposal.encode().freeze(),
+        ),
+        Subject::Nullify { round } => {
+            (nullify_namespace(namespace).into(), round.encode().freeze())
         }
-        Subject::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
-        Subject::Finalize { proposal } => {
-            (finalize_namespace(namespace), proposal.encode().to_vec())
-        }
+        Subject::Finalize { proposal } => (
+            finalize_namespace(namespace).into(),
+            proposal.encode().freeze(),
+        ),
     }
 }
 
@@ -130,14 +135,14 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
     subject: &Subject<'_, D>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Bytes, Bytes) {
     (
-        seed_namespace(namespace),
+        seed_namespace(namespace).into(),
         match subject {
             Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
-                proposal.round.encode().to_vec()
+                proposal.round.encode().freeze()
             }
-            Subject::Nullify { round } => round.encode().to_vec(),
+            Subject::Nullify { round } => round.encode().freeze(),
         },
     )
 }

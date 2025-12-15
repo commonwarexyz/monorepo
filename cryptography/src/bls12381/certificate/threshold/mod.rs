@@ -576,6 +576,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
+    use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
@@ -591,8 +592,8 @@ mod tests {
     }
 
     impl<'a> Subject for TestSubject<'a> {
-        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-            (namespace.to_vec(), self.message.to_vec())
+        fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+            (namespace.to_vec().into(), self.message.to_vec().into())
         }
     }
 
