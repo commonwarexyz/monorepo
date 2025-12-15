@@ -84,7 +84,7 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, AggregationScheme},
+        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
@@ -161,7 +161,7 @@ mod tests {
     }
 
     /// Initialize a simulated network environment.
-    async fn initialize_simulation<S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>>(
+    async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
@@ -184,7 +184,7 @@ mod tests {
 
     /// Spawn aggregation engines for all validators.
     #[allow(clippy::too_many_arguments)]
-    fn spawn_validator_engines<S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>>(
+    fn spawn_validator_engines<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// Wait for all reporters to reach the specified consensus threshold.
-    async fn await_reporters<S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>>(
+    async fn await_reporters<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>,
         threshold_index: u64,
@@ -308,7 +308,7 @@ mod tests {
     /// Test aggregation consensus with all validators online.
     fn all_online<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -350,7 +350,7 @@ mod tests {
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -391,7 +391,7 @@ mod tests {
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         // Test parameters
@@ -548,7 +548,7 @@ mod tests {
 
     fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
         // Test parameters
@@ -741,7 +741,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
@@ -848,7 +848,7 @@ mod tests {
 
     fn one_offline<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -894,7 +894,7 @@ mod tests {
     /// Test consensus recovery after a network partition.
     fn network_partition<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -960,7 +960,7 @@ mod tests {
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest, PublicKey = PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(15));

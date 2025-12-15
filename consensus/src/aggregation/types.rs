@@ -1,6 +1,6 @@
 //! Types used in [aggregation](super).
 
-use crate::{aggregation::scheme::AggregationScheme, types::Epoch};
+use crate::{aggregation::scheme, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -160,7 +160,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
-        S: AggregationScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_part::<D>(namespace, &self.item, &self.part)
     }
@@ -174,7 +174,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Signatures produced by this function are deterministic and safe for consensus.
     pub fn sign(scheme: &S, namespace: &[u8], epoch: Epoch, item: Item<D>) -> Option<Self>
     where
-        S: AggregationScheme<D>,
+        S: scheme::Scheme<D>,
     {
         let part = scheme.sign::<D>(namespace, &item)?;
         Some(Self { item, epoch, part })
@@ -279,7 +279,7 @@ pub struct Certificate<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     pub fn from_acks<'a>(scheme: &S, acks: impl IntoIterator<Item = &'a Ack<S, D>>) -> Option<Self>
     where
-        S: AggregationScheme<D>,
+        S: scheme::Scheme<D>,
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
@@ -295,7 +295,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
         R: Rng + CryptoRng,
-        S: AggregationScheme<D>,
+        S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
     }
@@ -418,9 +418,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519, AggregationScheme,
-    };
+    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -453,7 +451,7 @@ mod tests {
 
     fn codec<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest>,
+        S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
@@ -547,7 +545,7 @@ mod tests {
 
     fn activity_invalid_enum<S, F>(fixture: F)
     where
-        S: AggregationScheme<Sha256Digest>,
+        S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);

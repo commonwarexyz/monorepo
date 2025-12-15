@@ -1,6 +1,6 @@
 use crate::{
     aggregation::{
-        scheme::AggregationScheme,
+        scheme,
         types::{Ack, Activity, Certificate, Index},
     },
     types::Epoch,
@@ -55,7 +55,7 @@ pub struct Reporter<R: Rng + CryptoRng, S: Scheme, D: Digest> {
 impl<R, S, D> Reporter<R, S, D>
 where
     R: Rng + CryptoRng,
-    S: AggregationScheme<D>,
+    S: scheme::Scheme<D>,
     D: Digest,
 {
     pub fn new(rng: R, namespace: &[u8], scheme: S) -> (Self, Mailbox<S, D>) {

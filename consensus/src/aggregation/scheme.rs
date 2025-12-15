@@ -14,29 +14,17 @@
 //!   certificates regardless of committee size.
 
 use super::types::Item;
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{certificate, Digest};
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`Scheme`] to the [`Item`] subject type used by the
-/// aggregation protocol. It is automatically implemented for any scheme
+/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type used
+/// by the aggregation protocol. It is automatically implemented for any scheme
 /// whose subject type matches `&'a Item<D>`.
-pub trait AggregationScheme<D: Digest>: for<'a> Scheme<Subject<'a, D> = &'a Item<D>> {}
+pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {}
 
-impl<D: Digest, S> AggregationScheme<D> for S where S: for<'a> Scheme<Subject<'a, D> = &'a Item<D>> {}
-
-pub mod ed25519 {
-    //! Ed25519 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
-    //! for `aggregation`.
-    //!
-    //! This scheme is attributable: individual signatures can be safely exposed as
-    //! evidence of liveness or faults.
-
-    use super::Item;
-    use commonware_cryptography::impl_certificate_ed25519;
-
-    impl_certificate_ed25519!(&'a Item<D>);
-}
+impl<D: Digest, S> Scheme<D> for S where S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>>
+{}
 
 pub mod bls12381_multisig {
     //! BLS12-381 multi-signature implementation of the
@@ -62,4 +50,17 @@ pub mod bls12381_threshold {
     use commonware_cryptography::impl_certificate_bls12381_threshold;
 
     impl_certificate_bls12381_threshold!(&'a Item<D>);
+}
+
+pub mod ed25519 {
+    //! Ed25519 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
+    //! for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults.
+
+    use super::Item;
+    use commonware_cryptography::impl_certificate_ed25519;
+
+    impl_certificate_ed25519!(&'a Item<D>);
 }

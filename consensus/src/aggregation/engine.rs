@@ -7,7 +7,7 @@ use super::{
     Config,
 };
 use crate::{
-    aggregation::{scheme::AggregationScheme, types::Certificate},
+    aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };
@@ -155,7 +155,7 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: Provider<Scope = Epoch, Scheme: AggregationScheme<D>>,
+        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
