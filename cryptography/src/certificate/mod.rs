@@ -52,12 +52,15 @@
 //! (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
 //! for an example of a scheme that uses the same key for both purposes.
 
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 #[cfg(feature = "std")]
 pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
 };
 #[cfg(feature = "std")]
 pub use crate::ed25519::certificate as ed25519;
+#[cfg(feature = "std")]
 pub use crate::{
     impl_bls12381_multisig_certificate, impl_bls12381_threshold_certificate,
     impl_ed25519_certificate,
@@ -66,8 +69,10 @@ use crate::{Digest, PublicKey};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
+use core::{fmt::Debug, hash::Hash};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash, sync::Arc};
+#[cfg(feature = "std")]
+use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
@@ -87,7 +92,7 @@ impl<S: Scheme> PartialEq for Signature<S> {
 impl<S: Scheme> Eq for Signature<S> {}
 
 impl<S: Scheme> Hash for Signature<S> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
     }
