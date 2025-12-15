@@ -21,7 +21,7 @@ use crate::{
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
-    certificate::{Part, Scheme, Subject, Verification},
+    certificate::{Attestation, Scheme, Subject, Verification},
     Digest, PublicKey,
 };
 #[cfg(not(feature = "std"))]
@@ -173,8 +173,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
     }
 
-    /// Signs a subject and returns the part.
-    pub fn sign<S, D>(&self, namespace: &[u8], subject: S::Subject<'_, D>) -> Option<Part<S>>
+    /// Signs a subject and returns the attestation.
+    pub fn sign<S, D>(&self, namespace: &[u8], subject: S::Subject<'_, D>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
@@ -185,24 +185,24 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let signature =
             partial_sign_message::<V>(share, Some(namespace.as_ref()), message.as_ref()).value;
 
-        Some(Part {
+        Some(Attestation {
             signer: share.index,
             signature,
         })
     }
 
-    /// Verifies a single part from a signer.
-    pub fn verify_part<S, D>(
+    /// Verifies a single attestation from a signer.
+    pub fn verify_attestation<S, D>(
         &self,
         namespace: &[u8],
         subject: S::Subject<'_, D>,
-        part: &Part<S>,
+        attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
     {
-        let Ok(evaluated) = self.polynomial().partial_public(part.signer) else {
+        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
 
@@ -211,31 +211,31 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             &evaluated,
             Some(namespace.as_ref()),
             message.as_ref(),
-            &part.signature,
+            &attestation.signature,
         )
         .is_ok()
     }
 
-    /// Batch-verifies parts and returns verified parts and invalid signers.
-    pub fn verify_parts<S, R, D, I>(
+    /// Batch-verifies attestations and returns verified attestations and invalid signers.
+    pub fn verify_attestations<S, R, D, I>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
         subject: S::Subject<'_, D>,
-        parts: I,
+        attestations: I,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Part<S>>,
+        I: IntoIterator<Item = Attestation<S>>,
     {
         let mut invalid = BTreeSet::new();
-        let partials: Vec<_> = parts
+        let partials: Vec<_> = attestations
             .into_iter()
-            .map(|part| PartialSignature::<V> {
-                index: part.signer,
-                value: part.signature,
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
             })
             .collect();
 
@@ -255,7 +255,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let verified = partials
             .into_iter()
             .filter(|partial| !invalid.contains(&partial.index))
-            .map(|partial| Part {
+            .map(|partial| Attestation {
                 signer: partial.index,
                 signature: partial.value,
             })
@@ -264,17 +264,17 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles a certificate from a collection of parts.
-    pub fn assemble<S, I>(&self, parts: I) -> Option<V::Signature>
+    /// Assembles a certificate from a collection of attestations.
+    pub fn assemble<S, I>(&self, attestations: I) -> Option<V::Signature>
     where
         S: Scheme<Signature = V::Signature>,
-        I: IntoIterator<Item = Part<S>>,
+        I: IntoIterator<Item = Attestation<S>>,
     {
-        let partials: Vec<_> = parts
+        let partials: Vec<_> = attestations
             .into_iter()
-            .map(|part| PartialSignature::<V> {
-                index: part.signer,
-                value: part.signature,
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
             })
             .collect();
 
@@ -478,39 +478,39 @@ mod macros {
                     &self,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
-                ) -> Option<$crate::certificate::Part<Self>> {
+                ) -> Option<$crate::certificate::Attestation<Self>> {
                     self.generic.sign::<_, D>(namespace, subject)
                 }
 
-                fn verify_part<D: $crate::Digest>(
+                fn verify_attestation<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
-                    part: &$crate::certificate::Part<Self>,
+                    attestation: &$crate::certificate::Attestation<Self>,
                 ) -> bool {
-                    self.generic.verify_part::<_, D>(namespace, subject, part)
+                    self.generic.verify_attestation::<_, D>(namespace, subject, attestation)
                 }
 
-                fn verify_parts<R, D, I>(
+                fn verify_attestations<R, D, I>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
-                    parts: I,
+                    attestations: I,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: $crate::Digest,
-                    I: IntoIterator<Item = $crate::certificate::Part<Self>>,
+                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
-                    self.generic.verify_parts::<_, _, D, _>(rng, namespace, subject, parts)
+                    self.generic.verify_attestations::<_, _, D, _>(rng, namespace, subject, attestations)
                 }
 
-                fn assemble<I>(&self, parts: I) -> Option<Self::Certificate>
+                fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::certificate::Part<Self>>,
+                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
-                    self.generic.assemble(parts)
+                    self.generic.assemble(attestations)
                 }
 
                 fn verify_certificate<
@@ -638,13 +638,13 @@ mod tests {
         let (schemes, _, _) = setup_signers::<V>(4, 42);
         let scheme = &schemes[0];
 
-        let signature = scheme
+        let attestation = scheme
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(scheme.verify_part::<Sha256Digest>(
+        assert!(scheme.verify_attestation::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
-            &signature
+            &attestation
         ));
     }
 
@@ -667,11 +667,11 @@ mod tests {
         test_verifier_cannot_sign::<MinSig>();
     }
 
-    fn test_verify_votes_filters_invalid<V: Variant + Send + Sync>() {
+    fn test_verify_attestations_filters_invalid<V: Variant + Send + Sync>() {
         let (schemes, _, _) = setup_signers::<V>(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -681,51 +681,51 @@ mod tests {
             .collect();
 
         let mut rng = StdRng::seed_from_u64(45);
-        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
+        let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
-            parts.clone(),
+            attestations.clone(),
         );
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test: Corrupt one vote - invalid signer index
-        let mut votes_corrupted = parts.clone();
-        votes_corrupted[0].signer = 999;
-        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
+        // Test: Corrupt one attestation - invalid signer index
+        let mut attestations_corrupted = attestations.clone();
+        attestations_corrupted[0].signer = 999;
+        let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
-            votes_corrupted,
+            attestations_corrupted,
         );
         assert_eq!(result.invalid, vec![999]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test: Corrupt one vote - invalid signature
-        let mut votes_corrupted = parts;
-        votes_corrupted[0].signature = votes_corrupted[1].signature;
-        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
+        // Test: Corrupt one attestation - invalid signature
+        let mut attestations_corrupted = attestations;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
-            votes_corrupted,
+            attestations_corrupted,
         );
         assert_eq!(result.invalid.len(), 1);
         assert_eq!(result.verified.len(), quorum - 1);
     }
 
     #[test]
-    fn test_verify_votes_filters_invalid_variants() {
-        test_verify_votes_filters_invalid::<MinPk>();
-        test_verify_votes_filters_invalid::<MinSig>();
+    fn test_verify_attestations_filters_invalid_variants() {
+        test_verify_attestations_filters_invalid::<MinPk>();
+        test_verify_attestations_filters_invalid::<MinSig>();
     }
 
     fn test_assemble_certificate<V: Variant + Send + Sync>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 46);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -734,7 +734,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
 
         // Verify the assembled certificate
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -755,7 +755,7 @@ mod tests {
         let (schemes, verifier, _) = setup_signers::<V>(4, 48);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -764,7 +764,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
 
         let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -785,7 +785,7 @@ mod tests {
         let (schemes, verifier, _) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -794,7 +794,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -824,7 +824,7 @@ mod tests {
         let (schemes, _, _) = setup_signers::<V>(4, 51);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -833,7 +833,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
         let encoded = certificate.encode();
         let decoded = V::Signature::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -849,7 +849,7 @@ mod tests {
         let (schemes, _, _) = setup_signers::<V>(4, 52);
         let sub_quorum = 2; // Less than quorum (3)
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(sub_quorum)
             .map(|s| {
@@ -858,7 +858,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble(parts).is_none());
+        assert!(schemes[0].assemble(attestations).is_none());
     }
 
     #[test]
@@ -875,7 +875,7 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let parts: Vec<_> = schemes
+            let attestations: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
@@ -883,7 +883,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(parts).unwrap());
+            certificates.push(schemes[0].assemble(attestations).unwrap());
         }
 
         let certs_iter = messages
@@ -909,7 +909,7 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let parts: Vec<_> = schemes
+            let attestations: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
@@ -917,7 +917,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(parts).unwrap());
+            certificates.push(schemes[0].assemble(attestations).unwrap());
         }
 
         // Corrupt second certificate
@@ -944,7 +944,7 @@ mod tests {
         let (schemes, _, polynomial) = setup_signers::<V>(4, 60);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -953,7 +953,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
@@ -999,7 +999,7 @@ mod tests {
         let vote = schemes[1]
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(verifier.verify_part::<Sha256Digest>(
+        assert!(verifier.verify_attestation::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote
@@ -1049,7 +1049,7 @@ mod tests {
             .unwrap();
 
         // CertificateVerifier should panic when trying to verify a vote
-        certificate_verifier.verify_part::<Sha256Digest>(
+        certificate_verifier.verify_attestation::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote,
@@ -1157,7 +1157,7 @@ mod tests {
         let (schemes, _, _) = setup_signers::<V>(4, 65);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let parts: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -1166,7 +1166,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(parts).unwrap();
+        let certificate = schemes[0].assemble(attestations).unwrap();
         let mut encoded = certificate.encode();
         encoded.truncate(encoded.len() - 1);
         assert!(V::Signature::decode(encoded).is_err());

@@ -539,7 +539,7 @@ impl<
             tip.chunk.clone(),
             self.epoch,
         ) else {
-            return Err(Error::NotASigner(self.epoch));
+            return Err(Error::NotSigner(self.epoch));
         };
 
         // Sync the journal to prevent ever acking two conflicting chunks at
@@ -914,7 +914,7 @@ impl<
         let Some(index) = participants.iter().position(|p| p == sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index as u32 != ack.part.signer {
+        if index as u32 != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
 

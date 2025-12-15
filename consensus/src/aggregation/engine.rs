@@ -505,12 +505,12 @@ impl<
             }
         };
 
-        // Add the partial signature (if not already present)
+        // Add the attestation (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.part.signer) {
+        if acks.contains_key(&ack.attestation.signer) {
             return Ok(());
         }
-        acks.insert(ack.part.signer, ack.clone());
+        acks.insert(ack.attestation.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
         let filtered = acks
@@ -576,7 +576,7 @@ impl<
         // Get our signature
         let scheme = self.scheme(self.epoch)?;
         let Some(signer) = scheme.me() else {
-            return Err(Error::NotASigner(self.epoch));
+            return Err(Error::NotSigner(self.epoch));
         };
         let ack = acks
             .get(&self.epoch)
@@ -598,7 +598,6 @@ impl<
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
-    /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
         &self,
@@ -621,7 +620,7 @@ impl<
         let Some(signer) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if signer != ack.part.signer {
+        if signer != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
 
@@ -644,7 +643,7 @@ impl<
             None => false,
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.part.signer)),
+                .is_some_and(|acks| acks.contains_key(&ack.attestation.signer)),
             Some(Pending::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
@@ -653,7 +652,7 @@ impl<
                 }
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.part.signer))
+                    .is_some_and(|acks| acks.contains_key(&ack.attestation.signer))
             }
         };
         if have_ack {
@@ -693,13 +692,13 @@ impl<
     async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<P::Scheme, D>, Error> {
         let scheme = self.scheme(self.epoch)?;
         if scheme.me().is_none() {
-            return Err(Error::NotASigner(self.epoch));
+            return Err(Error::NotSigner(self.epoch));
         }
 
         // Sign the item
         let item = Item { index, digest };
         let ack = Ack::sign(&*scheme, &self.namespace, self.epoch, item)
-            .ok_or(Error::NotASigner(self.epoch))?;
+            .ok_or(Error::NotSigner(self.epoch))?;
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;
@@ -844,7 +843,7 @@ impl<
             let our_digest = our_signer.and_then(|signer| {
                 acks_group
                     .iter()
-                    .find(|ack| ack.epoch == self.epoch && ack.part.signer == signer)
+                    .find(|ack| ack.epoch == self.epoch && ack.attestation.signer == signer)
                     .map(|ack| ack.item.digest)
             });
 
@@ -859,7 +858,7 @@ impl<
                 epoch_map
                     .entry(ack.epoch)
                     .or_insert_with(BTreeMap::new)
-                    .insert(ack.part.signer, ack);
+                    .insert(ack.attestation.signer, ack);
             }
 
             // Insert as Verified if we have our own ack (meaning we verified the digest),

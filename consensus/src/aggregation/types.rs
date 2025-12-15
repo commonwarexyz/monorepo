@@ -6,7 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Part, Scheme, Subject},
+    certificate::{Attestation, Scheme, Subject},
     Digest,
 };
 use commonware_utils::union;
@@ -33,7 +33,7 @@ pub enum Error {
     UnknownValidator(Epoch, String),
     /// The local node is not a signer in the scheme for the specified epoch.
     #[error("Not a signer at epoch {0}")]
-    NotASigner(Epoch),
+    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -149,20 +149,20 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub item: Item<D>,
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
-    /// Scheme-specific part material
-    pub part: Part<S>,
+    /// Scheme-specific attestation material
+    pub attestation: Attestation<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
-    /// Verifies the part on this acknowledgment.
+    /// Verifies the attestation on this acknowledgment.
     ///
-    /// Returns `true` if the part is valid for the given namespace and public key.
+    /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_part::<D>(namespace, &self.item, &self.part)
+        scheme.verify_attestation::<D>(namespace, &self.item, &self.attestation)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -176,8 +176,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        let part = scheme.sign::<D>(namespace, &item)?;
-        Some(Self { item, epoch, part })
+        let attestation = scheme.sign::<D>(namespace, &item)?;
+        Some(Self {
+            item,
+            epoch,
+            attestation,
+        })
     }
 }
 
@@ -185,7 +189,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.epoch.write(writer);
-        self.part.write(writer);
+        self.attestation.write(writer);
     }
 }
 
@@ -195,14 +199,18 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let part = Part::read(reader)?;
-        Ok(Self { item, epoch, part })
+        let attestation = Attestation::read(reader)?;
+        Ok(Self {
+            item,
+            epoch,
+            attestation,
+        })
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.epoch.encode_size() + self.part.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
     }
 }
 
@@ -215,8 +223,12 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let part = Part::arbitrary(u)?;
-        Ok(Self { item, epoch, part })
+        let attestation = Attestation::arbitrary(u)?;
+        Ok(Self {
+            item,
+            epoch,
+            attestation,
+        })
     }
 }
 
@@ -283,10 +295,10 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
-        let parts = iter
+        let attestations = iter
             .filter(|ack| ack.item == item)
-            .map(|ack| ack.part.clone());
-        let certificate = scheme.assemble(parts)?;
+            .map(|ack| ack.attestation.clone());
+        let certificate = scheme.assemble(attestations)?;
 
         Some(Self { item, certificate })
     }

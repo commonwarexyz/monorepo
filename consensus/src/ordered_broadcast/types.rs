@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{self, Part, Provider, Scheme},
+    certificate::{self, Attestation, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -97,7 +97,7 @@ pub enum Error {
     UnknownValidator(Epoch, String),
     /// The local validator is not a signer in the scheme for the specified epoch.
     #[error("Not a signer at epoch {0}")]
-    NotASigner(Epoch),
+    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -669,9 +669,9 @@ where
 /// When a validator receives and validates a chunk, it sends an Ack containing:
 /// 1. The chunk being acknowledged
 /// 2. The current epoch
-/// 3. A partial signature over the chunk and epoch
+/// 3. An attestation over the chunk and epoch
 ///
-/// These partial signatures from validators can be aggregated to form a certificate
+/// These attestations from validators can be aggregated to form a certificate
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -682,25 +682,29 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Part of the certificate for this chunk.
+    /// Attestation for this chunk.
     ///
-    /// This is a cryptographic part that can be combined with other parts
+    /// This is a cryptographic attestation that can be combined with other attestations
     /// to form a certificate once a quorum is reached.
-    pub part: Part<S>,
+    pub attestation: Attestation<S>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
-    /// Create a new ack with the given chunk, epoch, and part.
-    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, part: Part<S>) -> Self {
-        Self { chunk, epoch, part }
+    /// Create a new ack with the given chunk, epoch, and attestation.
+    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, attestation: Attestation<S>) -> Self {
+        Self {
+            chunk,
+            epoch,
+            attestation,
+        }
     }
 
     /// Verify the Ack.
     ///
-    /// This ensures that the part is valid for the given chunk and epoch,
+    /// This ensures that the attestation is valid for the given chunk and epoch,
     /// using the provided scheme.
     ///
-    /// Returns true if the part is valid, false otherwise.
+    /// Returns true if the attestation is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<P, D>,
@@ -710,7 +714,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_part::<D>(&ack_namespace, ctx, &self.part)
+        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.attestation)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -726,8 +730,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &chunk,
             epoch,
         };
-        let part = scheme.sign::<D>(&ack_namespace, ctx)?;
-        Some(Self::new(chunk, epoch, part))
+        let attestation = scheme.sign::<D>(&ack_namespace, ctx)?;
+        Some(Self::new(chunk, epoch, attestation))
     }
 }
 
@@ -735,7 +739,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
-        self.part.write(writer);
+        self.attestation.write(writer);
     }
 }
 
@@ -745,14 +749,18 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let part = Part::read(reader)?;
-        Ok(Self { chunk, epoch, part })
+        let attestation = Attestation::read(reader)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            attestation,
+        })
     }
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + self.epoch.encode_size() + self.part.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
     }
 }
 
@@ -766,8 +774,12 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let chunk = Chunk::<P, D>::arbitrary(u)?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let part = Part::arbitrary(u)?;
-        Ok(Self { chunk, epoch, part })
+        let attestation = Attestation::arbitrary(u)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            attestation,
+        })
     }
 }
 
@@ -1035,7 +1047,7 @@ where
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::Validators,
+        mocks::Provider,
         scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
@@ -1105,7 +1117,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1116,7 +1128,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1170,7 +1182,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1180,7 +1192,7 @@ mod tests {
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1256,7 +1268,7 @@ mod tests {
         };
 
         // Collect signatures from a quorum of validators to form the parent certificate.
-        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1265,7 +1277,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1293,7 +1305,7 @@ mod tests {
 
         // When the provider doesn't have a scheme registered for the parent's epoch,
         // read_staged should return an UnknownScheme error.
-        let empty_provider = Validators::<PublicKey, S>::new(vec![]);
+        let empty_provider = Provider::<S>::new();
 
         let result = Node::<PublicKey, S, Sha256Digest>::read_staged(
             &mut encoded2.as_ref(),
@@ -1328,18 +1340,22 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let part = fixture.schemes[0]
+        let attestation = fixture.schemes[0]
             .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
 
-        let ack = Ack::<PublicKey, S, Sha256Digest> { chunk, epoch, part };
+        let ack = Ack::<PublicKey, S, Sha256Digest> {
+            chunk,
+            epoch,
+            attestation,
+        };
         let encoded = ack.encode();
         let decoded =
             Ack::<PublicKey, S, Sha256Digest>::read_cfg(&mut encoded.as_ref(), &()).unwrap();
 
         assert_eq!(decoded.chunk, ack.chunk);
         assert_eq!(decoded.epoch, ack.epoch);
-        assert_eq!(decoded.part.signer, ack.part.signer);
+        assert_eq!(decoded.attestation.signer, ack.attestation.signer);
     }
 
     #[test]
@@ -1389,7 +1405,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1400,7 +1416,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1473,7 +1489,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1484,7 +1500,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1544,7 +1560,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1553,7 +1569,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1625,7 +1641,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1636,7 +1652,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1672,7 +1688,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1681,7 +1697,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1787,7 +1803,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1796,7 +1812,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1823,7 +1839,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: Epoch::new(99), // Different epoch to get different signatures
         };
-        let wrong_parts: Vec<_> = fixture.schemes[..quorum]
+        let wrong_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1832,7 +1848,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble(wrong_parts)
+            .assemble(wrong_attestations)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -1961,7 +1977,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum_size]
+        let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1970,7 +1986,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1981,7 +1997,7 @@ mod tests {
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Generate certificate with the wrong keys
-        let wrong_parts: Vec<_> = wrong_fixture.schemes[..quorum_size]
+        let wrong_attestations: Vec<_> = wrong_fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1990,7 +2006,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble(wrong_parts)
+            .assemble(wrong_attestations)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -2069,7 +2085,7 @@ mod tests {
             chunk: &dummy_chunk,
             epoch: dummy_epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum_size]
+        let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -2078,7 +2094,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2154,7 +2170,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
@@ -2163,7 +2179,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent =

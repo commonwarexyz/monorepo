@@ -1,7 +1,7 @@
 use super::types::Ack;
 use crate::types::Epoch;
 use commonware_cryptography::{
-    certificate::{Part, Scheme},
+    certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -12,9 +12,9 @@ struct Partials<S: Scheme, D: Digest> {
     // The set of signer indices that have voted for the payload.
     pub signers: HashSet<u32>,
 
-    // A map from payload digest to votes.
+    // A map from payload digest to attestations.
     // Each signer should only vote once for each sequencer/height/epoch.
-    pub parts: HashMap<D, Vec<Part<S>>>,
+    pub attestations: HashMap<D, Vec<Attestation<S>>>,
 }
 
 /// Evidence for a chunk.
@@ -28,7 +28,7 @@ impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
-            parts: HashMap::new(),
+            attestations: HashMap::new(),
         })
     }
 }
@@ -73,20 +73,20 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
         match evidence {
             Evidence::Certificate(_) => None,
             Evidence::Partials(p) => {
-                if !p.signers.insert(ack.part.signer) {
+                if !p.signers.insert(ack.attestation.signer) {
                     // Validator already signed
                     return None;
                 }
 
                 // Add the vote
-                let parts = p.parts.entry(ack.chunk.payload).or_default();
-                parts.push(ack.part.clone());
+                let attestations = p.attestations.entry(ack.chunk.payload).or_default();
+                attestations.push(ack.attestation.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble(parts.iter().cloned())?;
+                let certificate = scheme.assemble(attestations.iter().cloned())?;
 
                 // Take ownership of the votes, which must exist
-                p.parts.remove(&ack.chunk.payload);
+                p.attestations.remove(&ack.chunk.payload);
 
                 Some(certificate)
             }
@@ -186,10 +186,14 @@ mod tests {
                 chunk: &chunk,
                 epoch,
             };
-            let part = scheme
+            let attestation = scheme
                 .sign::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
-            Ack { chunk, epoch, part }
+            Ack {
+                chunk,
+                epoch,
+                attestation,
+            }
         }
 
         /// Create a vector of acks for the given scheme indices.
@@ -469,8 +473,8 @@ mod tests {
         add_certificate(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    /// Duplicate partial submissions are ignored.
-    fn duplicate_partial_submission<S, F>(fixture: F)
+    /// Duplicate attestation submissions are ignored.
+    fn duplicate_attestation_submission<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
@@ -489,12 +493,12 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_partial_submission() {
-        duplicate_partial_submission(ed25519::fixture);
-        duplicate_partial_submission(bls12381_multisig::fixture::<MinPk, _>);
-        duplicate_partial_submission(bls12381_multisig::fixture::<MinSig, _>);
-        duplicate_partial_submission(bls12381_threshold::fixture::<MinPk, _>);
-        duplicate_partial_submission(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_duplicate_attestation_submission() {
+        duplicate_attestation_submission(ed25519::fixture);
+        duplicate_attestation_submission(bls12381_multisig::fixture::<MinPk, _>);
+        duplicate_attestation_submission(bls12381_multisig::fixture::<MinSig, _>);
+        duplicate_attestation_submission(bls12381_threshold::fixture::<MinPk, _>);
+        duplicate_attestation_submission(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Once a certificate is reached, further acks are ignored.
@@ -574,7 +578,7 @@ mod tests {
     }
 
     /// If quorum is never reached, no certificate is produced.
-    fn partial_quorum_never_reached<S, F>(fixture: F)
+    fn incomplete_quorum<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
@@ -595,12 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_quorum_never_reached() {
-        partial_quorum_never_reached(ed25519::fixture);
-        partial_quorum_never_reached(bls12381_multisig::fixture::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_multisig::fixture::<MinSig, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixture::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_incomplete_quorum() {
+        incomplete_quorum(ed25519::fixture);
+        incomplete_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        incomplete_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        incomplete_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        incomplete_quorum(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Interleaved acks for different payloads are aggregated separately.
