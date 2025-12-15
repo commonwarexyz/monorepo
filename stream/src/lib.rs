@@ -62,7 +62,7 @@
 
 pub mod utils;
 
-use crate::utils::codec::{recv_frame, send_frame};
+use crate::utils::codec::{recv_frame, send_frame, BufferedSender};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
@@ -201,8 +201,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
         Ok((
             Sender {
                 cipher: send,
-                sink,
-                max_message_size: config.max_message_size,
+                sender: BufferedSender::new(sink, config.max_message_size + CIPHERTEXT_OVERHEAD),
             },
             Receiver {
                 cipher: recv,
@@ -268,8 +267,7 @@ pub async fn listen<
             peer,
             Sender {
                 cipher: send,
-                sink,
-                max_message_size: config.max_message_size,
+                sender: BufferedSender::new(sink, config.max_message_size + CIPHERTEXT_OVERHEAD),
             },
             Receiver {
                 cipher: recv,
@@ -288,20 +286,14 @@ pub async fn listen<
 /// Sends encrypted messages to a peer.
 pub struct Sender<O> {
     cipher: SendCipher,
-    sink: O,
-    max_message_size: usize,
+    sender: BufferedSender<O>,
 }
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let c = self.cipher.send(msg)?;
-        send_frame(
-            &mut self.sink,
-            &c,
-            self.max_message_size + CIPHERTEXT_OVERHEAD,
-        )
-        .await?;
+        self.sender.send_frame(&c).await?;
         Ok(())
     }
 }

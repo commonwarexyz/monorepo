@@ -30,6 +30,13 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
 
 [lib]
 bench = false
+
+[[bench]]
+name = "stream"
+harness = false
+path = "src/benches/bench.rs"
