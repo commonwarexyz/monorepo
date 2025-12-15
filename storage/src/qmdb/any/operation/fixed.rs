@@ -1,8 +1,7 @@
 use crate::{
     mmr::Location,
     qmdb::any::{
-        operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        update::Update,
+        operation::{Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
         value::FixedEncoding,
         FixedValue, Operation,
     },

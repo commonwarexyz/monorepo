@@ -9,7 +9,7 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{update::Update, value::ValueEncoding, Operation},
+        any::{operation::Update, value::ValueEncoding, Operation},
         build_snapshot_from_log,
         store::LogStore,
         Error, FloorHelper,

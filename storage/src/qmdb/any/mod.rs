@@ -25,14 +25,13 @@ use std::{
     ops::Range,
 };
 
-mod update;
-pub use update::{OrderedUpdate, UnorderedUpdate};
-
 mod db;
 pub use db::span_contains;
 
 mod operation;
-pub use operation::{Operation, OrderedOperation, UnorderedOperation};
+pub use operation::{
+    Operation, OrderedOperation, OrderedUpdate, UnorderedOperation, UnorderedUpdate,
+};
 
 mod value;
 pub use value::{FixedEncoding, FixedValue, VariableEncoding, VariableValue};

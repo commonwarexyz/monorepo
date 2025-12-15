@@ -1,15 +1,14 @@
 use crate::{
     mmr::Location,
-    qmdb::{
-        any::{update::Update, value::ValueEncoding, OrderedUpdate, UnorderedUpdate},
-        operation::Committable,
-    },
+    qmdb::{any::value::ValueEncoding, operation::Committable},
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_utils::{hex, Array};
 use std::fmt;
 
 mod fixed;
+mod update;
+pub use update::{OrderedUpdate, UnorderedUpdate, Update};
 mod variable;
 
 const DELETE_CONTEXT: u8 = 0xD1;

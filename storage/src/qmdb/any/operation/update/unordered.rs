@@ -1,5 +1,5 @@
 use crate::qmdb::any::{
-    update::{sealed::Sealed, Update},
+    operation::{update::sealed::Sealed, Update},
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
