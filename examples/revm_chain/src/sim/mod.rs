@@ -1,3 +1,9 @@
+//! Deterministic simulation harness for the example chain.
+//!
+//! Spawns N nodes in a single process using the deterministic runtime and the simulated P2P
+//! transport. The harness waits for a fixed number of finalized blocks and asserts all nodes
+//! converge on the same head, state commitment, and balances.
+
 use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::{B256, U256};
 use commonware_consensus::simplex;
@@ -24,6 +30,7 @@ pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;
 pub(super) const P2P_LINK_LATENCY_MS: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
+/// Configuration for a deterministic simulation run.
 pub struct SimConfig {
     pub nodes: usize,
     pub blocks: u64,
@@ -31,14 +38,19 @@ pub struct SimConfig {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Summary of a completed simulation run.
 pub struct SimOutcome {
+    /// Finalized head digest (the value ordered by threshold-simplex).
     pub head: ConsensusDigest,
+    /// State commitment at the head digest.
     pub state_root: crate::StateRoot,
+    /// Latest tracked threshold-simplex seed hash (used as `prevrandao`).
     pub seed: B256,
     pub from_balance: U256,
     pub to_balance: U256,
 }
 
+/// Run the multi-node deterministic simulation and return the final outcome.
 pub fn simulate(cfg: SimConfig) -> anyhow::Result<SimOutcome> {
     let executor = deterministic::Runner::seeded(cfg.seed);
     executor.start(|context| async move { run_sim(context, cfg).await })

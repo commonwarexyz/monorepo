@@ -1,3 +1,9 @@
+//! Handle for interacting with the application actor.
+//!
+//! The handle is used by the deterministic simulation harness to:
+//! - inject out-of-band blocks, and
+//! - query state at a finalized digest for assertions.
+
 use super::ApplicationRequest;
 use crate::{
     consensus::{ConsensusDigest, PublicKey},
@@ -11,6 +17,7 @@ use futures::{
 };
 
 #[derive(Clone)]
+/// Handle to a running application actor.
 pub struct Handle {
     sender: mpsc::Sender<ApplicationRequest>,
 }
@@ -20,6 +27,7 @@ impl Handle {
         Self { sender }
     }
 
+    /// Deliver an encoded block from `from` to this node's application.
     pub async fn deliver_block(&self, from: PublicKey, bytes: Bytes) {
         let mut sender = self.sender.clone();
         let _ = sender
@@ -27,6 +35,7 @@ impl Handle {
             .await;
     }
 
+    /// Query an account balance at `digest`.
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
@@ -40,6 +49,7 @@ impl Handle {
         receiver.await.unwrap_or(None)
     }
 
+    /// Query the `state_root` commitment at `digest`.
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
@@ -49,6 +59,7 @@ impl Handle {
         receiver.await.unwrap_or(None)
     }
 
+    /// Query the stored consensus seed hash at `digest`.
     pub async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
         let (response, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();

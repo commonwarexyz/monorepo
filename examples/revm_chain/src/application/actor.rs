@@ -1,3 +1,11 @@
+//! Chain application actor.
+//!
+//! Owns per-node chain logic: proposing/verifying blocks, maintaining per-block EVM snapshots, and
+//! tracking consensus seed output for EVM `prevrandao`.
+//!
+//! The consensus engine orders only opaque digests. Full blocks are delivered out-of-band
+//! (see `BlockSync`) and cached until consensus requests verification.
+
 use super::{
     block_sync::BlockSync,
     store::{BlockEntry, ChainStore},
@@ -28,6 +36,11 @@ use futures::{
 type ThresholdActivity = <crate::consensus::Mailbox as commonware_consensus::Reporter>::Activity;
 
 /// Chain application actor.
+///
+/// This actor owns "chain state" for a single node:
+/// - a local store of verified blocks (keyed by the digest that consensus orders),
+/// - the corresponding EVM state snapshots used to re-execute proposals deterministically,
+/// - and a small control plane used by the simulation harness to query outcomes.
 pub struct Application<S> {
     node: u32,
     codec: BlockCodecCfg,
@@ -40,15 +53,21 @@ pub struct Application<S> {
     control: mpsc::Receiver<ApplicationRequest>,
 }
 
+/// Merged stream item for the application inbox.
 enum Input {
     Consensus(Box<ConsensusRequest>),
     Control(Box<ApplicationRequest>),
 }
 
+/// Mutable runtime state for the application actor.
 struct Runtime<S> {
     node: u32,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
+    /// Optional one-time transaction injected at height 1 for the demo.
+    ///
+    /// This must only be cleared after a height-1 block is finalized. Clearing earlier can lose the
+    /// transaction if consensus performs a view change and requests a new height-1 proposal.
     genesis_tx: Option<Tx>,
     store: ChainStore,
     sync: BlockSync<S>,
@@ -58,6 +77,7 @@ impl<S> Application<S>
 where
     S: commonware_p2p::Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
 {
+    /// Create a new application actor and the handles used by consensus and the simulation.
     pub fn new(
         node: u32,
         codec: BlockCodecCfg,
@@ -140,6 +160,7 @@ where
         ))
     }
 
+    /// Start the actor event loop.
     pub async fn run(self) {
         let Self {
             node,
@@ -305,6 +326,8 @@ where
 
         let prevrandao = parent.seed.unwrap_or(B256::from(context.parent.1 .0));
         let txs = if parent.block.height == 0 {
+            // Inject a single transaction immediately after genesis to keep the example minimal,
+            // deterministic, and end-to-end.
             self.genesis_tx.clone().into_iter().collect()
         } else {
             Vec::new()
@@ -329,6 +352,10 @@ where
                     finalization.proposal.payload,
                     Self::seed_hash_from_seed(finalization.seed()),
                 );
+                // Only clear the one-shot genesis transaction once a height-1 block is actually
+                // finalized. The consensus engine may discard a proposal during a view change and
+                // later ask for another height-1 proposal; clearing earlier would permanently lose
+                // the transaction and make the demo non-deterministic.
                 if let Some(entry) = self.store.get_by_digest(&finalization.proposal.payload) {
                     if entry.block.height == 1 {
                         self.genesis_tx = None;

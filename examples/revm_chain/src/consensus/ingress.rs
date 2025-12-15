@@ -1,3 +1,9 @@
+//! Mailbox-based consensus ingress.
+//!
+//! Threshold-simplex drives the application via three traits: `Automaton`, `Relay`, and `Reporter`.
+//! In this example, those methods are implemented by forwarding requests to the application actor
+//! over a mailbox channel.
+
 use super::{ConsensusDigest, PublicKey};
 use commonware_consensus::{
     simplex::types::{Activity, Context},
@@ -10,23 +16,27 @@ use futures::{
 };
 
 #[allow(clippy::large_enum_variant)]
+/// Requests sent from the consensus engine to the application actor.
 pub enum ConsensusRequest {
+    /// Return the genesis digest for the given epoch.
     Genesis {
         epoch: Epoch,
         response: oneshot::Sender<ConsensusDigest>,
     },
+    /// Ask the application to propose the next digest.
     Propose {
         context: Context<ConsensusDigest, PublicKey>,
         response: oneshot::Sender<ConsensusDigest>,
     },
+    /// Ask the application to verify that a candidate digest is valid.
     Verify {
         context: Context<ConsensusDigest, PublicKey>,
         digest: ConsensusDigest,
         response: oneshot::Sender<bool>,
     },
-    Broadcast {
-        digest: ConsensusDigest,
-    },
+    /// Ask the application to broadcast the full block bytes out-of-band.
+    Broadcast { digest: ConsensusDigest },
+    /// Notify the application of consensus activity (e.g. notarization/finalization).
     Report {
         activity: Activity<
             commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<
@@ -39,6 +49,9 @@ pub enum ConsensusRequest {
 }
 
 /// Mailbox for the chain application.
+///
+/// The consensus engine owns a clone of this mailbox. Each trait method sends a `ConsensusRequest`
+/// and returns a oneshot receiver for the response (where applicable).
 #[derive(Clone)]
 pub struct Mailbox {
     sender: mpsc::Sender<ConsensusRequest>,

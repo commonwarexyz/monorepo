@@ -1,3 +1,8 @@
+//! In-process deterministic DKG setup for the simulation.
+//!
+//! This example uses the BLS12-381 threshold signing scheme used by threshold-simplex. For
+//! simplicity, we run a dealer-based DKG locally to derive per-node signing shares.
+
 use super::ThresholdScheme;
 use commonware_consensus::simplex;
 use commonware_cryptography::{
@@ -20,6 +25,7 @@ pub(super) fn participants_set(
         .map_err(|_| anyhow::anyhow!("participant public keys are not unique"))
 }
 
+/// Deterministically derive `n` participants and their threshold-simplex signing schemes.
 pub(super) fn threshold_schemes(
     seed: u64,
     n: usize,

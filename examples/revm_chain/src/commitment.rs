@@ -1,3 +1,14 @@
+//! Deterministic state commitment for the example chain.
+//!
+//! This example does not implement Ethereum's Merkle-Patricia Trie. Instead it uses a rolling
+//! commitment that is easy to compute and verify without needing to iterate the whole database.
+//!
+//! Commitment scheme:
+//! - `delta = keccak256(Encode(StateChanges))`
+//! - `new_root = keccak256(prev_root || delta)`
+//!
+//! `StateChanges` uses `BTreeMap` so the encoded form is canonical and deterministic.
+
 use crate::types::StateRoot;
 use alloy_evm::revm::primitives::{keccak256, Address, B256, U256};
 use bytes::{Buf, BufMut};
@@ -11,6 +22,7 @@ pub struct StateChangesCfg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Canonical representation of a touched account's post-transaction state.
 pub struct AccountChange {
     pub touched: bool,
     pub created: bool,
@@ -22,6 +34,7 @@ pub struct AccountChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
+/// Canonical per-transaction state delta used for the rolling commitment.
 pub struct StateChanges {
     pub accounts: BTreeMap<Address, AccountChange>,
 }
@@ -168,6 +181,7 @@ impl Read for StateChanges {
     }
 }
 
+/// Compute the next rolling state commitment from a previous root and a canonical state delta.
 pub fn commit_state_root(prev_root: StateRoot, changes: &StateChanges) -> StateRoot {
     let delta = keccak256(changes.encode());
     let mut buf = [0u8; 64];

@@ -1,3 +1,9 @@
+//! Node wiring for the deterministic simulation.
+//!
+//! Each node runs:
+//! - a chain application actor (block production/verification and out-of-band block gossip), and
+//! - a threshold-simplex engine instance that orders opaque digests.
+
 use super::{
     genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
     CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
@@ -55,6 +61,7 @@ struct SimplexStart {
     resolver: (ChannelSender, ChannelReceiver),
 }
 
+/// Spawn all nodes (application + consensus) for a simulation run.
 pub(super) async fn start_all_nodes(
     context: &deterministic::Context,
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
@@ -65,6 +72,7 @@ pub(super) async fn start_all_nodes(
     Vec<application::Handle>,
     mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
 )> {
+    // Per-channel rate limit used by the simulated P2P transport in this example.
     let quota = Quota::per_second(NZU32!(1_000));
     let buffer_pool = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 

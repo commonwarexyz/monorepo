@@ -14,6 +14,11 @@ pub type ConsensusDigest = sha256::Digest;
 pub type PublicKey = ed25519::PublicKey;
 pub type FinalizationEvent = (u32, ConsensusDigest);
 
+/// Compute the digest ordered by threshold-simplex for a given block.
+///
+/// This example uses a two-step identifier:
+/// - `BlockId = keccak256(Encode(Block))` (Ethereum-ish block id)
+/// - `ConsensusDigest = sha256(BlockId)` (ordered by consensus)
 pub(crate) fn digest_for_block(block: &Block) -> ConsensusDigest {
     let mut hasher = Sha256::default();
     let id = block_id(block);

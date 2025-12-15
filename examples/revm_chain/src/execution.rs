@@ -1,3 +1,11 @@
+//! EVM execution for the example chain.
+//!
+//! This module uses `alloy-evm` as the integration layer above `revm` and keeps the execution
+//! backend generic over the `Database + DatabaseCommit` seam.
+//!
+//! The example also installs a small precompile that returns `block.prevrandao` (EIP-4399), which
+//! is sourced from the threshold-simplex seed.
+
 use crate::{
     commitment::{commit_state_root, AccountChange, StateChanges},
     types::{StateRoot, Tx},
@@ -18,16 +26,19 @@ use alloy_evm::{
 use anyhow::Context as _;
 use std::collections::BTreeMap;
 
+/// Example chain id used by the deterministic simulation.
 pub const CHAIN_ID: u64 = 1337;
 pub const SEED_PRECOMPILE_ADDRESS_BYTES: [u8; 20] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0xFF,
 ];
 
+/// Address of the example "seed" precompile.
 pub fn seed_precompile_address() -> Address {
     Address::from(SEED_PRECOMPILE_ADDRESS_BYTES)
 }
 
+/// Build an `EvmEnv` for a given block height and `prevrandao`.
 pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
     let mut env: EvmEnv = EvmEnv::default();
     env.cfg_env.chain_id = CHAIN_ID;
@@ -38,11 +49,20 @@ pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
 }
 
 #[derive(Debug, Clone)]
+/// Result of executing a batch of transactions.
 pub struct ExecutionOutcome {
+    /// Rolling state commitment after applying the batch.
     pub state_root: StateRoot,
+    /// Canonical per-transaction state deltas used to compute `state_root`.
     pub tx_changes: Vec<StateChanges>,
 }
 
+/// Execute a batch of transactions and commit them to the provided DB.
+///
+/// Notes:
+/// - Uses `transact_raw` so the state diff is available to compute the rolling `state_root`
+///   *before* committing the changes.
+/// - Commits the diff into the DB after updating the rolling root.
 pub fn execute_txs<DB>(
     db: DB,
     env: EvmEnv,
@@ -87,6 +107,7 @@ fn precompiles_with_seed(spec: alloy_evm::revm::primitives::hardfork::SpecId) ->
         PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec)));
 
     let address = seed_precompile_address();
+    // This precompile is stateful (not pure) because it depends on the current block env.
     precompiles.apply_precompile(&address, |_| {
         Some(DynPrecompile::new_stateful(
             PrecompileId::Custom("commonware_seed".into()),

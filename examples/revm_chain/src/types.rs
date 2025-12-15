@@ -1,3 +1,11 @@
+//! Canonical types and encodings for the example chain.
+//!
+//! The example uses `commonware-codec` for deterministic, bounded decoding of untrusted bytes.
+//!
+//! - `BlockId` is `keccak256(Encode(Block))`.
+//! - Consensus orders `ConsensusDigest = sha256(BlockId)` (see `crate::consensus::digest_for_block`).
+//! - `StateRoot` is a 32-byte rolling commitment (see `crate::commitment`).
+
 use alloy_evm::revm::primitives::{keccak256, Address, Bytes, B256, U256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -5,12 +13,15 @@ use commonware_codec::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Block identifier (32 bytes).
 pub struct BlockId(pub B256);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Transaction identifier (32 bytes).
 pub struct TxId(pub B256);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// State commitment (32 bytes).
 pub struct StateRoot(pub B256);
 
 impl FixedSize for BlockId {
@@ -86,6 +97,10 @@ pub struct TxCfg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Minimal transaction type for the example.
+///
+/// This is not a signed Ethereum transaction. It is just enough information to build a `TxEnv`
+/// for REVM execution in a deterministic simulation.
 pub struct Tx {
     pub from: Address,
     pub to: Address,
@@ -148,6 +163,7 @@ pub struct BlockCfg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Example block type agreed on by consensus (via its digest).
 pub struct Block {
     pub parent: BlockId,
     pub height: u64,

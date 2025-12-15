@@ -1,3 +1,7 @@
+//! Deterministic genesis state for the simulation.
+//!
+//! The example chain "prefunds" two addresses and injects a single transfer at height 1.
+
 use alloy_evm::revm::primitives::{Address, Bytes as EvmBytes, U256};
 
 #[derive(Clone, Debug)]

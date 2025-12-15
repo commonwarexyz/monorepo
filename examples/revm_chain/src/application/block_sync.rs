@@ -25,6 +25,10 @@ struct VerifyRequest {
 
 type VerifyRequestsByDigest = BTreeMap<ConsensusDigest, Vec<VerifyRequest>>;
 
+/// Owns out-of-band block dissemination for a node.
+///
+/// Consensus orders digests. This component ensures full block bytes are available for verification
+/// by caching received blocks and deferring verification requests until the bytes arrive.
 pub(super) struct BlockSync<S> {
     block_cfg: crate::types::BlockCfg,
     received: BTreeMap<ConsensusDigest, Block>,
@@ -78,6 +82,7 @@ where
         from: PublicKey,
         bytes: Bytes,
     ) {
+        // `from` is currently unused, but is kept to make it clear where the bytes came from.
         let _ = from;
         let Ok(block) = decode_block(bytes, &self.block_cfg) else {
             return;

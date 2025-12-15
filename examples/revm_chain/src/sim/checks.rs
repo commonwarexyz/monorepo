@@ -1,8 +1,16 @@
+//! Simulation assertions.
+//!
+//! Waits for finalizations and asserts all nodes converge on:
+//! - the same finalized head digest,
+//! - the same state commitment, and
+//! - the expected balances for the injected transfer.
+
 use super::{genesis, ConsensusDigest};
 use crate::{application::Handle, consensus};
 use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
 
+/// Wait until each node has observed `blocks` finalizations and return the common head digest.
 pub(super) async fn wait_for_finalized_head(
     finalized_rx: &mut mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
     nodes: usize,
@@ -43,6 +51,7 @@ pub(super) async fn wait_for_finalized_head(
     Ok(head)
 }
 
+/// Query each node's application store at `head` and assert they all agree on the outcome.
 pub(super) async fn assert_all_nodes_converged(
     nodes: &[Handle],
     head: ConsensusDigest,

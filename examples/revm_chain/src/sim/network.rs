@@ -1,3 +1,7 @@
+//! Simulated network setup for the deterministic simulation.
+//!
+//! The example uses `commonware_p2p::simulated` with deterministic timing and a full mesh of links.
+
 use super::{MAX_MSG_SIZE, P2P_LINK_LATENCY_MS};
 use anyhow::Context as _;
 use commonware_cryptography::ed25519;
@@ -24,6 +28,7 @@ pub(super) async fn start_network(
     oracle
 }
 
+/// Connect all peers in a full mesh with deterministic links.
 pub(super) async fn connect_all_peers(
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
     peers: &[ed25519::PublicKey],

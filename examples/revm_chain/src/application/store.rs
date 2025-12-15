@@ -1,3 +1,12 @@
+//! In-memory chain storage for the example.
+//!
+//! This store is intentionally simple:
+//! - It keeps verified blocks keyed by the digest that consensus orders.
+//! - It also stores an `InMemoryDB` snapshot per digest so validators can deterministically
+//!   re-execute proposals on the correct parent state.
+//!
+//! This is not intended to be a production storage layer.
+
 use crate::{
     consensus::ConsensusDigest,
     types::{Block, BlockId},
@@ -5,16 +14,20 @@ use crate::{
 use alloy_evm::revm::{database::InMemoryDB, primitives::B256};
 use std::collections::BTreeMap;
 
+/// Verified block and its post-execution EVM state snapshot.
 #[derive(Clone, Debug)]
 pub(super) struct BlockEntry {
     pub(super) block: Block,
     pub(super) db: InMemoryDB,
+    /// Seed hash tracked from consensus activity (notarization/finalization).
     pub(super) seed: Option<B256>,
 }
 
+/// Per-node in-memory store for verified blocks.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ChainStore {
     by_digest: BTreeMap<ConsensusDigest, BlockEntry>,
+    // Reserved for convenience in future extensions (not used by the current example).
     by_id: BTreeMap<BlockId, ConsensusDigest>,
 }
 
