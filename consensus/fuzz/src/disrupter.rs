@@ -492,12 +492,6 @@ where
     async fn send_random_vote(&mut self, sender: &mut impl Sender) {
         let proposal = self.get_proposal();
 
-        if self.participants.index(&self.validator).is_none() {
-            let bytes = self.bytes();
-            let _ = sender.send(Recipients::All, bytes.into(), true).await;
-            return;
-        }
-
         match self.message() {
             Message::Notarize => {
                 if let Some(vote) = Notarize::sign(&self.scheme, &self.namespace, proposal) {

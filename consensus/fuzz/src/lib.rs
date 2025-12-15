@@ -109,10 +109,12 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.arbitrary()?;
 
         // Bias towards Connected partition
-        let partition = if u.ratio(4, 5)? {
-            Partition::Connected
-        } else {
-            u.arbitrary()?
+        let partition = match u.int_in_range(0..=99)? {
+            0..=79 => Partition::Connected,                    // 80%
+            80..=84 => Partition::Isolated,                    // 5%
+            85..=89 => Partition::TwoPartitionsWithByzantine,  // 5%
+            90..=94 => Partition::ManyPartitionsWithByzantine, // 5%
+            _ => Partition::Ring,                              // 5%
         };
 
         let configuration = match u.int_in_range(1..=100)? {
