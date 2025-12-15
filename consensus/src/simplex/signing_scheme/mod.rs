@@ -37,6 +37,7 @@ use crate::{
     simplex::types::{Signature, SignatureVerification, Subject},
     types::Round,
 };
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::{ordered::Set, union};
@@ -225,15 +226,19 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
     subject: Subject<'_, D>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Bytes, Bytes) {
     match subject {
-        Subject::Notarize { proposal } => {
-            (notarize_namespace(namespace), proposal.encode().to_vec())
+        Subject::Notarize { proposal } => (
+            notarize_namespace(namespace).into(),
+            proposal.encode().freeze(),
+        ),
+        Subject::Nullify { round } => {
+            (nullify_namespace(namespace).into(), round.encode().freeze())
         }
-        Subject::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
-        Subject::Finalize { proposal } => {
-            (finalize_namespace(namespace), proposal.encode().to_vec())
-        }
+        Subject::Finalize { proposal } => (
+            finalize_namespace(namespace).into(),
+            proposal.encode().freeze(),
+        ),
     }
 }
 
@@ -245,14 +250,14 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
     subject: Subject<'_, D>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Bytes, Bytes) {
     (
-        seed_namespace(namespace),
+        seed_namespace(namespace).into(),
         match subject {
             Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
-                proposal.round.encode().to_vec()
+                proposal.round.encode().freeze()
             }
-            Subject::Nullify { round } => round.encode().to_vec(),
+            Subject::Nullify { round } => round.encode().freeze(),
         },
     )
 }
