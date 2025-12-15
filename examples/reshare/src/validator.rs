@@ -616,18 +616,15 @@ mod test {
                         }
                         status.insert(update.pk, epoch);
 
-                        match outputs.get(epoch.get() as usize) {
-                            None => {
-                                if output.is_some() {
-                                    successes += 1;
-                                }
-                                outputs.push(output);
+                        if let Some(o) = outputs.get(epoch.get() as usize) {
+                            if o.as_ref() != output.as_ref() {
+                                return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
                             }
-                            Some(o) => {
-                                if o.as_ref() != output.as_ref() {
-                                    return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
-                                }
+                        } else {
+                            if output.is_some() {
+                                successes += 1;
                             }
+                            outputs.push(output);
                         }
                         if successes >= target {
                             success_target_reached_epoch = Some(epoch);
@@ -654,48 +651,51 @@ mod test {
                         } else {
                             self.total as usize - delayed.len()
                         };
-                        if status.values().filter(|x| **x >= epoch).count() >= active_count {
-                            if successes >= target {
-                                // Verify all delayed participants got acknowledged shares
-                                if matches!(self.crash, Some(Crash::Delay { .. })) {
-                                    let unacknowledged: Vec<_> = delayed
-                                        .iter()
-                                        .filter(|pk| !delayed_acknowledged.contains(*pk))
-                                        .collect();
-                                    if !unacknowledged.is_empty() {
-                                        return Err(anyhow!(
-                                            "delayed participants not acknowledged: {:?}",
-                                            unacknowledged
-                                        ));
-                                    }
-                                }
-                                return Ok(PlanResult {
-                                    state: ctx.auditor().state(),
-                                    failures,
-                                });
-                            } else {
-                                current_epoch = current_epoch.next();
-
-                                // Start delayed participants after the specified number of epochs
-                                if !delayed_started {
-                                    if let Some(Crash::Delay { after, .. }) = &self.crash {
-                                        if current_epoch.get() == *after {
-                                            info!(epoch = ?current_epoch, "starting delayed participants");
-                                            for pk in delayed.iter() {
-                                                team.start_participant(
-                                                    &ctx,
-                                                    &mut oracle,
-                                                    updates_in.clone(),
-                                                    pk.clone(),
-                                                )
-                                                .await;
-                                            }
-                                            delayed_started = true;
-                                        }
-                                    }
+                        if status.values().filter(|x| **x >= epoch).count() < active_count {
+                            continue;
+                        }
+                        if successes >= target {
+                            // Verify all delayed participants got acknowledged shares
+                            if matches!(self.crash, Some(Crash::Delay { .. })) {
+                                let unacknowledged: Vec<_> = delayed
+                                    .iter()
+                                    .filter(|pk| !delayed_acknowledged.contains(*pk))
+                                    .collect();
+                                if !unacknowledged.is_empty() {
+                                    return Err(anyhow!(
+                                        "delayed participants not acknowledged: {:?}",
+                                        unacknowledged
+                                    ));
                                 }
                             }
+                            return Ok(PlanResult {
+                                state: ctx.auditor().state(),
+                                failures,
+                            });
                         }
+                        current_epoch = current_epoch.next();
+
+                        // Start delayed participants after the specified number of epochs
+                        if delayed_started {
+                            continue;
+                        }
+                        let Some(Crash::Delay { after, .. }) = &self.crash else {
+                            continue;
+                        };
+                        if current_epoch.get() != *after {
+                            continue;
+                        }
+                        info!(epoch = ?current_epoch, "starting delayed participants");
+                        for pk in delayed.iter() {
+                            team.start_participant(
+                                &ctx,
+                                &mut oracle,
+                                updates_in.clone(),
+                                pk.clone(),
+                            )
+                            .await;
+                        }
+                        delayed_started = true;
                     },
                     pk = restart_receiver.next() => {
                         let Some(pk) = pk else {
@@ -711,32 +711,33 @@ mod test {
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired (only for Random crashes)
-                        if let Some(Crash::Random { count, downtime, .. }) = &self.crash {
-                            // Pick multiple random participants to crash
-                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = (*count).min(all_participants.len());
-                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+                        let Some(Crash::Random { count, downtime, .. }) = &self.crash else {
+                            continue;
+                        };
 
-                            for pk in to_crash {
-                                // Try to abort the handle if it exists
-                                if let Some(handle) = team.handles.remove(&pk) {
-                                    handle.abort();
-                                    info!(pk = ?pk, "crashed participant");
+                        // Pick multiple random participants to crash
+                        let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                        let crash_count = (*count).min(all_participants.len());
+                        let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+                        for pk in to_crash {
+                            // Try to abort the handle if it exists
+                            let Some(handle) = team.handles.remove(&pk) else {
+                                debug!(pk = ?pk, "participant already crashed");
+                                continue;
+                            };
+                            handle.abort();
+                            info!(pk = ?pk, "crashed participant");
 
-                                    // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = *downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
-                                        }
-                                        let _ = restart_sender.send(pk_clone).await;
-                                    });
-                                } else {
-                                    debug!(pk = ?pk, "participant already crashed");
+                            // Schedule restart after downtime
+                            let mut restart_sender = restart_sender.clone();
+                            let downtime = *downtime;
+                            let pk_clone = pk.clone();
+                            ctx.clone().spawn(move |ctx| async move {
+                                if downtime > Duration::ZERO {
+                                    ctx.sleep(downtime).await;
                                 }
-                            }
+                                let _ = restart_sender.send(pk_clone).await;
+                            });
                         }
                     },
                 }

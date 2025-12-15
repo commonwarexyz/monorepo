@@ -2092,11 +2092,13 @@ mod test_plan {
                 let mut expected_reveals: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
                 for &(dealer_idx, player_pos) in round.no_acks.iter().chain(round.bad_shares.iter())
                 {
-                    if selected_dealers.contains(&dealer_idx) {
-                        if let Some(pk) = player_by_position.get(player_pos as usize) {
-                            *expected_reveals.entry(pk.clone()).or_insert(0) += 1;
-                        }
+                    if !selected_dealers.contains(&dealer_idx) {
+                        continue;
                     }
+                    let Some(pk) = player_by_position.get(player_pos as usize) else {
+                        continue;
+                    };
+                    *expected_reveals.entry(pk.clone()).or_insert(0) += 1;
                 }
 
                 // Verify each player's revealed status
