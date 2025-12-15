@@ -378,7 +378,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// Ed25519 Batch Verifier (std version using ed25519-consensus batch).
+/// Ed25519 Batch Verifier.
 #[cfg(feature = "std")]
 pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
@@ -426,41 +426,6 @@ impl Batch {
             &payload,
         ));
         self.verifier.queue(item);
-        true
-    }
-}
-
-/// Ed25519 Batch Verifier (no_std fallback using one-by-one verification).
-#[cfg(not(feature = "std"))]
-pub struct Batch {
-    items: Vec<(PublicKey, Vec<u8>, Signature)>,
-}
-
-#[cfg(not(feature = "std"))]
-impl BatchVerifier<PublicKey> for Batch {
-    fn new() -> Self {
-        Self { items: Vec::new() }
-    }
-
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        let payload = union_unique(namespace, message);
-        self.items
-            .push((public_key.clone(), payload, signature.clone()));
-        true
-    }
-
-    fn verify<R: CryptoRngCore>(self, _rng: &mut R) -> bool {
-        for (public_key, payload, signature) in self.items {
-            if !public_key.verify_inner(None, &payload, &signature) {
-                return false;
-            }
-        }
         true
     }
 }

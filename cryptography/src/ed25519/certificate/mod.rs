@@ -6,13 +6,17 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
+#[cfg(feature = "std")]
+use super::Batch;
+use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
+#[cfg(feature = "std")]
+use crate::{certificate::SignatureVerification, BatchVerifier};
 use crate::{
-    certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
-    BatchVerifier, Digest, Signer as _, Verifier as _,
+    certificate::{Context, Scheme, Signature, Signers},
+    Digest, Signer as _, Verifier as _,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::ordered::{Quorum, Set};
@@ -100,6 +104,7 @@ impl Generic {
     }
 
     /// Batch-verifies votes and returns verified votes and invalid signers.
+    #[cfg(feature = "std")]
     pub fn verify_votes<S, R, D, I>(
         &self,
         rng: &mut R,
@@ -158,6 +163,42 @@ impl Generic {
         SignatureVerification::new(verified, invalid.into_iter().collect())
     }
 
+    /// Verifies votes one-by-one and returns verified votes and invalid signers.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_votes<S, R, D, I>(
+        &self,
+        _rng: &mut R,
+        namespace: &[u8],
+        context: S::Context<'_, D>,
+        signatures: I,
+    ) -> crate::certificate::SignatureVerification<S>
+    where
+        S: Scheme<Signature = Ed25519Signature>,
+        R: Rng + CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Signature<S>>,
+    {
+        let (namespace, message) = context.namespace_and_message(namespace);
+
+        let mut invalid = alloc::collections::BTreeSet::new();
+        let mut verified = Vec::new();
+
+        for sig in signatures.into_iter() {
+            let Some(public_key) = self.participants.key(sig.signer) else {
+                invalid.insert(sig.signer);
+                continue;
+            };
+
+            if public_key.verify(namespace.as_ref(), message.as_ref(), &sig.signature) {
+                verified.push(sig);
+            } else {
+                invalid.insert(sig.signer);
+            }
+        }
+
+        crate::certificate::SignatureVerification::new(verified, invalid.into_iter().collect())
+    }
+
     /// Assembles a certificate from a collection of votes.
     pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<Certificate>
     where
@@ -191,7 +232,8 @@ impl Generic {
     /// Stages a certificate for batch verification.
     ///
     /// Returns false if the certificate structure is invalid.
-    pub fn batch_verify_certificate<S, D>(
+    #[cfg(feature = "std")]
+    fn batch_verify_certificate<S, D>(
         &self,
         batch: &mut Batch,
         namespace: &[u8],
@@ -230,7 +272,8 @@ impl Generic {
         true
     }
 
-    /// Verifies a certificate.
+    /// Verifies a certificate using batch verification.
+    #[cfg(feature = "std")]
     pub fn verify_certificate<S, R, D>(
         &self,
         rng: &mut R,
@@ -251,7 +294,45 @@ impl Generic {
         batch.verify(rng)
     }
 
+    /// Verifies a certificate by checking each signature individually.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_certificate<S, R, D>(
+        &self,
+        _rng: &mut R,
+        namespace: &[u8],
+        context: S::Context<'_, D>,
+        certificate: &Certificate,
+    ) -> bool
+    where
+        S: Scheme,
+        R: Rng + CryptoRng,
+        D: Digest,
+    {
+        if certificate.signers.len() != self.participants.len() {
+            return false;
+        }
+        if certificate.signers.count() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate.signers.count() < self.participants.quorum() as usize {
+            return false;
+        }
+
+        let (namespace, message) = context.namespace_and_message(namespace);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            if !public_key.verify(namespace.as_ref(), message.as_ref(), signature) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Verifies multiple certificates in a batch.
+    #[cfg(feature = "std")]
     pub fn verify_certificates<'a, S, R, D, I>(
         &self,
         rng: &mut R,
@@ -272,6 +353,29 @@ impl Generic {
         }
 
         batch.verify(rng)
+    }
+
+    /// Verifies multiple certificates one-by-one.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_certificates<'a, S, R, D, I>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
+    where
+        S: Scheme,
+        R: Rng + CryptoRng,
+        D: Digest,
+        I: Iterator<Item = (S::Context<'a, D>, &'a Certificate)>,
+    {
+        for (context, certificate) in certificates {
+            if !self.verify_certificate::<S, _, D>(rng, namespace, context, certificate) {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub const fn is_attributable(&self) -> bool {
