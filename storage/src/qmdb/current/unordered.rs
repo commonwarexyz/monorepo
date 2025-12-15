@@ -13,7 +13,7 @@ use crate::{
             unordered::{fixed::Any, FixedOperation as Operation},
             CleanAny, DirtyAny, FixedValue,
         },
-        current::{merkleize_grafted_bitmap, verify_range_proof, Config, OperationProof},
+        current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -107,7 +107,7 @@ impl<
         hasher: &mut H,
         key: K,
         value: V,
-        proof: KeyValueProof<H::Digest, N>,
+        proof: &KeyValueProof<H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let op = Operation::Update(key, value);
@@ -119,7 +119,7 @@ impl<
     /// the log with the provided root.
     pub fn verify_range_proof(
         hasher: &mut H,
-        proof: Proof<H::Digest>,
+        proof: &RangeProof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
@@ -127,7 +127,7 @@ impl<
     ) -> bool {
         let height = Self::grafting_height();
 
-        verify_range_proof(hasher, height, proof, start_loc, ops, chunks, root)
+        proof.verify(hasher, height, start_loc, ops, chunks, root)
     }
 }
 
@@ -219,7 +219,7 @@ impl<
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
         super::range_proof(
             hasher,
             &self.status,
@@ -918,8 +918,8 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v1,
-                proof.clone(),
-                &root,
+                &proof,
+                &root
             ));
 
             let v2 = Sha256::fill(0xA2);
@@ -928,7 +928,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v2,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -944,7 +944,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v2,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -954,7 +954,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v2,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             // Old value will not verify against new proof.
@@ -962,27 +962,27 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v1,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
             // Create a proof of the now-inactive update operation assigining v1 to k against the
             // current root.
-            let (p, _, chunks) = db
+            let (range_proof, _, chunks) = db
                 .range_proof(hasher.inner(), op_loc, NZU64!(1))
                 .await
                 .unwrap();
             let proof_inactive = KeyValueProof {
                 loc: op_loc,
                 chunk: chunks[0],
-                proof: p,
+                range_proof,
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
             let op = Operation::Update(k, v1);
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
-                proof_inactive.proof.clone(),
+                &proof_inactive.range_proof,
                 proof_inactive.loc,
                 &[op],
                 &[proof_inactive.chunk],
@@ -994,7 +994,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v1,
-                proof_inactive.clone(),
+                &proof_inactive,
                 &root,
             ));
 
@@ -1014,7 +1014,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v1,
-                fake_proof,
+                &fake_proof,
                 &root,
             ));
 
@@ -1034,7 +1034,7 @@ pub mod test {
                 hasher.inner(),
                 k,
                 v1,
-                fake_proof,
+                &fake_proof,
                 &root,
             ));
 
@@ -1113,7 +1113,7 @@ pub mod test {
                 assert!(
                     CleanCurrentTest::verify_range_proof(
                         hasher.inner(),
-                        proof,
+                        &proof,
                         loc,
                         &ops,
                         &chunks,
@@ -1166,7 +1166,7 @@ pub mod test {
                     hasher.inner(),
                     key,
                     value,
-                    proof.clone(),
+                    &proof,
                     &root
                 ));
                 // Proof should fail against the wrong value.
@@ -1175,7 +1175,7 @@ pub mod test {
                     hasher.inner(),
                     key,
                     wrong_val,
-                    proof.clone(),
+                    &proof,
                     &root
                 ));
                 // Proof should fail against the wrong key.
@@ -1184,7 +1184,7 @@ pub mod test {
                     hasher.inner(),
                     wrong_key,
                     value,
-                    proof.clone(),
+                    &proof,
                     &root
                 ));
                 // Proof should fail against the wrong root.
@@ -1193,7 +1193,7 @@ pub mod test {
                     hasher.inner(),
                     key,
                     value,
-                    proof,
+                    &proof,
                     &wrong_root,
                 ));
             }
@@ -1255,13 +1255,7 @@ pub mod test {
                 // Create a proof for the current value of k.
                 let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert!(
-                    CleanCurrentTest::verify_key_value_proof(
-                        hasher.inner(),
-                        k,
-                        v,
-                        proof.clone(),
-                        &root
-                    ),
+                    CleanCurrentTest::verify_key_value_proof(hasher.inner(), k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
@@ -1270,7 +1264,7 @@ pub mod test {
                         hasher.inner(),
                         k,
                         old_val,
-                        proof,
+                        &proof,
                         &root
                     ),
                     "proof of update {i} verified when it should not have"
