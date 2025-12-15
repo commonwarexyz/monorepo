@@ -34,7 +34,7 @@ mod tests {
         simplex::{
             actors::voter,
             mocks,
-            scheme::{bls12381_multisig, ed25519, Scheme},
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -264,6 +264,8 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_forwarding_from_network() {
+        certificate_forwarding_from_network(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_forwarding_from_network(bls12381_threshold::fixture::<MinSig, _>);
         certificate_forwarding_from_network(bls12381_multisig::fixture::<MinPk, _>);
         certificate_forwarding_from_network(bls12381_multisig::fixture::<MinSig, _>);
         certificate_forwarding_from_network(ed25519::fixture);
@@ -406,6 +408,8 @@ mod tests {
 
     #[test_traced]
     fn test_quorum_votes_construct_certificate() {
+        quorum_votes_construct_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        quorum_votes_construct_certificate(bls12381_threshold::fixture::<MinSig, _>);
         quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinPk, _>);
         quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinSig, _>);
         quorum_votes_construct_certificate(ed25519::fixture);
@@ -596,6 +600,8 @@ mod tests {
 
     #[test_traced]
     fn test_votes_and_certificate_deduplication() {
+        votes_and_certificate_deduplication(bls12381_threshold::fixture::<MinPk, _>);
+        votes_and_certificate_deduplication(bls12381_threshold::fixture::<MinSig, _>);
         votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinPk, _>);
         votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinSig, _>);
         votes_and_certificate_deduplication(ed25519::fixture);
@@ -793,6 +799,10 @@ mod tests {
 
     #[test_traced]
     fn test_conflicting_votes_dont_produce_invalid_certificate() {
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_votes_dont_produce_invalid_certificate(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
         conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinPk, _>);
         conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinSig, _>);
         conflicting_votes_dont_produce_invalid_certificate(ed25519::fixture);
@@ -917,6 +927,8 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_after_leader_set() {
+        proposal_forwarded_after_leader_set(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_forwarded_after_leader_set(bls12381_threshold::fixture::<MinSig, _>);
         proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinPk, _>);
         proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinSig, _>);
         proposal_forwarded_after_leader_set(ed25519::fixture);
@@ -1040,6 +1052,8 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_before_leader_set() {
+        proposal_forwarded_before_leader_set(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_forwarded_before_leader_set(bls12381_threshold::fixture::<MinSig, _>);
         proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinPk, _>);
         proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinSig, _>);
         proposal_forwarded_before_leader_set(ed25519::fixture);
@@ -1188,6 +1202,8 @@ mod tests {
 
     #[test_traced]
     fn test_leader_activity_detection() {
+        leader_activity_detection(bls12381_threshold::fixture::<MinPk, _>);
+        leader_activity_detection(bls12381_threshold::fixture::<MinSig, _>);
         leader_activity_detection(bls12381_multisig::fixture::<MinPk, _>);
         leader_activity_detection(bls12381_multisig::fixture::<MinSig, _>);
         leader_activity_detection(ed25519::fixture);
