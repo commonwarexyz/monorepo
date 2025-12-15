@@ -2,6 +2,7 @@ use crate::p2p::wire;
 use bimap::BiHashMap;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
+    governor::clock::Clock as GClock,
     utils::{
         codec::WrappedSender,
         requester::{Config, Error, Requester, ID},
@@ -10,7 +11,6 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
@@ -408,12 +408,13 @@ mod tests {
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Signer};
-    use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
+    use commonware_p2p::{
+        governor::Quota, utils::requester::Config as RequesterConfig, Recipients, Sender,
+    };
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use governor::Quota;
     use std::{fmt, time::Duration};
 
     // Mock error type for testing

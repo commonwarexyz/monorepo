@@ -21,6 +21,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
+    governor::{clock::Clock as GClock, Quota},
     utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Recipients, Sender,
 };
@@ -29,7 +30,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};

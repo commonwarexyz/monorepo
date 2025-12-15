@@ -1,8 +1,7 @@
 //! Tracker
 
-use crate::authenticated::discovery::config::Bootstrapper;
+use crate::{authenticated::discovery::config::Bootstrapper, governor::Quota};
 use commonware_cryptography::Signer;
-use governor::Quota;
 use std::{net::SocketAddr, time::Duration};
 
 mod actor;

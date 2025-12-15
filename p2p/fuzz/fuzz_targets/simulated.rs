@@ -5,10 +5,10 @@ use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
-    simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
+    governor::Quota, simulated, Channel, Receiver as ReceiverTrait, Recipients,
+    Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{

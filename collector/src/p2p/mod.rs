@@ -57,13 +57,13 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
+        governor::Quota,
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)

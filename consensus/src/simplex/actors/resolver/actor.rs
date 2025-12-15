@@ -16,6 +16,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{
+    governor::{clock::Clock as GClock, Quota},
     utils::{requester, StaticManager},
     Blocker, Receiver, Sender,
 };
@@ -23,7 +24,6 @@ use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::debug;

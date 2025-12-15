@@ -5,11 +5,12 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{
+    governor::clock::Clock as GClock, utils::requester, Blocker, Manager, Receiver, Sender,
+};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::time::Duration;
 

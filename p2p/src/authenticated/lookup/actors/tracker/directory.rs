@@ -296,8 +296,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::{
-        lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
+    use crate::{
+        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
+        governor::Quota,
     };
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Runner};
@@ -313,7 +314,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 1,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -373,7 +374,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -446,7 +447,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();

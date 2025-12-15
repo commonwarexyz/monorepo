@@ -1,11 +1,13 @@
 use super::{actors::Messenger, Error};
-use crate::{Channel, Message, Recipients};
+use crate::{
+    governor::{clock::Clock as GClock, Quota},
+    Channel, Message, Recipients,
+};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::RateLimiter;
 use commonware_utils::channels::ring;
 use futures::{channel::mpsc, lock::Mutex, FutureExt, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 /// Sender is the mechanism used to send arbitrary bytes to
@@ -209,7 +211,7 @@ impl<P: PublicKey> Channels<P> {
     pub fn register<C: GClock>(
         &mut self,
         channel: Channel,
-        rate: governor::Quota,
+        rate: Quota,
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {

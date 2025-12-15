@@ -225,9 +225,10 @@ mod tests {
     use super::*;
     use crate::{
         authenticated::lookup::actors::peer,
+        governor::Quota,
+        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
         Blocker,
         Manager,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -238,7 +239,6 @@ mod tests {
         Clock, Runner,
     };
     use commonware_utils::NZU32;
-    use governor::Quota;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,

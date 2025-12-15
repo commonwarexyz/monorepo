@@ -209,7 +209,7 @@ impl<P: PublicKey> Channels<P> {
     pub fn register<C: GClock>(
         &mut self,
         channel: Channel,
-        rate: governor::Quota,
+        rate: Quota,
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {

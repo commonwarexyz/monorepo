@@ -33,7 +33,11 @@ sysinfo.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
+tracing-subscriber = { workspace = true, features = [
+    "fmt",
+    "json",
+    "env-filter",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
@@ -42,7 +46,9 @@ features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
-console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
+console-subscriber = { workspace = true, features = [
+    "parking_lot",
+], optional = true }
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }

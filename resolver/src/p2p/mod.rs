@@ -81,13 +81,13 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
+        governor::Quota,
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;

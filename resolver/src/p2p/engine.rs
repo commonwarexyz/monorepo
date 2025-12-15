@@ -9,6 +9,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
+    governor::clock::Clock as GClock,
     utils::codec::{wrap, WrappedSender},
     Blocker, Manager, Receiver, Recipients, Sender,
 };
@@ -26,7 +27,6 @@ use futures::{
     future::{self, Either},
     StreamExt,
 };
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};

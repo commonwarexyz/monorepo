@@ -5,6 +5,7 @@ use colored::Colorize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
+    governor::{clock::Clock as GClock, Quota},
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
@@ -20,7 +21,6 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},

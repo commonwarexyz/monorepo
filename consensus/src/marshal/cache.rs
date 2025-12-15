@@ -5,13 +5,13 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::certificate::Scheme;
+use commonware_p2p::governor::clock::Clock as GClock;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
     cmp::max,

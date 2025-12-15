@@ -94,7 +94,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        governor::Quota,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+    };
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -102,7 +105,6 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::BTreeMap,

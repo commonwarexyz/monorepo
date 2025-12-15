@@ -1103,12 +1103,11 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver as _, Recipients, Sender as _};
+    use crate::{governor::Quota, Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
     use futures::FutureExt;
-    use governor::Quota;
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;

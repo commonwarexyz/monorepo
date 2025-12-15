@@ -4,9 +4,8 @@ use crate::{
     Automaton, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_p2p::Blocker;
+use commonware_p2p::{governor::Quota, Blocker};
 use commonware_runtime::buffer::PoolRef;
-use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.

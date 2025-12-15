@@ -68,11 +68,13 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_p2p::{
+        governor::Quota,
+        simulated::{Config as NConfig, Network},
+    };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use governor::Quota;
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);

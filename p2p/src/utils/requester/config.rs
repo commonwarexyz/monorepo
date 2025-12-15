@@ -1,7 +1,6 @@
 //! Configuration for `Requester`.
-
+use crate::governor::Quota;
 use commonware_cryptography::PublicKey;
-use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the requester.

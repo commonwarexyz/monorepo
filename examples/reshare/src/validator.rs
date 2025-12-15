@@ -10,11 +10,10 @@ use commonware_consensus::{marshal::resolver::p2p as marshal_resolver, simplex::
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{authenticated::discovery, utils::requester};
+use commonware_p2p::{authenticated::discovery, governor::Quota, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -169,6 +168,7 @@ mod test {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
+        governor::Quota,
         simulated::{self, Link, Network, Oracle},
         utils::mux,
         Message, Receiver,
@@ -182,7 +182,6 @@ mod test {
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
     };
-    use governor::Quota;
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{

@@ -285,9 +285,10 @@ mod tests {
             },
             Mailbox,
         },
+        governor::Quota,
+        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
         Blocker,
         Manager,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -297,7 +298,6 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
     use futures::future::Either;
-    use governor::Quota;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

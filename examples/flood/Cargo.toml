@@ -23,7 +23,6 @@ commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }

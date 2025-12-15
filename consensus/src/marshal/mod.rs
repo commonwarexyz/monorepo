@@ -125,6 +125,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
+        governor::Quota,
         simulated::{self, Link, Network, Oracle},
         utils::requester,
         Manager,
@@ -133,7 +134,6 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,

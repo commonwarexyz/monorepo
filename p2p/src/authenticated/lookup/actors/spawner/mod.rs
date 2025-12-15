@@ -1,8 +1,7 @@
-use governor::Quota;
-
 mod actor;
 mod ingress;
 
+use crate::governor::Quota;
 pub use actor::Actor;
 pub use ingress::Message;
 

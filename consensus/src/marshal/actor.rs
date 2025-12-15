@@ -26,7 +26,7 @@ use commonware_cryptography::{
     PublicKey,
 };
 use commonware_macros::select;
-use commonware_p2p::Recipients;
+use commonware_p2p::{governor::clock::Clock as GClock, Recipients};
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
@@ -46,7 +46,6 @@ use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
 };
-use governor::clock::Clock as GClock;
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};

@@ -311,10 +311,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::governor::Quota;
     use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
-    use governor::Quota;
     use std::time::Duration;
 
     #[test]

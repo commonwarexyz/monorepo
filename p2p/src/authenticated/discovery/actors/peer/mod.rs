@@ -1,12 +1,14 @@
 //! Peer
 
-use crate::authenticated::discovery::{
-    metrics,
-    types::{self, InfoVerifier},
+use crate::{
+    authenticated::discovery::{
+        metrics,
+        types::{self, InfoVerifier},
+    },
+    governor::Quota,
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;

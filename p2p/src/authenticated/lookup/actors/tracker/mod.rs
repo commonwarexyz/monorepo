@@ -1,8 +1,7 @@
 //! Tracker
 
-use crate::authenticated::Mailbox;
+use crate::{authenticated::Mailbox, governor::Quota};
 use commonware_cryptography::Signer;
-use governor::Quota;
 use std::{collections::HashSet, net::IpAddr};
 
 pub mod actor;

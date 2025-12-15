@@ -1,12 +1,11 @@
 use super::{Error, Receiver, Sender};
-use crate::Channel;
+use crate::{governor::Quota, Channel};
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::{Map, Set};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use governor::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 

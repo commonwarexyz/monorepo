@@ -21,14 +21,13 @@ use commonware_cryptography::{
     },
     Hasher, Signer,
 };
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{governor::clock::Clock as GClock, Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
-use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use std::{num::NonZero, time::Instant};
 use tracing::{error, info, warn};
