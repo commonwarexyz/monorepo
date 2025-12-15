@@ -447,7 +447,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        scheme_provider: &impl Provider<Scope = Epoch, Scheme = S>,
+        provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -478,7 +478,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         );
 
         // Verify parent certificate using the scheme for the parent's epoch
-        let parent_scheme = scheme_provider
+        let parent_scheme = provider
             .scoped(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);

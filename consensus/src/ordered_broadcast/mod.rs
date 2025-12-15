@@ -220,7 +220,7 @@ mod tests {
                 Config {
                     sequencer_signer: Some(fixture.private_keys[idx].clone()),
                     sequencers_provider: sequencers,
-                    validators_scheme_provider: validators_provider,
+                    validators_provider,
                     automaton: automaton.clone(),
                     relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
@@ -726,7 +726,7 @@ mod tests {
                     Config {
                         sequencer_signer: Some(fixture.private_keys[idx].clone()),
                         sequencers_provider: sequencers,
-                        validators_scheme_provider: validators_provider,
+                        validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
@@ -877,7 +877,7 @@ mod tests {
                     Config {
                         sequencer_signer: None::<PrivateKey>, // Validators don't propose in this test
                         sequencers_provider: sequencers,
-                        validators_scheme_provider: validators_provider,
+                        validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
@@ -926,7 +926,7 @@ mod tests {
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
-                        validators_scheme_provider: validators_provider,
+                        validators_provider,
                         relay: automaton.clone(),
                         automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),

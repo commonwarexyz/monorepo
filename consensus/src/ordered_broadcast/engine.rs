@@ -78,7 +78,7 @@ pub struct Engine<
     context: ContextCell<E>,
     sequencer_signer: Option<C>,
     sequencers_provider: S,
-    validators_scheme_provider: P,
+    validators_provider: P,
     automaton: A,
     relay: R,
     monitor: M,
@@ -218,7 +218,7 @@ impl<
             context: ContextCell::new(context),
             sequencer_signer: cfg.sequencer_signer,
             sequencers_provider: cfg.sequencers_provider,
-            validators_scheme_provider: cfg.validators_scheme_provider,
+            validators_provider: cfg.validators_provider,
             automaton: cfg.automaton,
             relay: cfg.relay,
             reporter: cfg.reporter,
@@ -391,7 +391,7 @@ impl<
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
 
                     // Decode using staged decoding with epoch-aware certificate bounds
-                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators_scheme_provider) {
+                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators_provider) {
                         Ok(node) => node,
                         Err(err) => {
                             debug!(?err, ?sender, "node decode failed");
@@ -528,7 +528,7 @@ impl<
             .await;
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_scheme_provider.scoped(self.epoch) else {
+        let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
             return Err(Error::UnknownScheme(self.epoch));
         };
 
@@ -609,7 +609,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators_scheme_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -830,7 +830,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators_scheme_provider.scoped(epoch) else {
+        let Some(scheme) = self.validators_provider.scoped(epoch) else {
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
@@ -888,7 +888,7 @@ impl<
         node.verify(
             &mut self.context,
             &self.namespace,
-            &self.validators_scheme_provider,
+            &self.validators_provider,
         )
     }
 
@@ -905,7 +905,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators_scheme_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 

@@ -25,7 +25,7 @@ pub struct Config<
     pub sequencers_provider: S,
 
     /// Provider for epoch-specific validator signing schemes.
-    pub validators_scheme_provider: P,
+    pub validators_provider: P,
 
     /// Proposes and verifies digests.
     pub automaton: A,
