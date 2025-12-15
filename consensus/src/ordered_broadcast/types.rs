@@ -1047,7 +1047,7 @@ where
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::Validators,
+        mocks::Provider,
         scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
@@ -1305,7 +1305,7 @@ mod tests {
 
         // When the provider doesn't have a scheme registered for the parent's epoch,
         // read_staged should return an UnknownScheme error.
-        let empty_provider = Validators::<PublicKey, S>::new(vec![]);
+        let empty_provider = Provider::<S>::new();
 
         let result = Node::<PublicKey, S, Sha256Digest>::read_staged(
             &mut encoded2.as_ref(),
