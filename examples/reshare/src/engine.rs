@@ -221,7 +221,7 @@ where
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                scheme_provider: scheme_provider.clone(),
+                provider: scheme_provider.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,

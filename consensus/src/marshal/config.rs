@@ -13,7 +13,7 @@ where
     P: Provider<Scope = Epoch>,
 {
     /// Provider for epoch-specific signing schemes.
-    pub scheme_provider: P,
+    pub provider: P,
 
     /// The length of an epoch in number of blocks.
     pub epoch_length: u64,

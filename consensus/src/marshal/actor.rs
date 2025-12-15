@@ -119,7 +119,7 @@ where
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
-    scheme_provider: P,
+    provider: P,
     // Epoch length (in blocks)
     epoch_length: u64,
     // Unique application namespace
@@ -224,7 +224,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 epoch_length: config.epoch_length,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -705,9 +705,7 @@ where
     /// Prefers a certificate verifier if available, otherwise falls back
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
-        self.scheme_provider
-            .all()
-            .or_else(|| self.scheme_provider.scoped(epoch))
+        self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
     // -------------------- Waiters --------------------

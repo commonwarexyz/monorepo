@@ -175,13 +175,13 @@ mod tests {
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
         validator: K,
-        scheme_provider: P,
+        provider: P,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
-            scheme_provider,
+            provider,
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
