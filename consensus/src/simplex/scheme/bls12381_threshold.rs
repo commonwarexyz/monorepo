@@ -1,4 +1,3 @@
-
 //! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
 //!
 //! [`Scheme`] is **non-attributable**: exposing partial signatures

@@ -1,4 +1,3 @@
-
 //! Ed25519 implementation of the [`Scheme`] trait for `simplex`.
 //!
 //! [`Scheme`] is **attributable**: individual signatures can be safely

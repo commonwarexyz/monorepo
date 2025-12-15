@@ -1,4 +1,3 @@
-
 //! BLS12-381 multi-signature implementation of the [`Scheme`] trait for `simplex`.
 //!
 //! [`Scheme`] is **attributable**: individual signatures can be
