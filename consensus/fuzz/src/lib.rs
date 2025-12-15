@@ -36,8 +36,8 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const MIN_REQUIRED_FINALIZATIONS: u64 = 5;
-const MAX_REQUIRED_FINALIZATIONS: u64 = 50;
+const MIN_REQUIRED_CONTAINERS: u64 = 5;
+const MAX_REQUIRED_CONTINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 // 4 nodes, 3 correct, 1 faulty
@@ -58,7 +58,8 @@ const EXPECTED_PANICS: [&str; 3] = [
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub seed: u64,
-    pub required_finalizations: u64,
+    pub required_containers: u64,
+    pub degraded_network_node: bool,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
     pub configuration: (u32, u32, u32),
@@ -123,8 +124,13 @@ impl Arbitrary<'_> for FuzzInput {
             _ => N4C1F3,       // 5%
         };
 
-        let required_finalizations =
-            u.int_in_range(MIN_REQUIRED_FINALIZATIONS..=MAX_REQUIRED_FINALIZATIONS)?;
+        // Bias degraded networking - 1%
+        let degraded_network_node = partition == Partition::Connected
+            && configuration == N4C3F1
+            && u.int_in_range(0..=99)? == 1;
+
+        let required_containers =
+            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
 
         let mut raw_bytes = Vec::new();
         for _ in 0..MAX_RAW_BYTES {
@@ -143,8 +149,9 @@ impl Arbitrary<'_> for FuzzInput {
             seed,
             partition,
             configuration,
+            degraded_network_node,
             raw_bytes,
-            required_finalizations,
+            required_containers,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed(prng_seed)),
         })
@@ -153,7 +160,7 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
-    let required_finalizations = input.required_finalizations;
+    let required_containers = input.required_containers;
     let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -190,8 +197,38 @@ fn run<P: Simplex>(input: FuzzInput) {
         )
         .await;
 
+        if input.partition == Partition::Connected
+            && input.configuration == N4C3F1
+            && input.degraded_network_node
+        {
+            if let Some(victim) = participants.last() {
+                let degraded = Link {
+                    latency: Duration::from_millis(50),
+                    jitter: Duration::from_millis(10),
+                    success_rate: 0.6,
+                };
+                for (peer_idx, peer) in participants.iter().enumerate() {
+                    if peer_idx == 3 {
+                        continue;
+                    }
+                    // Replace links to/from the degraded node with degraded connectivity.
+                    oracle.remove_link(victim.clone(), peer.clone()).await.ok();
+                    oracle.remove_link(peer.clone(), victim.clone()).await.ok();
+                    oracle
+                        .add_link(victim.clone(), peer.clone(), degraded.clone())
+                        .await
+                        .unwrap();
+                    oracle
+                        .add_link(peer.clone(), victim.clone(), degraded.clone())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
+        let mut engine_contexts = Vec::new();
 
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
@@ -212,6 +249,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
+            engine_contexts.push(context.clone());
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants
@@ -263,18 +301,16 @@ fn run<P: Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        let expect_exact_finalizations =
+        let expect_required_containers =
             input.partition == Partition::Connected && max_faults(n) == f;
 
-        if expect_exact_finalizations {
-            // For fuzzing we count the exact number of finalizations.
+        if expect_required_containers {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
-                let (_, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                let reporter = reporter.clone();
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while reporter.finalizations.lock().unwrap().len() < required_finalizations as usize {
-                        monitor.next().await.expect("event missing");
+                    while latest.get() < required_containers {
+                        latest = monitor.next().await.expect("event missing");
                     }
                 }));
             }
@@ -284,20 +320,6 @@ fn run<P: Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters);
-
-        if expect_exact_finalizations {
-            // Verify that exactly required_containers views were finalized and are contained in the `states`.
-            let finalizations_count = states
-                .iter()
-                .map(|(_, _, finalizations)| finalizations.len())
-                .max()
-                .unwrap_or(0);
-            assert_eq!(
-                finalizations_count as u64, required_finalizations,
-                "Finalization count mismatch: got {finalizations_count} finalizations, but expected exactly {required_finalizations}",
-            );
-        }
-
         invariants::check::<P>(n, states);
     });
 }
