@@ -100,10 +100,10 @@ impl<D: Digest> RangeProof<D> {
         hasher: &mut H,
         status: &CleanBitMap<H::Digest, N>,
         grafting_height: u32,
-        grafted_mmr: &S,
+        mmr: &S,
         range: Range<Location>,
     ) -> Result<RangeProof<H::Digest>, Error> {
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, grafted_mmr, grafting_height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height);
         let proof = verification::range_proof(&grafted_mmr, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
@@ -238,13 +238,12 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
         hasher: &mut H,
         status: &CleanBitMap<D, N>,
         grafting_height: u32,
-        grafted_mmr: &S,
+        mmr: &S,
         loc: Location,
     ) -> Result<Self, Error> {
         // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
         let range_proof =
-            RangeProof::<D>::new(hasher, status, grafting_height, grafted_mmr, loc..loc + 1)
-                .await?;
+            RangeProof::<D>::new(hasher, status, grafting_height, mmr, loc..loc + 1).await?;
         let chunk = *status.get_chunk_containing(*loc);
 
         Ok(Self {
@@ -341,10 +340,8 @@ async fn range_proof<E: RStorage + Clock + Metrics, H: CHasher, C: Contiguous, c
     let end_loc = core::cmp::min(max_loc, leaves);
 
     // Generate the proof from the grafted MMR.
-    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
     let proof =
-        RangeProof::<H::Digest>::new(hasher, status, height, &grafted_mmr, start_loc..end_loc)
-            .await?;
+        RangeProof::<H::Digest>::new(hasher, status, height, mmr, start_loc..end_loc).await?;
 
     // Collect the operations necessary to verify the proof.
     let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
