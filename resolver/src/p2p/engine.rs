@@ -1,6 +1,6 @@
 use super::{
     config::Config,
-    fetcher::Fetcher,
+    fetcher::{Config as FetcherConfig, Fetcher},
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
@@ -111,8 +111,6 @@ impl<
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-
-        use super::fetcher::Config as FetcherConfig;
 
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());

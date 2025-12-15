@@ -266,6 +266,11 @@ impl<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey =
             // Found eligible peers - request creation succeeded
             self.requests_created.inc(Status::Success);
 
+            // Track if this is an untargeted key (tries all eligible peers)
+            let is_untargeted = !self.targets.contains_key(&key);
+            // Track if all peers were rate-limited (returned empty)
+            let mut all_rate_limited = true;
+
             // Try each peer in order until one succeeds
             for peer in peers {
                 // Generate request ID
@@ -311,7 +316,8 @@ impl<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey =
                         continue;
                     }
                     Err(err) => {
-                        // Send error - update performance and try next peer
+                        // Send error - not rate-limited, just failed
+                        all_rate_limited = false;
                         self.requests_sent.inc(Status::Failure);
                         debug!(?err, ?peer, "send failed");
                         self.update_performance(&peer, self.timeout);
@@ -320,7 +326,11 @@ impl<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey =
                 }
             }
 
-            // All peers exhausted for this key, try next key
+            // If this untargeted key had all peers rate-limited, no other key will
+            // succeed either (rate limits are per-peer), so stop early
+            if is_untargeted && all_rate_limited {
+                break;
+            }
         }
 
         // No keys could be fetched, set waiter to retry later
