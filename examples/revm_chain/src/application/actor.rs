@@ -46,7 +46,7 @@ pub struct Application<S> {
     codec: BlockCodecCfg,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
-    genesis_tx: Option<Tx>,
+    first_block_tx: Tx,
     store: ChainStore,
     gossip: S,
     consensus: mpsc::Receiver<ConsensusRequest>,
@@ -64,11 +64,10 @@ struct Runtime<S> {
     node: u32,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
-    /// Optional one-time transaction injected at height 1 for the demo.
+    /// Deterministic transaction injected at height 1 (the first non-genesis block).
     ///
-    /// This must only be cleared after a height-1 block is finalized. Clearing earlier can lose the
-    /// transaction if consensus performs a view change and requests a new height-1 proposal.
-    genesis_tx: Option<Tx>,
+    /// This keeps the example end-to-end without implementing a mempool or separate ingress.
+    first_block_tx: Tx,
     store: ChainStore,
     sync: BlockSync<S>,
 }
@@ -85,7 +84,7 @@ where
         gossip: S,
         finalized: mpsc::UnboundedSender<FinalizationEvent>,
         genesis_alloc: Vec<(Address, U256)>,
-        genesis_tx: Option<Tx>,
+        first_block_tx: Tx,
     ) -> (Self, crate::consensus::Mailbox, Handle) {
         let (consensus_sender, consensus) = mpsc::channel(mailbox_size);
         let (control_sender, control) = mpsc::channel(mailbox_size);
@@ -97,7 +96,7 @@ where
                 codec,
                 finalized,
                 genesis_alloc,
-                genesis_tx,
+                first_block_tx,
                 store: ChainStore::default(),
                 gossip,
                 consensus,
@@ -167,7 +166,7 @@ where
             codec,
             finalized,
             genesis_alloc,
-            genesis_tx,
+            first_block_tx,
             store,
             gossip,
             consensus,
@@ -180,7 +179,7 @@ where
             node,
             finalized,
             genesis_alloc,
-            genesis_tx,
+            first_block_tx,
             store,
             sync,
         };
@@ -328,7 +327,7 @@ where
         let txs = if parent.block.height == 0 {
             // Inject a single transaction immediately after genesis to keep the example minimal,
             // deterministic, and end-to-end.
-            self.genesis_tx.clone().into_iter().collect()
+            vec![self.first_block_tx.clone()]
         } else {
             Vec::new()
         };
@@ -352,15 +351,6 @@ where
                     finalization.proposal.payload,
                     Self::seed_hash_from_seed(finalization.seed()),
                 );
-                // Only clear the one-shot genesis transaction once a height-1 block is actually
-                // finalized. The consensus engine may discard a proposal during a view change and
-                // later ask for another height-1 proposal; clearing earlier would permanently lose
-                // the transaction and make the demo non-deterministic.
-                if let Some(entry) = self.store.get_by_digest(&finalization.proposal.payload) {
-                    if entry.block.height == 1 {
-                        self.genesis_tx = None;
-                    }
-                }
                 let _ = self
                     .finalized
                     .unbounded_send((self.node, finalization.proposal.payload));

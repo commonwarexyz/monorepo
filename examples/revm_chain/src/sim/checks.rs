@@ -5,7 +5,7 @@
 //! - the same state commitment, and
 //! - the expected balances for the injected transfer.
 
-use super::{genesis, ConsensusDigest};
+use super::{demo, ConsensusDigest};
 use crate::{application::Handle, consensus};
 use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
@@ -55,20 +55,20 @@ pub(super) async fn wait_for_finalized_head(
 pub(super) async fn assert_all_nodes_converged(
     nodes: &[Handle],
     head: ConsensusDigest,
-    genesis: &genesis::GenesisTransfer,
+    demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(crate::StateRoot, B256)> {
     let mut state_root = None;
     let mut seed = None;
     for node in nodes.iter() {
         let from_balance = node
-            .query_balance(head, genesis.from)
+            .query_balance(head, demo.from)
             .await
             .ok_or_else(|| anyhow::anyhow!("missing from balance"))?;
         let to_balance = node
-            .query_balance(head, genesis.to)
+            .query_balance(head, demo.to)
             .await
             .ok_or_else(|| anyhow::anyhow!("missing to balance"))?;
-        if from_balance != genesis.expected_from || to_balance != genesis.expected_to {
+        if from_balance != demo.expected_from || to_balance != demo.expected_to {
             return Err(anyhow::anyhow!("unexpected balances"));
         }
 

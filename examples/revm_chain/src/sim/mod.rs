@@ -14,8 +14,8 @@ type ThresholdScheme =
     simplex::signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
 
 mod checks;
+mod demo;
 mod dkg;
-mod genesis;
 mod network;
 mod node;
 
@@ -63,20 +63,20 @@ async fn run_sim(context: deterministic::Context, cfg: SimConfig) -> anyhow::Res
     let mut oracle = network::start_network(&context, participants_set).await;
     network::connect_all_peers(&mut oracle, &participants_vec).await?;
 
-    let genesis = genesis::GenesisTransfer::new();
+    let demo = demo::DemoTransfer::new();
 
     let (nodes, mut finalized_rx) =
-        node::start_all_nodes(&context, &mut oracle, &participants_vec, &schemes, &genesis).await?;
+        node::start_all_nodes(&context, &mut oracle, &participants_vec, &schemes, &demo).await?;
 
     let head = checks::wait_for_finalized_head(&mut finalized_rx, cfg.nodes, cfg.blocks).await?;
-    let (state_root, seed) = checks::assert_all_nodes_converged(&nodes, head, &genesis).await?;
+    let (state_root, seed) = checks::assert_all_nodes_converged(&nodes, head, &demo).await?;
 
     Ok(SimOutcome {
         head,
         state_root,
         seed,
-        from_balance: genesis.expected_from,
-        to_balance: genesis.expected_to,
+        from_balance: demo.expected_from,
+        to_balance: demo.expected_to,
     })
 }
 

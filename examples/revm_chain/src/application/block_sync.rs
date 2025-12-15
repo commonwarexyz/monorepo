@@ -31,6 +31,8 @@ type VerifyRequestsByDigest = BTreeMap<ConsensusDigest, Vec<VerifyRequest>>;
 /// by caching received blocks and deferring verification requests until the bytes arrive.
 pub(super) struct BlockSync<S> {
     block_cfg: crate::types::BlockCfg,
+    // NOTE: These caches are intentionally unbounded to keep the example focused on wiring.
+    // Production code should add a block fetch/resolver path and bound these with pruning or an LRU.
     received: BTreeMap<ConsensusDigest, Block>,
     pending_verify_requests: VerifyRequestsByDigest,
     gossip: S,

@@ -5,8 +5,8 @@
 //! - a threshold-simplex engine instance that orders opaque digests.
 
 use super::{
-    genesis, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
-    CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
+    demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS, CHANNEL_BLOCKS,
+    CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
 use crate::{application, consensus};
 use anyhow::Context as _;
@@ -47,7 +47,7 @@ struct NodeInit<'a> {
     quota: Quota,
     buffer_pool: PoolRef,
     finalized_tx: mpsc::UnboundedSender<consensus::FinalizationEvent>,
-    genesis: &'a genesis::GenesisTransfer,
+    demo: &'a demo::DemoTransfer,
 }
 
 struct SimplexStart {
@@ -67,7 +67,7 @@ pub(super) async fn start_all_nodes(
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
     participants: &[ed25519::PublicKey],
     schemes: &[ThresholdScheme],
-    genesis: &genesis::GenesisTransfer,
+    demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(
     Vec<application::Handle>,
     mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
@@ -90,7 +90,7 @@ pub(super) async fn start_all_nodes(
                 quota,
                 buffer_pool: buffer_pool.clone(),
                 finalized_tx: finalized_tx.clone(),
-                genesis,
+                demo,
             },
         )
         .await?;
@@ -112,7 +112,7 @@ async fn start_node(
         quota,
         buffer_pool,
         finalized_tx,
-        genesis,
+        demo,
     } = init;
 
     let mut control = oracle.control(public_key.clone());
@@ -126,7 +126,7 @@ async fn start_node(
     } = register_channels(&mut control, quota).await?;
 
     let (application, consensus_mailbox, handle) =
-        start_application(index as u32, block_sender, finalized_tx, genesis);
+        start_application(index as u32, block_sender, finalized_tx, demo);
 
     spawn_block_forwarder(context, index, handle.clone(), block_receiver);
 
@@ -182,7 +182,7 @@ fn start_application(
     node: u32,
     gossip: ChannelSender,
     finalized: mpsc::UnboundedSender<consensus::FinalizationEvent>,
-    genesis: &genesis::GenesisTransfer,
+    demo: &demo::DemoTransfer,
 ) -> (
     application::Application<ChannelSender>,
     consensus::Mailbox,
@@ -197,8 +197,8 @@ fn start_application(
         MAILBOX_SIZE,
         gossip,
         finalized,
-        genesis.alloc.clone(),
-        Some(genesis.tx.clone()),
+        demo.alloc.clone(),
+        demo.tx.clone(),
     )
 }
 
