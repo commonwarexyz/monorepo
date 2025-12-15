@@ -33,9 +33,10 @@ pub mod ed25519 {
     //! evidence of liveness or faults.
 
     use super::Item;
-    use commonware_cryptography::impl_ed25519_certificate;
+    use commonware_cryptography::{impl_ed25519_certificate, impl_ed25519_certificate_fixtures};
 
     impl_ed25519_certificate!(&'a Item<D>);
+    impl_ed25519_certificate_fixtures!();
 }
 
 pub mod bls12381_multisig {
@@ -46,9 +47,12 @@ pub mod bls12381_multisig {
     //! per-validator attribution.
 
     use super::Item;
-    use commonware_cryptography::impl_bls12381_multisig_certificate;
+    use commonware_cryptography::{
+        impl_bls12381_multisig_certificate, impl_bls12381_multisig_certificate_fixtures,
+    };
 
     impl_bls12381_multisig_certificate!(&'a Item<D>);
+    impl_bls12381_multisig_certificate_fixtures!();
 }
 
 pub mod bls12381_threshold {
@@ -59,7 +63,10 @@ pub mod bls12381_threshold {
     //! third-party evidence.
 
     use super::Item;
-    use commonware_cryptography::impl_bls12381_threshold_certificate;
+    use commonware_cryptography::{
+        impl_bls12381_threshold_certificate, impl_bls12381_threshold_certificate_fixtures,
+    };
 
     impl_bls12381_threshold_certificate!(&'a Item<D>);
+    impl_bls12381_threshold_certificate_fixtures!();
 }

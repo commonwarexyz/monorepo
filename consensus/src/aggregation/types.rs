@@ -430,14 +430,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::{
-        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-        scheme::AggregationScheme,
+    use crate::aggregation::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, AggregationScheme,
     };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         Hasher, Sha256,
     };
     use commonware_utils::ordered::Quorum;
@@ -550,11 +550,11 @@ mod tests {
 
     #[test]
     fn test_codec() {
-        codec(ed25519);
-        codec(bls12381_multisig::<MinPk, _>);
-        codec(bls12381_multisig::<MinSig, _>);
-        codec(bls12381_threshold::<MinPk, _>);
-        codec(bls12381_threshold::<MinSig, _>);
+        codec(ed_scheme::fixtures);
+        codec(bls12381_multisig::fixtures::<MinPk, _>);
+        codec(bls12381_multisig::fixtures::<MinSig, _>);
+        codec(bls12381_threshold::fixtures::<MinPk, _>);
+        codec(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn activity_invalid_enum<S, F>(fixture: F)
@@ -579,11 +579,11 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        activity_invalid_enum(ed25519);
-        activity_invalid_enum(bls12381_multisig::<MinPk, _>);
-        activity_invalid_enum(bls12381_multisig::<MinSig, _>);
-        activity_invalid_enum(bls12381_threshold::<MinPk, _>);
-        activity_invalid_enum(bls12381_threshold::<MinSig, _>);
+        activity_invalid_enum(ed_scheme::fixtures);
+        activity_invalid_enum(bls12381_multisig::fixtures::<MinPk, _>);
+        activity_invalid_enum(bls12381_multisig::fixtures::<MinSig, _>);
+        activity_invalid_enum(bls12381_threshold::fixtures::<MinPk, _>);
+        activity_invalid_enum(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]

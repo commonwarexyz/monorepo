@@ -2411,13 +2411,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-        scheme::SimplexScheme,
+    use crate::simplex::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, SimplexScheme,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         sha256::Digest as Sha256,
     };
     use commonware_utils::{quorum, quorum_from_slice};
@@ -2482,11 +2482,11 @@ mod tests {
 
     #[test]
     fn test_notarize_encode_decode() {
-        notarize_encode_decode(ed25519);
-        notarize_encode_decode(bls12381_multisig::<MinPk, _>);
-        notarize_encode_decode(bls12381_multisig::<MinSig, _>);
-        notarize_encode_decode(bls12381_threshold::<MinPk, _>);
-        notarize_encode_decode(bls12381_threshold::<MinSig, _>);
+        notarize_encode_decode(ed_scheme::fixtures);
+        notarize_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        notarize_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        notarize_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        notarize_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarization_encode_decode<S, F>(fixture: F)
@@ -2515,11 +2515,11 @@ mod tests {
 
     #[test]
     fn test_notarization_encode_decode() {
-        notarization_encode_decode(ed25519);
-        notarization_encode_decode(bls12381_multisig::<MinPk, _>);
-        notarization_encode_decode(bls12381_multisig::<MinSig, _>);
-        notarization_encode_decode(bls12381_threshold::<MinPk, _>);
-        notarization_encode_decode(bls12381_threshold::<MinSig, _>);
+        notarization_encode_decode(ed_scheme::fixtures);
+        notarization_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        notarization_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        notarization_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        notarization_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn nullify_encode_decode<S, F>(fixture: F)
@@ -2538,11 +2538,11 @@ mod tests {
 
     #[test]
     fn test_nullify_encode_decode() {
-        nullify_encode_decode(ed25519);
-        nullify_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullify_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullify_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullify_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullify_encode_decode(ed_scheme::fixtures);
+        nullify_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        nullify_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        nullify_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        nullify_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn nullification_encode_decode<S, F>(fixture: F)
@@ -2567,11 +2567,11 @@ mod tests {
 
     #[test]
     fn test_nullification_encode_decode() {
-        nullification_encode_decode(ed25519);
-        nullification_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullification_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullification_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullification_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullification_encode_decode(ed_scheme::fixtures);
+        nullification_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        nullification_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        nullification_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        nullification_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn finalize_encode_decode<S, F>(fixture: F)
@@ -2591,11 +2591,11 @@ mod tests {
 
     #[test]
     fn test_finalize_encode_decode() {
-        finalize_encode_decode(ed25519);
-        finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        finalize_encode_decode(ed_scheme::fixtures);
+        finalize_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        finalize_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        finalize_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        finalize_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn finalization_encode_decode<S, F>(fixture: F)
@@ -2621,11 +2621,11 @@ mod tests {
 
     #[test]
     fn test_finalization_encode_decode() {
-        finalization_encode_decode(ed25519);
-        finalization_encode_decode(bls12381_multisig::<MinPk, _>);
-        finalization_encode_decode(bls12381_multisig::<MinSig, _>);
-        finalization_encode_decode(bls12381_threshold::<MinPk, _>);
-        finalization_encode_decode(bls12381_threshold::<MinSig, _>);
+        finalization_encode_decode(ed_scheme::fixtures);
+        finalization_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        finalization_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        finalization_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        finalization_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn backfiller_encode_decode<S, F>(fixture: F)
@@ -2671,11 +2671,11 @@ mod tests {
 
     #[test]
     fn test_backfiller_encode_decode() {
-        backfiller_encode_decode(ed25519);
-        backfiller_encode_decode(bls12381_multisig::<MinPk, _>);
-        backfiller_encode_decode(bls12381_multisig::<MinSig, _>);
-        backfiller_encode_decode(bls12381_threshold::<MinPk, _>);
-        backfiller_encode_decode(bls12381_threshold::<MinSig, _>);
+        backfiller_encode_decode(ed_scheme::fixtures);
+        backfiller_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        backfiller_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        backfiller_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        backfiller_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[test]
@@ -2733,11 +2733,11 @@ mod tests {
 
     #[test]
     fn test_response_encode_decode() {
-        response_encode_decode(ed25519);
-        response_encode_decode(bls12381_multisig::<MinPk, _>);
-        response_encode_decode(bls12381_multisig::<MinSig, _>);
-        response_encode_decode(bls12381_threshold::<MinPk, _>);
-        response_encode_decode(bls12381_threshold::<MinSig, _>);
+        response_encode_decode(ed_scheme::fixtures);
+        response_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        response_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        response_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        response_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
@@ -2769,11 +2769,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_notarize_encode_decode() {
-        conflicting_notarize_encode_decode(ed25519);
-        conflicting_notarize_encode_decode(bls12381_multisig::<MinPk, _>);
-        conflicting_notarize_encode_decode(bls12381_multisig::<MinSig, _>);
-        conflicting_notarize_encode_decode(bls12381_threshold::<MinPk, _>);
-        conflicting_notarize_encode_decode(bls12381_threshold::<MinSig, _>);
+        conflicting_notarize_encode_decode(ed_scheme::fixtures);
+        conflicting_notarize_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        conflicting_notarize_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        conflicting_notarize_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        conflicting_notarize_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
@@ -2805,11 +2805,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_finalize_encode_decode() {
-        conflicting_finalize_encode_decode(ed25519);
-        conflicting_finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        conflicting_finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        conflicting_finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        conflicting_finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        conflicting_finalize_encode_decode(ed_scheme::fixtures);
+        conflicting_finalize_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        conflicting_finalize_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        conflicting_finalize_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        conflicting_finalize_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
@@ -2833,11 +2833,11 @@ mod tests {
 
     #[test]
     fn test_nullify_finalize_encode_decode() {
-        nullify_finalize_encode_decode(ed25519);
-        nullify_finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullify_finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullify_finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullify_finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullify_finalize_encode_decode(ed_scheme::fixtures);
+        nullify_finalize_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        nullify_finalize_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        nullify_finalize_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        nullify_finalize_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarize_verify_wrong_namespace<S, F>(fixture: F)
@@ -2856,11 +2856,11 @@ mod tests {
 
     #[test]
     fn test_notarize_verify_wrong_namespace() {
-        notarize_verify_wrong_namespace(ed25519);
-        notarize_verify_wrong_namespace(bls12381_multisig::<MinPk, _>);
-        notarize_verify_wrong_namespace(bls12381_multisig::<MinSig, _>);
-        notarize_verify_wrong_namespace(bls12381_threshold::<MinPk, _>);
-        notarize_verify_wrong_namespace(bls12381_threshold::<MinSig, _>);
+        notarize_verify_wrong_namespace(ed_scheme::fixtures);
+        notarize_verify_wrong_namespace(bls12381_multisig::fixtures::<MinPk, _>);
+        notarize_verify_wrong_namespace(bls12381_multisig::fixtures::<MinSig, _>);
+        notarize_verify_wrong_namespace(bls12381_threshold::fixtures::<MinPk, _>);
+        notarize_verify_wrong_namespace(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarize_verify_wrong_scheme<S, F>(f: F)
@@ -2880,11 +2880,11 @@ mod tests {
 
     #[test]
     fn test_notarize_verify_wrong_scheme() {
-        notarize_verify_wrong_scheme(ed25519);
-        notarize_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        notarize_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        notarize_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        notarize_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        notarize_verify_wrong_scheme(ed_scheme::fixtures);
+        notarize_verify_wrong_scheme(bls12381_multisig::fixtures::<MinPk, _>);
+        notarize_verify_wrong_scheme(bls12381_multisig::fixtures::<MinSig, _>);
+        notarize_verify_wrong_scheme(bls12381_threshold::fixtures::<MinPk, _>);
+        notarize_verify_wrong_scheme(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarization_verify_wrong_scheme<S, F>(f: F)
@@ -2915,11 +2915,11 @@ mod tests {
 
     #[test]
     fn test_notarization_verify_wrong_scheme() {
-        notarization_verify_wrong_scheme(ed25519);
-        notarization_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        notarization_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        notarization_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        notarization_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        notarization_verify_wrong_scheme(ed_scheme::fixtures);
+        notarization_verify_wrong_scheme(bls12381_multisig::fixtures::<MinPk, _>);
+        notarization_verify_wrong_scheme(bls12381_multisig::fixtures::<MinSig, _>);
+        notarization_verify_wrong_scheme(bls12381_threshold::fixtures::<MinPk, _>);
+        notarization_verify_wrong_scheme(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarization_verify_wrong_namespace<S, F>(fixture: F)
@@ -2949,11 +2949,11 @@ mod tests {
 
     #[test]
     fn test_notarization_verify_wrong_namespace() {
-        notarization_verify_wrong_namespace(ed25519);
-        notarization_verify_wrong_namespace(bls12381_multisig::<MinPk, _>);
-        notarization_verify_wrong_namespace(bls12381_multisig::<MinSig, _>);
-        notarization_verify_wrong_namespace(bls12381_threshold::<MinPk, _>);
-        notarization_verify_wrong_namespace(bls12381_threshold::<MinSig, _>);
+        notarization_verify_wrong_namespace(ed_scheme::fixtures);
+        notarization_verify_wrong_namespace(bls12381_multisig::fixtures::<MinPk, _>);
+        notarization_verify_wrong_namespace(bls12381_multisig::fixtures::<MinSig, _>);
+        notarization_verify_wrong_namespace(bls12381_threshold::fixtures::<MinPk, _>);
+        notarization_verify_wrong_namespace(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
@@ -2981,11 +2981,11 @@ mod tests {
 
     #[test]
     fn test_notarization_recover_insufficient_signatures() {
-        notarization_recover_insufficient_signatures(ed25519);
-        notarization_recover_insufficient_signatures(bls12381_multisig::<MinPk, _>);
-        notarization_recover_insufficient_signatures(bls12381_multisig::<MinSig, _>);
-        notarization_recover_insufficient_signatures(bls12381_threshold::<MinPk, _>);
-        notarization_recover_insufficient_signatures(bls12381_threshold::<MinSig, _>);
+        notarization_recover_insufficient_signatures(ed_scheme::fixtures);
+        notarization_recover_insufficient_signatures(bls12381_multisig::fixtures::<MinPk, _>);
+        notarization_recover_insufficient_signatures(bls12381_multisig::fixtures::<MinSig, _>);
+        notarization_recover_insufficient_signatures(bls12381_threshold::fixtures::<MinPk, _>);
+        notarization_recover_insufficient_signatures(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn conflicting_notarize_detection<S, F>(f: F)
@@ -3010,11 +3010,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_notarize_detection() {
-        conflicting_notarize_detection(ed25519);
-        conflicting_notarize_detection(bls12381_multisig::<MinPk, _>);
-        conflicting_notarize_detection(bls12381_multisig::<MinSig, _>);
-        conflicting_notarize_detection(bls12381_threshold::<MinPk, _>);
-        conflicting_notarize_detection(bls12381_threshold::<MinSig, _>);
+        conflicting_notarize_detection(ed_scheme::fixtures);
+        conflicting_notarize_detection(bls12381_multisig::fixtures::<MinPk, _>);
+        conflicting_notarize_detection(bls12381_multisig::fixtures::<MinSig, _>);
+        conflicting_notarize_detection(bls12381_threshold::fixtures::<MinPk, _>);
+        conflicting_notarize_detection(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn nullify_finalize_detection<S, F>(f: F)
@@ -3038,11 +3038,11 @@ mod tests {
 
     #[test]
     fn test_nullify_finalize_detection() {
-        nullify_finalize_detection(ed25519);
-        nullify_finalize_detection(bls12381_multisig::<MinPk, _>);
-        nullify_finalize_detection(bls12381_multisig::<MinSig, _>);
-        nullify_finalize_detection(bls12381_threshold::<MinPk, _>);
-        nullify_finalize_detection(bls12381_threshold::<MinSig, _>);
+        nullify_finalize_detection(ed_scheme::fixtures);
+        nullify_finalize_detection(bls12381_multisig::fixtures::<MinPk, _>);
+        nullify_finalize_detection(bls12381_multisig::fixtures::<MinSig, _>);
+        nullify_finalize_detection(bls12381_threshold::fixtures::<MinPk, _>);
+        nullify_finalize_detection(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn finalization_verify_wrong_scheme<S, F>(f: F)
@@ -3073,11 +3073,11 @@ mod tests {
 
     #[test]
     fn test_finalization_wrong_scheme() {
-        finalization_verify_wrong_scheme(ed25519);
-        finalization_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        finalization_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        finalization_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        finalization_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        finalization_verify_wrong_scheme(ed_scheme::fixtures);
+        finalization_verify_wrong_scheme(bls12381_multisig::fixtures::<MinPk, _>);
+        finalization_verify_wrong_scheme(bls12381_multisig::fixtures::<MinSig, _>);
+        finalization_verify_wrong_scheme(bls12381_threshold::fixtures::<MinPk, _>);
+        finalization_verify_wrong_scheme(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     struct MockAttributable(u32);

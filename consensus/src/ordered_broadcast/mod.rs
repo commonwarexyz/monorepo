@@ -71,12 +71,14 @@ pub mod mocks;
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        ordered_broadcast::scheme::OrderedBroadcastScheme,
+        ordered_broadcast::scheme::{
+            bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, OrderedBroadcastScheme,
+        },
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::Scheme,
+        certificate::{mocks::Fixture, Scheme},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer as _,
@@ -161,7 +163,7 @@ mod tests {
 
     async fn initialize_simulation<S: Scheme>(
         context: Context,
-        fixture: &mocks::fixtures::Fixture<S>,
+        fixture: &Fixture<S>,
         link: Link,
     ) -> (Oracle<PublicKey>, Registrations<PublicKey>) {
         let (network, mut oracle) = Network::new(
@@ -182,7 +184,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<S>(
         context: Context,
-        fixture: &mocks::fixtures::Fixture<S>,
+        fixture: &Fixture<S>,
         sequencer_pks: &[PublicKey],
         registrations: &mut Registrations<PublicKey>,
         rebroadcast_timeout: Duration,
@@ -322,7 +324,7 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
@@ -358,17 +360,17 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        all_online(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        all_online(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        all_online(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        all_online(mocks::fixtures::ed25519);
+        all_online(bls12381_threshold::fixtures::<MinPk, _>);
+        all_online(bls12381_threshold::fixtures::<MinSig, _>);
+        all_online(bls12381_multisig::fixtures::<MinPk, _>);
+        all_online(bls12381_multisig::fixtures::<MinSig, _>);
+        all_online(ed_scheme::fixtures);
     }
 
     fn unclean_shutdown<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S> + Clone,
+        F: Fn(&mut deterministic::Context, u32) -> Fixture<S> + Clone,
     {
         let mut prev_checkpoint = None;
         let epoch = Epoch::new(111);
@@ -444,17 +446,17 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        unclean_shutdown(mocks::fixtures::ed25519);
+        unclean_shutdown(bls12381_threshold::fixtures::<MinPk, _>);
+        unclean_shutdown(bls12381_threshold::fixtures::<MinSig, _>);
+        unclean_shutdown(bls12381_multisig::fixtures::<MinPk, _>);
+        unclean_shutdown(bls12381_multisig::fixtures::<MinSig, _>);
+        unclean_shutdown(ed_scheme::fixtures);
     }
 
     fn network_partition<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
@@ -506,17 +508,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_network_partition() {
-        network_partition(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        network_partition(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        network_partition(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        network_partition(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        network_partition(mocks::fixtures::ed25519);
+        network_partition(bls12381_threshold::fixtures::<MinPk, _>);
+        network_partition(bls12381_threshold::fixtures::<MinSig, _>);
+        network_partition(bls12381_multisig::fixtures::<MinPk, _>);
+        network_partition(bls12381_multisig::fixtures::<MinSig, _>);
+        network_partition(ed_scheme::fixtures);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: Fn(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -569,11 +571,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, 0);
-        slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, 0);
-        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, 0);
-        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, 0);
-        slow_and_lossy_links(mocks::fixtures::ed25519, 0);
+        slow_and_lossy_links(bls12381_threshold::fixtures::<MinPk, _>, 0);
+        slow_and_lossy_links(bls12381_threshold::fixtures::<MinSig, _>, 0);
+        slow_and_lossy_links(bls12381_multisig::fixtures::<MinPk, _>, 0);
+        slow_and_lossy_links(bls12381_multisig::fixtures::<MinSig, _>, 0);
+        slow_and_lossy_links(ed_scheme::fixtures, 0);
     }
 
     #[test_group("slow")]
@@ -584,35 +586,33 @@ mod tests {
         for seed in 1..6 {
             // Test BLS threshold MinPk
             let ts_pk_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+                slow_and_lossy_links(bls12381_threshold::fixtures::<MinPk, _>, seed);
             let ts_pk_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+                slow_and_lossy_links(bls12381_threshold::fixtures::<MinPk, _>, seed);
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
             // Test BLS threshold MinSig
             let ts_sig_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+                slow_and_lossy_links(bls12381_threshold::fixtures::<MinSig, _>, seed);
             let ts_sig_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+                slow_and_lossy_links(bls12381_threshold::fixtures::<MinSig, _>, seed);
             assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
             // Test ed25519
-            let ed_state_1 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
-            let ed_state_2 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
+            let ed_state_1 = slow_and_lossy_links(ed_scheme::fixtures, seed);
+            let ed_state_2 = slow_and_lossy_links(ed_scheme::fixtures, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
             // Test BLS multisig MinPk
-            let ms_pk_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
-            let ms_pk_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
+            let ms_pk_state_1 = slow_and_lossy_links(bls12381_multisig::fixtures::<MinPk, _>, seed);
+            let ms_pk_state_2 = slow_and_lossy_links(bls12381_multisig::fixtures::<MinPk, _>, seed);
             assert_eq!(ms_pk_state_1, ms_pk_state_2);
 
             // Test BLS multisig MinSig
             let ms_sig_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
+                slow_and_lossy_links(bls12381_multisig::fixtures::<MinSig, _>, seed);
             let ms_sig_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
+                slow_and_lossy_links(bls12381_multisig::fixtures::<MinSig, _>, seed);
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
             let states = [
@@ -637,7 +637,7 @@ mod tests {
     fn invalid_signature_injection<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
@@ -673,17 +673,17 @@ mod tests {
 
     #[test_traced]
     fn test_invalid_signature_injection() {
-        invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        invalid_signature_injection(mocks::fixtures::ed25519);
+        invalid_signature_injection(bls12381_threshold::fixtures::<MinPk, _>);
+        invalid_signature_injection(bls12381_threshold::fixtures::<MinSig, _>);
+        invalid_signature_injection(bls12381_multisig::fixtures::<MinPk, _>);
+        invalid_signature_injection(bls12381_multisig::fixtures::<MinSig, _>);
+        invalid_signature_injection(ed_scheme::fixtures);
     }
 
     fn updated_epoch<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
@@ -805,17 +805,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_updated_epoch() {
-        updated_epoch(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        updated_epoch(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        updated_epoch(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        updated_epoch(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        updated_epoch(mocks::fixtures::ed25519);
+        updated_epoch(bls12381_threshold::fixtures::<MinPk, _>);
+        updated_epoch(bls12381_threshold::fixtures::<MinSig, _>);
+        updated_epoch(bls12381_multisig::fixtures::<MinPk, _>);
+        updated_epoch(bls12381_multisig::fixtures::<MinSig, _>);
+        updated_epoch(ed_scheme::fixtures);
     }
 
     fn external_sequencer<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -970,17 +970,17 @@ mod tests {
 
     #[test_traced]
     fn test_external_sequencer() {
-        external_sequencer(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        external_sequencer(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-        external_sequencer(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        external_sequencer(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        external_sequencer(mocks::fixtures::ed25519);
+        external_sequencer(bls12381_threshold::fixtures::<MinPk, _>);
+        external_sequencer(bls12381_threshold::fixtures::<MinSig, _>);
+        external_sequencer(bls12381_multisig::fixtures::<MinPk, _>);
+        external_sequencer(bls12381_multisig::fixtures::<MinSig, _>);
+        external_sequencer(ed_scheme::fixtures);
     }
 
     fn run_1k<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
@@ -1037,30 +1037,30 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
-        run_1k(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        run_1k(bls12381_threshold::fixtures::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
-        run_1k(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        run_1k(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_pk() {
-        run_1k(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        run_1k(bls12381_multisig::fixtures::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_sig() {
-        run_1k(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        run_1k(bls12381_multisig::fixtures::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_ed25519() {
-        run_1k(mocks::fixtures::ed25519);
+        run_1k(ed_scheme::fixtures);
     }
 }

@@ -40,7 +40,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
-commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 rstest.workspace = true
@@ -51,7 +51,8 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-fuzz = [ "dep:commonware-math", "commonware-cryptography/mocks" ]
+mocks = ["commonware-cryptography/mocks"]
+fuzz = [ "dep:commonware-math", "mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",

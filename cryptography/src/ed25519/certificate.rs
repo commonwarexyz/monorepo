@@ -355,6 +355,23 @@ mod macros {
     /// impl_ed25519_certificate!(VoteContext<'a, D>);
     /// ```
     #[macro_export]
+    macro_rules! impl_ed25519_certificate_fixtures {
+        () => {
+            /// Generates a test fixture with Ed25519 identities and signing schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            #[cfg(feature = "mocks")]
+            pub fn fixtures<R>(rng: &mut R, n: u32) -> $crate::certificate::mocks::Fixture<Scheme>
+            where
+                R: rand::RngCore + rand::CryptoRng,
+            {
+                $crate::certificate::mocks::ed25519(rng, n, Scheme::signer, Scheme::verifier)
+            }
+        };
+    }
+
+    #[macro_export]
     macro_rules! impl_ed25519_certificate {
         ($context:ty) => {
             /// Ed25519 signing scheme wrapper.

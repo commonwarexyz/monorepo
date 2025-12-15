@@ -474,14 +474,14 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{ed25519, Fixture},
+            scheme::ed25519 as ed_scheme,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
         },
         types::{Epoch, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519(&mut rng, 4);
+        } = ed_scheme::fixtures(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -546,7 +546,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519(&mut rng, 4);
+        } = ed_scheme::fixtures(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -609,7 +609,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
+        } = ed_scheme::fixtures(&mut rng, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -639,7 +639,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2029);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
+        } = ed_scheme::fixtures(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = StdRng::seed_from_u64(2029);
-        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let Fixture { schemes, .. } = ed_scheme::fixtures(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 

@@ -149,7 +149,6 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{ed25519 as build_fixture, Fixture},
             scheme::ed25519 as ed_scheme,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
@@ -157,7 +156,7 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_macros::test_async;
     use rand::{rngs::StdRng, SeedableRng};
     use std::{
@@ -219,7 +218,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = build_fixture(&mut rng, 5);
+        } = ed_scheme::fixtures(&mut rng, 5);
         (schemes, verifier)
     }
 

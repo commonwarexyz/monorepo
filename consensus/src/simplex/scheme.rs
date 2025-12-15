@@ -35,10 +35,12 @@ pub mod bls12381_multisig {
         types::Round,
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::Variant, impl_bls12381_multisig_certificate, PublicKey,
+        bls12381::primitives::variant::Variant, impl_bls12381_multisig_certificate,
+        impl_bls12381_multisig_certificate_fixtures, PublicKey,
     };
 
     impl_bls12381_multisig_certificate!(Subject<'a, D>);
+    impl_bls12381_multisig_certificate_fixtures!();
 
     impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
         type Seed = ();
@@ -52,15 +54,14 @@ pub mod bls12381_multisig {
     mod tests {
         use crate::{
             simplex::{
-                mocks::fixtures::{bls12381_multisig, Fixture},
-                scheme::SeededScheme,
+                scheme::{bls12381_multisig, SeededScheme},
                 types::Subject,
             },
             types::{Epoch, Round, View},
         };
         use commonware_cryptography::{
             bls12381::primitives::variant::{MinPk, MinSig, Variant},
-            certificate::Scheme as _,
+            certificate::{mocks::Fixture, Scheme as _},
             sha256::Digest as Sha256Digest,
         };
         use commonware_utils::quorum_from_slice;
@@ -68,7 +69,7 @@ pub mod bls12381_multisig {
 
         fn test_seed_returns_none<V: Variant + Send + Sync>() {
             let mut rng = StdRng::seed_from_u64(42);
-            let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, 4);
+            let Fixture { schemes, .. } = bls12381_multisig::fixtures::<V, _>(&mut rng, 4);
 
             let quorum = quorum_from_slice(&schemes) as usize;
 
@@ -308,6 +309,29 @@ pub mod bls12381_threshold {
         let seed_ns = seed_namespace(namespace);
         let target_message = target.encode();
         tle::encrypt(rng, identity, (Some(&seed_ns), &target_message), &block)
+    }
+
+    /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+    ///
+    /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+    /// scheme instances share a consistent ordering.
+    #[cfg(feature = "mocks")]
+    pub fn fixtures<V, R>(
+        rng: &mut R,
+        n: u32,
+    ) -> commonware_cryptography::certificate::mocks::Fixture<
+        Scheme<commonware_cryptography::ed25519::PublicKey, V>,
+    >
+    where
+        V: Variant,
+        R: rand::RngCore + rand::CryptoRng,
+    {
+        commonware_cryptography::certificate::mocks::bls12381_threshold::<_, V, _>(
+            rng,
+            n,
+            Scheme::signer,
+            Scheme::verifier,
+        )
     }
 
     /// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
@@ -804,8 +828,7 @@ pub mod bls12381_threshold {
         use super::*;
         use crate::{
             simplex::{
-                mocks::fixtures::{bls12381_threshold, ed25519_participants, Fixture},
-                scheme::{notarize_namespace, seed_namespace},
+                scheme::{bls12381_threshold, notarize_namespace, seed_namespace},
                 types::{Finalization, Finalize, Notarization, Notarize, Proposal, Subject},
             },
             types::{Round, View},
@@ -819,6 +842,7 @@ pub mod bls12381_threshold {
                     variant::{MinPk, MinSig, Variant},
                 },
             },
+            certificate::mocks::{ed25519_participants, Fixture},
             ed25519,
             sha256::Digest as Sha256Digest,
             Hasher, Sha256,
@@ -835,7 +859,7 @@ pub mod bls12381_threshold {
             let mut rng = StdRng::seed_from_u64(seed);
             let Fixture {
                 schemes, verifier, ..
-            } = bls12381_threshold::<V, _>(&mut rng, n);
+            } = bls12381_threshold::fixtures::<V, _>(&mut rng, n);
 
             (schemes, verifier)
         }
@@ -1690,9 +1714,10 @@ pub mod ed25519 {
         simplex::{scheme::SeededScheme, types::Subject},
         types::Round,
     };
-    use commonware_cryptography::impl_ed25519_certificate;
+    use commonware_cryptography::{impl_ed25519_certificate, impl_ed25519_certificate_fixtures};
 
     impl_ed25519_certificate!(Subject<'a, D>);
+    impl_ed25519_certificate_fixtures!();
 
     impl SeededScheme for Scheme {
         type Seed = ();
@@ -1706,20 +1731,22 @@ pub mod ed25519 {
     mod tests {
         use crate::{
             simplex::{
-                mocks::fixtures::{ed25519, Fixture},
-                scheme::SeededScheme,
+                scheme::{ed25519, SeededScheme},
                 types::Subject,
             },
             types::{Epoch, Round, View},
         };
-        use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+        use commonware_cryptography::{
+            certificate::{mocks::Fixture, Scheme as _},
+            sha256::Digest as Sha256Digest,
+        };
         use commonware_utils::quorum_from_slice;
         use rand::{rngs::StdRng, SeedableRng};
 
         #[test]
         fn test_seed_returns_none() {
             let mut rng = StdRng::seed_from_u64(42);
-            let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+            let Fixture { schemes, .. } = ed25519::fixtures(&mut rng, 4);
 
             let quorum = quorum_from_slice(&schemes) as usize;
 
@@ -1866,14 +1893,14 @@ cfg_if::cfg_if! {
                 use super::*;
                 use crate::{
                     simplex::{
-                        mocks::fixtures::{bls12381_threshold, ed25519, Fixture},
-                        scheme::Scheme,
+                        scheme::{bls12381_threshold, ed25519, Scheme},
                         types::{Notarization, Notarize, Proposal, Subject},
                     },
                     types::{Epoch, Round, View},
                 };
                 use commonware_cryptography::{
-                    bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest, Hasher, Sha256,
+                    bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
+                    sha256::Digest as Sha256Digest, Hasher, Sha256,
                 };
                 use futures::executor::block_on;
                 use rand::{rngs::StdRng, SeedableRng};
@@ -1924,7 +1951,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519(&mut rng, 4);
+                    } = ed25519::fixtures(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -1960,7 +1987,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519(&mut rng, 4);
+                    } = ed25519::fixtures(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -2003,7 +2030,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = bls12381_threshold::<MinPk, _>(&mut rng, 4);
+                    } = bls12381_threshold::fixtures::<MinPk, _>(&mut rng, 4);
 
                     assert!(
                         !verifier.is_attributable(),
@@ -2054,7 +2081,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = bls12381_threshold::<MinPk, _>(&mut rng, 4);
+                    } = bls12381_threshold::fixtures::<MinPk, _>(&mut rng, 4);
 
                     assert!(
                         !verifier.is_attributable(),
@@ -2094,7 +2121,7 @@ cfg_if::cfg_if! {
                     let mut rng = StdRng::seed_from_u64(42);
                     let Fixture {
                         schemes, verifier, ..
-                    } = ed25519(&mut rng, 4);
+                    } = ed25519::fixtures(&mut rng, 4);
 
                     assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 

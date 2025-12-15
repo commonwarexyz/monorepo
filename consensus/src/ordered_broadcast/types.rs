@@ -1047,15 +1047,15 @@ where
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::{
-            fixtures::{bls12381_multisig, bls12381_threshold, ed25519, ConstantProvider, Fixture},
-            Validators,
+        mocks::Validators,
+        scheme::{
+            bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, OrderedBroadcastScheme,
         },
-        scheme::OrderedBroadcastScheme,
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::{ConstantProvider, Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer,
@@ -1143,11 +1143,11 @@ mod tests {
 
     #[test]
     fn test_parent_encode_decode() {
-        parent_encode_decode(ed25519);
-        parent_encode_decode(bls12381_multisig::<MinPk, _>);
-        parent_encode_decode(bls12381_multisig::<MinSig, _>);
-        parent_encode_decode(bls12381_threshold::<MinPk, _>);
-        parent_encode_decode(bls12381_threshold::<MinSig, _>);
+        parent_encode_decode(ed_scheme::fixtures);
+        parent_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        parent_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        parent_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        parent_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_encode_decode<S, F>(fixture: F)
@@ -1221,11 +1221,11 @@ mod tests {
 
     #[test]
     fn test_node_encode_decode() {
-        node_encode_decode(ed25519);
-        node_encode_decode(bls12381_multisig::<MinPk, _>);
-        node_encode_decode(bls12381_multisig::<MinSig, _>);
-        node_encode_decode(bls12381_threshold::<MinPk, _>);
-        node_encode_decode(bls12381_threshold::<MinSig, _>);
+        node_encode_decode(ed_scheme::fixtures);
+        node_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        node_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        node_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        node_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_read_staged<S, F>(fixture: F)
@@ -1322,11 +1322,11 @@ mod tests {
 
     #[test]
     fn test_node_read_staged() {
-        node_read_staged(ed25519);
-        node_read_staged(bls12381_multisig::<MinPk, _>);
-        node_read_staged(bls12381_multisig::<MinSig, _>);
-        node_read_staged(bls12381_threshold::<MinPk, _>);
-        node_read_staged(bls12381_threshold::<MinSig, _>);
+        node_read_staged(ed_scheme::fixtures);
+        node_read_staged(bls12381_multisig::fixtures::<MinPk, _>);
+        node_read_staged(bls12381_multisig::fixtures::<MinSig, _>);
+        node_read_staged(bls12381_threshold::fixtures::<MinPk, _>);
+        node_read_staged(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn ack_encode_decode<S, F>(fixture: F)
@@ -1362,11 +1362,11 @@ mod tests {
 
     #[test]
     fn test_ack_encode_decode() {
-        ack_encode_decode(ed25519);
-        ack_encode_decode(bls12381_multisig::<MinPk, _>);
-        ack_encode_decode(bls12381_multisig::<MinSig, _>);
-        ack_encode_decode(bls12381_threshold::<MinPk, _>);
-        ack_encode_decode(bls12381_threshold::<MinSig, _>);
+        ack_encode_decode(ed_scheme::fixtures);
+        ack_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        ack_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        ack_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        ack_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn activity_encode_decode<S, F>(fixture: F)
@@ -1446,11 +1446,11 @@ mod tests {
 
     #[test]
     fn test_activity_encode_decode() {
-        activity_encode_decode(ed25519);
-        activity_encode_decode(bls12381_multisig::<MinPk, _>);
-        activity_encode_decode(bls12381_multisig::<MinSig, _>);
-        activity_encode_decode(bls12381_threshold::<MinPk, _>);
-        activity_encode_decode(bls12381_threshold::<MinSig, _>);
+        activity_encode_decode(ed_scheme::fixtures);
+        activity_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        activity_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        activity_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        activity_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[test]
@@ -1522,11 +1522,11 @@ mod tests {
 
     #[test]
     fn test_lock_encode_decode() {
-        lock_encode_decode(ed25519);
-        lock_encode_decode(bls12381_multisig::<MinPk, _>);
-        lock_encode_decode(bls12381_multisig::<MinSig, _>);
-        lock_encode_decode(bls12381_threshold::<MinPk, _>);
-        lock_encode_decode(bls12381_threshold::<MinSig, _>);
+        lock_encode_decode(ed_scheme::fixtures);
+        lock_encode_decode(bls12381_multisig::fixtures::<MinPk, _>);
+        lock_encode_decode(bls12381_multisig::fixtures::<MinSig, _>);
+        lock_encode_decode(bls12381_threshold::fixtures::<MinPk, _>);
+        lock_encode_decode(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_sign_verify<S, F>(fixture: F)
@@ -1594,11 +1594,11 @@ mod tests {
 
     #[test]
     fn test_node_sign_verify() {
-        node_sign_verify(ed25519);
-        node_sign_verify(bls12381_multisig::<MinPk, _>);
-        node_sign_verify(bls12381_multisig::<MinSig, _>);
-        node_sign_verify(bls12381_threshold::<MinPk, _>);
-        node_sign_verify(bls12381_threshold::<MinSig, _>);
+        node_sign_verify(ed_scheme::fixtures);
+        node_sign_verify(bls12381_multisig::fixtures::<MinPk, _>);
+        node_sign_verify(bls12381_multisig::fixtures::<MinSig, _>);
+        node_sign_verify(bls12381_threshold::fixtures::<MinPk, _>);
+        node_sign_verify(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn ack_sign_verify<S, F>(fixture: F)
@@ -1620,11 +1620,11 @@ mod tests {
 
     #[test]
     fn test_ack_sign_verify() {
-        ack_sign_verify(ed25519);
-        ack_sign_verify(bls12381_multisig::<MinPk, _>);
-        ack_sign_verify(bls12381_multisig::<MinSig, _>);
-        ack_sign_verify(bls12381_threshold::<MinPk, _>);
-        ack_sign_verify(bls12381_threshold::<MinSig, _>);
+        ack_sign_verify(ed_scheme::fixtures);
+        ack_sign_verify(bls12381_multisig::fixtures::<MinPk, _>);
+        ack_sign_verify(bls12381_multisig::fixtures::<MinSig, _>);
+        ack_sign_verify(bls12381_threshold::fixtures::<MinPk, _>);
+        ack_sign_verify(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn certificate_assembly<S, F>(fixture: F)
@@ -1667,11 +1667,11 @@ mod tests {
 
     #[test]
     fn test_certificate_assembly() {
-        certificate_assembly(ed25519);
-        certificate_assembly(bls12381_multisig::<MinPk, _>);
-        certificate_assembly(bls12381_multisig::<MinSig, _>);
-        certificate_assembly(bls12381_threshold::<MinPk, _>);
-        certificate_assembly(bls12381_threshold::<MinSig, _>);
+        certificate_assembly(ed_scheme::fixtures);
+        certificate_assembly(bls12381_multisig::fixtures::<MinPk, _>);
+        certificate_assembly(bls12381_multisig::fixtures::<MinSig, _>);
+        certificate_assembly(bls12381_threshold::fixtures::<MinPk, _>);
+        certificate_assembly(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn lock_verify<S, F>(fixture: F)
@@ -1715,11 +1715,11 @@ mod tests {
 
     #[test]
     fn test_lock_verify() {
-        lock_verify(ed25519);
-        lock_verify(bls12381_multisig::<MinPk, _>);
-        lock_verify(bls12381_multisig::<MinSig, _>);
-        lock_verify(bls12381_threshold::<MinPk, _>);
-        lock_verify(bls12381_threshold::<MinSig, _>);
+        lock_verify(ed_scheme::fixtures);
+        lock_verify(bls12381_multisig::fixtures::<MinPk, _>);
+        lock_verify(bls12381_multisig::fixtures::<MinSig, _>);
+        lock_verify(bls12381_threshold::fixtures::<MinPk, _>);
+        lock_verify(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[test]
@@ -1778,11 +1778,11 @@ mod tests {
 
     #[test]
     fn test_node_verify_invalid_signature() {
-        node_verify_invalid_signature(ed25519);
-        node_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        node_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        node_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        node_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        node_verify_invalid_signature(ed_scheme::fixtures);
+        node_verify_invalid_signature(bls12381_multisig::fixtures::<MinPk, _>);
+        node_verify_invalid_signature(bls12381_multisig::fixtures::<MinSig, _>);
+        node_verify_invalid_signature(bls12381_threshold::fixtures::<MinPk, _>);
+        node_verify_invalid_signature(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_verify_invalid_parent_signature<S, F>(fixture: F)
@@ -1873,11 +1873,11 @@ mod tests {
 
     #[test]
     fn test_node_verify_invalid_parent_signature() {
-        node_verify_invalid_parent_signature(ed25519);
-        node_verify_invalid_parent_signature(bls12381_multisig::<MinPk, _>);
-        node_verify_invalid_parent_signature(bls12381_multisig::<MinSig, _>);
-        node_verify_invalid_parent_signature(bls12381_threshold::<MinPk, _>);
-        node_verify_invalid_parent_signature(bls12381_threshold::<MinSig, _>);
+        node_verify_invalid_parent_signature(ed_scheme::fixtures);
+        node_verify_invalid_parent_signature(bls12381_multisig::fixtures::<MinPk, _>);
+        node_verify_invalid_parent_signature(bls12381_multisig::fixtures::<MinSig, _>);
+        node_verify_invalid_parent_signature(bls12381_threshold::fixtures::<MinPk, _>);
+        node_verify_invalid_parent_signature(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn ack_verify_invalid_signature<S, F>(fixture: F)
@@ -1922,11 +1922,11 @@ mod tests {
 
     #[test]
     fn test_ack_verify_invalid_signature() {
-        ack_verify_invalid_signature(ed25519);
-        ack_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        ack_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        ack_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        ack_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        ack_verify_invalid_signature(ed_scheme::fixtures);
+        ack_verify_invalid_signature(bls12381_multisig::fixtures::<MinPk, _>);
+        ack_verify_invalid_signature(bls12381_multisig::fixtures::<MinSig, _>);
+        ack_verify_invalid_signature(bls12381_threshold::fixtures::<MinPk, _>);
+        ack_verify_invalid_signature(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn ack_verify_wrong_validator<S, F>(f: F)
@@ -1955,11 +1955,11 @@ mod tests {
 
     #[test]
     fn test_ack_verify_wrong_validator() {
-        ack_verify_wrong_validator(ed25519);
-        ack_verify_wrong_validator(bls12381_multisig::<MinPk, _>);
-        ack_verify_wrong_validator(bls12381_multisig::<MinSig, _>);
-        ack_verify_wrong_validator(bls12381_threshold::<MinPk, _>);
-        ack_verify_wrong_validator(bls12381_threshold::<MinSig, _>);
+        ack_verify_wrong_validator(ed_scheme::fixtures);
+        ack_verify_wrong_validator(bls12381_multisig::fixtures::<MinPk, _>);
+        ack_verify_wrong_validator(bls12381_multisig::fixtures::<MinSig, _>);
+        ack_verify_wrong_validator(bls12381_threshold::fixtures::<MinPk, _>);
+        ack_verify_wrong_validator(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn lock_verify_invalid_signature<S, F>(f: F)
@@ -2023,11 +2023,11 @@ mod tests {
 
     #[test]
     fn test_lock_verify_invalid_signature() {
-        lock_verify_invalid_signature(ed25519);
-        lock_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        lock_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        lock_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        lock_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        lock_verify_invalid_signature(ed_scheme::fixtures);
+        lock_verify_invalid_signature(bls12381_multisig::fixtures::<MinPk, _>);
+        lock_verify_invalid_signature(bls12381_multisig::fixtures::<MinSig, _>);
+        lock_verify_invalid_signature(bls12381_threshold::fixtures::<MinPk, _>);
+        lock_verify_invalid_signature(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     #[test]
@@ -2113,11 +2113,11 @@ mod tests {
 
     #[test]
     fn test_node_genesis_with_parent_fails() {
-        node_genesis_with_parent_fails(ed25519);
-        node_genesis_with_parent_fails(bls12381_multisig::<MinPk, _>);
-        node_genesis_with_parent_fails(bls12381_multisig::<MinSig, _>);
-        node_genesis_with_parent_fails(bls12381_threshold::<MinPk, _>);
-        node_genesis_with_parent_fails(bls12381_threshold::<MinSig, _>);
+        node_genesis_with_parent_fails(ed_scheme::fixtures);
+        node_genesis_with_parent_fails(bls12381_multisig::fixtures::<MinPk, _>);
+        node_genesis_with_parent_fails(bls12381_multisig::fixtures::<MinSig, _>);
+        node_genesis_with_parent_fails(bls12381_threshold::fixtures::<MinPk, _>);
+        node_genesis_with_parent_fails(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_non_genesis_without_parent_fails<S, F>(fixture: F)
@@ -2144,11 +2144,11 @@ mod tests {
 
     #[test]
     fn test_node_non_genesis_without_parent_fails() {
-        node_non_genesis_without_parent_fails(ed25519);
-        node_non_genesis_without_parent_fails(bls12381_multisig::<MinPk, _>);
-        node_non_genesis_without_parent_fails(bls12381_multisig::<MinSig, _>);
-        node_non_genesis_without_parent_fails(bls12381_threshold::<MinPk, _>);
-        node_non_genesis_without_parent_fails(bls12381_threshold::<MinSig, _>);
+        node_non_genesis_without_parent_fails(ed_scheme::fixtures);
+        node_non_genesis_without_parent_fails(bls12381_multisig::fixtures::<MinPk, _>);
+        node_non_genesis_without_parent_fails(bls12381_multisig::fixtures::<MinSig, _>);
+        node_non_genesis_without_parent_fails(bls12381_threshold::fixtures::<MinPk, _>);
+        node_non_genesis_without_parent_fails(bls12381_threshold::fixtures::<MinSig, _>);
     }
 
     fn node_genesis_with_parent_panics<S, F>(fixture: F)
@@ -2196,23 +2196,23 @@ mod tests {
 
     #[test]
     fn test_node_genesis_with_parent_panics() {
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(ed25519)).is_err());
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_multisig::<MinPk, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_multisig::<MinSig, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_threshold::<MinPk, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_threshold::<MinSig, _>))
-                .is_err()
-        );
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(ed_scheme::fixtures)).is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_multisig::fixtures::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_multisig::fixtures::<MinSig, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_threshold::fixtures::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_threshold::fixtures::<MinSig, _>
+        ))
+        .is_err());
     }
 
     fn node_non_genesis_without_parent_panics<S, F>(fixture: F)
@@ -2237,21 +2237,23 @@ mod tests {
 
     #[test]
     fn test_node_non_genesis_without_parent_panics() {
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(ed25519)).is_err());
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(ed_scheme::fixtures)).is_err()
+        );
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::<MinPk, _>
+            bls12381_multisig::fixtures::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::<MinSig, _>
+            bls12381_multisig::fixtures::<MinSig, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::<MinPk, _>
+            bls12381_threshold::fixtures::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::<MinSig, _>
+            bls12381_threshold::fixtures::<MinSig, _>
         ))
         .is_err());
     }

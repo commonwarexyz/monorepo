@@ -12,7 +12,7 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{application, fixtures::Fixture, relay, reporter},
+        mocks::{application, relay, reporter},
         scheme::SimplexScheme,
         Engine,
     },
@@ -20,8 +20,10 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{
-    certificate::Scheme as CertificateScheme, ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest, Sha256,
+    certificate::{mocks::Fixture, Scheme as CertificateScheme},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};

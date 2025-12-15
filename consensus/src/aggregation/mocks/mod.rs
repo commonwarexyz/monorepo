@@ -2,7 +2,6 @@
 
 mod application;
 pub use application::{Application, Strategy};
-pub mod fixtures;
 mod monitor;
 pub use monitor::Monitor;
 mod reporter;

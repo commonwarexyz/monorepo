@@ -109,7 +109,6 @@ mod tests {
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
-            mocks::fixtures::{bls12381_threshold, Fixture},
             scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
@@ -119,7 +118,10 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
-        certificate::{mocks::ConstantProvider, Scheme as _},
+        certificate::{
+            mocks::{ConstantProvider, Fixture},
+            Scheme as _,
+        },
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
@@ -421,7 +423,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -567,7 +569,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -733,7 +735,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -788,7 +790,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -864,7 +866,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -932,7 +934,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -1043,7 +1045,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1103,7 +1105,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1185,7 +1187,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (application, mut actor) = setup_validator(
@@ -1244,7 +1246,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -1302,7 +1304,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -1356,7 +1358,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -1441,7 +1443,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal) = setup_validator(
@@ -1567,7 +1569,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Set up two validators
             let mut actors = Vec::new();
@@ -1679,7 +1681,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixtures::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();

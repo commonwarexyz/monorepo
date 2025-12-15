@@ -369,6 +369,32 @@ mod macros {
     /// impl_bls12381_threshold_certificate!(VoteContext<'a, D>);
     /// ```
     #[macro_export]
+    macro_rules! impl_bls12381_threshold_certificate_fixtures {
+        () => {
+            /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            #[cfg(feature = "mocks")]
+            pub fn fixtures<V, R>(
+                rng: &mut R,
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            where
+                V: $crate::bls12381::primitives::variant::Variant,
+                R: rand::RngCore + rand::CryptoRng,
+            {
+                $crate::certificate::mocks::bls12381_threshold::<_, V, _>(
+                    rng,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
+        };
+    }
+
+    #[macro_export]
     macro_rules! impl_bls12381_threshold_certificate {
         ($context:ty) => {
             /// BLS12-381 threshold signature scheme wrapper.
