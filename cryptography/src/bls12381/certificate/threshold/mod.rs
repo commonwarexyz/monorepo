@@ -81,6 +81,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             participants.len(),
             "polynomial total must equal participant len"
         );
+        #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
             .partial_public(share.index)
@@ -110,6 +111,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             participants.len(),
             "polynomial total must equal participant len"
         );
+        #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
 
         Self::Verifier {
