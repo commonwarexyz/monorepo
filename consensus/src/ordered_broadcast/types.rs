@@ -97,7 +97,7 @@ pub enum Error {
     UnknownValidator(Epoch, String),
     /// The local validator is not a signer in the scheme for the specified epoch.
     #[error("Not a signer at epoch {0}")]
-    NotASigner(Epoch),
+    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key

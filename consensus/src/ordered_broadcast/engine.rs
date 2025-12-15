@@ -539,7 +539,7 @@ impl<
             tip.chunk.clone(),
             self.epoch,
         ) else {
-            return Err(Error::NotASigner(self.epoch));
+            return Err(Error::NotSigner(self.epoch));
         };
 
         // Sync the journal to prevent ever acking two conflicting chunks at
