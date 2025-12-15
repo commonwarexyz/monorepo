@@ -16,7 +16,7 @@ use crate::{
         digest_for_block, ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey,
     },
     execution::{evm_env, execute_txs},
-    types::{Block, BlockId, StateRoot, Tx},
+    types::{Block, BlockId, StateRoot, Tx, TxId},
 };
 use alloy_evm::revm::{
     database::InMemoryDB,
@@ -32,6 +32,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 type ThresholdActivity = <crate::consensus::Mailbox as commonware_consensus::Reporter>::Activity;
 
@@ -46,7 +47,6 @@ pub struct Application<S> {
     codec: BlockCodecCfg,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
-    first_block_tx: Tx,
     store: ChainStore,
     gossip: S,
     consensus: mpsc::Receiver<ConsensusRequest>,
@@ -64,10 +64,14 @@ struct Runtime<S> {
     node: u32,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
-    /// Deterministic transaction injected at height 1 (the first non-genesis block).
+    /// Node-local mempool used for deterministic block construction.
     ///
-    /// This keeps the example end-to-end without implementing a mempool or separate ingress.
-    first_block_tx: Tx,
+    /// This is intentionally minimal:
+    /// - transactions are submitted via the simulation control plane (see `ApplicationRequest::SubmitTx`)
+    /// - ordering is deterministic (`BTreeMap` by `TxId`)
+    /// - transactions are pruned only after finalization
+    mempool: BTreeMap<TxId, Tx>,
+    max_txs: usize,
     store: ChainStore,
     sync: BlockSync<S>,
 }
@@ -84,7 +88,6 @@ where
         gossip: S,
         finalized: mpsc::UnboundedSender<FinalizationEvent>,
         genesis_alloc: Vec<(Address, U256)>,
-        first_block_tx: Tx,
     ) -> (Self, crate::consensus::Mailbox, Handle) {
         let (consensus_sender, consensus) = mpsc::channel(mailbox_size);
         let (control_sender, control) = mpsc::channel(mailbox_size);
@@ -96,7 +99,6 @@ where
                 codec,
                 finalized,
                 genesis_alloc,
-                first_block_tx,
                 store: ChainStore::default(),
                 gossip,
                 consensus,
@@ -166,7 +168,6 @@ where
             codec,
             finalized,
             genesis_alloc,
-            first_block_tx,
             store,
             gossip,
             consensus,
@@ -179,7 +180,8 @@ where
             node,
             finalized,
             genesis_alloc,
-            first_block_tx,
+            mempool: BTreeMap::new(),
+            max_txs: block_cfg.max_txs,
             store,
             sync,
         };
@@ -232,6 +234,7 @@ where
 
     fn handle_control(&mut self, message: ApplicationRequest) {
         match message {
+            ApplicationRequest::SubmitTx { tx, response } => self.handle_submit_tx(tx, response),
             ApplicationRequest::QueryBalance {
                 digest,
                 address,
@@ -248,6 +251,12 @@ where
                     .handle_block_received(&mut self.store, from, bytes);
             }
         }
+    }
+
+    fn handle_submit_tx(&mut self, tx: Tx, response: oneshot::Sender<bool>) {
+        let id = tx.id();
+        let inserted = self.mempool.insert(id, tx).is_none();
+        let _ = response.send(inserted);
     }
 
     fn handle_genesis(
@@ -324,13 +333,15 @@ where
         };
 
         let prevrandao = parent.seed.unwrap_or(B256::from(context.parent.1 .0));
-        let txs = if parent.block.height == 0 {
-            // Inject a single transaction immediately after genesis to keep the example minimal,
-            // deterministic, and end-to-end.
-            vec![self.first_block_tx.clone()]
-        } else {
-            Vec::new()
-        };
+
+        let included = self.included_tx_ids(&parent);
+        let txs = self
+            .mempool
+            .iter()
+            .filter(|(tx_id, _)| !included.contains(tx_id))
+            .take(self.max_txs)
+            .map(|(_, tx)| tx.clone())
+            .collect::<Vec<_>>();
         let child = Application::<S>::build_child_block(&parent.block, prevrandao, txs);
         if let Ok((digest, entry)) = Application::<S>::execute_block(&parent, child) {
             self.store.insert(digest, entry);
@@ -351,6 +362,11 @@ where
                     finalization.proposal.payload,
                     Self::seed_hash_from_seed(finalization.seed()),
                 );
+                if let Some(entry) = self.store.get_by_digest(&finalization.proposal.payload) {
+                    for tx in entry.block.txs.iter() {
+                        self.mempool.remove(&tx.id());
+                    }
+                }
                 let _ = self
                     .finalized
                     .unbounded_send((self.node, finalization.proposal.payload));
@@ -367,5 +383,23 @@ where
         if let Some(entry) = self.store.get_by_digest_mut(&digest) {
             entry.seed = Some(seed_hash);
         }
+    }
+
+    fn included_tx_ids(&self, parent: &BlockEntry) -> BTreeSet<TxId> {
+        let mut included = BTreeSet::new();
+        let mut cursor = &parent.block;
+        loop {
+            for tx in cursor.txs.iter() {
+                included.insert(tx.id());
+            }
+            if cursor.height == 0 {
+                break;
+            }
+            let Some(next) = self.store.get_by_id(&cursor.parent) else {
+                break;
+            };
+            cursor = &next.block;
+        }
+        included
     }
 }

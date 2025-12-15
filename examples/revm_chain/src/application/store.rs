@@ -41,6 +41,12 @@ impl ChainStore {
         self.by_digest.get(digest)
     }
 
+    pub(super) fn get_by_id(&self, id: &BlockId) -> Option<&BlockEntry> {
+        self.by_id
+            .get(id)
+            .and_then(|digest| self.by_digest.get(digest))
+    }
+
     pub(super) fn get_by_digest_mut(
         &mut self,
         digest: &ConsensusDigest,

@@ -16,7 +16,7 @@ use commonware_codec::{
 /// Block identifier (32 bytes).
 pub struct BlockId(pub B256);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// Transaction identifier (32 bytes).
 pub struct TxId(pub B256);
 

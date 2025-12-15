@@ -6,7 +6,7 @@
 
 use crate::{
     consensus::{ConsensusDigest, PublicKey},
-    types::StateRoot,
+    types::{StateRoot, Tx},
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
 use bytes::Bytes;
@@ -18,6 +18,14 @@ use futures::channel::oneshot;
 /// - `BlockReceived` is the out-of-band block delivery path used by the simulated network.
 /// - `Query*` requests are used by the simulation harness to assert convergence.
 pub(crate) enum ApplicationRequest {
+    /// Submit a transaction into the node-local mempool.
+    ///
+    /// In this example, the simulation harness uses this to inject a deterministic "demo transfer"
+    /// without hardcoding tx selection inside block production.
+    SubmitTx {
+        tx: Tx,
+        response: oneshot::Sender<bool>,
+    },
     /// Deliver a full block (encoded bytes) out-of-band.
     BlockReceived { from: PublicKey, bytes: Bytes },
     /// Read an account balance from the state snapshot for `digest`.

@@ -35,6 +35,16 @@ impl Handle {
             .await;
     }
 
+    /// Submit a transaction into this node's mempool.
+    pub async fn submit_tx(&self, tx: crate::Tx) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        let _ = sender
+            .send(ApplicationRequest::SubmitTx { tx, response })
+            .await;
+        receiver.await.unwrap_or(false)
+    }
+
     /// Query an account balance at `digest`.
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
         let (response, receiver) = oneshot::channel();

@@ -132,6 +132,10 @@ async fn start_node(
 
     spawn_application(context, index, application);
 
+    // Submit the deterministic demo transfer before starting consensus so the first leader can
+    // include it without relying on a hardcoded "height == 1" rule.
+    let _ = handle.submit_tx(demo.tx.clone()).await;
+
     start_simplex_engine(
         context,
         SimplexStart {
@@ -198,7 +202,6 @@ fn start_application(
         gossip,
         finalized,
         demo.alloc.clone(),
-        demo.tx.clone(),
     )
 }
 
