@@ -105,7 +105,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: State<DigestO
         self.journal.size()
     }
 
-    /// Returns the location of the last commit, if any.
+    /// Returns the location of the last commit.
     pub const fn last_commit_loc(&self) -> Location {
         self.last_commit_loc
     }
@@ -221,7 +221,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
     /// this function. Caller can associate an arbitrary `metadata` value with the commit. Returns
     /// the `(start_loc, end_loc]` location range of committed operations. The end of the returned
     /// range includes the commit operation itself, and hence will always be equal to `op_count`.
-    /// the range of locations that were committed.
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
@@ -1090,7 +1089,6 @@ mod test {
             assert_eq!(db.get(Location::new_unchecked(2)).await.unwrap().unwrap(), v2);
 
             // Test getting out of bounds location
-            // Test getting commit location
             let result = db.get(Location::new_unchecked(3)).await.unwrap();
             assert!(result.is_none());
 
