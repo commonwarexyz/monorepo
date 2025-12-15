@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochSchemeProvider, SchemeProvider},
+    application::{Application, Block, EpochProvider, Provider},
     dkg::{self, UpdateCallBack},
     orchestrator,
     setup::PeerConfig,
@@ -11,7 +11,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{signing_scheme::Scheme, types::Finalization},
+    simplex::{scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
@@ -30,7 +30,7 @@ use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, time::Instant};
+use std::{num::NonZero, time::Instant};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -75,8 +75,8 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     config: Config<C, P, B, V>,
@@ -88,8 +88,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
-        SchemeProvider<S, C>,
-        S,
+        Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
     >,
@@ -104,7 +103,6 @@ where
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
-    _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
@@ -115,8 +113,8 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
@@ -217,13 +215,13 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let scheme_provider = SchemeProvider::new(config.signer.clone());
+        let provider = Provider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                scheme_provider: scheme_provider.clone(),
+                provider: provider.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
@@ -239,7 +237,6 @@ where
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
-                _marker: PhantomData,
             },
         )
         .await;
@@ -256,7 +253,7 @@ where
             orchestrator::Config {
                 oracle: config.blocker.clone(),
                 application,
-                scheme_provider,
+                provider,
                 marshal: marshal_mailbox,
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
@@ -275,7 +272,6 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            _phantom: core::marker::PhantomData,
         }
     }
 

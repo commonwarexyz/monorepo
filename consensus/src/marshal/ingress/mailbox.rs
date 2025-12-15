@@ -1,12 +1,9 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Finalization, Notarization},
-    },
+    simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},

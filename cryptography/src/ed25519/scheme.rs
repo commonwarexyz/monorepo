@@ -1,12 +1,9 @@
-use crate::Array;
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use crate::BatchVerifier;
-        use std::borrow::{Cow, ToOwned};
-    } else {
-        use alloc::borrow::{Cow, ToOwned};
-    }
-}
+use crate::{Array, BatchVerifier};
+#[cfg(not(feature = "std"))]
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -18,6 +15,8 @@ use core::{
 };
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::{Cow, ToOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -418,9 +417,9 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
-            Cow::Owned(union_unique(namespace, message))
-        });
+        let payload = namespace
+            .map(|ns| Cow::Owned(union_unique(ns, message)))
+            .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
             signature.signature,

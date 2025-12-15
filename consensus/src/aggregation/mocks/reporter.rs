@@ -1,40 +1,40 @@
 use crate::{
-    aggregation::types::{Ack, Activity, Certificate, Index},
+    aggregation::{
+        scheme,
+        types::{Ack, Activity, Certificate, Index},
+    },
     types::Epoch,
-    Reporter as Z,
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{sharing::Sharing, variant::Variant},
-    Digest,
-};
+use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use rand::{CryptoRng, Rng};
 use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
-enum Message<V: Variant, D: Digest> {
-    Ack(Ack<V, D>),
-    Certified(Certificate<V, D>),
+enum Message<S: Scheme, D: Digest> {
+    Ack(Ack<S, D>),
+    Certified(Certificate<S, D>),
     Tip(Index),
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
     Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<V: Variant, D: Digest> {
-    mailbox: mpsc::Receiver<Message<V, D>>,
+pub struct Reporter<R: Rng + CryptoRng, S: Scheme, D: Digest> {
+    mailbox: mpsc::Receiver<Message<S, D>>,
+
+    // RNG used for signature verification with scheme.
+    rng: R,
 
     // Application namespace
     namespace: Vec<u8>,
 
-    // Identity public key
-    identity: V::Public,
-
-    // Polynomial public key of the group
-    polynomial: Sharing<V>,
+    // Signing scheme for verification
+    scheme: S,
 
     // Received acks (for validation)
     acks: HashSet<(Index, Epoch)>,
@@ -52,25 +52,20 @@ pub struct Reporter<V: Variant, D: Digest> {
     current_epoch: Epoch,
 }
 
-impl<V: Variant, D: Digest> Reporter<V, D> {
-    pub fn new(
-        namespace: &[u8],
-        participants: u32,
-        polynomial: Sharing<V>,
-    ) -> (Self, Mailbox<V, D>) {
-        assert_eq!(
-            participants,
-            polynomial.total().get(),
-            "number of participants does not match polynomial"
-        );
+impl<R, S, D> Reporter<R, S, D>
+where
+    R: Rng + CryptoRng,
+    S: scheme::Scheme<D>,
+    D: Digest,
+{
+    pub fn new(rng: R, namespace: &[u8], scheme: S) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
-        let identity = *polynomial.public();
         (
             Self {
                 mailbox: receiver,
+                rng,
                 namespace: namespace.to_vec(),
-                identity,
-                polynomial,
+                scheme,
                 acks: HashSet::new(),
                 digests: BTreeMap::new(),
                 contiguous: None,
@@ -86,11 +81,11 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&self.namespace, &self.polynomial));
+                    assert!(ack.verify(&self.scheme, &self.namespace));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
-                    Ack::<V, D>::decode(encoded).unwrap();
+                    Ack::<S, D>::decode(encoded).unwrap();
 
                     // Update current epoch from ack
                     self.current_epoch = ack.epoch;
@@ -99,12 +94,13 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     self.acks.insert((ack.item.index, ack.epoch));
                 }
                 Message::Certified(certificate) => {
-                    // Verify threshold signature
-                    assert!(certificate.verify(&self.namespace, &self.identity));
+                    // Verify certificate
+                    assert!(certificate.verify(&mut self.rng, &self.scheme, &self.namespace));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();
-                    Certificate::<V, D>::decode(encoded).unwrap();
+                    let cfg = self.scheme.certificate_codec_config();
+                    Certificate::<S, D>::decode_cfg(encoded, &cfg).unwrap();
 
                     // Update the reporter
                     let entry = self.digests.entry(certificate.item.index);
@@ -159,12 +155,16 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<S: Scheme, D: Digest> {
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Z for Mailbox<V, D> {
-    type Activity = Activity<V, D>;
+impl<S, D> crate::Reporter for Mailbox<S, D>
+where
+    S: Scheme,
+    D: Digest,
+{
+    type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
@@ -190,7 +190,11 @@ impl<V: Variant, D: Digest> Z for Mailbox<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
+impl<S, D> Mailbox<S, D>
+where
+    S: Scheme,
+    D: Digest,
+{
     pub async fn get_tip(&mut self) -> Option<(Index, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender.send(Message::GetTip(sender)).await.unwrap();

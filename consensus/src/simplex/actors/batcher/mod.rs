@@ -4,11 +4,11 @@ mod round;
 mod verifier;
 
 use crate::{
-    simplex::signing_scheme::Scheme,
     types::{Epoch, ViewDelta},
     Reporter,
 };
 pub use actor::Actor;
+use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
@@ -33,10 +33,8 @@ mod tests {
     use crate::{
         simplex::{
             actors::voter,
-            mocks::{
-                self,
-                fixtures::{bls12381_multisig, ed25519, Fixture},
-            },
+            mocks,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -48,7 +46,8 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        ed25519,
+        certificate::mocks::Fixture,
+        ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256, Signer,
     };
@@ -66,7 +65,7 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    fn build_notarization<S: Scheme>(
+    fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -81,7 +80,7 @@ mod tests {
             .expect("notarization requires a quorum of votes")
     }
 
-    fn build_nullification<S: Scheme>(
+    fn build_nullification<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         round: Round,
@@ -96,7 +95,7 @@ mod tests {
             .expect("nullification requires a quorum of votes")
     }
 
-    fn build_finalization<S: Scheme>(
+    fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -113,7 +112,7 @@ mod tests {
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -174,7 +173,7 @@ mod tests {
                 oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
 
             // Create a peer to inject certificates
-            let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -265,14 +264,16 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_forwarding_from_network() {
-        certificate_forwarding_from_network(bls12381_multisig::<MinPk, _>);
-        certificate_forwarding_from_network(bls12381_multisig::<MinSig, _>);
-        certificate_forwarding_from_network(ed25519);
+        certificate_forwarding_from_network(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_forwarding_from_network(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_forwarding_from_network(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_forwarding_from_network(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_forwarding_from_network(ed25519::fixture);
     }
 
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -407,15 +408,17 @@ mod tests {
 
     #[test_traced]
     fn test_quorum_votes_construct_certificate() {
-        quorum_votes_construct_certificate(bls12381_multisig::<MinPk, _>);
-        quorum_votes_construct_certificate(bls12381_multisig::<MinSig, _>);
-        quorum_votes_construct_certificate(ed25519);
+        quorum_votes_construct_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        quorum_votes_construct_certificate(bls12381_threshold::fixture::<MinSig, _>);
+        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        quorum_votes_construct_certificate(ed25519::fixture);
     }
 
     /// Test that if both votes and a certificate arrive, only one certificate is sent to voter.
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -496,7 +499,7 @@ mod tests {
             }
 
             // Create an injector peer to send certificates (on channel 1)
-            let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -597,14 +600,16 @@ mod tests {
 
     #[test_traced]
     fn test_votes_and_certificate_deduplication() {
-        votes_and_certificate_deduplication(bls12381_multisig::<MinPk, _>);
-        votes_and_certificate_deduplication(bls12381_multisig::<MinSig, _>);
-        votes_and_certificate_deduplication(ed25519);
+        votes_and_certificate_deduplication(bls12381_threshold::fixture::<MinPk, _>);
+        votes_and_certificate_deduplication(bls12381_threshold::fixture::<MinSig, _>);
+        votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinPk, _>);
+        votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinSig, _>);
+        votes_and_certificate_deduplication(ed25519::fixture);
     }
 
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 7;
@@ -794,16 +799,20 @@ mod tests {
 
     #[test_traced]
     fn test_conflicting_votes_dont_produce_invalid_certificate() {
-        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::<MinPk, _>);
-        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::<MinSig, _>);
-        conflicting_votes_dont_produce_invalid_certificate(ed25519);
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_votes_dont_produce_invalid_certificate(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_votes_dont_produce_invalid_certificate(ed25519::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote AFTER setting the leader,
     /// the proposal is forwarded to the voter (when we are not the leader).
     fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -918,16 +927,18 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_after_leader_set() {
-        proposal_forwarded_after_leader_set(bls12381_multisig::<MinPk, _>);
-        proposal_forwarded_after_leader_set(bls12381_multisig::<MinSig, _>);
-        proposal_forwarded_after_leader_set(ed25519);
+        proposal_forwarded_after_leader_set(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_forwarded_after_leader_set(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_forwarded_after_leader_set(ed25519::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote BEFORE setting the leader,
     /// the proposal is forwarded to the voter once the leader is set (when we are not the leader).
     fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1041,9 +1052,11 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_forwarded_before_leader_set() {
-        proposal_forwarded_before_leader_set(bls12381_multisig::<MinPk, _>);
-        proposal_forwarded_before_leader_set(bls12381_multisig::<MinSig, _>);
-        proposal_forwarded_before_leader_set(ed25519);
+        proposal_forwarded_before_leader_set(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_forwarded_before_leader_set(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_forwarded_before_leader_set(ed25519::fixture);
     }
 
     /// Test that leader activity detection works correctly:
@@ -1052,7 +1065,7 @@ mod tests {
     /// 3. With gaps in recent views (with sufficient data), returns inactive
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1189,8 +1202,10 @@ mod tests {
 
     #[test_traced]
     fn test_leader_activity_detection() {
-        leader_activity_detection(bls12381_multisig::<MinPk, _>);
-        leader_activity_detection(bls12381_multisig::<MinSig, _>);
-        leader_activity_detection(ed25519);
+        leader_activity_detection(bls12381_threshold::fixture::<MinPk, _>);
+        leader_activity_detection(bls12381_threshold::fixture::<MinSig, _>);
+        leader_activity_detection(bls12381_multisig::fixture::<MinPk, _>);
+        leader_activity_detection(bls12381_multisig::fixture::<MinSig, _>);
+        leader_activity_detection(ed25519::fixture);
     }
 }

@@ -1164,6 +1164,7 @@ dependencies = [
  "commonware-broadcast",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",

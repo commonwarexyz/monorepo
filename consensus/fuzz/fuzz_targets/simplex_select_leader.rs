@@ -3,12 +3,12 @@ use arbitrary::Arbitrary;
 use commonware_codec::DecodeExt;
 use commonware_consensus::{
     simplex::{
-        select_leader,
-        signing_scheme::{
+        scheme::{
             bls12381_multisig,
             bls12381_threshold::{self, Seed},
-            ed25519, Scheme,
+            ed25519, SeededScheme,
         },
+        select_leader,
     },
     types::{Epoch, Round, View},
 };
@@ -45,7 +45,7 @@ struct FuzzInput {
     encoded_seed: Vec<u8>,
 }
 
-fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
+fn fuzz<S: SeededScheme<PublicKey = PublicKey>>(input: &FuzzInput, seed: Option<S::Seed>) {
     let participants: Vec<PublicKey> = (1..=input.participants_count)
         .map(|i| {
             let mut rng = StdRng::seed_from_u64(i as u64);
@@ -58,7 +58,7 @@ fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
     }
 
     let round = Round::new(Epoch::new(input.round_epoch), View::new(input.round_view));
-    let _ = select_leader::<S, PublicKey>(&participants, round, seed);
+    let _ = select_leader::<S>(&participants, round, seed);
 }
 
 fuzz_target!(|input: FuzzInput| {

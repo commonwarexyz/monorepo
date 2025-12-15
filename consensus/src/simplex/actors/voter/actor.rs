@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         metrics::{self, Outbound},
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
@@ -17,7 +17,7 @@ use crate::{
     Automaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
@@ -50,11 +50,10 @@ enum Resolved {
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D, P>>,
+    A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -81,14 +80,13 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D, P>>,
+        A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, P, S, B, D, A, R, F>
+    > Actor<E, S, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
@@ -258,7 +256,7 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    async fn try_propose(&mut self) -> Option<(Context<D, S::PublicKey>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
         let context = self.state.try_propose()?;
 
@@ -268,7 +266,7 @@ impl<
     }
 
     /// Attempt to verify a proposed block.
-    async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+    async fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
 
@@ -586,8 +584,8 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl Sender<PublicKey = P>,
-        certificate_sender: impl Sender<PublicKey = P>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -601,8 +599,8 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl Sender<PublicKey = P>,
-        certificate_sender: impl Sender<PublicKey = P>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
         let mut vote_sender = WrappedSender::new(vote_sender);

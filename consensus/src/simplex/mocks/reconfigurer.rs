@@ -3,11 +3,11 @@
 //! reject messages from an unexpected epoch.
 
 use crate::simplex::{
-    signing_scheme::Scheme,
+    scheme,
     types::{Finalize, Notarize, Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
@@ -25,7 +25,12 @@ pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
+impl<E, S, H> Reconfigurer<E, S, H>
+where
+    E: Spawner,
+    S: scheme::Scheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -43,7 +48,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
         let (mut sender, mut receiver) = vote_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Vote::<S, H::Digest>::decode(msg) {
+            let msg = match Vote::<S, _>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -83,8 +88,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
-                        .unwrap();
+                    let n = Nullify::sign(&self.scheme, &self.namespace, new_round).unwrap();
                     let msg = Vote::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
