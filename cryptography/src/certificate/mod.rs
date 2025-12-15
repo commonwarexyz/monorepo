@@ -1,13 +1,13 @@
-//! Cryptographic certificate schemes for consensus protocols.
+//! Cryptographic certificate schemes for multi-party signing.
 //!
 //! This module provides the [`Scheme`] trait and implementations for producing
-//! validator votes, validating them (individually or in batches), assembling
-//! quorum certificates, and verifying recovered certificates.
+//! signatures, validating them (individually or in batches), assembling
+//! certificates, and verifying recovered certificates.
 //!
 //! # Pluggable Cryptography
 //!
-//! Consensus implementations are generic over the signing scheme, allowing users
-//! to choose the scheme best suited for their requirements:
+//! Applications are generic over the signing scheme, allowing users to choose
+//! the scheme best suited for their requirements:
 //!
 //! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly, no trusted
 //!   setup required, and widely supported. Certificates contain individual signatures from each
@@ -21,15 +21,15 @@
 //!   certificates that are constant-size regardless of committee size. Requires a trusted
 //!   setup (distributed key generation) and cannot attribute signatures to individual signers.
 //!
-//! # Attributable Schemes and Liveness/Fault Evidence
+//! # Attributable Schemes and Fault Evidence
 //!
-//! Signing schemes differ in whether per-validator activities can be used as evidence of either
-//! liveness or of committing a fault:
+//! Signing schemes differ in whether per-participant activities can be used as evidence of
+//! either liveness or of committing a fault:
 //!
 //! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
 //!   presented to some third party as evidence of either liveness or of committing a fault.
 //!   Certificates contain signer indices alongside individual signatures, enabling secure
-//!   per-validator activity tracking and conflict detection.
+//!   per-participant activity tracking and conflict detection.
 //!
 //! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
 //!   presented to some third party as evidence of either liveness or of committing a fault
@@ -42,15 +42,16 @@
 //! The [`Scheme::is_attributable()`] method signals whether evidence can be safely exposed to
 //! third parties.
 //!
-//! # Identity Keys vs Consensus Keys
+//! # Identity Keys vs Signing Keys
 //!
-//! A participant may supply both an identity key and a consensus key. The identity key
-//! is used for assigning a unique order to the committee and authenticating connections whereas the consensus key
-//! is used for actually signing and verifying votes/certificates.
+//! A participant may supply both an identity key and a signing key. The identity key
+//! is used for assigning a unique order to the participant set and authenticating connections
+//! whereas the signing key is used for producing and verifying signatures/certificates.
 //!
-//! This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
-//! (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
-//! for an example of a scheme that uses the same key for both purposes.
+//! This flexibility is supported because some cryptographic schemes are only performant when
+//! used in batch verification (like [bls12381_multisig]) and/or are refreshed frequently
+//! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
+//! same key for both purposes.
 
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
@@ -69,12 +70,12 @@ use rand::{CryptoRng, Rng};
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
-/// Signed vote emitted by a participant.
+/// Signature emitted by a participant.
 #[derive(Clone, Debug)]
 pub struct Signature<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
-    /// Scheme-specific signature or share produced for the vote context.
+    /// Scheme-specific signature or share produced for a given subject.
     pub signature: S::Signature,
 }
 
@@ -138,7 +139,7 @@ pub struct SignatureVerification<S: Scheme> {
 }
 
 impl<S: Scheme> SignatureVerification<S> {
-    /// Creates a new `VoteVerification` result.
+    /// Creates a new `SignatureVerification` result.
     pub const fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
@@ -147,26 +148,26 @@ impl<S: Scheme> SignatureVerification<S> {
     }
 }
 
-/// Identifies the subject of a vote or certificate.
+/// Identifies the subject of a signature or certificate.
 pub trait Subject: Clone + Debug + Send + Sync {
     /// Returns the namespace and message for the subject, given some base namespace.
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>);
 }
 
-/// Cryptographic surface required by consensus protocols.
+/// Cryptographic surface for multi-party certificate schemes.
 ///
-/// A `Scheme` produces validator votes, validates them (individually or in batches), assembles
-/// quorum certificates, and verifies recovered certificates. Implementations may override the
+/// A `Scheme` produces signatures, validates them (individually or in batches), assembles
+/// certificates, and verifies recovered certificates. Implementations may override the
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Subject type for signing and verifying votes.
+    /// Subject type for signing and verifying signatures.
     type Subject<'a, D: Digest>: Subject;
 
-    /// Public key type for participant identity used to order and index the committee.
+    /// Public key type for participant identity used to order and index the participant set.
     type PublicKey: PublicKey;
-    /// Vote signature emitted by individual validators.
+    /// Signature emitted by individual participants.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
-    /// Quorum certificate recovered from a set of votes.
+    /// Certificate assembled from a set of signatures.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     /// Returns the index of "self" in the participant set, if available.
@@ -176,27 +177,27 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a vote for the given subject using the supplied namespace for domain separation.
+    /// Signs a subject using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    fn sign_vote<D: Digest>(
+    fn sign<D: Digest>(
         &self,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
     ) -> Option<Signature<Self>>;
 
-    /// Verifies a single vote against the participant material managed by the scheme.
-    fn verify_vote<D: Digest>(
+    /// Verifies a single signature against the participant material managed by the scheme.
+    fn verify<D: Digest>(
         &self,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool;
 
-    /// Batch-verifies votes and separates valid messages from the voter indices that failed
+    /// Batch-verifies signatures and separates valid signatures from signer indices that failed
     /// verification.
     ///
-    /// Callers must not include duplicate votes from the same signer.
-    fn verify_votes<R, D, I>(
+    /// Callers must not include duplicate signatures from the same signer.
+    fn verify_many<R, D, I>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
@@ -210,11 +211,11 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     {
         let mut invalid = BTreeSet::new();
 
-        let verified = signatures.into_iter().filter_map(|vote| {
-            if self.verify_vote(namespace, subject.clone(), &vote) {
-                Some(vote)
+        let verified = signatures.into_iter().filter_map(|sig| {
+            if self.verify(namespace, subject.clone(), &sig) {
+                Some(sig)
             } else {
-                invalid.insert(vote.signer);
+                invalid.insert(sig.signer);
                 None
             }
         });
@@ -222,9 +223,9 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         SignatureVerification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
+    /// Assembles signatures into a certificate, returning `None` if the threshold is not met.
     ///
-    /// Callers must not include duplicate votes from the same signer.
+    /// Callers must not include duplicate signatures from the same signer.
     fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Signature<Self>>;
@@ -259,7 +260,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
-    /// Returns whether per-validator fault evidence can be safely exposed.
+    /// Returns whether per-participant fault evidence can be safely exposed.
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
@@ -306,7 +307,7 @@ pub trait Provider: Clone + Send + Sync + 'static {
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-/// Bitmap wrapper that tracks which validators signed a certificate.
+/// Bitmap wrapper that tracks which participants signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -344,7 +345,7 @@ impl Signers {
         self.bitmap.len() as usize
     }
 
-    /// Returns how many validators are marked as signers.
+    /// Returns how many participants are marked as signers.
     pub fn count(&self) -> usize {
         self.bitmap.count_ones() as usize
     }

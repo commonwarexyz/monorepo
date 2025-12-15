@@ -162,7 +162,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        scheme.verify_vote::<D>(namespace, &self.item, &self.signature)
+        scheme.verify::<D>(namespace, &self.item, &self.signature)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -176,7 +176,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(namespace, &item)?;
+        let signature = scheme.sign::<D>(namespace, &item)?;
         Some(Self {
             item,
             epoch,

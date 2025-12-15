@@ -189,7 +189,7 @@ mod tests {
                 epoch,
             };
             let signature = scheme
-                .sign_vote::<Sha256Digest>(NAMESPACE, context)
+                .sign::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
             Ack {
                 chunk,

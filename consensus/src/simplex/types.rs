@@ -753,7 +753,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(
+        let signature = scheme.sign::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &proposal,
@@ -773,7 +773,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1017,7 +1017,7 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(namespace, Subject::Nullify { round })?;
+        let signature = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
 
         Some(Self { round, signature })
     }
@@ -1029,7 +1029,7 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify::<D>(
             namespace,
             Subject::Nullify { round: self.round },
             &self.signature,
@@ -1225,7 +1225,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(
+        let signature = scheme.sign::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &proposal,
@@ -1245,7 +1245,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &self.proposal,

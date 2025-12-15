@@ -714,7 +714,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_vote::<D>(&ack_namespace, ctx, &self.signature)
+        scheme.verify::<D>(&ack_namespace, ctx, &self.signature)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -730,7 +730,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &chunk,
             epoch,
         };
-        let signature = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
+        let signature = scheme.sign::<D>(&ack_namespace, ctx)?;
         Some(Self::new(chunk, epoch, signature))
     }
 }
@@ -1123,7 +1123,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1188,7 +1188,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1274,7 +1274,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1343,7 +1343,7 @@ mod tests {
             epoch,
         };
         let signature = fixture.schemes[0]
-            .sign_vote::<Sha256Digest>(NAMESPACE, ctx)
+            .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
 
         let ack = Ack::<PublicKey, S, Sha256Digest> {
@@ -1411,7 +1411,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1495,7 +1495,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1566,7 +1566,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1647,7 +1647,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1694,7 +1694,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1809,7 +1809,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1845,7 +1845,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), wrong_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), wrong_ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -1909,7 +1909,7 @@ mod tests {
             epoch,
         };
         let mut tampered_vote = fixture.schemes[1]
-            .sign_vote::<Sha256Digest>(NAMESPACE, ctx)
+            .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
         // Change the signer index to mismatch with the actual signature
         // The vote was signed by validator 1, but we claim it's from validator 0
@@ -1983,7 +1983,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -2003,7 +2003,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -2091,7 +2091,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
@@ -2176,7 +2176,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();

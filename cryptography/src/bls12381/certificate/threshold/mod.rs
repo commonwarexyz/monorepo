@@ -97,7 +97,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
     }
 
-    /// Produces a verifier that can authenticate votes but does not hold signing state.
+    /// Produces a verifier that can authenticate signatures but does not hold signing state.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
@@ -123,7 +123,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Creates a verifier that only checks recovered certificates.
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
-    /// verify individual votes or partial signatures.
+    /// verify individual signatures or partial signatures.
     ///
     /// * `identity` - public identity of the committee (constant across reshares)
     pub const fn certificate_verifier(identity: V::Public) -> Self {
@@ -173,12 +173,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
     }
 
-    /// Signs a vote and returns it.
-    pub fn sign_vote<S, D>(
-        &self,
-        namespace: &[u8],
-        subject: S::Subject<'_, D>,
-    ) -> Option<Signature<S>>
+    /// Signs a subject and returns the signature.
+    pub fn sign<S, D>(&self, namespace: &[u8], subject: S::Subject<'_, D>) -> Option<Signature<S>>
     where
         S: Scheme<Signature = V::Signature>,
         D: Digest,
@@ -195,8 +191,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         })
     }
 
-    /// Verifies a single vote from a signer.
-    pub fn verify_vote<S, D>(
+    /// Verifies a single signature from a signer.
+    pub fn verify<S, D>(
         &self,
         namespace: &[u8],
         subject: S::Subject<'_, D>,
@@ -220,8 +216,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         .is_ok()
     }
 
-    /// Batch-verifies votes and returns verified votes and invalid signers.
-    pub fn verify_votes<S, R, D, I>(
+    /// Batch-verifies signatures and returns verified signatures and invalid signers.
+    pub fn verify_many<S, R, D, I>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
@@ -270,7 +266,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         SignatureVerification::new(verified, invalid_signers)
     }
 
-    /// Assembles a certificate from a collection of votes.
+    /// Assembles a certificate from a collection of signatures.
     pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<V::Signature>
     where
         S: Scheme<Signature = V::Signature>,
@@ -480,24 +476,24 @@ mod macros {
                     self.generic.participants()
                 }
 
-                fn sign_vote<D: $crate::Digest>(
+                fn sign<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
                 ) -> Option<$crate::certificate::Signature<Self>> {
-                    self.generic.sign_vote::<_, D>(namespace, subject)
+                    self.generic.sign::<_, D>(namespace, subject)
                 }
 
-                fn verify_vote<D: $crate::Digest>(
+                fn verify<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
                     signature: &$crate::certificate::Signature<Self>,
                 ) -> bool {
-                    self.generic.verify_vote::<_, D>(namespace, subject, signature)
+                    self.generic.verify::<_, D>(namespace, subject, signature)
                 }
 
-                fn verify_votes<R, D, I>(
+                fn verify_many<R, D, I>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
@@ -509,7 +505,7 @@ mod macros {
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Signature<Self>>,
                 {
-                    self.generic.verify_votes::<_, _, D, _>(rng, namespace, subject, signatures)
+                    self.generic.verify_many::<_, _, D, _>(rng, namespace, subject, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
@@ -645,9 +641,9 @@ mod tests {
         let scheme = &schemes[0];
 
         let signature = scheme
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(scheme.verify_vote::<Sha256Digest>(
+        assert!(scheme.verify::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &signature
@@ -663,7 +659,7 @@ mod tests {
     fn test_verifier_cannot_sign<V: Variant + Send + Sync>() {
         let (_, verifier, _) = setup_signers::<V>(4, 43);
         assert!(verifier
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .is_none());
     }
 
@@ -681,13 +677,13 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
         let mut rng = StdRng::seed_from_u64(45);
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        let result = schemes[0].verify_many::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
@@ -699,7 +695,7 @@ mod tests {
         // Test: Corrupt one vote - invalid signer index
         let mut votes_corrupted = signatures.clone();
         votes_corrupted[0].signer = 999;
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        let result = schemes[0].verify_many::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
@@ -711,7 +707,7 @@ mod tests {
         // Test: Corrupt one vote - invalid signature
         let mut votes_corrupted = signatures;
         votes_corrupted[0].signature = votes_corrupted[1].signature;
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        let result = schemes[0].verify_many::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
@@ -735,7 +731,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -765,7 +761,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -795,7 +791,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -834,7 +830,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -859,7 +855,7 @@ mod tests {
             .iter()
             .take(sub_quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -885,7 +881,7 @@ mod tests {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
+                    s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
@@ -919,7 +915,7 @@ mod tests {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
+                    s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
@@ -954,7 +950,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -975,7 +971,7 @@ mod tests {
 
         // Should not be able to sign
         assert!(cert_verifier
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .is_none());
     }
 
@@ -1003,9 +999,9 @@ mod tests {
         let (schemes, verifier, _) = setup_signers::<V>(4, 62);
 
         let vote = schemes[1]
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(verifier.verify_vote::<Sha256Digest>(
+        assert!(verifier.verify::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote
@@ -1025,7 +1021,7 @@ mod tests {
         let signer = schemes[0].clone();
         assert!(
             signer
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_some(),
             "signer should produce votes"
         );
@@ -1033,7 +1029,7 @@ mod tests {
         // A verifier cannot produce votes
         assert!(
             verifier
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_none(),
             "verifier should not produce votes"
         );
@@ -1051,11 +1047,11 @@ mod tests {
             Scheme::<ed25519::PublicKey, V>::certificate_verifier(*schemes[0].identity());
 
         let vote = schemes[1]
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
 
         // CertificateVerifier should panic when trying to verify a vote
-        certificate_verifier.verify_vote::<Sha256Digest>(
+        certificate_verifier.verify::<Sha256Digest>(
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote,
@@ -1167,7 +1163,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
@@ -1189,7 +1185,7 @@ mod tests {
         let scheme = &schemes[0];
 
         let signature = scheme
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
 
         // Verify the partial signature matches what we'd get from direct signing

@@ -211,7 +211,7 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
         let SignatureVerification {
             verified,
             invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        } = self.scheme.verify_many::<_, D, _>(
             rng,
             namespace,
             Subject::Notarize { proposal },
@@ -298,7 +298,7 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
         let SignatureVerification {
             verified,
             invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        } = self.scheme.verify_many::<_, D, _>(
             rng,
             namespace,
             Subject::Nullify { round },
@@ -377,7 +377,7 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
         let SignatureVerification {
             verified,
             invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        } = self.scheme.verify_many::<_, D, _>(
             rng,
             namespace,
             Subject::Finalize { proposal },

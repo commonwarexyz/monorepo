@@ -1,6 +1,6 @@
 //! Signing scheme implementations for `simplex`.
 //!
-//! # Attributable Schemes and Liveness/Fault Evidence
+//! # Attributable Schemes and Fault Evidence
 //!
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
@@ -76,7 +76,7 @@ pub mod bls12381_multisig {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(
+                    s.sign::<Sha256Digest>(
                         b"test",
                         Subject::Nullify {
                             round: Round::new(Epoch::new(1), View::new(1)),
@@ -518,7 +518,7 @@ pub mod bls12381_threshold {
             self.participants()
         }
 
-        fn sign_vote<D: Digest>(
+        fn sign<D: Digest>(
             &self,
             namespace: &[u8],
             subject: Subject<'_, D>,
@@ -590,7 +590,7 @@ pub mod bls12381_threshold {
             })
         }
 
-        fn verify_vote<D: Digest>(
+        fn verify<D: Digest>(
             &self,
             namespace: &[u8],
             subject: Subject<'_, D>,
@@ -620,7 +620,7 @@ pub mod bls12381_threshold {
             .is_ok()
         }
 
-        fn verify_votes<R, D, I>(
+        fn verify_many<R, D, I>(
             &self,
             _rng: &mut R,
             namespace: &[u8],
@@ -938,14 +938,14 @@ pub mod bls12381_threshold {
 
             let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
             let notarize_vote = scheme
-                .sign_vote(
+                .sign(
                     NAMESPACE,
                     Subject::Notarize {
                         proposal: &proposal,
                     },
                 )
                 .unwrap();
-            assert!(scheme.verify_vote(
+            assert!(scheme.verify(
                 NAMESPACE,
                 Subject::Notarize {
                     proposal: &proposal,
@@ -954,14 +954,14 @@ pub mod bls12381_threshold {
             ));
 
             let nullify_vote = scheme
-                .sign_vote::<Sha256Digest>(
+                .sign::<Sha256Digest>(
                     NAMESPACE,
                     Subject::Nullify {
                         round: proposal.round,
                     },
                 )
                 .unwrap();
-            assert!(scheme.verify_vote::<Sha256Digest>(
+            assert!(scheme.verify::<Sha256Digest>(
                 NAMESPACE,
                 Subject::Nullify {
                     round: proposal.round,
@@ -970,14 +970,14 @@ pub mod bls12381_threshold {
             ));
 
             let finalize_vote = scheme
-                .sign_vote(
+                .sign(
                     NAMESPACE,
                     Subject::Finalize {
                         proposal: &proposal,
                     },
                 )
                 .unwrap();
-            assert!(scheme.verify_vote(
+            assert!(scheme.verify(
                 NAMESPACE,
                 Subject::Finalize {
                     proposal: &proposal,
@@ -998,7 +998,7 @@ pub mod bls12381_threshold {
             let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
             assert!(
                 verifier
-                    .sign_vote(
+                    .sign(
                         NAMESPACE,
                         Subject::Notarize {
                             proposal: &proposal,
@@ -1019,14 +1019,14 @@ pub mod bls12381_threshold {
             let (schemes, verifier) = setup_signers::<V>(4, 11);
             let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
             let vote = schemes[1]
-                .sign_vote(
+                .sign(
                     NAMESPACE,
                     Subject::Notarize {
                         proposal: &proposal,
                     },
                 )
                 .unwrap();
-            assert!(verifier.verify_vote(
+            assert!(verifier.verify(
                 NAMESPACE,
                 Subject::Notarize {
                     proposal: &proposal,
@@ -1051,7 +1051,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -1061,7 +1061,7 @@ pub mod bls12381_threshold {
                 })
                 .collect();
 
-            let verification = schemes[0].verify_votes(
+            let verification = schemes[0].verify_many(
                 &mut thread_rng(),
                 NAMESPACE,
                 Subject::Notarize {
@@ -1073,7 +1073,7 @@ pub mod bls12381_threshold {
             assert_eq!(verification.verified.len(), quorum);
 
             votes[0].signer = 999;
-            let verification = schemes[0].verify_votes(
+            let verification = schemes[0].verify_many(
                 &mut thread_rng(),
                 NAMESPACE,
                 Subject::Notarize {
@@ -1101,7 +1101,7 @@ pub mod bls12381_threshold {
                 .take(quorum - 1)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -1130,7 +1130,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Finalize {
                                 proposal: &proposal,
@@ -1170,7 +1170,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -1221,7 +1221,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -1257,7 +1257,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Finalize {
                                 proposal: &proposal,
@@ -1296,7 +1296,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Finalize {
                                 proposal: &proposal,
@@ -1370,7 +1370,7 @@ pub mod bls12381_threshold {
 
             assert!(
                 signer
-                    .sign_vote(
+                    .sign(
                         NAMESPACE,
                         Subject::Notarize {
                             proposal: &proposal,
@@ -1382,7 +1382,7 @@ pub mod bls12381_threshold {
 
             assert!(
                 verifier
-                    .sign_vote(
+                    .sign(
                         NAMESPACE,
                         Subject::Notarize {
                             proposal: &proposal,
@@ -1409,7 +1409,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Finalize {
                                 proposal: &proposal,
@@ -1426,7 +1426,7 @@ pub mod bls12381_threshold {
             let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
             assert!(
                 certificate_verifier
-                    .sign_vote(
+                    .sign(
                         NAMESPACE,
                         Subject::Finalize {
                             proposal: &proposal,
@@ -1456,7 +1456,7 @@ pub mod bls12381_threshold {
             let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
             let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
             let vote = schemes[1]
-                .sign_vote(
+                .sign(
                     NAMESPACE,
                     Subject::Finalize {
                         proposal: &proposal,
@@ -1464,7 +1464,7 @@ pub mod bls12381_threshold {
                 )
                 .unwrap();
 
-            certificate_verifier.verify_vote(
+            certificate_verifier.verify(
                 NAMESPACE,
                 Subject::Finalize {
                     proposal: &proposal,
@@ -1495,7 +1495,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote(
+                        .sign(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -1529,7 +1529,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Nullify {
                                 round: proposal.round,
@@ -1561,7 +1561,7 @@ pub mod bls12381_threshold {
 
             let proposal = sample_proposal(Epoch::new(0), View::new(23), 12);
             let vote = scheme
-                .sign_vote(
+                .sign(
                     NAMESPACE,
                     Subject::Notarize {
                         proposal: &proposal,
@@ -1608,7 +1608,7 @@ pub mod bls12381_threshold {
                 .take(quorum)
                 .map(|scheme| {
                     scheme
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Nullify {
                                 round: proposal.round,
@@ -1755,7 +1755,7 @@ pub mod ed25519 {
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(
+                    s.sign::<Sha256Digest>(
                         b"test",
                         Subject::Nullify {
                             round: Round::new(Epoch::new(1), View::new(1)),
@@ -1963,7 +1963,7 @@ cfg_if::cfg_if! {
                     // Create an invalid activity (wrong namespace)
                     let proposal = create_proposal(0, 1);
                     let signature = schemes[1]
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             &[], // Invalid namespace
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -2004,7 +2004,7 @@ cfg_if::cfg_if! {
                     // Create an invalid activity (wrong namespace)
                     let proposal = create_proposal(0, 1);
                     let signature = schemes[1]
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             &[], // Invalid namespace
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -2048,7 +2048,7 @@ cfg_if::cfg_if! {
                         .iter()
                         .map(|scheme| {
                             scheme
-                                .sign_vote::<Sha256Digest>(
+                                .sign::<Sha256Digest>(
                                     NAMESPACE,
                                     Subject::Notarize {
                                         proposal: &proposal,
@@ -2096,7 +2096,7 @@ cfg_if::cfg_if! {
                     // Create peer activity (from validator 1)
                     let proposal = create_proposal(0, 1);
                     let signature = schemes[1]
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
@@ -2133,7 +2133,7 @@ cfg_if::cfg_if! {
                     // Create a peer activity (from validator 1)
                     let proposal = create_proposal(0, 1);
                     let signature = schemes[1]
-                        .sign_vote::<Sha256Digest>(
+                        .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Notarize {
                                 proposal: &proposal,
