@@ -1430,9 +1430,6 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The returned [`Output`] includes a `revealed` field that contains the set of
-    /// players whose shares may have been compromised (more than `max_faults` reveals).
-    ///
     /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
         self,
