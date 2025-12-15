@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochSchemeProvider, SchemeProvider},
+    application::{Application, Block, EpochProvider, MockProvider},
     dkg::{self, UpdateCallBack},
     orchestrator,
     setup::PeerConfig,
@@ -76,7 +76,7 @@ where
     H: Hasher,
     V: Variant,
     S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    MockProvider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     config: Config<C, P, B, V>,
@@ -88,7 +88,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
-        SchemeProvider<S, C>,
+        MockProvider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
     >,
@@ -114,7 +114,7 @@ where
     H: Hasher,
     V: Variant,
     S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    MockProvider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
@@ -215,7 +215,7 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let scheme_provider = SchemeProvider::new(config.signer.clone());
+        let scheme_provider = MockProvider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,

@@ -221,22 +221,22 @@ impl<S: Scheme, E> Provider<E> for ConstantProvider<S> {
     }
 }
 
-/// A scheme provider that allows dynamically setting the returned scheme.
+/// A provider that allows dynamically setting the returned scheme.
 ///
 /// Useful for tests that need to modify the scheme during execution (e.g., to simulate
 /// epoch transitions or scheme failures).
 #[derive(Clone, Debug)]
-pub struct MockSchemeProvider<S: Scheme> {
+pub struct MockProvider<S: Scheme> {
     scheme: Arc<std::sync::RwLock<Option<Arc<S>>>>,
 }
 
-impl<S: Scheme> Default for MockSchemeProvider<S> {
+impl<S: Scheme> Default for MockProvider<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Scheme> MockSchemeProvider<S> {
+impl<S: Scheme> MockProvider<S> {
     /// Creates a new mock provider with no scheme set.
     pub fn new() -> Self {
         Self {
@@ -257,7 +257,7 @@ impl<S: Scheme> MockSchemeProvider<S> {
     }
 }
 
-impl<S: Scheme, E> Provider<E> for MockSchemeProvider<S> {
+impl<S: Scheme, E> Provider<E> for MockProvider<S> {
     type Scheme = S;
 
     fn scheme(&self, _epoch: E) -> Option<Arc<S>> {

@@ -21,12 +21,12 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct SchemeProvider<S: Scheme, C: Signer> {
+pub struct MockProvider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     signer: C,
 }
 
-impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> MockProvider<S, C> {
     pub fn new(signer: C) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
@@ -35,7 +35,7 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> MockProvider<S, C> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -53,7 +53,7 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> ProviderTrait<Epoch> for SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> ProviderTrait<Epoch> for MockProvider<S, C> {
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
@@ -62,7 +62,7 @@ impl<S: Scheme, C: Signer> ProviderTrait<Epoch> for SchemeProvider<S, C> {
     }
 }
 
-pub trait EpochSchemeProvider {
+pub trait EpochProvider {
     type Variant: Variant;
     type PublicKey: PublicKey;
     type Scheme: Scheme;
@@ -74,7 +74,7 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
+impl<V: Variant> EpochProvider for MockProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
     type PublicKey = ed25519::PublicKey;
     type Scheme = ThresholdScheme<V>;
@@ -108,7 +108,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
     }
 }
 
-impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
+impl EpochProvider for MockProvider<EdScheme, ed25519::PrivateKey> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;

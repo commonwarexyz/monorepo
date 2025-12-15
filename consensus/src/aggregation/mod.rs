@@ -202,7 +202,7 @@ mod tests {
             let context = context.with_label(&participant.to_string());
 
             // Create Provider and register scheme for epoch
-            let scheme_provider = mocks::Provider::new();
+            let scheme_provider = mocks::MockProvider::new();
             assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
             // Create monitor
@@ -439,7 +439,7 @@ mod tests {
                         let validator_context = context.with_label(&participant.to_string());
 
                         // Create Provider and register scheme for epoch
-                        let scheme_provider = mocks::Provider::new();
+                        let scheme_provider = mocks::MockProvider::new();
                         assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                         // Create monitor
@@ -588,7 +588,7 @@ mod tests {
                     let validator_context = context.with_label(&participant.to_string());
 
                     // Create Provider and register scheme for epoch
-                    let scheme_provider = mocks::Provider::new();
+                    let scheme_provider = mocks::MockProvider::new();
                     assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
@@ -671,7 +671,7 @@ mod tests {
                     let validator_context = context.with_label(&participant.to_string());
 
                     // Create Provider and register scheme for epoch
-                    let scheme_provider = mocks::Provider::new();
+                    let scheme_provider = mocks::MockProvider::new();
                     assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
@@ -983,7 +983,7 @@ mod tests {
                 let context = context.with_label(&participant.to_string());
 
                 // Create Provider and register scheme for epoch
-                let scheme_provider = mocks::Provider::new();
+                let scheme_provider = mocks::MockProvider::new();
                 assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                 // Create monitor
