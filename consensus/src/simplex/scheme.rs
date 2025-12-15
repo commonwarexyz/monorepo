@@ -267,7 +267,7 @@ pub mod bls12381_threshold {
         }
 
         /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
-        pub const fn polynomial(&self) -> &Sharing<V> {
+        pub fn polynomial(&self) -> &Sharing<V> {
             match self {
                 Self::Signer { polynomial, .. } => polynomial,
                 Self::Verifier { polynomial, .. } => polynomial,
@@ -771,7 +771,10 @@ pub mod bls12381_threshold {
                 }
                 signatures.push(&certificate.vote_signature);
 
-                // Add seed message (if not already present)
+                // Seed signatures are per-view, so multiple certificates for the same view
+                // (e.g., notarization and finalization) share the same seed. We only include
+                // each unique seed once in the aggregate, but verify all certificates for a
+                // view have matching seeds.
                 if let Some(previous) = seeds.get(&context.view()) {
                     if *previous != &certificate.seed_signature {
                         return false;
