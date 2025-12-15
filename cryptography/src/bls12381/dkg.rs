@@ -371,24 +371,6 @@ impl<V: Variant, P: Ord> Output<V, P> {
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
-
-    /// Returns true if a player's share was potentially revealed to an adversary.
-    ///
-    /// A share is considered revealed if more than `max_faults` dealer shares
-    /// had to be recovered from public reveals. In this case, an adversary
-    /// controlling `max_faults` dealers could have reconstructed the share.
-    pub fn is_revealed(&self, player: &P) -> bool {
-        self.revealed.position(player).is_some()
-    }
-
-    /// Returns true if a player's share was safely acknowledged.
-    ///
-    /// A share is considered acknowledged if at most `max_faults` dealer shares
-    /// had to be recovered from public reveals, meaning no single adversary could
-    /// have learned the full share.
-    pub fn is_acknowledged(&self, player: &P) -> bool {
-        self.revealed.position(player).is_none()
-    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {

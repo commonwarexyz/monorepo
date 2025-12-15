@@ -543,16 +543,12 @@ mod test {
             team.failures = self.failures.clone();
 
             // Determine which participants should be delayed
-            let delayed: HashSet<PublicKey> =
-                if let Some(Crash::Delay { count, .. }) = &self.crash {
-                    team.participants
-                        .keys()
-                        .take(*count)
-                        .cloned()
-                        .collect()
-                } else {
-                    HashSet::new()
-                };
+            let delayed: HashSet<PublicKey> = if let Some(Crash::Delay { count, .. }) = &self.crash
+            {
+                team.participants.keys().take(*count).cloned().collect()
+            } else {
+                HashSet::new()
+            };
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
@@ -605,11 +601,9 @@ mod test {
                                 info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
 
                                 // Check if a delayed participant got an acknowledged share
-                                if delayed.contains(&update.pk) && share.is_some() {
-                                    if output.is_acknowledged(&update.pk) {
-                                        info!(pk = ?update.pk, "delayed participant acknowledged");
-                                        delayed_acknowledged.insert(update.pk.clone());
-                                    }
+                                if delayed.contains(&update.pk) && has_share && output.revealed().position(&update.pk).is_none() {
+                                    info!(pk = ?update.pk, "delayed participant acknowledged");
+                                    delayed_acknowledged.insert(update.pk.clone());
                                 }
 
                                 (epoch, Some(output))
