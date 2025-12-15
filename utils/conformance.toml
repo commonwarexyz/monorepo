@@ -1,0 +1,39 @@
+["commonware_utils::bitmap::prunable::tests::conformance::CodecConformance<Prunable<16>>"]
+n_cases = 65536
+hash = "c49f13e5df245eb2343e64a24eaa4dc9d9b6f698dcc50622953216a44302dc86"
+
+["commonware_utils::bitmap::tests::conformance::CodecConformance<BitMap>"]
+n_cases = 65536
+hash = "07161626ba27702dd0c4699ac8bc20bf0d2c8fb6e378644b7899af0d4a060dbd"
+
+["commonware_utils::ordered::test::conformance::CodecConformance<BiMap<u32,u32>>"]
+n_cases = 65536
+hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"
+
+["commonware_utils::ordered::test::conformance::CodecConformance<Map<u32,u32>>"]
+n_cases = 65536
+hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"
+
+["commonware_utils::ordered::test::conformance::CodecConformance<Set<u32>>"]
+n_cases = 65536
+hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
+
+["commonware_utils::sequence::fixed_bytes::tests::conformance::CodecConformance<FixedBytes<16>>"]
+n_cases = 65536
+hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
+
+["commonware_utils::sequence::prefixed_u64::tests::conformance::CodecConformance<U64>"]
+n_cases = 65536
+hash = "1c7e1a1fc1925835e28cc501d03a83d03085c800a93c0c8788558b3b2b5d409b"
+
+["commonware_utils::sequence::u32::tests::conformance::CodecConformance<U32>"]
+n_cases = 65536
+hash = "7e51d52b48539110acf575de847ef8d0c0029c877815f50b6a151db0621f2240"
+
+["commonware_utils::sequence::u64::tests::conformance::CodecConformance<U64>"]
+n_cases = 65536
+hash = "73102c8e2c269bbe2afd67158252c90a683a347e7ba623e8a1b383197c0d848a"
+
+["commonware_utils::sequence::unit::test::conformance::CodecConformance<Unit>"]
+n_cases = 65536
+hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"

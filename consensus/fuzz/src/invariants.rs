@@ -4,7 +4,7 @@ use crate::{
     },
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
-use commonware_consensus::simplex::signing_scheme;
+use commonware_consensus::simplex::scheme;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest as Sha256Digest,
@@ -195,28 +195,31 @@ fn is_attributable_scheme<P: Simplex>() -> bool {
         || type_id == TypeId::of::<SimplexBls12381MultisigMinSig>()
 }
 
-fn get_signature_count<S: signing_scheme::Scheme>(certificate: &S::Certificate) -> Option<usize> {
+fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
+    certificate: &S::Certificate,
+) -> Option<usize> {
+    use commonware_cryptography::{bls12381::certificate, ed25519};
+
     let type_id = TypeId::of::<S::Certificate>();
 
     match type_id {
-        t if t == TypeId::of::<signing_scheme::ed25519::Certificate>() => {
+        t if t == TypeId::of::<ed25519::certificate::Certificate>() => {
             let cert = unsafe {
-                &*(certificate as *const S::Certificate
-                    as *const signing_scheme::ed25519::Certificate)
+                &*(certificate as *const S::Certificate as *const ed25519::certificate::Certificate)
             };
             Some(cert.signatures.len())
         }
-        t if t == TypeId::of::<signing_scheme::bls12381_multisig::Certificate<MinPk>>() => {
+        t if t == TypeId::of::<certificate::multisig::Certificate<MinPk>>() => {
             let cert = unsafe {
                 &*(certificate as *const S::Certificate
-                    as *const signing_scheme::bls12381_multisig::Certificate<MinPk>)
+                    as *const certificate::multisig::Certificate<MinPk>)
             };
             Some(cert.signers.count())
         }
-        t if t == TypeId::of::<signing_scheme::bls12381_multisig::Certificate<MinSig>>() => {
+        t if t == TypeId::of::<certificate::multisig::Certificate<MinSig>>() => {
             let cert = unsafe {
                 &*(certificate as *const S::Certificate
-                    as *const signing_scheme::bls12381_multisig::Certificate<MinSig>)
+                    as *const certificate::multisig::Certificate<MinSig>)
             };
             Some(cert.signers.count())
         }
@@ -224,13 +227,12 @@ fn get_signature_count<S: signing_scheme::Scheme>(certificate: &S::Certificate) 
     }
 }
 
-pub fn extract<E, P, S>(
-    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, P, S, Sha256Digest>>,
+pub fn extract<E, S>(
+    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, S, Sha256Digest>>,
 ) -> Vec<ReplicaState>
 where
     E: Rng + CryptoRng,
-    P: commonware_cryptography::PublicKey,
-    S: commonware_consensus::simplex::signing_scheme::Scheme,
+    S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
 {
     reporters
         .iter()

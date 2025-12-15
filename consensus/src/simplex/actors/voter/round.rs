@@ -1,7 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
-        signing_scheme::Scheme,
+        scheme::SeededScheme,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::Round as Rnd,
@@ -21,7 +21,7 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Per-[Rnd] state machine.
-pub struct Round<S: Scheme, D: Digest> {
+pub struct Round<S: SeededScheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -47,7 +47,7 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalization: bool,
 }
 
-impl<S: Scheme, D: Digest> Round<S, D> {
+impl<S: SeededScheme, D: Digest> Round<S, D> {
     pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         Self {
             start,
@@ -134,7 +134,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Picks and stores the leader for this round using the deterministic lottery.
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) = crate::simplex::select_leader::<S, _>(
+        let (leader, leader_idx) = crate::simplex::select_leader::<S>(
             self.scheme.participants().as_ref(),
             self.round,
             seed,
@@ -177,6 +177,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes peer proposal verification after the automaton returns.
+    ///
+    /// Returns `true` if the slot was updated, `false` if we already broadcast nullify
+    /// or the slot was in an invalid state (e.g., we received a certificate for a
+    /// conflicting proposal).
     pub fn verified(&mut self) -> bool {
         if self.broadcast_nullify {
             return false;
@@ -387,7 +391,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -414,7 +419,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated).
+        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
+        // completed yet.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -468,14 +474,14 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{ed25519, Fixture},
+            scheme::ed25519,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
         },
         types::{Epoch, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -487,7 +493,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -540,7 +546,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -603,7 +609,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -633,7 +639,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2029);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 
@@ -701,7 +707,7 @@ mod tests {
     #[test]
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = StdRng::seed_from_u64(2029);
-        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 

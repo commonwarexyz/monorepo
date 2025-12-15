@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
     dial, listen,

@@ -136,10 +136,28 @@ impl<C: PublicKey> Read for Payload<C> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey> arbitrary::Arbitrary<'_> for Payload<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(Self::BitVec(u.arbitrary()?)),
+            1 => Ok(Self::Peers(u.arbitrary()?)),
+            2 => Ok(Self::Data(u.arbitrary()?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// BitVec is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct BitVec {
     /// The index that the bit vector applies to.
     pub index: u64,
@@ -269,6 +287,27 @@ impl<C: PublicKey> Read for Info<C> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<C: PublicKey> arbitrary::Arbitrary<'_> for Info<C>
+where
+    C: for<'a> arbitrary::Arbitrary<'a>,
+    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let socket = u.arbitrary()?;
+        let timestamp = u.arbitrary()?;
+        let public_key = u.arbitrary()?;
+        let signature = u.arbitrary()?;
+
+        Ok(Self {
+            socket,
+            timestamp,
+            public_key,
+            signature,
+        })
+    }
+}
+
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct InfoVerifier<C: PublicKey> {
@@ -353,10 +392,8 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{
-        secp256r1::standard::{PrivateKey, PublicKey},
-        PrivateKeyExt as _,
-    };
+    use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
+    use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
     use std::time::Duration;
 
@@ -364,7 +401,7 @@ mod tests {
 
     fn signed_peer_info() -> Info<PublicKey> {
         let mut rng = rand::thread_rng();
-        let c = PrivateKey::from_rng(&mut rng);
+        let c = PrivateKey::random(&mut rng);
         Info {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
@@ -525,8 +562,8 @@ mod tests {
     fn info_verifier_accepts_valid_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
-            let peer_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
@@ -549,20 +586,20 @@ mod tests {
     fn info_verifier_rejects_too_many_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let timestamp = context.current().epoch().as_millis() as u64;
             let peers = {
                 let addr_a = SocketAddr::from(([8, 8, 8, 8], 9000));
                 let addr_b = SocketAddr::from(([8, 8, 4, 4], 9001));
                 let peer_a = Info::sign(
-                    &PrivateKey::from_rng(&mut context),
+                    &PrivateKey::random(&mut context),
                     NAMESPACE,
                     addr_a,
                     timestamp,
                 );
                 let peer_b = Info::sign(
-                    &PrivateKey::from_rng(&mut context),
+                    &PrivateKey::random(&mut context),
                     NAMESPACE,
                     addr_b,
                     timestamp,
@@ -585,8 +622,8 @@ mod tests {
     fn info_verifier_rejects_private_ips_when_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
-            let peer_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
@@ -610,7 +647,7 @@ mod tests {
     fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
@@ -634,8 +671,8 @@ mod tests {
     fn info_verifier_rejects_future_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
-            let peer_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
@@ -662,8 +699,8 @@ mod tests {
     fn info_verifier_allows_past_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
-            let peer_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
@@ -694,8 +731,8 @@ mod tests {
     fn info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::from_rng(&mut context);
-            let peer_key = PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
@@ -713,5 +750,17 @@ mod tests {
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::InvalidSignature));
         });
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Payload<PublicKey>>,
+            CodecConformance<BitVec>,
+            CodecConformance<Info<PublicKey>>,
+        }
     }
 }

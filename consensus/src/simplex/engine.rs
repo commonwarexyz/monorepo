@@ -3,8 +3,8 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{simplex::signing_scheme::Scheme, Automaton, Relay, Reporter};
-use commonware_cryptography::{Digest, PublicKey};
+use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -15,39 +15,37 @@ use tracing::debug;
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, P>, Digest = D>,
+    A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, P, S, B, D, A, R, F>,
+    voter: voter::Actor<E, S, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, P, S, B, D, F>,
+    batcher: batcher::Actor<E, S, B, D, F>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, P, S, B, D>,
+    resolver: resolver::Actor<E, S, B, D>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, P>, Digest = D>,
+        A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, P, S, B, D, A, R, F>
+    > Engine<E, S, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<P, S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -158,9 +156,18 @@ impl<
     /// rate limiting, retries, and peer selection for these requests.
     pub fn start(
         mut self,
-        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -171,9 +178,18 @@ impl<
 
     async fn run(
         self,
-        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) {
         // Start the batcher (receives votes via vote_network, certificates via certificate_network)
         // Batcher sends proposals/certificates to voter via voter_mailbox

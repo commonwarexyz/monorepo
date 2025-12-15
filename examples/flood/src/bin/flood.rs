@@ -21,7 +21,7 @@ use std::{
 };
 use tracing::{error, info, Level};
 
-const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
+const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_FLOOD";
 
 fn main() {
     // Parse arguments

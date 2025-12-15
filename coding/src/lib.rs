@@ -14,9 +14,6 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use std::fmt::Debug;
 
-mod field;
-mod poly;
-
 mod reed_solomon;
 use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
@@ -29,6 +26,7 @@ pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,
@@ -378,5 +376,15 @@ mod test {
     #[test]
     fn test_suite_zoda() {
         test_suite::<Zoda<Sha256>>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Config>,
+        }
     }
 }

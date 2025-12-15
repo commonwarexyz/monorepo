@@ -14,8 +14,19 @@ documentation = "https://docs.rs/commonware-deployer"
 workspace = true
 
 [features]
-default = ["aws"]
-aws = ["aws-config", "aws-sdk-ec2", "reqwest", "tokio", "tracing", "tracing-subscriber", "thiserror", "futures", "clap", "uuid"]
+default = [ "aws" ]
+aws = [
+	"aws-config",
+	"aws-sdk-ec2",
+	"clap",
+	"futures",
+	"reqwest",
+	"thiserror",
+	"tokio",
+	"tracing",
+	"tracing-subscriber",
+	"uuid",
+]
 
 [dependencies]
 aws-config = { workspace = true, optional = true }

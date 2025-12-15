@@ -5,12 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Activity},
+    simplex::types::Activity,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::Mailbox;
@@ -51,33 +51,35 @@ mod tests {
     use crate::{
         simplex::{
             actors::{batcher, resolver},
-            mocks::{
-                self,
-                fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            },
+            mocks,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             select_leader,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Round, View},
         Viewable,
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        ed25519,
+        certificate::mocks::Fixture,
+        ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use std::{sync::Arc, time::Duration};
+    use governor::Quota;
+    use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    fn build_notarization<S: Scheme>(
+    fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -96,7 +98,7 @@ mod tests {
         (votes, certificate)
     }
 
-    fn build_finalization<S: Scheme>(
+    fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -123,7 +125,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -200,10 +202,16 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Run the actor
             actor.start(batcher, resolver, vote_sender, certificate_sender);
@@ -330,11 +338,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls12381_threshold::<MinPk, _>);
-        stale_backfill(bls12381_threshold::<MinSig, _>);
-        stale_backfill(bls12381_multisig::<MinPk, _>);
-        stale_backfill(bls12381_multisig::<MinSig, _>);
-        stale_backfill(ed25519);
+        stale_backfill(bls12381_threshold::fixture::<MinPk, _>);
+        stale_backfill(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill(bls12381_multisig::fixture::<MinPk, _>);
+        stale_backfill(bls12381_multisig::fixture::<MinSig, _>);
+        stale_backfill(ed25519::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -348,7 +356,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -425,10 +433,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             actor.start(
@@ -607,17 +621,17 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls12381_threshold::<MinPk, _>);
-        append_old_interesting_view(bls12381_threshold::<MinSig, _>);
-        append_old_interesting_view(bls12381_multisig::<MinPk, _>);
-        append_old_interesting_view(bls12381_multisig::<MinSig, _>);
-        append_old_interesting_view(ed25519);
+        append_old_interesting_view(bls12381_threshold::fixture::<MinPk, _>);
+        append_old_interesting_view(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view(bls12381_multisig::fixture::<MinPk, _>);
+        append_old_interesting_view(bls12381_multisig::fixture::<MinSig, _>);
+        append_old_interesting_view(ed25519::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -692,10 +706,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -772,16 +792,16 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls12381_threshold::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_threshold::<MinSig, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519);
+        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519::fixture);
     }
 
     fn certificate_conflicts_proposal<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -856,9 +876,16 @@ mod tests {
 
             // Register network channels
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the voter
             voter.start(
@@ -956,16 +983,16 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal(bls12381_threshold::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_threshold::<MinSig, _>);
-        certificate_conflicts_proposal(bls12381_multisig::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_multisig::<MinSig, _>);
-        certificate_conflicts_proposal(ed25519);
+        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_conflicts_proposal(ed25519::fixture);
     }
 
     fn proposal_conflicts_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1034,8 +1061,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _) = oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             voter.start(
                 batcher_mailbox,
@@ -1122,16 +1157,16 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate(bls12381_threshold::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_threshold::<MinSig, _>);
-        proposal_conflicts_certificate(bls12381_multisig::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_multisig::<MinSig, _>);
-        proposal_conflicts_certificate(ed25519);
+        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_conflicts_certificate(ed25519::fixture);
     }
 
     fn certificate_verifies_proposal<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1200,8 +1235,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
-            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _) = oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             voter.start(
                 batcher_mailbox,
@@ -1280,11 +1323,11 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal(bls12381_threshold::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_threshold::<MinSig, _>);
-        certificate_verifies_proposal(bls12381_multisig::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_multisig::<MinSig, _>);
-        certificate_verifies_proposal(ed25519);
+        certificate_verifies_proposal(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_verifies_proposal(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_verifies_proposal(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_verifies_proposal(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_verifies_proposal(ed25519::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1296,7 +1339,7 @@ mod tests {
     /// 3. Our proposal should be dropped when the conflict is detected
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey, Seed = ()>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey, Seed = ()>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1321,11 +1364,12 @@ mod tests {
                 participants,
                 schemes,
                 verifier: _,
+                ..
             } = fixture(&mut context, n);
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let (leader, leader_idx) = select_leader::<S, _>(&participants, view2_round, None);
+            let (leader, leader_idx) = select_leader::<S>(&participants, view2_round, None);
 
             // Create a voter with the leader's identity
             let leader_scheme = schemes[leader_idx as usize].clone();
@@ -1380,9 +1424,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
-            let (vote_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(leader.clone()).register(1).await.unwrap();
+            let (vote_sender, _) = oracle
+                .control(leader.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(leader.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the voter
             voter.start(
@@ -1491,14 +1542,14 @@ mod tests {
 
     #[test]
     fn test_drop_our_proposal_on_conflict() {
-        drop_our_proposal_on_conflict(bls12381_multisig::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_multisig::<MinSig, _>);
-        drop_our_proposal_on_conflict(ed25519);
+        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(ed25519::fixture);
     }
 
     fn populate_resolver_on_restart<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1573,10 +1624,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             let handle = voter.start(
@@ -1658,10 +1715,16 @@ mod tests {
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(2).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(3).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -1700,16 +1763,16 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart(bls12381_threshold::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_threshold::<MinSig, _>);
-        populate_resolver_on_restart(bls12381_multisig::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_multisig::<MinSig, _>);
-        populate_resolver_on_restart(ed25519);
+        populate_resolver_on_restart(bls12381_threshold::fixture::<MinPk, _>);
+        populate_resolver_on_restart(bls12381_threshold::fixture::<MinSig, _>);
+        populate_resolver_on_restart(bls12381_multisig::fixture::<MinPk, _>);
+        populate_resolver_on_restart(bls12381_multisig::fixture::<MinSig, _>);
+        populate_resolver_on_restart(ed25519::fixture);
     }
 
     fn finalization_from_resolver<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -1786,10 +1849,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -1847,11 +1916,11 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver(bls12381_threshold::<MinPk, _>);
-        finalization_from_resolver(bls12381_threshold::<MinSig, _>);
-        finalization_from_resolver(bls12381_multisig::<MinPk, _>);
-        finalization_from_resolver(bls12381_multisig::<MinSig, _>);
-        finalization_from_resolver(ed25519);
+        finalization_from_resolver(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_from_resolver(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_from_resolver(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_from_resolver(ed25519::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -1862,7 +1931,7 @@ mod tests {
     /// 3. Voter sends it back to resolver (unnecessary)
     fn no_resolver_boomerang<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1937,10 +2006,16 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
-            let (certificate_sender, _certificate_receiver) =
-                oracle.control(me.clone()).register(1).await.unwrap();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Start the actor
             voter.start(
@@ -2013,10 +2088,218 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang(bls12381_threshold::<MinPk, _>);
-        no_resolver_boomerang(bls12381_threshold::<MinSig, _>);
-        no_resolver_boomerang(bls12381_multisig::<MinPk, _>);
-        no_resolver_boomerang(bls12381_multisig::<MinSig, _>);
-        no_resolver_boomerang(ed25519);
+        no_resolver_boomerang(bls12381_threshold::fixture::<MinPk, _>);
+        no_resolver_boomerang(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang(bls12381_multisig::fixture::<MinPk, _>);
+        no_resolver_boomerang(bls12381_multisig::fixture::<MinSig, _>);
+        no_resolver_boomerang(ed25519::fixture);
+    }
+
+    /// Tests that when proposal verification fails, the voter emits a nullify vote
+    /// immediately rather than waiting for the timeout.
+    fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Use participant[0] as the voter
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (10.0, 0.0), // 10ms verification latency
+            };
+            let (mut actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+
+            // Configure application to always fail verification
+            actor.set_fail_verification(true);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_verify_fail_test_{me}"),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                // Use long timeouts to prove nullify comes immediately, not from timeout
+                leader_timeout: Duration::from_secs(10),
+                notarization_timeout: Duration::from_secs(10),
+                nullify_retry: Duration::from_secs(10),
+                activity_timeout,
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let (vote_sender, _vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (certificate_sender, _certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for initial batcher update
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                _ => panic!("expected Update message"),
+            }
+
+            // Advance views until we find one where we're NOT the leader (so we verify
+            // rather than propose). Keep track of the previous view's proposal for parent.
+            let mut current_view = View::new(1);
+            let mut prev_proposal = Proposal::new(
+                Round::new(Epoch::new(333), current_view),
+                View::zero(),
+                Sha256::hash(b"v0"),
+            );
+
+            let (target_view, leader) = loop {
+                // Send finalization to advance to next view
+                let (_, finalization) =
+                    build_finalization(&schemes, &namespace, &prev_proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                // Wait for the view update
+                let (new_view, leader) = loop {
+                    match batcher_receiver.next().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } => {
+                            active.send(true).unwrap();
+                            if current > current_view {
+                                break (current, leader);
+                            }
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    }
+                };
+
+                current_view = new_view;
+
+                // Check if we're NOT the leader for this view
+                if leader != 0 {
+                    break (current_view, participants[leader as usize].clone());
+                }
+
+                // We're the leader, advance to next view
+                prev_proposal = Proposal::new(
+                    Round::new(Epoch::new(333), current_view),
+                    current_view.previous().unwrap(),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+            };
+
+            // Create proposal for the target view (where we are a verifier)
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+
+            // Broadcast the payload contents so verification can complete (the automaton waits
+            // for the contents via the relay).
+            let parent_payload = Sha256::hash(
+                target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice(),
+            );
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents.into()))
+                .await;
+            mailbox.proposal(proposal).await;
+
+            // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
+            // within 1s proves it came from verification failure, not timeout.
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                                break;
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!("expected nullify for view {} within 1s (timeouts are 10s)", target_view);
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_failure_emits_nullify_immediately() {
+        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(ed25519::fixture);
     }
 }

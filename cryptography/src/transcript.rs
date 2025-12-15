@@ -7,6 +7,7 @@ use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
 use rand_core::{
@@ -342,13 +343,25 @@ impl Display for Summary {
 impl Span for Summary {}
 impl Array for Summary {}
 
-impl crate::Digest for Summary {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Summary {}
+
+impl Random for Summary {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut bytes = [0u8; blake3::OUT_LEN];
         rng.fill_bytes(&mut bytes[..]);
         Self {
             hash: blake3::Hash::from_bytes(bytes),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Summary {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes: [u8; blake3::OUT_LEN] = u.arbitrary()?;
+        Ok(Self {
+            hash: blake3::Hash::from_bytes(bytes),
+        })
     }
 }
 
@@ -456,5 +469,15 @@ mod test {
     fn test_summary_encode_roundtrip() {
         let s = Transcript::new(b"test").summarize();
         assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Summary>,
+        }
     }
 }

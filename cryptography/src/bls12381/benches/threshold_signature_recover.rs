@@ -1,8 +1,12 @@
-use commonware_cryptography::bls12381::{
-    dkg,
-    primitives::{self, variant::MinSig},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::deal,
+        primitives::{self, variant::MinSig},
+    },
+    ed25519::PrivateKey,
+    Signer,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
@@ -16,18 +20,34 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
-                    let (_, shares) = dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-                    shares
-                        .iter()
-                        .map(|s| {
-                            primitives::ops::partial_sign_message::<MinSig>(s, Some(namespace), msg)
-                        })
-                        .collect::<Vec<_>>()
+                    let players = (0..n)
+                        .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                        .try_collect()
+                        .unwrap();
+                    let (public, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
+                        .expect("deal should succeed");
+                    (
+                        public,
+                        shares
+                            .values()
+                            .iter()
+                            .map(|s| {
+                                primitives::ops::partial_sign_message::<MinSig>(
+                                    s,
+                                    Some(namespace),
+                                    msg,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 },
-                |partials| {
+                |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold_signature_recover::<MinSig, _>(t, &partials)
-                            .unwrap(),
+                        primitives::ops::threshold_signature_recover::<MinSig, _>(
+                            public.public(),
+                            &partials,
+                        )
+                        .unwrap(),
                     );
                 },
                 BatchSize::SmallInput,

@@ -3,12 +3,13 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        signing_scheme::ed25519,
-        types::{AttributableMap, Nullify, Signature},
+        scheme::ed25519,
+        types::{AttributableMap, Nullify},
     },
     types::{Epoch, Round, View},
 };
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
+use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -41,7 +42,7 @@ fn make_vote(
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
         round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
-        signature: Signature {
+        attestation: Attestation {
             signer: data.signer,
             signature: sig,
         },
@@ -50,7 +51,7 @@ fn make_vote(
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    let signer = PrivateKey::from_rng(&mut rng);
+    let signer = PrivateKey::random(&mut rng);
     let dummy_sig = signer.sign(b"fuzz", b"dummy");
 
     let mut map: AttributableMap<Nullify<ed25519::Scheme>> =

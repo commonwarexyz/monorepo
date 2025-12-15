@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochSchemeProvider, SchemeProvider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
@@ -9,15 +9,16 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self,
-        signing_scheme::Scheme,
+        self, scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -28,7 +29,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota, RateLimiter};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -46,13 +47,12 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: SchemeProvider<S, C>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
-    pub rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -68,7 +68,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -76,12 +76,11 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: SchemeProvider<S, C>,
+    provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
-    rate_limit: governor::Quota,
     pool_ref: PoolRef,
 }
 
@@ -94,8 +93,8 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -108,11 +107,10 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                rate_limit: config.rate_limit,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -121,11 +119,11 @@ where
 
     pub fn start(
         mut self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -140,7 +138,7 @@ where
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending, recovered, resolver, orchestrator).await
+            self.run(votes, certificates, resolver, orchestrator).await
         )
     }
 
@@ -164,8 +162,8 @@ where
         ),
     ) {
         // Start muxers for each physical channel used by consensus
-        let (mux, mut pending_mux, mut pending_backup) = Muxer::builder(
-            self.context.with_label("pending_mux"),
+        let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
+            self.context.with_label("vote_mux"),
             vote_sender,
             vote_receiver,
             self.muxer_size,
@@ -173,8 +171,8 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut recovered_mux, mut recovered_global_sender) = Muxer::builder(
-            self.context.with_label("recovered_mux"),
+        let (mux, mut certificate_mux, mut certificate_global_sender) = Muxer::builder(
+            self.context.with_label("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
@@ -190,9 +188,6 @@ where
         );
         mux.start();
 
-        // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
-
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
@@ -200,11 +195,11 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
-            message = pending_backup.next() => {
-                // If a message is received in an unregistered sub-channel in the pending network,
+            message = vote_backup.next() => {
+                // If a message is received in an unregistered sub-channel in the vote network,
                 // attempt to forward the orchestrator for the epoch.
                 let Some((their_epoch, (from, _))) = message else {
-                    warn!("pending mux backup channel closed, shutting down orchestrator");
+                    warn!("vote mux backup channel closed, shutting down orchestrator");
                     break;
                 };
                 let their_epoch = Epoch::new(their_epoch);
@@ -220,9 +215,6 @@ where
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                if rate_limiter.check_key(&from).is_err() {
-                    continue;
-                }
                 let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
@@ -270,14 +262,14 @@ where
                     %epoch,
                     boundary_height,
                     ?from,
-                    "received message on pending network from old epoch. forwarding orchestrator"
+                    "received message on vote network from old epoch. forwarding orchestrator"
                 );
 
                 // Forward the finalization to the sender. This operation is best-effort.
                 //
                 // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
                 let message = Certificate::<S, H::Digest>::Finalization(finalization);
-                if recovered_global_sender
+                if certificate_global_sender
                     .send(
                         epoch.get(),
                         Recipients::One(from),
@@ -304,16 +296,16 @@ where
                         }
 
                         // Register the new signing scheme with the scheme provider.
-                        let scheme = self.scheme_provider.scheme_for_epoch(&transition);
-                        assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
+                        let scheme = self.provider.scheme_for_epoch(&transition);
+                        assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                         // Enter the new epoch.
                         let engine = self
                             .enter_epoch(
                                 transition.epoch,
                                 scheme,
-                                &mut pending_mux,
-                                &mut recovered_mux,
+                                &mut vote_mux,
+                                &mut certificate_mux,
                                 &mut resolver_mux,
                             )
                             .await;
@@ -330,7 +322,7 @@ where
                         engine.abort();
 
                         // Unregister the signing scheme for the epoch.
-                        assert!(self.scheme_provider.unregister(&epoch));
+                        assert!(self.provider.unregister(&epoch));
 
                         info!(%epoch, "exited epoch");
                     }
@@ -343,11 +335,11 @@ where
         &mut self,
         epoch: Epoch,
         scheme: S,
-        pending_mux: &mut MuxHandle<
+        vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-        recovered_mux: &mut MuxHandle<
+        certificate_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
@@ -384,10 +376,10 @@ where
         );
 
         // Create epoch-specific subchannels
-        let pending_sc = pending_mux.register(epoch.get()).await.unwrap();
-        let recovered_sc = recovered_mux.register(epoch.get()).await.unwrap();
-        let resolver_sc = resolver_mux.register(epoch.get()).await.unwrap();
+        let vote = vote_mux.register(epoch.get()).await.unwrap();
+        let certificate = certificate_mux.register(epoch.get()).await.unwrap();
+        let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
-        engine.start(pending_sc, recovered_sc, resolver_sc)
+        engine.start(vote, certificate, resolver)
     }
 }

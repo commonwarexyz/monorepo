@@ -35,6 +35,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "qmdb_ordered_batching"
+path = "fuzz_targets/qmdb_ordered_batching.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "archive_operations"
 path = "fuzz_targets/archive_operations.rs"
 test = false

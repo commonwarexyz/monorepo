@@ -7,8 +7,7 @@
 //! value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is an [Operation::Update] operation, and (3) it is the most recent operation for that
-//! key.
+//! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
 //! # Lifecycle
 //!
@@ -34,6 +33,7 @@
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
+//! use commonware_math::algebra::Random;
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
 //! const PAGE_SIZE: usize = 77;
@@ -91,11 +91,9 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
+        any::{unordered::VariableOperation as Operation, VariableValue},
         build_snapshot_from_log, create_key, delete_key,
-        operation::{
-            variable::{unordered::Operation, Value},
-            Committable as _, Keyed as _,
-        },
+        operation::{Committable as _, Operation as _},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -252,7 +250,7 @@ pub struct Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     /// A log of all [Operation]s that have been applied to the store.
@@ -289,7 +287,7 @@ impl<E, K, V, T> Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     /// Initializes a new [`Store`] database with the given configuration.
@@ -553,7 +551,7 @@ impl<E, K, V, T> LogStorePrunable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
@@ -565,7 +563,7 @@ impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     async fn commit(&mut self) -> Result<(), Error> {
@@ -581,7 +579,7 @@ impl<E, K, V, T> LogStore for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     type Value = V;
@@ -607,7 +605,7 @@ impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     type Key = K;
@@ -623,7 +621,7 @@ impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -635,7 +633,7 @@ impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
@@ -647,7 +645,7 @@ impl<E, K, V, T> Batchable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
 {
 }
@@ -658,9 +656,10 @@ mod test {
     use crate::{qmdb::store::batch_tests, store::StoreMut as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
-        Digest as _, Hasher as _,
+        Hasher as _,
     };
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
 

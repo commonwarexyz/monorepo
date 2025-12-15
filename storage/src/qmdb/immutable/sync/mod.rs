@@ -2,8 +2,8 @@ use crate::{
     journal::contiguous::variable,
     mmr::Location,
     qmdb::{
-        immutable,
-        operation::variable::{immutable::Operation, Value},
+        any::VariableValue,
+        immutable::{self, Operation},
         sync, Error,
     },
     translator::Translator,
@@ -17,7 +17,7 @@ impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     H: Hasher,
     T: Translator,
 {
@@ -123,7 +123,7 @@ pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
     D: commonware_cryptography::Digest,
 {
@@ -155,7 +155,7 @@ mod tests {
         mmr::Location,
         qmdb::{
             immutable,
-            operation::variable::immutable::Operation,
+            immutable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -164,8 +164,9 @@ mod tests {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256, Digest, Sha256};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};

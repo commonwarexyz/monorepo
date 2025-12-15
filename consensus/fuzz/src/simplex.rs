@@ -1,72 +1,70 @@
 use commonware_codec::Read;
-use commonware_consensus::simplex::{
-    mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-    signing_scheme::{
-        bls12381_multisig as multisig_scheme, bls12381_threshold as threshold_scheme,
-        ed25519 as ed25519_scheme, Scheme as SimplexScheme,
-    },
+use commonware_consensus::simplex::scheme::{
+    bls12381_multisig, bls12381_threshold, ed25519, Scheme,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
+    certificate::{self, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::deterministic;
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
-    type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
+    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
 pub struct SimplexEd25519;
 
 impl Simplex for SimplexEd25519 {
-    type Scheme = ed25519_scheme::Scheme;
+    type Scheme = ed25519::Scheme;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519(context, n)
+        ed25519::fixture(context, n)
     }
 }
 
 pub struct SimplexBls12381MultisigMinPk;
 
 impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = multisig_scheme::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::<MinPk, _>(context, n)
+        bls12381_multisig::fixture::<MinPk, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MultisigMinSig;
 
 impl Simplex for SimplexBls12381MultisigMinSig {
-    type Scheme = multisig_scheme::Scheme<Ed25519PublicKey, MinSig>;
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::<MinSig, _>(context, n)
+        bls12381_multisig::fixture::<MinSig, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MinPk;
 
 impl Simplex for SimplexBls12381MinPk {
-    type Scheme = threshold_scheme::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::<MinPk, _>(context, n)
+        bls12381_threshold::fixture::<MinPk, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
-    type Scheme = threshold_scheme::Scheme<Ed25519PublicKey, MinSig>;
+    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::<MinSig, _>(context, n)
+        bls12381_threshold::fixture::<MinSig, _>(context, n)
     }
 }
 

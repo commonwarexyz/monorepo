@@ -70,6 +70,7 @@ use commonware_cryptography::{
         dial_end, dial_start, listen_end, listen_start, Ack, Context, Error as HandshakeError,
         RecvCipher, SendCipher, Syn, SynAck, CIPHERTEXT_OVERHEAD,
     },
+    transcript::Transcript,
     Signer,
 };
 use commonware_macros::select;
@@ -181,7 +182,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn) = dial_start(
             &mut ctx,
-            Context::new(current_time, ok_timestamps, config.signing_key, peer),
+            Context::new(
+                &Transcript::new(&config.namespace),
+                current_time,
+                ok_timestamps,
+                config.signing_key,
+                peer,
+            ),
         );
         send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
 
@@ -242,6 +249,7 @@ pub async fn listen<
         let (state, syn_ack) = listen_start(
             &mut ctx,
             Context::new(
+                &Transcript::new(&config.namespace),
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -320,7 +328,7 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
 
     const NAMESPACE: &[u8] = b"fuzz_transport";

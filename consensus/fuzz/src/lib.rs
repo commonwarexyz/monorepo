@@ -6,20 +6,26 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
-    simplex::Simplex,
     utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
+use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{application, fixtures::Fixture, relay, reporter},
+        mocks::{application, relay, reporter},
+        scheme::Scheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{
+    certificate::{self, mocks::Fixture},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
+};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
@@ -47,6 +53,14 @@ const N3C2F1: (u32, u32, u32) = (3, 2, 1);
 // 3 nodes, 1 correct, 2 faulty
 const N4C1F3: (u32, u32, u32) = (4, 1, 3);
 const MAX_RAW_BYTES: usize = 4096;
+
+pub trait Simplex: 'static
+where
+    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
+{
+    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
+}
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
@@ -152,7 +166,7 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-fn run<P: Simplex>(input: FuzzInput) {
+fn run<P: simplex::Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
     let required_containers = input.required_containers;
     let namespace = NAMESPACE.to_vec();
@@ -174,6 +188,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             participants,
             schemes,
             verifier: _,
+            ..
         } = P::fixture(&mut context, n);
 
         let mut registrations = register(&mut oracle, &participants).await;
@@ -318,7 +333,7 @@ fn run<P: Simplex>(input: FuzzInput) {
     });
 }
 
-pub fn fuzz<P: Simplex>(input: FuzzInput) {
+pub fn fuzz<P: simplex::Simplex>(input: FuzzInput) {
     let seed = input.seed;
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}

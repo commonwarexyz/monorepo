@@ -7,6 +7,7 @@ cfg_if::cfg_if! {
 }
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -22,14 +23,21 @@ pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
 pub struct PrivateKeyInner {
     raw: [u8; PRIVATE_KEY_LENGTH],
-    /// `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
-    ///
-    /// Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
-    #[zeroize(skip)]
     pub key: SigningKey,
+}
+
+impl Zeroize for PrivateKeyInner {
+    fn zeroize(&mut self) {
+        self.raw.zeroize();
+
+        // skip zeroizing `key` here, `ZeroizeOnDrop` is implemented for `SigningKey` and
+        // can't be called directly.
+        //
+        // Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
+    }
 }
 
 impl PrivateKeyInner {
@@ -37,9 +45,11 @@ impl PrivateKeyInner {
         let raw = key.to_bytes().into();
         Self { raw, key }
     }
+}
 
-    pub fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
-        Self::new(SigningKey::random(rng))
+impl Random for PrivateKeyInner {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        Self::new(SigningKey::random(&mut rng))
     }
 }
 
@@ -118,6 +128,17 @@ impl Debug for PrivateKeyInner {
 impl Display for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::random(&mut rand))
     }
 }
 
@@ -202,14 +223,26 @@ impl Display for PublicKeyInner {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKeyInner {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKeyInner::random(&mut rand);
+        Ok(Self::from_private_key(&private_key))
+    }
+}
+
 /// Macro to implement newtype wrapper traits for PrivateKey.
 macro_rules! impl_private_key_wrapper {
     ($name:ident) => {
         impl crate::PrivateKey for $name {}
 
-        impl crate::PrivateKeyExt for $name {
-            fn from_rng<R: rand_core::CryptoRngCore>(rng: &mut R) -> Self {
-                Self(PrivateKeyInner::from_rng(rng))
+        impl commonware_math::algebra::Random for $name {
+            fn random(rng: impl rand_core::CryptoRngCore) -> Self {
+                Self(PrivateKeyInner::random(rng))
             }
         }
 
@@ -834,5 +867,16 @@ pub(crate) mod tests {
             508033812c776a0e00c003c7e0d628e50736c7512df0acfa9f2320bd102229f46495ae6d0857cc452a84",
         );
         (public_key, sig, message, true)
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PublicKeyInner>,
+            CodecConformance<PrivateKeyInner>,
+        }
     }
 }

@@ -25,6 +25,7 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -86,6 +87,7 @@ impl Hasher for Sha256 {
 
 /// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -143,8 +145,10 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Digest {}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -214,5 +218,15 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

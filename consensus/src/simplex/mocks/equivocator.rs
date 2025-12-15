@@ -3,20 +3,20 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
+        scheme::Scheme,
         select_leader,
-        signing_scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Round, View},
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: Scheme, H: Hasher> {
+pub struct Config<S: certificate::Scheme, H: Hasher> {
     pub scheme: S,
     pub namespace: Vec<u8>,
     pub epoch: Epoch,
@@ -24,7 +24,7 @@ pub struct Config<S: Scheme, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
+pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
@@ -34,7 +34,7 @@ pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S, H> {
     pub fn new(context: E, cfg: Config<S, H>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -103,7 +103,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
 
             // Check if we are the leader for the next view, otherwise move on
             let (_, leader) =
-                select_leader::<S, _>(self.scheme.participants().as_ref(), next_round, seed);
+                select_leader::<S>(self.scheme.participants().as_ref(), next_round, seed);
             if leader != self.scheme.me().unwrap() {
                 continue;
             }

@@ -1,20 +1,24 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochSchemeProvider, SchemeProvider},
-    dkg, orchestrator,
-    setup::ParticipantConfig,
+    application::{Application, Block, EpochProvider, Provider},
+    dkg::{self, UpdateCallBack},
+    orchestrator,
+    setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{signing_scheme::Scheme, types::Finalization},
+    simplex::{scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
+    bls12381::{
+        dkg::Output,
+        primitives::{group, variant::Variant},
+    },
     Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
@@ -22,11 +26,11 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, quorum, union, NZUsize, NZU64};
+use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf, time::Instant};
+use std::{num::NonZero, time::Instant};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -47,8 +51,8 @@ const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
 pub struct Config<C, P, B, V>
 where
-    C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -56,16 +60,9 @@ where
     pub manager: P,
     pub blocker: B,
     pub namespace: Vec<u8>,
-
-    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
-    pub polynomial: Option<Public<V>>,
+    pub output: Option<Output<V, C::PublicKey>>,
     pub share: Option<group::Share>,
-    pub active_participants: Vec<C::PublicKey>,
-    pub inactive_participants: Vec<C::PublicKey>,
-    pub num_participants_per_epoch: u32,
-    pub dkg_rate_limit: governor::Quota,
-    pub orchestrator_rate_limit: governor::Quota,
-
+    pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
 }
@@ -78,8 +75,8 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     config: Config<C, P, B, V>,
@@ -91,8 +88,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
-        SchemeProvider<S, C>,
-        S,
+        Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
     >,
@@ -107,7 +103,6 @@ where
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
-    _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
@@ -118,26 +113,22 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let dkg_namespace = union(&config.namespace, b"_DKG");
-        let threshold = quorum(config.num_participants_per_epoch);
+        let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
-                participant_config: config.participant_config.clone(),
-                namespace: dkg_namespace,
                 signer: config.signer.clone(),
-                num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.dkg_rate_limit,
                 partition_prefix: config.partition_prefix.clone(),
+                peer_config: config.peer_config.clone(),
             },
         )
         .await;
@@ -149,7 +140,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: threshold,
+                codec_config: num_participants,
             },
         );
 
@@ -215,7 +206,7 @@ where
                 freezer_journal_buffer_pool: buffer_pool.clone(),
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: threshold,
+                codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
             },
@@ -224,13 +215,13 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let scheme_provider = SchemeProvider::new(config.signer.clone());
+        let provider = Provider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                scheme_provider: scheme_provider.clone(),
+                provider: provider.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
@@ -244,9 +235,8 @@ where
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                block_codec_config: threshold,
+                block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
-                _marker: PhantomData,
             },
         )
         .await;
@@ -263,12 +253,11 @@ where
             orchestrator::Config {
                 oracle: config.blocker.clone(),
                 application,
-                scheme_provider,
+                provider,
                 marshal: marshal_mailbox,
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
@@ -283,18 +272,17 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            _phantom: core::marker::PhantomData,
         }
     }
 
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -318,17 +306,19 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
             self.run(
-                pending,
-                recovered,
+                votes,
+                certificates,
                 resolver,
                 broadcast,
                 dkg,
                 orchestrator,
-                marshal
+                marshal,
+                callback
             )
             .await
         )
@@ -337,11 +327,11 @@ where
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn run(
         self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -365,14 +355,14 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
         ),
+        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let dkg_handle = self.dkg.start(
-            self.config.polynomial,
+            self.config.output,
             self.config.share,
-            self.config.active_participants,
-            self.config.inactive_participants,
             self.orchestrator_mailbox,
             dkg,
+            callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle = self
@@ -380,7 +370,7 @@ where
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
         let orchestrator_handle =
             self.orchestrator
-                .start(pending, recovered, resolver, orchestrator);
+                .start(votes, certificates, resolver, orchestrator);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

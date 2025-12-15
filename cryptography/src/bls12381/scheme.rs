@@ -7,11 +7,12 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
+//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
+//! use commonware_math::algebra::Random;
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = bls12381::PrivateKey::from_rng(&mut OsRng);
+//! let mut signer = bls12381::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
 //! let namespace = &b"demo"[..];
@@ -29,7 +30,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, PrivateKeyExt, Signer as _};
+use crate::{Array, BatchVerifier, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
@@ -38,6 +39,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -155,11 +157,21 @@ impl PrivateKey {
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(rng);
+impl Random for PrivateKey {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
         let raw = private.encode_fixed();
         Self { raw, key: private }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::random(&mut rand))
     }
 }
 
@@ -279,6 +291,18 @@ impl Display for PublicKey {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        Ok(private_key.public_key())
+    }
+}
+
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
@@ -366,6 +390,24 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(private_key.sign(&[], &message))
     }
 }
 
@@ -1103,5 +1145,17 @@ mod tests {
             "0xa42ae16f1c2a5fa69c04cb5998d2add790764ce8dd45bf25b29b4700829232052b52352dcff1cf255b3a7810ad7269601810f03b2bc8b68cf289cf295b206770605a190b6842583e47c3d1c0f73c54907bfb2a602157d46a4353a20283018763",
         );
         (v.0, v.1, v.2, true)
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PublicKey>,
+            CodecConformance<PrivateKey>,
+            CodecConformance<Signature>,
+        }
     }
 }
