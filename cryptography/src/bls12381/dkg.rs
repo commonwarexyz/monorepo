@@ -1285,32 +1285,31 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         selected: Map<P, DealerLog<V, P>>,
         concurrency: usize,
     ) -> Result<Self, Error> {
-        // Count reveals per player across all selected dealer logs
+        // Track players with too many reveals
+        let max_faults = info.players.max_faults();
         let mut reveal_counts: BTreeMap<P, u32> = BTreeMap::new();
+        let mut revealed = Vec::new();
         for log in selected.values() {
-            if let Some(iter) = log.zip_players(&info.players) {
-                for (player, result) in iter {
-                    if result.is_reveal() {
-                        *reveal_counts.entry(player.clone()).or_insert(0) += 1;
-                    }
+            let Some(iter) = log.zip_players(&info.players) else {
+                continue;
+            };
+            for (player, result) in iter {
+                if !result.is_reveal() {
+                    continue;
+                }
+                let count = reveal_counts.entry(player.clone()).or_insert(0);
+                *count += 1;
+                if *count == max_faults + 1 {
+                    revealed.push(player.clone());
                 }
             }
         }
-
-        // Determine which players had too many reveals
-        let max_faults = info.players.max_faults();
-        let revealed: Set<P> = reveal_counts
+        let revealed: Set<P> = revealed
             .into_iter()
-            .filter_map(|(player, count)| {
-                if count > max_faults {
-                    Some(player)
-                } else {
-                    None
-                }
-            })
             .try_collect()
             .expect("players are unique");
 
+        // Recover the public polynomial
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
                 .public()
