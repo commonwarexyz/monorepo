@@ -52,7 +52,7 @@ jobs:
     - name: Fmt
       run: just check-fmt
     - name: Lint
-      run: just clippy ${{ matrix.flags }}
+      run: just lint ${{ matrix.flags }}
     - name: Check docs
       run: just check-docs ${{ matrix.flags }}
     - name: Test docs
