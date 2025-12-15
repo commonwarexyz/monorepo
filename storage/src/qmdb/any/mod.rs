@@ -29,6 +29,7 @@ mod update;
 pub use update::{OrderedUpdate, UnorderedUpdate};
 
 mod db;
+pub use db::span_contains;
 
 mod operation;
 pub use operation::{Operation, OrderedOperation, UnorderedOperation};

@@ -7,7 +7,7 @@ use crate::{
     qmdb::{
         any::{
             db::IndexedLog, init_fixed_authenticated_log, FixedConfig as Config, FixedEncoding,
-            FixedValue, UnorderedOperation,
+            FixedValue, UnorderedOperation, UnorderedUpdate,
         },
         Error,
     },
@@ -21,8 +21,16 @@ type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Operation<K, V>, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+    E,
+    K,
+    FixedEncoding<V>,
+    UnorderedUpdate<K, FixedEncoding<V>>,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    S,
+>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>

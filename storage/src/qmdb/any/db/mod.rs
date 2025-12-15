@@ -11,7 +11,6 @@ use crate::{
     qmdb::{
         any::{update::Update, value::ValueEncoding, Operation},
         build_snapshot_from_log,
-        operation::Operation as OperationTrait,
         store::LogStore,
         Error, FloorHelper,
     },
@@ -25,17 +24,23 @@ use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 mod ordered;
+pub use ordered::span_contains;
+
 mod unordered;
 
 /// An indexed, authenticated log of ordered database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    Op: Codec,
-    C: Contiguous<Item = Op>,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
-> {
+> where
+    Operation<K, V, U>: Codec,
+{
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
     ///
@@ -69,12 +74,16 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: Contiguous<Item = Op>,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, Op, C, I, H, S>
+    > IndexedLog<E, K, V, U, C, I, H, S>
+where
+    Operation<K, V, U>: Codec,
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -91,23 +100,6 @@ impl<
     /// Whether the snapshot currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Whether the span defined by `span_start` and `span_end` contains `key`.
-    pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
-        if span_start >= span_end {
-            // cyclic span case
-            if key >= span_start || key < span_end {
-                return true;
-            }
-        } else {
-            // normal span case
-            if key >= span_start && key < span_end {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Returns the location of the oldest operation that remains retrievable.
@@ -130,7 +122,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, Operation<K, V, U>, C, I, H, S>
+    > IndexedLog<E, K, V, U, C, I, H, S>
 where
     Operation<K, V, U>: Codec,
 {
@@ -190,7 +182,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Operation<K, V, U>, C, I, H>
+    > IndexedLog<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -260,14 +252,18 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: Contiguous<Item = Op>,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Op, C, I, H>
+    > IndexedLog<E, K, V, U, C, I, H>
+where
+    Operation<K, V, U>: Codec,
 {
     /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, Op, C, I, H, Dirty> {
+    pub fn into_dirty(self) -> IndexedLog<E, K, V, U, C, I, H, Dirty> {
         IndexedLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -281,11 +277,15 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: MutableContiguous<Item = Op>,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Op, C, I, H>
+    > IndexedLog<E, K, V, U, C, I, H>
+where
+    Operation<K, V, U>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -316,7 +316,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Operation<K, V, U>, C, I, H>
+    > IndexedLog<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -380,11 +380,15 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: OperationTrait + Codec,
-        C: MutableContiguous<Item = Op>,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Op, C, I, H>
+    > IndexedLog<E, K, V, U, C, I, H>
+where
+    Operation<K, V, U>: Codec,
 {
     /// Returns a FloorHelper wrapping the current state of the log.
     #[allow(clippy::type_complexity)]
@@ -442,14 +446,18 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        Op: Codec,
-        C: Contiguous<Item = Op>,
+        K: Array,
+        V: ValueEncoding,
+        U: Update<K, V>,
+        C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, Op, C, I, H, Dirty>
+    > IndexedLog<E, K, V, U, C, I, H, Dirty>
+where
+    Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, Op, C, I, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> IndexedLog<E, K, V, U, C, I, H, Clean<H::Digest>> {
         IndexedLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -469,7 +477,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, Operation<K, V, U>, C, I, H>
+    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -486,13 +494,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::CleanStore for IndexedLog<E, Operation<K, V, U>, C, I, H>
+    > crate::qmdb::store::CleanStore for IndexedLog<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Dirty = IndexedLog<E, Operation<K, V, U>, C, I, H, Dirty>;
+    type Dirty = IndexedLog<E, K, V, U, C, I, H, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
@@ -533,7 +541,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > LogStore for IndexedLog<E, Operation<K, V, U>, C, I, H, S>
+    > LogStore for IndexedLog<E, K, V, U, C, I, H, S>
 where
     Operation<K, V, U>: Codec,
 {
@@ -564,13 +572,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::DirtyStore for IndexedLog<E, Operation<K, V, U>, C, I, H, Dirty>
+    > crate::qmdb::store::DirtyStore for IndexedLog<E, K, V, U, C, I, H, Dirty>
 where
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Clean = IndexedLog<E, Operation<K, V, U>, C, I, H>;
+    type Clean = IndexedLog<E, K, V, U, C, I, H>;
 
     async fn merkleize(self) -> Result<Self::Clean, Error> {
         Ok(self.merkleize())

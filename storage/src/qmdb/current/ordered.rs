@@ -10,8 +10,8 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue, OrderedOperation,
-            OrderedUpdate,
+            ordered::fixed::Any, span_contains, CleanAny, DirtyAny, FixedEncoding, FixedValue,
+            OrderedOperation, OrderedUpdate,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -192,7 +192,7 @@ impl<
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
+                if !span_contains(&info.key, &info.next_key, key) {
                     return false;
                 }
 

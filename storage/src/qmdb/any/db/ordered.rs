@@ -48,7 +48,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
+    > IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -88,7 +88,7 @@ where
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update(&self.log, loc).await?;
-            if Self::span_contains(&data.key, &data.next_key, key) {
+            if span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
         }
@@ -169,7 +169,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, OrderedOperation<K, V>, C, I, H, S>
+    > IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -702,7 +702,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+impl<E, K, V, C, I, H> Batchable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -915,7 +915,7 @@ impl<
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+    > crate::store::StorePersistable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -935,7 +935,7 @@ impl<
         C: Contiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+    > crate::store::Store for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -955,7 +955,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+    > crate::store::StoreMut for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -971,7 +971,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+    > crate::store::StoreDeletable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -987,7 +987,7 @@ impl<
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, OrderedOperation<K, V>, C, I, H>
+    > CleanAny for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -1025,7 +1025,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, OrderedOperation<K, V>, C, I, H, Dirty>
+    > DirtyAny for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, Dirty>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -1084,4 +1084,21 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .iter()
         .next_back()
         .expect("possible_previous should not be empty")
+}
+
+/// Whether the span defined by `span_start` and `span_end` contains `key`.
+pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
+    if span_start >= span_end {
+        // cyclic span case
+        if key >= span_start || key < span_end {
+            return true;
+        }
+    } else {
+        // normal span case
+        if key >= span_start && key < span_end {
+            return true;
+        }
+    }
+
+    false
 }
