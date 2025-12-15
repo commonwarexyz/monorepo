@@ -305,7 +305,23 @@ pub trait Provider: Clone + Send + Sync + 'static {
 }
 
 #[cfg(feature = "mocks")]
-pub mod mocks;
+pub mod mocks {
+    //! Mocks for certificate signing schemes.
+
+    /// A fixture containing identities, identity private keys, per-participant
+    /// signing schemes, and a single verifier scheme.
+    #[derive(Clone, Debug)]
+    pub struct Fixture<S> {
+        /// A sorted vector of participant public identity keys.
+        pub participants: Vec<crate::ed25519::PublicKey>,
+        /// A sorted vector of participant private identity keys (matching order with `participants`).
+        pub private_keys: Vec<crate::ed25519::PrivateKey>,
+        /// A vector of per-participant scheme instances (matching order with `participants`).
+        pub schemes: Vec<S>,
+        /// A single scheme verifier.
+        pub verifier: S,
+    }
+}
 
 /// Bitmap wrapper that tracks which participants signed a certificate.
 ///
@@ -393,6 +409,38 @@ impl arbitrary::Arbitrary<'_> for Signers {
         let signer_count = u.arbitrary_len::<u8>()?.min(participants);
         let signers = (0..signer_count as u32).collect::<Vec<_>>();
         Ok(Self::from(participants, signers))
+    }
+}
+
+/// A scheme provider that always returns the same scheme regardless of scope.
+#[derive(Clone, Debug)]
+pub struct ConstantProvider<S: Scheme, Sc = ()> {
+    scheme: Arc<S>,
+    _scope: core::marker::PhantomData<Sc>,
+}
+
+impl<S: Scheme, Sc> ConstantProvider<S, Sc> {
+    /// Creates a new provider that always returns the given scheme.
+    pub fn new(scheme: S) -> Self {
+        Self {
+            scheme: Arc::new(scheme),
+            _scope: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
+    for ConstantProvider<S, Sc>
+{
+    type Scope = Sc;
+    type Scheme = S;
+
+    fn scoped(&self, _: Sc) -> Option<Arc<S>> {
+        Some(self.scheme.clone())
+    }
+
+    fn all(&self) -> Option<Arc<Self::Scheme>> {
+        Some(self.scheme.clone())
     }
 }
 

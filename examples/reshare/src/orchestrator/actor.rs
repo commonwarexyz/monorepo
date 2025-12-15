@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochProvider, MockProvider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
@@ -48,7 +48,7 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: MockProvider<S, C>,
+    pub scheme_provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
@@ -69,7 +69,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    MockProvider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -77,7 +77,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: MockProvider<S, C>,
+    scheme_provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -95,7 +95,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
-    MockProvider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);

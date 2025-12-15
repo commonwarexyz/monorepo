@@ -5,7 +5,7 @@ use crate::orchestrator::EpochTransition;
 use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
-    certificate::{Provider as ProviderTrait, Scheme},
+    certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
 use std::{
@@ -21,12 +21,12 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct MockProvider<S: Scheme, C: Signer> {
+pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     signer: C,
 }
 
-impl<S: Scheme, C: Signer> MockProvider<S, C> {
+impl<S: Scheme, C: Signer> Provider<S, C> {
     pub fn new(signer: C) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
@@ -35,7 +35,7 @@ impl<S: Scheme, C: Signer> MockProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> MockProvider<S, C> {
+impl<S: Scheme, C: Signer> Provider<S, C> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -53,7 +53,7 @@ impl<S: Scheme, C: Signer> MockProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> ProviderTrait for MockProvider<S, C> {
+impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scope = Epoch;
     type Scheme = S;
 
@@ -75,7 +75,7 @@ pub trait EpochProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant> EpochProvider for MockProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
+impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
     type PublicKey = ed25519::PublicKey;
     type Scheme = ThresholdScheme<V>;
@@ -109,7 +109,7 @@ impl<V: Variant> EpochProvider for MockProvider<ThresholdScheme<V>, ed25519::Pri
     }
 }
 
-impl EpochProvider for MockProvider<EdScheme, ed25519::PrivateKey> {
+impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;

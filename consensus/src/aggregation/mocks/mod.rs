@@ -7,4 +7,4 @@ pub use monitor::Monitor;
 mod reporter;
 pub use reporter::{Mailbox as ReporterMailbox, Reporter};
 mod provider;
-pub use provider::MockProvider;
+pub use provider::Provider;

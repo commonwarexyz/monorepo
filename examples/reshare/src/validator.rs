@@ -1,7 +1,7 @@
 //! Validator node service entrypoint.
 
 use crate::{
-    application::{EpochProvider, MockProvider},
+    application::{EpochProvider, Provider},
     dkg::UpdateCallBack,
     engine, namespace,
     setup::{ParticipantConfig, PeerConfig},
@@ -42,7 +42,7 @@ pub async fn run<S>(
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
-    MockProvider<S, ed25519::PrivateKey>:
+    Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     // Load the participant configuration.
@@ -328,7 +328,7 @@ mod test {
             pk: PublicKey,
         ) where
             S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
-            MockProvider<S, PrivateKey>:
+            Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             if let Some(handle) = self.handles.remove(&pk) {
