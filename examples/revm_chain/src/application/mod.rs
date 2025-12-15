@@ -1,6 +1,7 @@
 //! Chain application logic (block production and verification).
 
 mod actor;
+mod block_sync;
 mod handle;
 mod message;
 mod store;

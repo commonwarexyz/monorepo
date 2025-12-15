@@ -1,11 +1,14 @@
 use super::{
+    block_sync::BlockSync,
     store::{BlockEntry, ChainStore},
     ApplicationRequest, BlockCodecCfg, Handle,
 };
 use crate::{
-    consensus::{ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey},
+    consensus::{
+        digest_for_block, ConsensusDigest, ConsensusRequest, FinalizationEvent, PublicKey,
+    },
     execution::{evm_env, execute_txs},
-    types::{block_id, Block, BlockId, StateRoot, Tx},
+    types::{Block, BlockId, StateRoot, Tx},
 };
 use alloy_evm::revm::{
     database::InMemoryDB,
@@ -13,21 +16,16 @@ use alloy_evm::revm::{
     state::AccountInfo,
     Database as _,
 };
-use bytes::Bytes;
 use commonware_consensus::simplex::{
     signing_scheme::bls12381_threshold::Seedable as _,
     types::{Activity, Context},
 };
-use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use std::collections::BTreeMap;
 
 type ThresholdActivity = <crate::consensus::Mailbox as commonware_consensus::Reporter>::Activity;
-type PendingVerify = (Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>);
-type PendingVerifies = BTreeMap<ConsensusDigest, Vec<PendingVerify>>;
 
 /// Chain application actor.
 pub struct Application<S> {
@@ -37,8 +35,6 @@ pub struct Application<S> {
     genesis_alloc: Vec<(Address, U256)>,
     genesis_tx: Option<Tx>,
     store: ChainStore,
-    received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: PendingVerifies,
     gossip: S,
     consensus: mpsc::Receiver<ConsensusRequest>,
     control: mpsc::Receiver<ApplicationRequest>,
@@ -51,14 +47,11 @@ enum Input {
 
 struct Runtime<S> {
     node: u32,
-    block_cfg: crate::types::BlockCfg,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     genesis_alloc: Vec<(Address, U256)>,
     genesis_tx: Option<Tx>,
     store: ChainStore,
-    received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: PendingVerifies,
-    gossip: S,
+    sync: BlockSync<S>,
 }
 
 impl<S> Application<S>
@@ -86,8 +79,6 @@ where
                 genesis_alloc,
                 genesis_tx,
                 store: ChainStore::default(),
-                received: BTreeMap::new(),
-                pending_verifies: BTreeMap::new(),
                 gossip,
                 consensus,
                 control,
@@ -95,13 +86,6 @@ where
             consensus_mailbox,
             handle,
         )
-    }
-
-    fn digest_for_block(block: &Block) -> ConsensusDigest {
-        let mut hasher = Sha256::default();
-        let id = block_id(block);
-        hasher.update(id.0.as_slice());
-        hasher.finalize()
     }
 
     const fn genesis_block() -> Block {
@@ -121,11 +105,6 @@ where
                 max_calldata_bytes: codec.max_calldata_bytes,
             },
         }
-    }
-
-    fn decode_block(bytes: Bytes, cfg: &crate::types::BlockCfg) -> anyhow::Result<Block> {
-        use commonware_codec::Decode as _;
-        Ok(Block::decode_cfg(bytes.as_ref(), cfg)?)
     }
 
     fn build_child_block(parent: &Block, prevrandao: B256, txs: Vec<Tx>) -> Block {
@@ -150,7 +129,7 @@ where
         )?;
 
         child.state_root = outcome.state_root;
-        let digest = Self::digest_for_block(&child);
+        let digest = digest_for_block(&child);
         Ok((
             digest,
             BlockEntry {
@@ -161,53 +140,6 @@ where
         ))
     }
 
-    fn try_verify_and_insert(
-        store: &mut ChainStore,
-        expected_digest: ConsensusDigest,
-        context: &Context<ConsensusDigest, PublicKey>,
-        block: Block,
-    ) -> anyhow::Result<bool> {
-        if Self::digest_for_block(&block) != expected_digest {
-            return Ok(false);
-        }
-        let parent = store.get_by_digest(&context.parent.1).cloned();
-        let Some(parent) = parent else {
-            return Ok(false);
-        };
-
-        if block.parent != parent.block.id() {
-            return Ok(false);
-        }
-        if block.height != parent.block.height + 1 {
-            return Ok(false);
-        }
-
-        let (db, outcome) = execute_txs(
-            parent.db.clone(),
-            evm_env(block.height, block.prevrandao),
-            parent.block.state_root,
-            &block.txs,
-        )?;
-        if outcome.state_root != block.state_root {
-            return Ok(false);
-        }
-
-        store.insert(
-            expected_digest,
-            BlockEntry {
-                block,
-                db,
-                seed: None,
-            },
-        );
-        Ok(true)
-    }
-
-    fn encode_block(block: &Block) -> Bytes {
-        use commonware_codec::Encode as _;
-        Bytes::copy_from_slice(block.encode().as_ref())
-    }
-
     pub async fn run(self) {
         let Self {
             node,
@@ -216,24 +148,20 @@ where
             genesis_alloc,
             genesis_tx,
             store,
-            received,
-            pending_verifies,
             gossip,
             consensus,
             control,
         } = self;
 
         let block_cfg = Self::block_cfg(codec);
+        let sync = BlockSync::new(block_cfg, gossip);
         let mut runtime = Runtime {
             node,
-            block_cfg,
             finalized,
             genesis_alloc,
             genesis_tx,
             store,
-            received,
-            pending_verifies,
-            gossip,
+            sync,
         };
         let mut inbox = futures::stream::select(
             consensus.map(|m| Input::Consensus(Box::new(m))),
@@ -270,10 +198,11 @@ where
                 digest,
                 response,
             } => {
-                self.handle_verify(context, digest, response);
+                self.sync
+                    .handle_verify_request(&mut self.store, context, digest, response);
             }
             ConsensusRequest::Broadcast { digest } => {
-                self.handle_broadcast(digest).await;
+                self.sync.broadcast_block(&self.store, digest).await;
             }
             ConsensusRequest::Report { activity } => {
                 self.handle_report(activity);
@@ -295,7 +224,8 @@ where
                 self.handle_query_seed(digest, response)
             }
             ApplicationRequest::BlockReceived { from, bytes } => {
-                self.handle_block_received(from, bytes);
+                self.sync
+                    .handle_block_received(&mut self.store, from, bytes);
             }
         }
     }
@@ -308,7 +238,7 @@ where
         assert_eq!(epoch, commonware_consensus::types::Epoch::zero());
 
         let genesis_block = Application::<S>::genesis_block();
-        let digest = Application::<S>::digest_for_block(&genesis_block);
+        let digest = digest_for_block(&genesis_block);
         let mut db = InMemoryDB::default();
         for (address, balance) in self.genesis_alloc.iter().copied() {
             db.insert_account_info(
@@ -384,96 +314,6 @@ where
             self.store.insert(digest, entry);
             let _ = response.send(digest);
         }
-    }
-
-    fn handle_verify(
-        &mut self,
-        context: Context<ConsensusDigest, PublicKey>,
-        digest: ConsensusDigest,
-        response: oneshot::Sender<bool>,
-    ) {
-        if self.store.get_by_digest(&digest).is_some() {
-            let _ = response.send(true);
-            return;
-        }
-
-        if let Some(block) = self.received.get(&digest).cloned() {
-            let ok =
-                Application::<S>::try_verify_and_insert(&mut self.store, digest, &context, block)
-                    .unwrap_or(false);
-            if ok {
-                self.received.remove(&digest);
-            }
-            let _ = response.send(ok);
-            return;
-        }
-
-        self.pending_verifies
-            .entry(digest)
-            .or_default()
-            .push((context, response));
-    }
-
-    fn handle_block_received(&mut self, from: PublicKey, bytes: Bytes) {
-        let _ = from;
-        let Ok(block) = Application::<S>::decode_block(bytes, &self.block_cfg) else {
-            return;
-        };
-
-        let digest = Application::<S>::digest_for_block(&block);
-        if self.store.get_by_digest(&digest).is_none() {
-            self.received.entry(digest).or_insert(block);
-        }
-        self.flush_pending_verifies(digest);
-    }
-
-    fn flush_pending_verifies(&mut self, digest: ConsensusDigest) {
-        let Some(pending) = self.pending_verifies.remove(&digest) else {
-            return;
-        };
-
-        if self.store.get_by_digest(&digest).is_some() {
-            for (_, response) in pending {
-                let _ = response.send(true);
-            }
-            self.received.remove(&digest);
-            return;
-        }
-
-        for (context, response) in pending {
-            if self.store.get_by_digest(&digest).is_some() {
-                let _ = response.send(true);
-                continue;
-            }
-            let block = match self.received.get(&digest).cloned() {
-                Some(b) => b,
-                None => {
-                    let _ = response.send(false);
-                    continue;
-                }
-            };
-            let ok =
-                Application::<S>::try_verify_and_insert(&mut self.store, digest, &context, block)
-                    .unwrap_or(false);
-            if ok {
-                self.received.remove(&digest);
-            }
-            let _ = response.send(ok);
-        }
-    }
-
-    async fn handle_broadcast(&mut self, digest: ConsensusDigest) {
-        let bytes = self
-            .store
-            .get_by_digest(&digest)
-            .map(|entry| Application::<S>::encode_block(&entry.block));
-        let Some(bytes) = bytes else {
-            return;
-        };
-        let _ = self
-            .gossip
-            .send(commonware_p2p::Recipients::All, bytes, true)
-            .await;
     }
 
     fn handle_report(&mut self, activity: ThresholdActivity) {

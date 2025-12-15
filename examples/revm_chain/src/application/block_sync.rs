@@ -1,0 +1,186 @@
+//! Out-of-band block dissemination (gossip) for the example chain.
+//!
+//! Threshold-simplex orders opaque `ConsensusDigest`s. The full block bytes are delivered
+//! separately. This module owns:
+//! - receiving and decoding gossiped blocks,
+//! - caching received blocks until consensus asks to verify them,
+//! - deferring verification requests until the corresponding bytes arrive,
+//! - broadcasting full blocks when the consensus engine requests it.
+
+use super::store::{BlockEntry, ChainStore};
+use crate::{
+    consensus::{digest_for_block, ConsensusDigest, PublicKey},
+    execution::{evm_env, execute_txs},
+    types::Block,
+};
+use bytes::Bytes;
+use commonware_consensus::simplex::types::Context;
+use futures::channel::oneshot;
+use std::collections::BTreeMap;
+
+type PendingVerify = (Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>);
+type PendingVerifies = BTreeMap<ConsensusDigest, Vec<PendingVerify>>;
+
+pub(super) struct BlockSync<S> {
+    block_cfg: crate::types::BlockCfg,
+    received: BTreeMap<ConsensusDigest, Block>,
+    pending_verifies: PendingVerifies,
+    gossip: S,
+}
+
+impl<S> BlockSync<S>
+where
+    S: commonware_p2p::Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
+{
+    pub(super) const fn new(block_cfg: crate::types::BlockCfg, gossip: S) -> Self {
+        Self {
+            block_cfg,
+            received: BTreeMap::new(),
+            pending_verifies: BTreeMap::new(),
+            gossip,
+        }
+    }
+
+    pub(super) fn handle_verify_request(
+        &mut self,
+        store: &mut ChainStore,
+        context: Context<ConsensusDigest, PublicKey>,
+        digest: ConsensusDigest,
+        response: oneshot::Sender<bool>,
+    ) {
+        if store.get_by_digest(&digest).is_some() {
+            let _ = response.send(true);
+            return;
+        }
+
+        if let Some(block) = self.received.get(&digest).cloned() {
+            let ok = try_verify_and_insert(store, digest, &context, block).unwrap_or(false);
+            if ok {
+                self.received.remove(&digest);
+            }
+            let _ = response.send(ok);
+            return;
+        }
+
+        self.pending_verifies
+            .entry(digest)
+            .or_default()
+            .push((context, response));
+    }
+
+    pub(super) fn handle_block_received(
+        &mut self,
+        store: &mut ChainStore,
+        from: PublicKey,
+        bytes: Bytes,
+    ) {
+        let _ = from;
+        let Ok(block) = decode_block(bytes, &self.block_cfg) else {
+            return;
+        };
+
+        let digest = digest_for_block(&block);
+        if store.get_by_digest(&digest).is_none() {
+            self.received.entry(digest).or_insert(block);
+        }
+        self.flush_pending_verifies(store, digest);
+    }
+
+    pub(super) async fn broadcast_block(&mut self, store: &ChainStore, digest: ConsensusDigest) {
+        let bytes = store
+            .get_by_digest(&digest)
+            .map(|entry| encode_block(&entry.block));
+        let Some(bytes) = bytes else {
+            return;
+        };
+        let _ = self
+            .gossip
+            .send(commonware_p2p::Recipients::All, bytes, true)
+            .await;
+    }
+
+    fn flush_pending_verifies(&mut self, store: &mut ChainStore, digest: ConsensusDigest) {
+        let Some(pending) = self.pending_verifies.remove(&digest) else {
+            return;
+        };
+
+        if store.get_by_digest(&digest).is_some() {
+            for (_, response) in pending {
+                let _ = response.send(true);
+            }
+            self.received.remove(&digest);
+            return;
+        }
+
+        for (context, response) in pending {
+            if store.get_by_digest(&digest).is_some() {
+                let _ = response.send(true);
+                continue;
+            }
+            let block = match self.received.get(&digest).cloned() {
+                Some(b) => b,
+                None => {
+                    let _ = response.send(false);
+                    continue;
+                }
+            };
+            let ok = try_verify_and_insert(store, digest, &context, block).unwrap_or(false);
+            if ok {
+                self.received.remove(&digest);
+            }
+            let _ = response.send(ok);
+        }
+    }
+}
+
+fn decode_block(bytes: Bytes, cfg: &crate::types::BlockCfg) -> anyhow::Result<Block> {
+    use commonware_codec::Decode as _;
+    Ok(Block::decode_cfg(bytes.as_ref(), cfg)?)
+}
+
+fn encode_block(block: &Block) -> Bytes {
+    use commonware_codec::Encode as _;
+    Bytes::copy_from_slice(block.encode().as_ref())
+}
+
+fn try_verify_and_insert(
+    store: &mut ChainStore,
+    expected_digest: ConsensusDigest,
+    context: &Context<ConsensusDigest, PublicKey>,
+    block: Block,
+) -> anyhow::Result<bool> {
+    if digest_for_block(&block) != expected_digest {
+        return Ok(false);
+    }
+    let parent = store.get_by_digest(&context.parent.1).cloned();
+    let Some(parent) = parent else {
+        return Ok(false);
+    };
+
+    if block.parent != parent.block.id() {
+        return Ok(false);
+    }
+    if block.height != parent.block.height + 1 {
+        return Ok(false);
+    }
+
+    let (db, outcome) = execute_txs(
+        parent.db.clone(),
+        evm_env(block.height, block.prevrandao),
+        parent.block.state_root,
+        &block.txs,
+    )?;
+    if outcome.state_root != block.state_root {
+        return Ok(false);
+    }
+
+    store.insert(
+        expected_digest,
+        BlockEntry {
+            block,
+            db,
+            seed: None,
+        },
+    );
+    Ok(true)
+}
