@@ -42,7 +42,7 @@ fn make_vote(
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
         round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
-        part: Attestation {
+        attestation: Attestation {
             signer: data.signer,
             signature: sig,
         },

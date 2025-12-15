@@ -201,8 +201,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, parts): (Vec<_>, Vec<_>) =
-            notarizes.into_iter().map(|n| (n.proposal, n.part)).unzip();
+        let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
+            .into_iter()
+            .map(|n| (n.proposal, n.attestation))
+            .unzip();
 
         let proposal = &proposals[0];
 
@@ -210,7 +212,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             namespace,
             Subject::Notarize { proposal },
-            parts,
+            attestations,
         );
 
         self.notarizes_verified += verified.len();
@@ -219,7 +221,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(part, proposal)| Vote::Notarize(Notarize { proposal, part }))
+                .map(|(attestation, proposal)| {
+                    Vote::Notarize(Notarize {
+                        proposal,
+                        attestation,
+                    })
+                })
                 .collect(),
             invalid,
         )
@@ -289,7 +296,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             namespace,
             Subject::Nullify { round },
-            nullifies.into_iter().map(|nullify| nullify.part),
+            nullifies.into_iter().map(|nullify| nullify.attestation),
         );
 
         self.nullifies_verified += verified.len();
@@ -297,7 +304,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         (
             verified
                 .into_iter()
-                .map(|part| Vote::Nullify(Nullify { round, part }))
+                .map(|attestation| Vote::Nullify(Nullify { round, attestation }))
                 .collect(),
             invalid,
         )
@@ -354,8 +361,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, parts): (Vec<_>, Vec<_>) =
-            finalizes.into_iter().map(|n| (n.proposal, n.part)).unzip();
+        let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
+            .into_iter()
+            .map(|n| (n.proposal, n.attestation))
+            .unzip();
 
         let proposal = &proposals[0];
 
@@ -363,7 +372,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             namespace,
             Subject::Finalize { proposal },
-            parts,
+            attestations,
         );
 
         self.finalizes_verified += verified.len();
@@ -372,7 +381,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(part, proposal)| Vote::Finalize(Finalize { proposal, part }))
+                .map(|(attestation, proposal)| {
+                    Vote::Finalize(Finalize {
+                        proposal,
+                        attestation,
+                    })
+                })
                 .collect(),
             invalid,
         )
@@ -632,7 +646,7 @@ mod tests {
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
         verifier2.set_leader(leader_vote.signer());
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-        faulty_vote.part.signer = (schemes.len() as u32) + 10;
+        faulty_vote.attestation.signer = (schemes.len() as u32) + 10;
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {

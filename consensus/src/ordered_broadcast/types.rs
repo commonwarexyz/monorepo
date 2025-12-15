@@ -682,25 +682,29 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Part of the certificate for this chunk.
+    /// Attestation for this chunk.
     ///
-    /// This is a cryptographic part that can be combined with other parts
+    /// This is a cryptographic attestation that can be combined with other attestations
     /// to form a certificate once a quorum is reached.
-    pub part: Attestation<S>,
+    pub attestation: Attestation<S>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
-    /// Create a new ack with the given chunk, epoch, and part.
-    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, part: Attestation<S>) -> Self {
-        Self { chunk, epoch, part }
+    /// Create a new ack with the given chunk, epoch, and attestation.
+    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, attestation: Attestation<S>) -> Self {
+        Self {
+            chunk,
+            epoch,
+            attestation,
+        }
     }
 
     /// Verify the Ack.
     ///
-    /// This ensures that the part is valid for the given chunk and epoch,
+    /// This ensures that the attestation is valid for the given chunk and epoch,
     /// using the provided scheme.
     ///
-    /// Returns true if the part is valid, false otherwise.
+    /// Returns true if the attestation is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<P, D>,
@@ -710,7 +714,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.part)
+        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.attestation)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -726,8 +730,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &chunk,
             epoch,
         };
-        let part = scheme.sign::<D>(&ack_namespace, ctx)?;
-        Some(Self::new(chunk, epoch, part))
+        let attestation = scheme.sign::<D>(&ack_namespace, ctx)?;
+        Some(Self::new(chunk, epoch, attestation))
     }
 }
 
@@ -735,7 +739,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
-        self.part.write(writer);
+        self.attestation.write(writer);
     }
 }
 
@@ -745,14 +749,18 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let part = Attestation::read(reader)?;
-        Ok(Self { chunk, epoch, part })
+        let attestation = Attestation::read(reader)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            attestation,
+        })
     }
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + self.epoch.encode_size() + self.part.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
     }
 }
 
@@ -766,8 +774,12 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let chunk = Chunk::<P, D>::arbitrary(u)?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let part = Part::arbitrary(u)?;
-        Ok(Self { chunk, epoch, part })
+        let attestation = Attestation::arbitrary(u)?;
+        Ok(Self {
+            chunk,
+            epoch,
+            attestation,
+        })
     }
 }
 
@@ -1328,18 +1340,22 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let part = fixture.schemes[0]
+        let attestation = fixture.schemes[0]
             .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
 
-        let ack = Ack::<PublicKey, S, Sha256Digest> { chunk, epoch, part };
+        let ack = Ack::<PublicKey, S, Sha256Digest> {
+            chunk,
+            epoch,
+            attestation,
+        };
         let encoded = ack.encode();
         let decoded =
             Ack::<PublicKey, S, Sha256Digest>::read_cfg(&mut encoded.as_ref(), &()).unwrap();
 
         assert_eq!(decoded.chunk, ack.chunk);
         assert_eq!(decoded.epoch, ack.epoch);
-        assert_eq!(decoded.part.signer, ack.part.signer);
+        assert_eq!(decoded.attestation.signer, ack.attestation.signer);
     }
 
     #[test]

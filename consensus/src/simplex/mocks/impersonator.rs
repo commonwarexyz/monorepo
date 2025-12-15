@@ -64,10 +64,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hash
                         Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.part.signer == 0 {
-                        n.part.signer = 1;
+                    if n.attestation.signer == 0 {
+                        n.attestation.signer = 1;
                     } else {
-                        n.part.signer = 0;
+                        n.attestation.signer = 0;
                     }
 
                     // Send invalid message
@@ -80,10 +80,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hash
                         Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.part.signer == 0 {
-                        f.part.signer = 1;
+                    if f.attestation.signer == 0 {
+                        f.attestation.signer = 1;
                     } else {
-                        f.part.signer = 0;
+                        f.attestation.signer = 0;
                     }
 
                     // Send invalid message

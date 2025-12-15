@@ -73,17 +73,17 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
         match evidence {
             Evidence::Certificate(_) => None,
             Evidence::Partials(p) => {
-                if !p.signers.insert(ack.part.signer) {
+                if !p.signers.insert(ack.attestation.signer) {
                     // Validator already signed
                     return None;
                 }
 
                 // Add the vote
-                let parts = p.parts.entry(ack.chunk.payload).or_default();
-                parts.push(ack.part.clone());
+                let attestations = p.parts.entry(ack.chunk.payload).or_default();
+                attestations.push(ack.attestation.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble(parts.iter().cloned())?;
+                let certificate = scheme.assemble(attestations.iter().cloned())?;
 
                 // Take ownership of the votes, which must exist
                 p.parts.remove(&ack.chunk.payload);
@@ -186,10 +186,14 @@ mod tests {
                 chunk: &chunk,
                 epoch,
             };
-            let part = scheme
+            let attestation = scheme
                 .sign::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
-            Ack { chunk, epoch, part }
+            Ack {
+                chunk,
+                epoch,
+                attestation,
+            }
         }
 
         /// Create a vector of acks for the given scheme indices.

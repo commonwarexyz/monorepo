@@ -507,10 +507,10 @@ impl<
 
         // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.part.signer) {
+        if acks.contains_key(&ack.attestation.signer) {
             return Ok(());
         }
-        acks.insert(ack.part.signer, ack.clone());
+        acks.insert(ack.attestation.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
         let filtered = acks
@@ -621,7 +621,7 @@ impl<
         let Some(signer) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if signer != ack.part.signer {
+        if signer != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
 
@@ -644,7 +644,7 @@ impl<
             None => false,
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.part.signer)),
+                .is_some_and(|acks| acks.contains_key(&ack.attestation.signer)),
             Some(Pending::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
@@ -653,7 +653,7 @@ impl<
                 }
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.part.signer))
+                    .is_some_and(|acks| acks.contains_key(&ack.attestation.signer))
             }
         };
         if have_ack {
@@ -844,7 +844,7 @@ impl<
             let our_digest = our_signer.and_then(|signer| {
                 acks_group
                     .iter()
-                    .find(|ack| ack.epoch == self.epoch && ack.part.signer == signer)
+                    .find(|ack| ack.epoch == self.epoch && ack.attestation.signer == signer)
                     .map(|ack| ack.item.digest)
             });
 
@@ -859,7 +859,7 @@ impl<
                 epoch_map
                     .entry(ack.epoch)
                     .or_insert_with(BTreeMap::new)
-                    .insert(ack.part.signer, ack);
+                    .insert(ack.attestation.signer, ack);
             }
 
             // Insert as Verified if we have our own ack (meaning we verified the digest),

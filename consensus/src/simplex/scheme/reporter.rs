@@ -186,7 +186,7 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let part = schemes[1]
+        let attestation = schemes[1]
             .sign::<Sha256Digest>(
                 &[], // Invalid namespace
                 Subject::Notarize {
@@ -194,7 +194,10 @@ mod tests {
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, part };
+        let notarize = Notarize {
+            proposal,
+            attestation,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -224,7 +227,7 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let part = schemes[1]
+        let attestation = schemes[1]
             .sign::<Sha256Digest>(
                 &[], // Invalid namespace
                 Subject::Notarize {
@@ -232,7 +235,10 @@ mod tests {
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, part };
+        let notarize = Notarize {
+            proposal,
+            attestation,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -313,7 +319,7 @@ mod tests {
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let part = schemes[1]
+        let attestation = schemes[1]
             .sign::<Sha256Digest>(
                 NAMESPACE,
                 Subject::Notarize {
@@ -322,7 +328,10 @@ mod tests {
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, part };
+        let notarize = Notarize {
+            proposal,
+            attestation,
+        };
 
         // Report peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -347,7 +356,7 @@ mod tests {
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let part = schemes[1]
+        let attestation = schemes[1]
             .sign::<Sha256Digest>(
                 NAMESPACE,
                 Subject::Notarize {
@@ -356,7 +365,10 @@ mod tests {
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, part };
+        let notarize = Notarize {
+            proposal,
+            attestation,
+        };
 
         // Report the peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));
