@@ -53,7 +53,8 @@ impl<S: Scheme, C: Signer> MockProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> ProviderTrait<Epoch> for MockProvider<S, C> {
+impl<S: Scheme, C: Signer> ProviderTrait for MockProvider<S, C> {
+    type Key = Epoch;
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

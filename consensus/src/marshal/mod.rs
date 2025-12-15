@@ -153,7 +153,7 @@ mod tests {
     type K = PublicKey;
     type V = MinPk;
     type S = bls12381_threshold::Scheme<K, V>;
-    type P = ConstantProvider<S>;
+    type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);

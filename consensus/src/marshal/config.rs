@@ -10,7 +10,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub struct Config<B, P>
 where
     B: Block,
-    P: Provider<Epoch>,
+    P: Provider<Key = Epoch>,
 {
     /// Provider for epoch-specific signing schemes.
     pub scheme_provider: P,

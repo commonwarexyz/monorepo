@@ -17,27 +17,32 @@ pub struct Fixture<S> {
     pub verifier: S,
 }
 
-/// A scheme provider that always returns the same scheme regardless of epoch.
+/// A scheme provider that always returns the same scheme regardless of key.
 ///
-/// Useful for unit tests that don't need to test epoch transitions.
+/// Useful for unit tests that don't need to test key transitions.
 #[derive(Clone, Debug)]
-pub struct ConstantProvider<S: Scheme> {
+pub struct ConstantProvider<S: Scheme, K = ()> {
     scheme: Arc<S>,
+    _key: core::marker::PhantomData<K>,
 }
 
-impl<S: Scheme> ConstantProvider<S> {
+impl<S: Scheme, K> ConstantProvider<S, K> {
     /// Creates a new provider that always returns the given scheme.
     pub fn new(scheme: S) -> Self {
         Self {
             scheme: Arc::new(scheme),
+            _key: core::marker::PhantomData,
         }
     }
 }
 
-impl<S: Scheme, E> crate::certificate::Provider<E> for ConstantProvider<S> {
+impl<S: Scheme, K: Clone + Send + Sync + 'static> crate::certificate::Provider
+    for ConstantProvider<S, K>
+{
+    type Key = K;
     type Scheme = S;
 
-    fn scheme(&self, _epoch: E) -> Option<Arc<S>> {
+    fn scheme(&self, _: K) -> Option<Arc<S>> {
         Some(self.scheme.clone())
     }
 
@@ -49,23 +54,25 @@ impl<S: Scheme, E> crate::certificate::Provider<E> for ConstantProvider<S> {
 /// A provider that allows dynamically setting the returned scheme.
 ///
 /// Useful for tests that need to modify the scheme during execution (e.g., to simulate
-/// epoch transitions or scheme failures).
+/// key transitions or scheme failures).
 #[derive(Clone, Debug)]
-pub struct MockProvider<S: Scheme> {
+pub struct MockProvider<S: Scheme, K = ()> {
     scheme: Arc<std::sync::RwLock<Option<Arc<S>>>>,
+    _key: core::marker::PhantomData<K>,
 }
 
-impl<S: Scheme> Default for MockProvider<S> {
+impl<S: Scheme, K> Default for MockProvider<S, K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Scheme> MockProvider<S> {
+impl<S: Scheme, K> MockProvider<S, K> {
     /// Creates a new mock provider with no scheme set.
     pub fn new() -> Self {
         Self {
             scheme: Arc::new(std::sync::RwLock::new(None)),
+            _key: core::marker::PhantomData,
         }
     }
 
@@ -73,6 +80,7 @@ impl<S: Scheme> MockProvider<S> {
     pub fn with_scheme(scheme: S) -> Self {
         Self {
             scheme: Arc::new(std::sync::RwLock::new(Some(Arc::new(scheme)))),
+            _key: core::marker::PhantomData,
         }
     }
 
@@ -82,10 +90,13 @@ impl<S: Scheme> MockProvider<S> {
     }
 }
 
-impl<S: Scheme, E> crate::certificate::Provider<E> for MockProvider<S> {
+impl<S: Scheme, K: Clone + Send + Sync + 'static> crate::certificate::Provider
+    for MockProvider<S, K>
+{
+    type Key = K;
     type Scheme = S;
 
-    fn scheme(&self, _epoch: E) -> Option<Arc<S>> {
+    fn scheme(&self, _: K) -> Option<Arc<S>> {
         self.scheme.read().unwrap().clone()
     }
 }

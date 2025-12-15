@@ -275,27 +275,29 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
-/// Supplies the signing scheme for a given epoch.
+/// Supplies the signing scheme for a given key.
 ///
-/// This trait is generic over the epoch type `E`, allowing implementations to work
-/// with any epoch representation. The consensus crate provides a concrete `Epoch` type.
-pub trait Provider<E>: Clone + Send + Sync + 'static {
+/// This trait uses an associated `Key` type, allowing implementations to work
+/// with any key representation (e.g., epoch numbers, block heights, etc.).
+pub trait Provider: Clone + Send + Sync + 'static {
+    /// The key type used to look up schemes.
+    type Key: Clone + Send + Sync + 'static;
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
-    /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: E) -> Option<Arc<Self::Scheme>>;
+    /// Return the signing scheme that corresponds to `key`.
+    fn scheme(&self, key: Self::Key) -> Option<Arc<Self::Scheme>>;
 
-    /// Return a certificate verifier that can validate certificates independent of epoch.
+    /// Return a certificate verifier that can validate certificates independent of key.
     ///
     /// This method allows implementations to provide a verifier that can validate
-    /// certificates from any epoch (without epoch-specific state). For example,
+    /// certificates from any key (without key-specific state). For example,
     /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
     /// can be used to verify certificates from any epoch, even after the committee
     /// has rotated and the underlying secret shares have been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
-    /// [`Provider::scheme`] for epoch-specific verification.
+    /// [`Provider::scheme`] for key-specific verification.
     fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
         None
     }

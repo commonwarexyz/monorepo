@@ -41,7 +41,8 @@ impl<S: Scheme> MockProvider<S> {
     }
 }
 
-impl<S: Scheme> Provider<Epoch> for MockProvider<S> {
+impl<S: Scheme> Provider for MockProvider<S> {
+    type Key = Epoch;
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

@@ -32,7 +32,8 @@ impl<P: PublicKey, S: Scheme> Validators<P, S> {
     }
 }
 
-impl<P: PublicKey, S: Scheme> Provider<Epoch> for Validators<P, S> {
+impl<P: PublicKey, S: Scheme> Provider for Validators<P, S> {
+    type Key = Epoch;
     type Scheme = S;
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
