@@ -571,6 +571,8 @@ mod test {
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
+            let mut delayed_started = false;
+            let mut delayed_acknowledged: HashSet<PublicKey> = HashSet::new();
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(Crash::Random { frequency, .. }) = &self.crash {
                 let frequency = *frequency;
@@ -598,8 +600,17 @@ mod test {
                                 failures += 1;
                                 (epoch, None)
                             }
-                            Update::Success { epoch, output, .. } => {
-                                info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
+                            Update::Success { epoch, output, share } => {
+                                let has_share = share.is_some();
+                                info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
+
+                                // Check if a delayed participant got an acknowledged share
+                                if delayed.contains(&update.pk) && share.is_some() {
+                                    if output.is_acknowledged(&update.pk) {
+                                        info!(pk = ?update.pk, "delayed participant acknowledged");
+                                        delayed_acknowledged.insert(update.pk.clone());
+                                    }
+                                }
 
                                 (epoch, Some(output))
                             }
@@ -644,9 +655,26 @@ mod test {
                         }
 
                         // Check if all non-delayed participants have reached this epoch
-                        let active_count = self.total as usize - delayed.len();
+                        let active_count = if delayed_started {
+                            self.total as usize
+                        } else {
+                            self.total as usize - delayed.len()
+                        };
                         if status.values().filter(|x| **x >= epoch).count() >= active_count {
                             if successes >= target {
+                                // Verify all delayed participants got acknowledged shares
+                                if matches!(self.crash, Some(Crash::Delay { .. })) {
+                                    let unacknowledged: Vec<_> = delayed
+                                        .iter()
+                                        .filter(|pk| !delayed_acknowledged.contains(*pk))
+                                        .collect();
+                                    if !unacknowledged.is_empty() {
+                                        return Err(anyhow!(
+                                            "delayed participants not acknowledged: {:?}",
+                                            unacknowledged
+                                        ));
+                                    }
+                                }
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
                                     failures,
@@ -655,17 +683,20 @@ mod test {
                                 current_epoch = current_epoch.next();
 
                                 // Start delayed participants after the specified number of epochs
-                                if let Some(Crash::Delay { after, .. }) = &self.crash {
-                                    if current_epoch.get() == *after {
-                                        info!(epoch = ?current_epoch, "starting delayed participants");
-                                        for pk in delayed.iter() {
-                                            team.start_participant(
-                                                &ctx,
-                                                &mut oracle,
-                                                updates_in.clone(),
-                                                pk.clone(),
-                                            )
-                                            .await;
+                                if !delayed_started {
+                                    if let Some(Crash::Delay { after, .. }) = &self.crash {
+                                        if current_epoch.get() == *after {
+                                            info!(epoch = ?current_epoch, "starting delayed participants");
+                                            for pk in delayed.iter() {
+                                                team.start_participant(
+                                                    &ctx,
+                                                    &mut oracle,
+                                                    updates_in.clone(),
+                                                    pk.clone(),
+                                                )
+                                                .await;
+                                            }
+                                            delayed_started = true;
                                         }
                                     }
                                 }
