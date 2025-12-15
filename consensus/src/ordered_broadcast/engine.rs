@@ -16,7 +16,7 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
-    scheme::SchemeProvider,
+    scheme::Provider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
@@ -64,7 +64,7 @@ pub struct Engine<
     E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
-    P: SchemeProvider<Epoch, Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+    P: Provider<Epoch, Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
@@ -200,10 +200,7 @@ impl<
         E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: SchemeProvider<
-            Epoch,
-            Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>,
-        >,
+        P: Provider<Epoch, Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,

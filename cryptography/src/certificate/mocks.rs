@@ -5,7 +5,7 @@ use crate::{
         dkg::deal,
         primitives::{group, ops::compute_public, sharing::Sharing, variant::Variant},
     },
-    certificate::{Scheme, SchemeProvider},
+    certificate::{Provider, Scheme},
     ed25519, Signer as _,
 };
 use commonware_math::algebra::Random;
@@ -196,11 +196,11 @@ where
 ///
 /// Useful for unit tests that don't need to test epoch transitions.
 #[derive(Clone, Debug)]
-pub struct SingleSchemeProvider<S: Scheme> {
+pub struct ConstantProvider<S: Scheme> {
     scheme: Arc<S>,
 }
 
-impl<S: Scheme> SingleSchemeProvider<S> {
+impl<S: Scheme> ConstantProvider<S> {
     /// Creates a new provider that always returns the given scheme.
     pub fn new(scheme: S) -> Self {
         Self {
@@ -209,7 +209,7 @@ impl<S: Scheme> SingleSchemeProvider<S> {
     }
 }
 
-impl<S: Scheme, E> SchemeProvider<E> for SingleSchemeProvider<S> {
+impl<S: Scheme, E> Provider<E> for ConstantProvider<S> {
     type Scheme = S;
 
     fn scheme(&self, _epoch: E) -> Option<Arc<S>> {
@@ -257,7 +257,7 @@ impl<S: Scheme> MockSchemeProvider<S> {
     }
 }
 
-impl<S: Scheme, E> SchemeProvider<E> for MockSchemeProvider<S> {
+impl<S: Scheme, E> Provider<E> for MockSchemeProvider<S> {
     type Scheme = S;
 
     fn scheme(&self, _epoch: E) -> Option<Arc<S>> {

@@ -1,7 +1,7 @@
 //! Types used in [crate::ordered_broadcast].
 
 use super::scheme::OrderedBroadcastScheme;
-use crate::{scheme::SchemeProvider, types::Epoch};
+use crate::{scheme::Provider, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -447,7 +447,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        scheme_provider: &impl SchemeProvider<Epoch, Scheme = S>,
+        scheme_provider: &impl Provider<Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -528,7 +528,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// 5. Decodes the certificate using the epoch-specific bounded codec config
     pub fn read_staged(
         reader: &mut impl Buf,
-        provider: &impl SchemeProvider<Epoch, Scheme = S>,
+        provider: &impl Provider<Epoch, Scheme = S>,
     ) -> Result<Self, CodecError> {
         // Decode chunk and signature
         let chunk = Chunk::read(reader)?;
@@ -1048,9 +1048,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks::{
-            fixtures::{
-                bls12381_multisig, bls12381_threshold, ed25519, Fixture, SingleSchemeProvider,
-            },
+            fixtures::{bls12381_multisig, bls12381_threshold, ed25519, ConstantProvider, Fixture},
             Validators,
         },
         scheme::OrderedBroadcastScheme,
@@ -1239,7 +1237,7 @@ mod tests {
 
         // Create a provider that returns the verifier for any epoch.
         // This simulates the normal case where the scheme is available.
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
 
         // Create common test data: a sequencer public key and the chunk namespace.
         let public_key = fixture.participants[0].clone();
@@ -1550,7 +1548,7 @@ mod tests {
             None,
         );
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
         let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -1764,7 +1762,7 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier);
+        let provider = ConstantProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a node with invalid signature
@@ -1834,7 +1832,7 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a parent with invalid certificate

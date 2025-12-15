@@ -201,7 +201,7 @@ mod tests {
             let monitor = mocks::Monitor::new(epoch);
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
-            // Create SchemeProvider and register only this validator's scheme for the epoch
+            // Create Provider and register only this validator's scheme for the epoch
             let validators_provider = mocks::Validators::new(fixture.participants.clone());
             assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
@@ -710,7 +710,7 @@ mod tests {
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
 
-                // Create and store SchemeProvider so we can register new epochs later
+                // Create and store Provider so we can register new epochs later
                 let validators_provider = mocks::Validators::new(fixture.participants.clone());
                 assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
                 validators_providers.insert(validator.clone(), validators_provider.clone());
@@ -861,7 +861,7 @@ mod tests {
                 let monitor = mocks::Monitor::new(epoch);
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
-                // Create SchemeProvider and register this validator's scheme
+                // Create Provider and register this validator's scheme
                 let validators_provider = mocks::Validators::new(fixture.participants.clone());
                 assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 

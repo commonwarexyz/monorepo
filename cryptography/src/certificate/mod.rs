@@ -277,7 +277,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 ///
 /// This trait is generic over the epoch type `E`, allowing implementations to work
 /// with any epoch representation. The consensus crate provides a concrete `Epoch` type.
-pub trait SchemeProvider<E>: Clone + Send + Sync + 'static {
+pub trait Provider<E>: Clone + Send + Sync + 'static {
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
@@ -293,7 +293,7 @@ pub trait SchemeProvider<E>: Clone + Send + Sync + 'static {
     /// has rotated and the underlying secret shares have been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
-    /// [`SchemeProvider::scheme`] for epoch-specific verification.
+    /// [`Provider::scheme`] for epoch-specific verification.
     fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
         None
     }

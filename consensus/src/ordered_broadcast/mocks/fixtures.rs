@@ -3,7 +3,7 @@
 use crate::ordered_broadcast::scheme::{
     bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
 };
-pub use certificate_mocks::{ed25519_participants, Fixture, SingleSchemeProvider};
+pub use certificate_mocks::{ed25519_participants, ConstantProvider, Fixture};
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::mocks as certificate_mocks, ed25519,
 };

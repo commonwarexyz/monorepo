@@ -38,7 +38,7 @@
 //! - [crate::Automaton]: Provides external digests
 //! - [crate::Reporter]: Receives agreement confirmations
 //! - [crate::Monitor]: Tracks epoch transitions
-//! - [crate::scheme::SchemeProvider]: Manages validator sets and network identities
+//! - [crate::scheme::Provider]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!
@@ -201,8 +201,8 @@ mod tests {
         for (idx, participant) in fixture.participants.iter().enumerate() {
             let context = context.with_label(&participant.to_string());
 
-            // Create SchemeProvider and register scheme for epoch
-            let scheme_provider = mocks::SchemeProvider::new();
+            // Create Provider and register scheme for epoch
+            let scheme_provider = mocks::Provider::new();
             assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
             // Create monitor
@@ -438,8 +438,8 @@ mod tests {
                     for (idx, participant) in fixture.participants.iter().enumerate() {
                         let validator_context = context.with_label(&participant.to_string());
 
-                        // Create SchemeProvider and register scheme for epoch
-                        let scheme_provider = mocks::SchemeProvider::new();
+                        // Create Provider and register scheme for epoch
+                        let scheme_provider = mocks::Provider::new();
                         assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                         // Create monitor
@@ -587,8 +587,8 @@ mod tests {
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context.with_label(&participant.to_string());
 
-                    // Create SchemeProvider and register scheme for epoch
-                    let scheme_provider = mocks::SchemeProvider::new();
+                    // Create Provider and register scheme for epoch
+                    let scheme_provider = mocks::Provider::new();
                     assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
@@ -670,8 +670,8 @@ mod tests {
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context.with_label(&participant.to_string());
 
-                    // Create SchemeProvider and register scheme for epoch
-                    let scheme_provider = mocks::SchemeProvider::new();
+                    // Create Provider and register scheme for epoch
+                    let scheme_provider = mocks::Provider::new();
                     assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
@@ -982,8 +982,8 @@ mod tests {
             for (idx, participant) in fixture.participants.iter().take(2).enumerate() {
                 let context = context.with_label(&participant.to_string());
 
-                // Create SchemeProvider and register scheme for epoch
-                let scheme_provider = mocks::SchemeProvider::new();
+                // Create Provider and register scheme for epoch
+                let scheme_provider = mocks::Provider::new();
                 assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
 
                 // Create monitor

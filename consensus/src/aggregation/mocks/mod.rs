@@ -8,4 +8,4 @@ pub use monitor::Monitor;
 mod reporter;
 pub use reporter::{Mailbox as ReporterMailbox, Reporter};
 mod scheme_provider;
-pub use scheme_provider::SchemeProvider;
+pub use scheme_provider::Provider;
