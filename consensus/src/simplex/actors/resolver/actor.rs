@@ -26,7 +26,8 @@ use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, error};
+use crate::simplex::actors::observer;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -86,8 +87,9 @@ impl<
         voter: voter::Mailbox<S, D>,
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
+        observer: Option<observer::Mailbox<S, D>>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
+        spawn_cell!(self.context, self.run(voter, sender, receiver, observer).await)
     }
 
     async fn run(
@@ -95,6 +97,7 @@ impl<
         mut voter: voter::Mailbox<S, D>,
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
+        mut observer: Option<observer::Mailbox<S, D>>,
     ) {
         let participants = self.scheme.participants().clone();
         let me = self
@@ -139,7 +142,8 @@ impl<
                 let Some(message) = mailbox else {
                     break;
                 };
-                self.state.handle(message, &mut resolver).await;
+                self.state.handle(message.clone(), &mut resolver).await;
+                Self::broadcast_to_observers(&mut observer, message).await;
             },
             handler = handler_rx.next() => {
                 let Some(message) = handler else {
@@ -260,5 +264,13 @@ impl<
                 let _ = response.send(voter.encode().into());
             }
         }
+    }
+
+    async fn broadcast_to_observers(observer: &mut Option<observer::Mailbox<S, D>>, cert: Certificate<S, D>) {
+        let Some(observer) = observer else {
+            return;
+        };
+
+        observer.send(cert).await;
     }
 }
