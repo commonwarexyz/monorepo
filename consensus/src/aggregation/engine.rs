@@ -81,7 +81,7 @@ pub struct Engine<
     context: ContextCell<E>,
     automaton: A,
     monitor: M,
-    scheme_provider: P,
+    provider: P,
     reporter: Z,
     blocker: B,
 
@@ -173,7 +173,7 @@ impl<
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            scheme_provider: cfg.scheme_provider,
+            provider: cfg.provider,
             blocker: cfg.blocker,
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
@@ -201,7 +201,7 @@ impl<
 
     /// Gets the scheme for a given epoch, returning an error if unavailable.
     fn scheme(&self, epoch: Epoch) -> Result<Arc<P::Scheme>, Error> {
-        self.scheme_provider
+        self.provider
             .scoped(epoch)
             .ok_or(Error::UnknownEpoch(epoch))
     }

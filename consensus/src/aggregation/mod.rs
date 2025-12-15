@@ -200,8 +200,8 @@ mod tests {
             let context = context.with_label(&participant.to_string());
 
             // Create Provider and register scheme for epoch
-            let scheme_provider = mocks::Provider::new();
-            assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
+            let provider = mocks::Provider::new();
+            assert!(provider.register(epoch, fixture.schemes[idx].clone()));
 
             // Create monitor
             let monitor = mocks::Monitor::new(epoch);
@@ -228,7 +228,7 @@ mod tests {
                 context.with_label("engine"),
                 Config {
                     monitor,
-                    scheme_provider,
+                    provider,
                     automaton,
                     reporter: reporter_mailbox,
                     blocker,
@@ -437,8 +437,8 @@ mod tests {
                         let validator_context = context.with_label(&participant.to_string());
 
                         // Create Provider and register scheme for epoch
-                        let scheme_provider = mocks::Provider::new();
-                        assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
+                        let provider = mocks::Provider::new();
+                        assert!(provider.register(epoch, fixture.schemes[idx].clone()));
 
                         // Create monitor
                         let monitor = mocks::Monitor::new(epoch);
@@ -459,7 +459,7 @@ mod tests {
                             validator_context.with_label("engine"),
                             Config {
                                 monitor,
-                                scheme_provider,
+                                provider,
                                 automaton,
                                 reporter: reporter_mailbox.clone(),
                                 blocker,
@@ -586,8 +586,8 @@ mod tests {
                     let validator_context = context.with_label(&participant.to_string());
 
                     // Create Provider and register scheme for epoch
-                    let scheme_provider = mocks::Provider::new();
-                    assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
+                    let provider = mocks::Provider::new();
+                    assert!(provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
                     let monitor = mocks::Monitor::new(epoch);
@@ -604,7 +604,7 @@ mod tests {
                         validator_context.with_label("engine"),
                         Config {
                             monitor,
-                            scheme_provider,
+                            provider,
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
@@ -669,8 +669,8 @@ mod tests {
                     let validator_context = context.with_label(&participant.to_string());
 
                     // Create Provider and register scheme for epoch
-                    let scheme_provider = mocks::Provider::new();
-                    assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
+                    let provider = mocks::Provider::new();
+                    assert!(provider.register(epoch, fixture.schemes[idx].clone()));
 
                     // Create monitor
                     let monitor = mocks::Monitor::new(epoch);
@@ -686,7 +686,7 @@ mod tests {
                         validator_context.with_label("engine"),
                         Config {
                             monitor,
-                            scheme_provider,
+                            provider,
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
@@ -985,8 +985,8 @@ mod tests {
                 let context = context.with_label(&participant.to_string());
 
                 // Create Provider and register scheme for epoch
-                let scheme_provider = mocks::Provider::new();
-                assert!(scheme_provider.register(epoch, fixture.schemes[idx].clone()));
+                let provider = mocks::Provider::new();
+                assert!(provider.register(epoch, fixture.schemes[idx].clone()));
 
                 // Create monitor
                 let monitor = mocks::Monitor::new(epoch);
@@ -1008,7 +1008,7 @@ mod tests {
                     context.with_label("engine"),
                     Config {
                         monitor,
-                        scheme_provider,
+                        provider,
                         automaton,
                         reporter: reporter_mailbox,
                         blocker,

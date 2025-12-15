@@ -26,7 +26,7 @@ pub struct Config<
     pub monitor: M,
 
     /// Provider for epoch-specific signing schemes.
-    pub scheme_provider: P,
+    pub provider: P,
 
     /// Proposes and verifies [Digest]s.
     pub automaton: A,
