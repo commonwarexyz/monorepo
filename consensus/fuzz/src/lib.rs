@@ -202,12 +202,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
                 context.with_label("disrupter"),
-                validator.clone(),
                 scheme,
-                participants
-                    .clone()
-                    .try_into()
-                    .expect("public keys are unique"),
                 namespace.clone(),
                 input.clone(),
             );

@@ -10,12 +10,11 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
-use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand::{prelude::IteratorRandom, CryptoRng, Rng};
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -33,9 +32,7 @@ pub enum Mutation {
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
 pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     context: E,
-    validator: PublicKey,
     scheme: S,
-    participants: Set<PublicKey>,
     namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     last_vote: u64,
@@ -49,14 +46,7 @@ impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
-    pub fn new(
-        context: E,
-        validator: PublicKey,
-        scheme: S,
-        participants: Set<PublicKey>,
-        namespace: Vec<u8>,
-        fuzz_input: FuzzInput,
-    ) -> Self {
+    pub fn new(context: E, scheme: S, namespace: Vec<u8>, fuzz_input: FuzzInput) -> Self {
         Self {
             last_vote: 0,
             last_finalized: 0,
@@ -64,9 +54,7 @@ where
             last_notarized: 0,
             latest_proposals: VecDeque::new(),
             context,
-            validator,
             scheme,
-            participants,
             namespace,
             fuzz_input,
         }
@@ -271,9 +259,18 @@ where
 
     pub fn start(
         self,
-        vote_network: (impl Sender, impl Receiver),
-        certificate_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) -> Handle<()> {
         let context = self.context.clone();
         context.spawn(|_| self.run(vote_network, certificate_network, resolver_network))
@@ -281,9 +278,18 @@ where
 
     async fn run(
         mut self,
-        vote_network: (impl Sender, impl Receiver),
-        certificate_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) {
         let (mut vote_sender, mut vote_receiver) = vote_network;
         let (mut cert_sender, mut cert_receiver) = certificate_network;
@@ -291,7 +297,7 @@ where
 
         loop {
             // Send disruptive messages across all channels
-            match self.fuzz_input.random_byte() % 6 {
+            match self.fuzz_input.random_byte() % 7 {
                 0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
                 2 => {
@@ -304,6 +310,10 @@ where
                 }
                 4 => {
                     self.send_random_message(&mut resolver_sender).await;
+                }
+                5 => {
+                    // flood random victim
+                    self.flood_victim(&mut vote_sender).await;
                 }
                 _ => {
                     // Send on multiple channels simultaneously
@@ -478,6 +488,30 @@ where
         }
     }
 
+    async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        let (_, victim) = self
+            .scheme
+            .participants()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index as u32 != self.scheme.me().unwrap())
+            .choose(&mut self.context)
+            .unwrap();
+        let victim = victim.clone();
+
+        // Send 10 messages to victim
+        for _ in 0..10 {
+            let proposal = self.get_proposal();
+            let msg = proposal.encode().into();
+            let _ = sender
+                .send(Recipients::One(victim.clone()), msg, true)
+                .await;
+            // Also send a random vote directly to the victim to vary disruption.
+            self.send_random_vote_to(sender, Recipients::One(victim.clone()))
+                .await;
+        }
+    }
+
     async fn send_proposal(&mut self, sender: &mut impl Sender) {
         let proposal = self.get_proposal();
         let msg = proposal.encode().into();
@@ -489,20 +523,28 @@ where
         let _ = sender.send(Recipients::All, cert.into(), true).await;
     }
 
-    async fn send_random_vote(&mut self, sender: &mut impl Sender) {
+    async fn send_random_vote(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        self.send_random_vote_to(sender, Recipients::All).await;
+    }
+
+    async fn send_random_vote_to(
+        &mut self,
+        sender: &mut impl Sender<PublicKey = S::PublicKey>,
+        recipients: Recipients<S::PublicKey>,
+    ) {
         let proposal = self.get_proposal();
 
         match self.message() {
             Message::Notarize => {
                 if let Some(vote) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().into();
-                    let _ = sender.send(Recipients::All, msg, true).await;
+                    let _ = sender.send(recipients, msg, true).await;
                 }
             }
             Message::Finalize => {
                 if let Some(vote) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().into();
-                    let _ = sender.send(Recipients::All, msg, true).await;
+                    let _ = sender.send(recipients, msg, true).await;
                 }
             }
             Message::Nullify => {
@@ -514,12 +556,12 @@ where
                     Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
                 {
                     let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().into();
-                    let _ = sender.send(Recipients::All, msg, true).await;
+                    let _ = sender.send(recipients, msg, true).await;
                 }
             }
             Message::Random => {
                 let bytes = self.bytes();
-                let _ = sender.send(Recipients::All, bytes.into(), true).await;
+                let _ = sender.send(recipients, bytes.into(), true).await;
             }
         }
     }
