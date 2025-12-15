@@ -104,7 +104,8 @@ mod tests {
             raw_bytes,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::seed_from_u64(seed)),
-            required_finalizations: containers,
+            required_containers: containers,
+            degraded_network_node: false,
         }
     }
 
@@ -121,7 +122,8 @@ mod tests {
                 raw_bytes,
                 offset: RefCell::new(0),
                 rng: RefCell::new(StdRng::seed_from_u64(seed)),
-                required_finalizations: PROPERTY_TEST_CONTAINERS,
+                required_containers: PROPERTY_TEST_CONTAINERS,
+                degraded_network_node: false,
             }
         })
     }
