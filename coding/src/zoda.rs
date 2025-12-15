@@ -438,6 +438,7 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
+            // TODO (#2506): use correct bounds on inclusion proof size
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
         })
@@ -592,7 +593,8 @@ pub enum Error {
     FailedToCreateInclusionProof(MmrError),
 }
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
+// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
+const NAMESPACE: &[u8] = b"commonware-zoda";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {
