@@ -18,13 +18,17 @@ use commonware_consensus::simplex::types::Context;
 use futures::channel::oneshot;
 use std::collections::BTreeMap;
 
-type PendingVerify = (Context<ConsensusDigest, PublicKey>, oneshot::Sender<bool>);
-type PendingVerifies = BTreeMap<ConsensusDigest, Vec<PendingVerify>>;
+struct VerifyRequest {
+    context: Context<ConsensusDigest, PublicKey>,
+    response: oneshot::Sender<bool>,
+}
+
+type VerifyRequestsByDigest = BTreeMap<ConsensusDigest, Vec<VerifyRequest>>;
 
 pub(super) struct BlockSync<S> {
     block_cfg: crate::types::BlockCfg,
     received: BTreeMap<ConsensusDigest, Block>,
-    pending_verifies: PendingVerifies,
+    pending_verify_requests: VerifyRequestsByDigest,
     gossip: S,
 }
 
@@ -36,7 +40,7 @@ where
         Self {
             block_cfg,
             received: BTreeMap::new(),
-            pending_verifies: BTreeMap::new(),
+            pending_verify_requests: BTreeMap::new(),
             gossip,
         }
     }
@@ -62,10 +66,10 @@ where
             return;
         }
 
-        self.pending_verifies
+        self.pending_verify_requests
             .entry(digest)
             .or_default()
-            .push((context, response));
+            .push(VerifyRequest { context, response });
     }
 
     pub(super) fn handle_block_received(
@@ -100,35 +104,35 @@ where
     }
 
     fn flush_pending_verifies(&mut self, store: &mut ChainStore, digest: ConsensusDigest) {
-        let Some(pending) = self.pending_verifies.remove(&digest) else {
+        let Some(pending) = self.pending_verify_requests.remove(&digest) else {
             return;
         };
 
         if store.get_by_digest(&digest).is_some() {
-            for (_, response) in pending {
-                let _ = response.send(true);
+            for request in pending {
+                let _ = request.response.send(true);
             }
             self.received.remove(&digest);
             return;
         }
 
-        for (context, response) in pending {
+        for request in pending {
             if store.get_by_digest(&digest).is_some() {
-                let _ = response.send(true);
+                let _ = request.response.send(true);
                 continue;
             }
             let block = match self.received.get(&digest).cloned() {
                 Some(b) => b,
                 None => {
-                    let _ = response.send(false);
+                    let _ = request.response.send(false);
                     continue;
                 }
             };
-            let ok = try_verify_and_insert(store, digest, &context, block).unwrap_or(false);
+            let ok = try_verify_and_insert(store, digest, &request.context, block).unwrap_or(false);
             if ok {
                 self.received.remove(&digest);
             }
-            let _ = response.send(ok);
+            let _ = request.response.send(ok);
         }
     }
 }
