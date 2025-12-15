@@ -410,12 +410,30 @@ mod test {
             self.handles.insert(pk, handle);
         }
 
+        /// Start a participant using the appropriate scheme based on whether
+        /// we have an initial output (reshare mode) or not (DKG mode).
+        async fn start_participant(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) {
+            if self.output.is_none() {
+                self.start_one::<EdScheme>(ctx, oracle, updates, pk).await;
+            } else {
+                self.start_one::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
+                    .await;
+            }
+        }
+
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
+            delayed: &HashSet<PublicKey>,
         ) {
             // Add links between all participants
             for v1 in self.participants.keys() {
@@ -430,33 +448,37 @@ mod test {
                 }
             }
 
-            // Start all participants (even if not active at first)
+            // Start participants that aren't delayed
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                if self.output.is_none() {
-                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
-                        .await;
-                } else {
-                    self.start_one::<ThresholdScheme<MinSig>>(
-                        ctx,
-                        oracle,
-                        updates.clone(),
-                        pk.clone(),
-                    )
-                    .await;
+                if delayed.contains(&pk) {
+                    info!(?pk, "delayed participant");
+                    continue;
                 }
+                self.start_participant(ctx, oracle, updates.clone(), pk)
+                    .await;
             }
         }
     }
 
-    /// Configuration for simulating participant crashes during a test.
+    /// Configuration for simulating participant unavailability during a test.
     #[derive(Clone)]
-    struct Crash {
-        /// How often to trigger crashes.
-        frequency: Duration,
-        /// How long crashed participants stay offline before restarting.
-        downtime: Duration,
-        /// Number of participants to crash each time.
-        count: usize,
+    enum Crash {
+        /// Randomly crash participants periodically.
+        Random {
+            /// How often to trigger crashes.
+            frequency: Duration,
+            /// How long crashed participants stay offline before restarting.
+            downtime: Duration,
+            /// Number of participants to crash each time.
+            count: usize,
+        },
+        /// Delay some participants from starting until after N epochs.
+        Delay {
+            /// Number of participants to delay.
+            count: usize,
+            /// Number of epochs to wait before starting delayed participants.
+            after: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -520,20 +542,38 @@ mod test {
             };
             team.failures = self.failures.clone();
 
+            // Determine which participants should be delayed
+            let delayed: HashSet<PublicKey> =
+                if let Some(Crash::Delay { count, .. }) = &self.crash {
+                    team.participants
+                        .keys()
+                        .take(*count)
+                        .cloned()
+                        .collect()
+                } else {
+                    HashSet::new()
+                };
+
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-            team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
-                .await;
+            team.start(
+                &ctx,
+                &mut oracle,
+                self.link.clone(),
+                updates_in.clone(),
+                &delayed,
+            )
+            .await;
 
-            // Set up crash ticker if needed
+            // Set up crash ticker if needed (only for Random crashes)
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
-            if let Some(crash) = &self.crash {
-                let frequency = crash.frequency;
+            if let Some(Crash::Random { frequency, .. }) = &self.crash {
+                let frequency = *frequency;
                 let mut crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
@@ -603,7 +643,9 @@ mod test {
                                 continue;
                         }
 
-                        if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
+                        // Check if all non-delayed participants have reached this epoch
+                        let active_count = self.total as usize - delayed.len();
+                        if status.values().filter(|x| **x >= epoch).count() >= active_count {
                             if successes >= target {
                                 return Ok(PlanResult {
                                     state: ctx.auditor().state(),
@@ -611,6 +653,22 @@ mod test {
                                 });
                             } else {
                                 current_epoch = current_epoch.next();
+
+                                // Start delayed participants after the specified number of epochs
+                                if let Some(Crash::Delay { after, .. }) = &self.crash {
+                                    if current_epoch.get() == *after {
+                                        info!(epoch = ?current_epoch, "starting delayed participants");
+                                        for pk in delayed.iter() {
+                                            team.start_participant(
+                                                &ctx,
+                                                &mut oracle,
+                                                updates_in.clone(),
+                                                pk.clone(),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
                             }
                         }
                     },
@@ -627,11 +685,11 @@ mod test {
                         }
                     },
                     _ = crash_receiver.next() => {
-                        // Crash ticker fired
-                        if let Some(crash) = &self.crash {
+                        // Crash ticker fired (only for Random crashes)
+                        if let Some(Crash::Random { count, downtime, .. }) = &self.crash {
                             // Pick multiple random participants to crash
                             let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
+                            let crash_count = (*count).min(all_participants.len());
                             let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
 
                             for pk in to_crash {
@@ -642,7 +700,7 @@ mod test {
 
                                     // Schedule restart after downtime
                                     let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
+                                    let downtime = *downtime;
                                     let pk_clone = pk.clone();
                                     ctx.clone().spawn(move |ctx| async move {
                                         if downtime > Duration::ZERO {
@@ -918,7 +976,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -942,7 +1000,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -966,7 +1024,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
@@ -990,10 +1048,58 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 4,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
+                count: 4,
             }),
             failures: HashSet::new(),
         }
@@ -1076,6 +1182,66 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0, 1]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([0, 1, 2, 3, 4]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(5),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay_subset() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![4, 5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(8),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
         }
         .run()
         .unwrap();

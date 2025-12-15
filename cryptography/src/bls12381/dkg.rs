@@ -335,6 +335,12 @@ pub struct Output<V: Variant, P> {
     summary: Summary,
     players: Set<P>,
     public: Sharing<V>,
+    /// The set of players whose shares may have been revealed to an adversary.
+    ///
+    /// A player is included in this set if more than `max_faults` dealer shares
+    /// had to be recovered from public reveals. In this case, an adversary
+    /// controlling `max_faults` dealers could have reconstructed the share.
+    revealed: Set<P>,
 }
 
 impl<V: Variant, P: Ord> Output<V, P> {
@@ -358,11 +364,39 @@ impl<V: Variant, P: Ord> Output<V, P> {
     pub const fn players(&self) -> &Set<P> {
         &self.players
     }
+
+    /// Return the set of players whose shares may have been revealed.
+    ///
+    /// These are players who had more than `max_faults` reveals.
+    pub const fn revealed(&self) -> &Set<P> {
+        &self.revealed
+    }
+
+    /// Returns true if a player's share was potentially revealed to an adversary.
+    ///
+    /// A share is considered revealed if more than `max_faults` dealer shares
+    /// had to be recovered from public reveals. In this case, an adversary
+    /// controlling `max_faults` dealers could have reconstructed the share.
+    pub fn is_revealed(&self, player: &P) -> bool {
+        self.revealed.position(player).is_some()
+    }
+
+    /// Returns true if a player's share was safely acknowledged.
+    ///
+    /// A share is considered acknowledged if at most `max_faults` dealer shares
+    /// had to be recovered from public reveals, meaning no single adversary could
+    /// have learned the full share.
+    pub fn is_acknowledged(&self, player: &P) -> bool {
+        self.revealed.position(player).is_none()
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
-        self.summary.encode_size() + self.players.encode_size() + self.public.encode_size()
+        self.summary.encode_size()
+            + self.players.encode_size()
+            + self.public.encode_size()
+            + self.revealed.encode_size()
     }
 }
 
@@ -371,6 +405,7 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
         self.summary.write(buf);
         self.players.write(buf);
         self.public.write(buf);
+        self.revealed.write(buf);
     }
 }
 
@@ -385,6 +420,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
             summary: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
             public: Read::read_cfg(buf, &max_players)?,
+            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players.get() as usize), ()))?,
         })
     }
 }
@@ -405,11 +441,13 @@ where
                 .collect::<Result<Vec<_>, _>>()?,
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let revealed = u.arbitrary()?;
 
         Ok(Self {
             summary,
             players,
             public,
+            revealed,
         })
     }
 }
@@ -1265,6 +1303,32 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         selected: Map<P, DealerLog<V, P>>,
         concurrency: usize,
     ) -> Result<Self, Error> {
+        // Count reveals per player across all selected dealer logs
+        let mut reveal_counts: BTreeMap<P, u32> = BTreeMap::new();
+        for log in selected.values() {
+            if let Some(iter) = log.zip_players(&info.players) {
+                for (player, result) in iter {
+                    if result.is_reveal() {
+                        *reveal_counts.entry(player.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        // Determine which players had too many reveals
+        let max_faults = info.players.max_faults();
+        let revealed: Set<P> = reveal_counts
+            .into_iter()
+            .filter_map(|(player, count)| {
+                if count > max_faults {
+                    Some(player)
+                } else {
+                    None
+                }
+            })
+            .try_collect()
+            .expect("players are unique");
+
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
                 .public()
@@ -1295,6 +1359,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             summary: info.summary,
             public: Sharing::new(info.mode, NZU32!(n), public),
             players: info.players,
+            revealed,
         };
         Ok(Self { output, weights })
     }
@@ -1384,6 +1449,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
+    /// The returned [`Output`] includes a `reveals` field that tracks how many
+    /// dealer shares each player had to recover from public reveals. Use
+    /// [`Output::is_revealed`] to check if a player's share may have been compromised.
+    ///
     /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
         self,
@@ -1469,6 +1538,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         summary: Summary::random(&mut rng),
         public: Sharing::new(mode, n, Poly::commit(private)),
         players,
+        revealed: Set::default(),
     };
     Ok((output, shares))
 }
