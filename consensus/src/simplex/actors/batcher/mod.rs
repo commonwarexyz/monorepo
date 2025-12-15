@@ -34,7 +34,7 @@ mod tests {
         simplex::{
             actors::voter,
             mocks,
-            scheme::{bls12381_multisig, ed25519 as ed_scheme, SimplexScheme},
+            scheme::{bls12381_multisig, SimplexScheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -43,6 +43,7 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
+    use crate::simplex::scheme as certificate;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -266,7 +267,7 @@ mod tests {
     fn test_certificate_forwarding_from_network() {
         certificate_forwarding_from_network(bls12381_multisig::fixture::<MinPk, _>);
         certificate_forwarding_from_network(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_forwarding_from_network(ed_scheme::fixture);
+        certificate_forwarding_from_network(certificate::ed25519::fixture);
     }
 
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
@@ -408,7 +409,7 @@ mod tests {
     fn test_quorum_votes_construct_certificate() {
         quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinPk, _>);
         quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        quorum_votes_construct_certificate(ed_scheme::fixture);
+        quorum_votes_construct_certificate(certificate::ed25519::fixture);
     }
 
     /// Test that if both votes and a certificate arrive, only one certificate is sent to voter.
@@ -598,7 +599,7 @@ mod tests {
     fn test_votes_and_certificate_deduplication() {
         votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinPk, _>);
         votes_and_certificate_deduplication(bls12381_multisig::fixture::<MinSig, _>);
-        votes_and_certificate_deduplication(ed_scheme::fixture);
+        votes_and_certificate_deduplication(certificate::ed25519::fixture);
     }
 
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
@@ -795,7 +796,7 @@ mod tests {
     fn test_conflicting_votes_dont_produce_invalid_certificate() {
         conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinPk, _>);
         conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        conflicting_votes_dont_produce_invalid_certificate(ed_scheme::fixture);
+        conflicting_votes_dont_produce_invalid_certificate(certificate::ed25519::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote AFTER setting the leader,
@@ -919,7 +920,7 @@ mod tests {
     fn test_proposal_forwarded_after_leader_set() {
         proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinPk, _>);
         proposal_forwarded_after_leader_set(bls12381_multisig::fixture::<MinSig, _>);
-        proposal_forwarded_after_leader_set(ed_scheme::fixture);
+        proposal_forwarded_after_leader_set(certificate::ed25519::fixture);
     }
 
     /// Test that when we receive a leader's notarize vote BEFORE setting the leader,
@@ -1042,7 +1043,7 @@ mod tests {
     fn test_proposal_forwarded_before_leader_set() {
         proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinPk, _>);
         proposal_forwarded_before_leader_set(bls12381_multisig::fixture::<MinSig, _>);
-        proposal_forwarded_before_leader_set(ed_scheme::fixture);
+        proposal_forwarded_before_leader_set(certificate::ed25519::fixture);
     }
 
     /// Test that leader activity detection works correctly:
@@ -1190,6 +1191,6 @@ mod tests {
     fn test_leader_activity_detection() {
         leader_activity_detection(bls12381_multisig::fixture::<MinPk, _>);
         leader_activity_detection(bls12381_multisig::fixture::<MinSig, _>);
-        leader_activity_detection(ed_scheme::fixture);
+        leader_activity_detection(certificate::ed25519::fixture);
     }
 }

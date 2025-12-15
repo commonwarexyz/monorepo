@@ -474,7 +474,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::ed25519 as ed_scheme,
+            scheme::ed25519,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
@@ -493,7 +493,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed_scheme::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -546,7 +546,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed_scheme::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -609,7 +609,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed_scheme::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -639,7 +639,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2029);
         let Fixture {
             schemes, verifier, ..
-        } = ed_scheme::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = StdRng::seed_from_u64(2029);
-        let Fixture { schemes, .. } = ed_scheme::fixture(&mut rng, 4);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
         let namespace = b"ns";
         let local_scheme = schemes[0].clone();
 

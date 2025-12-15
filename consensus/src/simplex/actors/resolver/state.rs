@@ -149,7 +149,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::ed25519 as ed_scheme,
+            scheme::ed25519,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
@@ -167,7 +167,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
 
-    type TestScheme = ed_scheme::Scheme;
+    type TestScheme = ed25519::Scheme;
 
     #[derive(Clone, Default)]
     struct MockResolver {
@@ -218,7 +218,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed_scheme::fixture(&mut rng, 5);
+        } = ed25519::fixture(&mut rng, 5);
         (schemes, verifier)
     }
 

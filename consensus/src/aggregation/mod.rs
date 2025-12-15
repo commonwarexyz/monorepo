@@ -85,7 +85,7 @@ mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
         aggregation::scheme::{
-            bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, AggregationScheme,
+            bls12381_multisig, bls12381_threshold, ed25519, AggregationScheme,
         },
         types::{Epoch, EpochDelta},
     };
@@ -346,7 +346,7 @@ mod tests {
         all_online(bls12381_threshold::fixture::<MinSig, _>);
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
-        all_online(ed_scheme::fixture);
+        all_online(ed25519::fixture);
     }
 
     /// Test consensus resilience to Byzantine behavior.
@@ -388,7 +388,7 @@ mod tests {
         byzantine_proposer(bls12381_threshold::fixture::<MinSig, _>);
         byzantine_proposer(bls12381_multisig::fixture::<MinPk, _>);
         byzantine_proposer(bls12381_multisig::fixture::<MinSig, _>);
-        byzantine_proposer(ed_scheme::fixture);
+        byzantine_proposer(ed25519::fixture);
     }
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
@@ -545,7 +545,7 @@ mod tests {
         unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinSig, _>);
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_byzantine_shutdown(ed_scheme::fixture);
+        unclean_byzantine_shutdown(ed25519::fixture);
     }
 
     fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
@@ -738,7 +738,7 @@ mod tests {
         unclean_shutdown_with_unsigned_index(bls12381_threshold::fixture::<MinSig, _>);
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown_with_unsigned_index(ed_scheme::fixture);
+        unclean_shutdown_with_unsigned_index(ed25519::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
@@ -791,7 +791,7 @@ mod tests {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinSig, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
-        slow_and_lossy_links(ed_scheme::fixture, 0);
+        slow_and_lossy_links(ed25519::fixture, 0);
     }
 
     #[test_group("slow")]
@@ -825,8 +825,8 @@ mod tests {
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
             // Test ed25519
-            let ed_state_1 = slow_and_lossy_links(ed_scheme::fixture, seed);
-            let ed_state_2 = slow_and_lossy_links(ed_scheme::fixture, seed);
+            let ed_state_1 = slow_and_lossy_links(ed25519::fixture, seed);
+            let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
@@ -890,7 +890,7 @@ mod tests {
         one_offline(bls12381_threshold::fixture::<MinSig, _>);
         one_offline(bls12381_multisig::fixture::<MinPk, _>);
         one_offline(bls12381_multisig::fixture::<MinSig, _>);
-        one_offline(ed_scheme::fixture);
+        one_offline(ed25519::fixture);
     }
 
     /// Test consensus recovery after a network partition.
@@ -956,7 +956,7 @@ mod tests {
         network_partition(bls12381_threshold::fixture::<MinSig, _>);
         network_partition(bls12381_multisig::fixture::<MinPk, _>);
         network_partition(bls12381_multisig::fixture::<MinSig, _>);
-        network_partition(ed_scheme::fixture);
+        network_partition(ed25519::fixture);
     }
 
     /// Test insufficient validator participation (below quorum).
@@ -1068,6 +1068,6 @@ mod tests {
         insufficient_validators(bls12381_threshold::fixture::<MinSig, _>);
         insufficient_validators(bls12381_multisig::fixture::<MinPk, _>);
         insufficient_validators(bls12381_multisig::fixture::<MinSig, _>);
-        insufficient_validators(ed_scheme::fixture);
+        insufficient_validators(ed25519::fixture);
     }
 }

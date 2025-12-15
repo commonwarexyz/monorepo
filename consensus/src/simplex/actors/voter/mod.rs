@@ -52,13 +52,14 @@ mod tests {
         simplex::{
             actors::{batcher, resolver},
             mocks,
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, SimplexScheme},
+            scheme::{bls12381_multisig, bls12381_threshold, SimplexScheme},
             select_leader,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Round, View},
         Viewable,
     };
+    use crate::simplex::scheme as certificate;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -342,7 +343,7 @@ mod tests {
         stale_backfill(bls12381_threshold::fixture::<MinSig, _>);
         stale_backfill(bls12381_multisig::fixture::<MinPk, _>);
         stale_backfill(bls12381_multisig::fixture::<MinSig, _>);
-        stale_backfill(ed_scheme::fixture);
+        stale_backfill(certificate::ed25519::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -625,7 +626,7 @@ mod tests {
         append_old_interesting_view(bls12381_threshold::fixture::<MinSig, _>);
         append_old_interesting_view(bls12381_multisig::fixture::<MinPk, _>);
         append_old_interesting_view(bls12381_multisig::fixture::<MinSig, _>);
-        append_old_interesting_view(ed_scheme::fixture);
+        append_old_interesting_view(certificate::ed25519::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
@@ -796,7 +797,7 @@ mod tests {
         finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinSig, _>);
         finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinPk, _>);
         finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(ed_scheme::fixture);
+        finalization_without_notarization_certificate(certificate::ed25519::fixture);
     }
 
     fn certificate_conflicts_proposal<S, F>(mut fixture: F)
@@ -987,7 +988,7 @@ mod tests {
         certificate_conflicts_proposal(bls12381_threshold::fixture::<MinSig, _>);
         certificate_conflicts_proposal(bls12381_multisig::fixture::<MinPk, _>);
         certificate_conflicts_proposal(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_conflicts_proposal(ed_scheme::fixture);
+        certificate_conflicts_proposal(certificate::ed25519::fixture);
     }
 
     fn proposal_conflicts_certificate<S, F>(mut fixture: F)
@@ -1161,7 +1162,7 @@ mod tests {
         proposal_conflicts_certificate(bls12381_threshold::fixture::<MinSig, _>);
         proposal_conflicts_certificate(bls12381_multisig::fixture::<MinPk, _>);
         proposal_conflicts_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        proposal_conflicts_certificate(ed_scheme::fixture);
+        proposal_conflicts_certificate(certificate::ed25519::fixture);
     }
 
     fn certificate_verifies_proposal<S, F>(mut fixture: F)
@@ -1327,7 +1328,7 @@ mod tests {
         certificate_verifies_proposal(bls12381_threshold::fixture::<MinSig, _>);
         certificate_verifies_proposal(bls12381_multisig::fixture::<MinPk, _>);
         certificate_verifies_proposal(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_verifies_proposal(ed_scheme::fixture);
+        certificate_verifies_proposal(certificate::ed25519::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1544,7 +1545,7 @@ mod tests {
     fn test_drop_our_proposal_on_conflict() {
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
-        drop_our_proposal_on_conflict(ed_scheme::fixture);
+        drop_our_proposal_on_conflict(certificate::ed25519::fixture);
     }
 
     fn populate_resolver_on_restart<S, F>(mut fixture: F)
@@ -1767,7 +1768,7 @@ mod tests {
         populate_resolver_on_restart(bls12381_threshold::fixture::<MinSig, _>);
         populate_resolver_on_restart(bls12381_multisig::fixture::<MinPk, _>);
         populate_resolver_on_restart(bls12381_multisig::fixture::<MinSig, _>);
-        populate_resolver_on_restart(ed_scheme::fixture);
+        populate_resolver_on_restart(certificate::ed25519::fixture);
     }
 
     fn finalization_from_resolver<S, F>(mut fixture: F)
@@ -1920,7 +1921,7 @@ mod tests {
         finalization_from_resolver(bls12381_threshold::fixture::<MinSig, _>);
         finalization_from_resolver(bls12381_multisig::fixture::<MinPk, _>);
         finalization_from_resolver(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_from_resolver(ed_scheme::fixture);
+        finalization_from_resolver(certificate::ed25519::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -2092,7 +2093,7 @@ mod tests {
         no_resolver_boomerang(bls12381_threshold::fixture::<MinSig, _>);
         no_resolver_boomerang(bls12381_multisig::fixture::<MinPk, _>);
         no_resolver_boomerang(bls12381_multisig::fixture::<MinSig, _>);
-        no_resolver_boomerang(ed_scheme::fixture);
+        no_resolver_boomerang(certificate::ed25519::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
@@ -2300,6 +2301,6 @@ mod tests {
         verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinSig, _>);
         verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
         verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
-        verification_failure_emits_nullify_immediately(ed_scheme::fixture);
+        verification_failure_emits_nullify_immediately(certificate::ed25519::fixture);
     }
 }

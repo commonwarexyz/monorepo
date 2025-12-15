@@ -431,7 +431,7 @@ where
 mod tests {
     use super::*;
     use crate::aggregation::scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme, AggregationScheme,
+        bls12381_multisig, bls12381_threshold, ed25519, AggregationScheme,
     };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_codec() {
-        codec(ed_scheme::fixture);
+        codec(ed25519::fixture);
         codec(bls12381_multisig::fixture::<MinPk, _>);
         codec(bls12381_multisig::fixture::<MinSig, _>);
         codec(bls12381_threshold::fixture::<MinPk, _>);
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        activity_invalid_enum(ed_scheme::fixture);
+        activity_invalid_enum(ed25519::fixture);
         activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
         activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
         activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);

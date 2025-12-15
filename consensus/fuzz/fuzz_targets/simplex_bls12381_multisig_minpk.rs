@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus::simplex::scheme::bls12381_multisig as multisig_scheme;
+use commonware_consensus::simplex::scheme::bls12381_multisig;
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
@@ -12,10 +12,10 @@ use libfuzzer_sys::fuzz_target;
 struct SimplexBls12381MultisigMinPk;
 
 impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = multisig_scheme::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        multisig_scheme::fixture::<MinPk, _>(context, n)
+        bls12381_multisig::fixture::<MinPk, _>(context, n)
     }
 }
 
