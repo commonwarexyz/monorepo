@@ -1,12 +1,6 @@
-use crate::Array;
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use crate::BatchVerifier;
-        use std::borrow::{Cow, ToOwned};
-    } else {
-        use alloc::borrow::{Cow, ToOwned};
-    }
-}
+use crate::{Array, BatchVerifier};
+#[cfg(not(feature = "std"))]
+use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -18,6 +12,8 @@ use core::{
 };
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::{Cow, ToOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -380,12 +376,10 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
-#[cfg(feature = "std")]
 pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-#[cfg(feature = "std")]
 impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
         Self {
@@ -408,7 +402,6 @@ impl BatchVerifier<PublicKey> for Batch {
     }
 }
 
-#[cfg(feature = "std")]
 impl Batch {
     #[inline(always)]
     fn add_inner(

@@ -25,10 +25,7 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
-#[cfg(feature = "std")]
 pub mod certificate;
 mod scheme;
 
-#[cfg(feature = "std")]
-pub use scheme::Batch;
-pub use scheme::{PrivateKey, PublicKey, Signature};
+pub use scheme::{Batch, PrivateKey, PublicKey, Signature};

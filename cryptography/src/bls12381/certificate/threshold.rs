@@ -21,9 +21,13 @@ use crate::{
     certificate::{Context, Scheme, Signature, SignatureVerification},
     Digest, PublicKey,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_utils::ordered::Set;
+use core::fmt::Debug;
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug};
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 
 /// Generic BLS12-381 threshold signature implementation.
 ///

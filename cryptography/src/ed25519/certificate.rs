@@ -8,10 +8,13 @@ use crate::{
     certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
+#[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
 /// Generic Ed25519 signing scheme implementation.

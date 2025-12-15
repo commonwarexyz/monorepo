@@ -15,10 +15,13 @@ use crate::{
     certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
     Digest, PublicKey,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
+#[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
 /// Generic BLS12-381 multi-signature implementation.
