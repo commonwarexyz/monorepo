@@ -495,7 +495,6 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    #[allow(dead_code)]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
