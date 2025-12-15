@@ -473,8 +473,8 @@ mod tests {
         add_certificate(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    /// Duplicate partial submissions are ignored.
-    fn duplicate_partial_submission<S, F>(fixture: F)
+    /// Duplicate attestation submissions are ignored.
+    fn duplicate_attestation_submission<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
@@ -493,12 +493,12 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_partial_submission() {
-        duplicate_partial_submission(ed25519::fixture);
-        duplicate_partial_submission(bls12381_multisig::fixture::<MinPk, _>);
-        duplicate_partial_submission(bls12381_multisig::fixture::<MinSig, _>);
-        duplicate_partial_submission(bls12381_threshold::fixture::<MinPk, _>);
-        duplicate_partial_submission(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_duplicate_attestation_submission() {
+        duplicate_attestation_submission(ed25519::fixture);
+        duplicate_attestation_submission(bls12381_multisig::fixture::<MinPk, _>);
+        duplicate_attestation_submission(bls12381_multisig::fixture::<MinSig, _>);
+        duplicate_attestation_submission(bls12381_threshold::fixture::<MinPk, _>);
+        duplicate_attestation_submission(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Once a certificate is reached, further acks are ignored.
@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// If quorum is never reached, no certificate is produced.
-    fn partial_quorum_never_reached<S, F>(fixture: F)
+    fn incomplete_quorum<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
@@ -599,12 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_quorum_never_reached() {
-        partial_quorum_never_reached(ed25519::fixture);
-        partial_quorum_never_reached(bls12381_multisig::fixture::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_multisig::fixture::<MinSig, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixture::<MinPk, _>);
-        partial_quorum_never_reached(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_incomplete_quorum() {
+        incomplete_quorum(ed25519::fixture);
+        incomplete_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        incomplete_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        incomplete_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        incomplete_quorum(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Interleaved acks for different payloads are aggregated separately.

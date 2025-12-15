@@ -669,9 +669,9 @@ where
 /// When a validator receives and validates a chunk, it sends an Ack containing:
 /// 1. The chunk being acknowledged
 /// 2. The current epoch
-/// 3. A partial signature over the chunk and epoch
+/// 3. An attestation over the chunk and epoch
 ///
-/// These partial signatures from validators can be aggregated to form a certificate
+/// These attestations from validators can be aggregated to form a certificate
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

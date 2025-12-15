@@ -505,7 +505,7 @@ impl<
             }
         };
 
-        // Add the partial signature (if not already present)
+        // Add the attestation (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
         if acks.contains_key(&ack.attestation.signer) {
             return Ok(());
@@ -598,7 +598,6 @@ impl<
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
-    /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
         &self,
