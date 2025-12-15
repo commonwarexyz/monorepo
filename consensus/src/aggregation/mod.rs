@@ -38,7 +38,7 @@
 //! - [crate::Automaton]: Provides external digests
 //! - [crate::Reporter]: Receives agreement confirmations
 //! - [crate::Monitor]: Tracks epoch transitions
-//! - [crate::scheme::Provider]: Manages validator sets and network identities
+//! - `Provider`: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!

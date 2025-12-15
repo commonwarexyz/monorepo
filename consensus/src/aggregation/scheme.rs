@@ -1,7 +1,7 @@
 //! Signing scheme implementations for `aggregation`.
 //!
 //! This module provides protocol-specific wrappers around the generic signing schemes
-//! in [`crate::scheme`]. Each wrapper binds the scheme's subject type to
+//! in [`commonware_cryptography::certificate`]. Each wrapper binds the scheme's subject type to
 //! [`Item`], which represents the data being aggregated and signed.
 //!
 //! # Available Schemes

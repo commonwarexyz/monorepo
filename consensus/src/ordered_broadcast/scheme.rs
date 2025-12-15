@@ -1,7 +1,7 @@
 //! Signing scheme implementations for `ordered_broadcast`.
 //!
 //! This module provides protocol-specific wrappers around the generic signing schemes
-//! in [`crate::scheme`]. Each wrapper binds the scheme's subject type to
+//! in [`commonware_cryptography::certificate`]. Each wrapper binds the scheme's subject type to
 //! [`AckSubject`], which is used for signing and verifying chunk acknowledgments.
 //!
 //! # Available Schemes
