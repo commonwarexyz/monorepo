@@ -147,7 +147,9 @@ impl<S: Scheme> SignatureVerification<S> {
     }
 }
 
+/// Identifies the subject of a vote or certificate.
 pub trait Subject: Clone + Debug + Send + Sync {
+    /// Returns the namespace and message for the subject, given some base namespace.
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>);
 }
 
