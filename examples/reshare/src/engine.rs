@@ -224,7 +224,7 @@ where
             finalized_blocks,
             marshal::Config {
                 scheme_provider: scheme_provider.clone(),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epoch_config: commonware_consensus::types::EpochConfig::fixed(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(

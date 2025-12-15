@@ -1,5 +1,9 @@
 use super::SchemeProvider;
-use crate::{simplex::signing_scheme::Scheme, types::ViewDelta, Block};
+use crate::{
+    simplex::signing_scheme::Scheme,
+    types::{EpochConfig, ViewDelta},
+    Block,
+};
 use commonware_runtime::buffer::PoolRef;
 use std::{
     marker::PhantomData,
@@ -16,8 +20,8 @@ where
     /// Provider for epoch-specific signing schemes.
     pub scheme_provider: P,
 
-    /// The length of an epoch in number of blocks.
-    pub epoch_length: u64,
+    /// Configuration for epoch lengths across block height ranges.
+    pub epoch_config: EpochConfig,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

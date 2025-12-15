@@ -228,7 +228,7 @@ mod tests {
     ) {
         let config: Config<B, _, _> = Config {
             scheme_provider,
-            epoch_length: BLOCKS_PER_EPOCH,
+            epoch_config: crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),

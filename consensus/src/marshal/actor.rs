@@ -17,7 +17,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, Round, ViewDelta},
+    types::{Epoch, EpochConfig, Round, ViewDelta},
     utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -119,8 +119,8 @@ where
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
     scheme_provider: P,
-    // Epoch length (in blocks)
-    epoch_length: u64,
+    // Epoch configuration
+    epoch_config: EpochConfig,
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
@@ -225,7 +225,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 scheme_provider: config.scheme_provider,
-                epoch_length: config.epoch_length,
+                epoch_config: config.epoch_config,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
@@ -597,7 +597,11 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let epoch = utils::epoch(self.epoch_length, height);
+                                    let Some(epoch) = utils::epoch_with_config(&self.epoch_config, height) else {
+                                        error!(height, "no epoch mapping for height");
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
                                     let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
                                         let _ = response.send(false);
                                         continue;

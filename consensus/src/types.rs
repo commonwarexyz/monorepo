@@ -235,7 +235,7 @@ impl From<View> for U64 {
 
 /// A generic type representing offsets or durations for consensus types.
 ///
-/// `Delta<T>` is semantically distinct from point-in-time types like `Epoch` or `View` -
+/// [`Delta<T>`] is semantically distinct from point-in-time types like [`Epoch`] or [`View`] -
 /// it represents a duration or distance rather than a specific moment.
 ///
 /// For convenience, type aliases [`EpochDelta`] and [`ViewDelta`] are provided and should
@@ -273,13 +273,13 @@ impl<T> Display for Delta<T> {
 
 /// Type alias for epoch offsets and durations.
 ///
-/// `EpochDelta` represents a distance between epochs or a duration measured in epochs.
+/// [`EpochDelta`] represents a distance between epochs or a duration measured in epochs.
 /// It is used for epoch arithmetic operations and defining epoch bounds for data retention.
 pub type EpochDelta = Delta<Epoch>;
 
 /// Type alias for view offsets and durations.
 ///
-/// `ViewDelta` represents a distance between views or a duration measured in views.
+/// [`ViewDelta`] represents a distance between views or a duration measured in views.
 /// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
 pub type ViewDelta = Delta<View>;
 
@@ -325,6 +325,90 @@ impl From<(Epoch, View)> for Round {
 impl From<Round> for (Epoch, View) {
     fn from(round: Round) -> Self {
         (round.epoch, round.view)
+    }
+}
+
+/// Configuration for variable epoch lengths across block height ranges.
+///
+/// Enables networks to change block times while maintaining consistent epoch durations.
+/// For example, a network might start with 10-second blocks and later upgrade to 1-second blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochConfig {
+    /// Sorted ranges of (start_height, epoch_length) defining epoch transitions.
+    pub ranges: Vec<(u64, u64)>,
+}
+
+impl EpochConfig {
+    /// Creates a fixed epoch length configuration.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use commonware_consensus::types::EpochConfig;
+    /// let config = EpochConfig::fixed(60_480);
+    /// ```
+    pub fn fixed(epoch_length: u64) -> Self {
+        assert!(epoch_length > 0, "epoch length must be positive");
+        Self {
+            ranges: vec![(0, epoch_length)],
+        }
+    }
+
+    /// Creates a variable epoch length configuration.
+    ///
+    /// Ranges must cover all heights starting from 0 with no gaps.
+    ///
+    /// # Example  
+    /// ```rust
+    /// # use commonware_consensus::types::EpochConfig;
+    /// let config = EpochConfig::variable(vec![
+    ///     (0, 60_480),        // Initial phase: 60,480 blocks per epoch
+    ///     (100_000, 604_800), // Later phase: 604,800 blocks per epoch
+    /// ]).expect("valid configuration");
+    /// ```
+    pub fn variable(ranges: Vec<(u64, u64)>) -> Result<Self, &'static str> {
+        if ranges.is_empty() {
+            return Err("ranges cannot be empty");
+        }
+
+        let mut sorted_ranges = ranges;
+        sorted_ranges.sort_by_key(|(start, _)| *start);
+
+        // Validate ranges start at 0 and have no gaps
+        if sorted_ranges[0].0 != 0 {
+            return Err("first range must start at height 0");
+        }
+
+        for (_, length) in sorted_ranges.iter() {
+            if *length == 0 {
+                return Err("epoch length must be positive");
+            }
+        }
+
+        Ok(Self {
+            ranges: sorted_ranges,
+        })
+    }
+
+    /// Returns the epoch length for a given block height.
+    ///
+    /// Returns `None` if the height is not covered by any range.
+    pub fn epoch_length_at(&self, height: u64) -> Option<u64> {
+        self.ranges.iter().rev().find_map(|(start, length)| {
+            if height >= *start {
+                let has_next = self
+                    .ranges
+                    .iter()
+                    .any(|(next_start, _)| *next_start > *start && height >= *next_start);
+
+                if !has_next {
+                    Some(*length)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -743,6 +827,93 @@ mod tests {
         assert_eq!(range.next(), Some(View::new(7)));
         assert_eq!(range.next(), None);
         assert_eq!(range.next_back(), None);
+    }
+
+    #[test]
+    fn test_epoch_config_functionality() {
+        use crate::utils;
+
+        // Fixed epoch configuration
+        let fixed_config = EpochConfig::fixed(10);
+        assert_eq!(
+            utils::epoch_with_config(&fixed_config, 0),
+            Some(Epoch::new(0))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&fixed_config, 9),
+            Some(Epoch::new(0))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&fixed_config, 10),
+            Some(Epoch::new(1))
+        );
+
+        // Variable epoch configuration with transitions
+        let variable_config = EpochConfig::variable(vec![
+            (0, 5),   // First range: 5 blocks per epoch
+            (20, 10), // Second range: 10 blocks per epoch
+        ])
+        .expect("valid config");
+
+        assert_eq!(
+            utils::epoch_with_config(&variable_config, 4),
+            Some(Epoch::new(0))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&variable_config, 19),
+            Some(Epoch::new(3))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&variable_config, 20),
+            Some(Epoch::new(4))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&variable_config, 29),
+            Some(Epoch::new(4))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&variable_config, 30),
+            Some(Epoch::new(5))
+        );
+
+        // Configuration validation
+        assert!(EpochConfig::variable(vec![]).is_err());
+        assert!(EpochConfig::variable(vec![(10, 5)]).is_err());
+        assert!(EpochConfig::variable(vec![(0, 0)]).is_err());
+    }
+
+    #[test]
+    fn test_variable_epoch_block_time_transition() {
+        // Test maintaining consistent epoch duration across block time changes
+        let config = EpochConfig::variable(vec![
+            (0, 60_480),        // Initial phase: 60,480 blocks per epoch
+            (100_000, 604_800), // Later phase: 604,800 blocks per epoch
+        ])
+        .expect("valid configuration");
+
+        // Verify epoch lengths adapt to maintain consistent real-world duration
+        assert_eq!(config.epoch_length_at(50_000), Some(60_480));
+        assert_eq!(config.epoch_length_at(200_000), Some(604_800));
+
+        // Verify epoch progression across transitions
+        use crate::utils;
+        assert_eq!(utils::epoch_with_config(&config, 0), Some(Epoch::new(0)));
+        assert_eq!(
+            utils::epoch_with_config(&config, 60_479),
+            Some(Epoch::new(0))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&config, 60_480),
+            Some(Epoch::new(1))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&config, 100_000),
+            Some(Epoch::new(1))
+        );
+        assert_eq!(
+            utils::epoch_with_config(&config, 704_800),
+            Some(Epoch::new(2))
+        );
     }
 
     #[cfg(feature = "arbitrary")]
