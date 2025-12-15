@@ -17,17 +17,23 @@ pub fn epoch_with_config(config: &EpochConfig, height: u64) -> Option<Epoch> {
                 .ranges
                 .iter()
                 .find(|(start, _)| *start > *range_start)
-                .map(|(start, _)| *start)
-                .unwrap_or(u64::MAX);
+                .map(|(start, _)| *start);
 
-            if height < next_range_start {
+            if let Some(next_start) = next_range_start {
+                if height < next_start {
+                    let offset_in_range = height - range_start;
+                    let epoch_offset = offset_in_range / range_epoch_length;
+                    return Some(Epoch::new(cumulative_epoch + epoch_offset));
+                } else {
+                    let range_size = next_start - range_start;
+                    let complete_epochs_in_range = range_size / range_epoch_length;
+                    cumulative_epoch += complete_epochs_in_range;
+                }
+            } else {
+                // This is the last range, height belongs here
                 let offset_in_range = height - range_start;
                 let epoch_offset = offset_in_range / range_epoch_length;
                 return Some(Epoch::new(cumulative_epoch + epoch_offset));
-            } else {
-                let range_size = next_range_start - range_start;
-                let complete_epochs_in_range = range_size / range_epoch_length;
-                cumulative_epoch += complete_epochs_in_range;
             }
         }
     }

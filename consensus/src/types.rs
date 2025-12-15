@@ -373,9 +373,16 @@ impl EpochConfig {
         let mut sorted_ranges = ranges;
         sorted_ranges.sort_by_key(|(start, _)| *start);
 
-        // Validate ranges start at 0 and have no gaps
+        // Validate ranges start at 0 and have no duplicates
         if sorted_ranges[0].0 != 0 {
             return Err("first range must start at height 0");
+        }
+
+        // Check for duplicate start heights
+        for i in 1..sorted_ranges.len() {
+            if sorted_ranges[i].0 == sorted_ranges[i - 1].0 {
+                return Err("duplicate start heights not allowed");
+            }
         }
 
         for (_, length) in sorted_ranges.iter() {
@@ -880,6 +887,7 @@ mod tests {
         assert!(EpochConfig::variable(vec![]).is_err());
         assert!(EpochConfig::variable(vec![(10, 5)]).is_err());
         assert!(EpochConfig::variable(vec![(0, 0)]).is_err());
+        assert!(EpochConfig::variable(vec![(0, 5), (0, 10)]).is_err()); // Duplicate start heights
     }
 
     #[test]
@@ -913,6 +921,12 @@ mod tests {
         assert_eq!(
             utils::epoch_with_config(&config, 704_800),
             Some(Epoch::new(2))
+        );
+
+        // Test edge case: u64::MAX height
+        assert_eq!(
+            utils::epoch_with_config(&config, u64::MAX),
+            Some(Epoch::new((u64::MAX - 100_000) / 604_800 + 1))
         );
     }
 
