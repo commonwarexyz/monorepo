@@ -1431,9 +1431,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The returned [`Output`] includes a `reveals` field that tracks how many
-    /// dealer shares each player had to recover from public reveals. Use
-    /// [`Output::is_revealed`] to check if a player's share may have been compromised.
+    /// The returned [`Output`] includes a `revealed` field that contains the set of
+    /// players whose shares may have been compromised (more than `max_faults` reveals).
     ///
     /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
@@ -2039,7 +2038,8 @@ mod test_plan {
                 }
 
                 // Make sure that bad dealers are not selected.
-                if let Ok(selection) = select(&info, dealer_logs.clone()) {
+                let selection_result = select(&info, dealer_logs.clone());
+                if let Ok(ref selection) = selection_result {
                     let good_pks = selection
                         .iter_pairs()
                         .map(|(pk, _)| pk.clone())
@@ -2061,9 +2061,47 @@ mod test_plan {
                 }
                 let observer_output = observe_result?;
 
-                // Verify bad dealers were not selected
-                // (This is implicit - if a bad dealer was selected, the DKG would fail
-                // or produce incorrect results which we'd catch later)
+                // Verify revealed set is correct
+                let selection =
+                    selection_result.expect("select should succeed if observe succeeded");
+                let selected_dealer_indices: BTreeSet<u32> = selection
+                    .keys()
+                    .iter()
+                    .map(|pk| {
+                        keys.iter()
+                            .position(|k| k.public_key() == *pk)
+                            .expect("selected dealer must be in keys")
+                            as u32
+                    })
+                    .collect();
+
+                // Calculate expected reveals per player based on selected dealers
+                let mut expected_reveal_counts: BTreeMap<u32, u32> = BTreeMap::new();
+                for &(dealer, player) in round.no_acks.iter().chain(round.bad_shares.iter()) {
+                    if selected_dealer_indices.contains(&dealer) {
+                        *expected_reveal_counts.entry(player).or_insert(0) += 1;
+                    }
+                }
+
+                let max_faults_val = max_faults(round.players.len() as u32);
+                let expected_revealed: BTreeSet<ed25519::PublicKey> = expected_reveal_counts
+                    .into_iter()
+                    .filter_map(|(player_idx, count)| {
+                        if count > max_faults_val {
+                            Some(keys[player_idx as usize].public_key())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let actual_revealed: BTreeSet<ed25519::PublicKey> =
+                    observer_output.revealed().into_iter().cloned().collect();
+
+                assert_eq!(
+                    expected_revealed, actual_revealed,
+                    "Round {i_round}: revealed set mismatch"
+                );
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
