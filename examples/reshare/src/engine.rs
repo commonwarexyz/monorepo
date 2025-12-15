@@ -215,13 +215,13 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let scheme_provider = Provider::new(config.signer.clone());
+        let provider = Provider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider: scheme_provider.clone(),
+                provider: provider.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
@@ -253,7 +253,7 @@ where
             orchestrator::Config {
                 oracle: config.blocker.clone(),
                 application,
-                scheme_provider,
+                provider,
                 marshal: marshal_mailbox,
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,

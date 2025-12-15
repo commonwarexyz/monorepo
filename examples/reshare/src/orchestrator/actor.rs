@@ -48,7 +48,7 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: Provider<S, C>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
@@ -77,7 +77,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: Provider<S, C>,
+    provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -108,7 +108,7 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
@@ -297,8 +297,8 @@ where
                         }
 
                         // Register the new signing scheme with the scheme provider.
-                        let scheme = self.scheme_provider.scheme_for_epoch(&transition);
-                        assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
+                        let scheme = self.provider.scheme_for_epoch(&transition);
+                        assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                         // Enter the new epoch.
                         let engine = self
@@ -323,7 +323,7 @@ where
                         engine.abort();
 
                         // Unregister the signing scheme for the epoch.
-                        assert!(self.scheme_provider.unregister(&epoch));
+                        assert!(self.provider.unregister(&epoch));
 
                         info!(%epoch, "exited epoch");
                     }
