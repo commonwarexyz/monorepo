@@ -40,17 +40,22 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-consensus"]
 
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-fuzz = [ "dep:commonware-math" ]
+mocks = [ "commonware-cryptography/mocks" ]
+fuzz = [ "dep:commonware-math", "mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",

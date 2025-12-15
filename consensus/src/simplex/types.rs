@@ -1,14 +1,16 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    scheme::{Scheme, Signature},
     simplex::scheme::SimplexScheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{
+    certificate::{Part, Scheme},
+    Digest, PublicKey,
+};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -742,7 +744,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
@@ -751,17 +753,14 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(
+        let part = scheme.sign::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self {
-            proposal,
-            signature,
-        })
+        Some(Self { proposal, part })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
@@ -771,12 +770,12 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -788,7 +787,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
+        self.proposal == other.proposal && self.part == other.part
     }
 }
 
@@ -797,20 +796,20 @@ impl<S: Scheme, D: Digest> Eq for Notarize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.signature.encode_size()
+        self.proposal.encode_size() + self.part.encode_size()
     }
 }
 
@@ -819,18 +818,15 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        Ok(Self { proposal, part })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -854,11 +850,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { proposal, part })
     }
 }
 
@@ -883,7 +876,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.part.clone()))?;
 
         Some(Self {
             proposal,
@@ -991,12 +984,12 @@ pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme> PartialEq for Nullify<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.signature == other.signature
+        self.round == other.round && self.part == other.part
     }
 }
 
@@ -1005,7 +998,7 @@ impl<S: Scheme> Eq for Nullify<S> {}
 impl<S: Scheme> Hash for Nullify<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.round.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
@@ -1015,9 +1008,9 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(namespace, Subject::Nullify { round })?;
+        let part = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
 
-        Some(Self { round, signature })
+        Some(Self { round, part })
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
@@ -1027,10 +1020,10 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Nullify { round: self.round },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -1043,13 +1036,13 @@ impl<S: Scheme> Nullify<S> {
 impl<S: Scheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.signature.encode_size()
+        self.round.encode_size() + self.part.encode_size()
     }
 }
 
@@ -1058,15 +1051,15 @@ impl<S: Scheme> Read for Nullify<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self { round, signature })
+        Ok(Self { round, part })
     }
 }
 
 impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -1089,8 +1082,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let round = Round::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self { round, signature })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { round, part })
     }
 }
 
@@ -1112,7 +1105,7 @@ impl<S: Scheme> Nullification<S> {
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.part.clone()))?;
 
         Some(Self { round, certificate })
     }
@@ -1214,7 +1207,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
@@ -1223,17 +1216,14 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(
+        let part = scheme.sign::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self {
-            proposal,
-            signature,
-        })
+        Some(Self { proposal, part })
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
@@ -1243,12 +1233,12 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify_vote::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &self.proposal,
             },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -1260,7 +1250,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
+        self.proposal == other.proposal && self.part == other.part
     }
 }
 
@@ -1269,20 +1259,20 @@ impl<S: Scheme, D: Digest> Eq for Finalize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.signature.encode_size()
+        self.proposal.encode_size() + self.part.encode_size()
     }
 }
 
@@ -1291,18 +1281,15 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        Ok(Self { proposal, part })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -1326,11 +1313,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { proposal, part })
     }
 }
 
@@ -1355,7 +1339,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     ) -> Option<Self> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|f| f.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|f| f.part.clone()))?;
 
         Some(Self {
             proposal,
@@ -2409,13 +2393,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-        scheme::SimplexScheme,
-    };
+    use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, SimplexScheme};
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         sha256::Digest as Sha256,
     };
     use commonware_utils::{quorum, quorum_from_slice};
@@ -2480,11 +2462,11 @@ mod tests {
 
     #[test]
     fn test_notarize_encode_decode() {
-        notarize_encode_decode(ed25519);
-        notarize_encode_decode(bls12381_multisig::<MinPk, _>);
-        notarize_encode_decode(bls12381_multisig::<MinSig, _>);
-        notarize_encode_decode(bls12381_threshold::<MinPk, _>);
-        notarize_encode_decode(bls12381_threshold::<MinSig, _>);
+        notarize_encode_decode(ed25519::fixture);
+        notarize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        notarize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        notarize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        notarize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarization_encode_decode<S, F>(fixture: F)
@@ -2513,11 +2495,11 @@ mod tests {
 
     #[test]
     fn test_notarization_encode_decode() {
-        notarization_encode_decode(ed25519);
-        notarization_encode_decode(bls12381_multisig::<MinPk, _>);
-        notarization_encode_decode(bls12381_multisig::<MinSig, _>);
-        notarization_encode_decode(bls12381_threshold::<MinPk, _>);
-        notarization_encode_decode(bls12381_threshold::<MinSig, _>);
+        notarization_encode_decode(ed25519::fixture);
+        notarization_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        notarization_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn nullify_encode_decode<S, F>(fixture: F)
@@ -2536,11 +2518,11 @@ mod tests {
 
     #[test]
     fn test_nullify_encode_decode() {
-        nullify_encode_decode(ed25519);
-        nullify_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullify_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullify_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullify_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullify_encode_decode(ed25519::fixture);
+        nullify_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        nullify_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        nullify_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn nullification_encode_decode<S, F>(fixture: F)
@@ -2565,11 +2547,11 @@ mod tests {
 
     #[test]
     fn test_nullification_encode_decode() {
-        nullification_encode_decode(ed25519);
-        nullification_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullification_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullification_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullification_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullification_encode_decode(ed25519::fixture);
+        nullification_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        nullification_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        nullification_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        nullification_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn finalize_encode_decode<S, F>(fixture: F)
@@ -2589,11 +2571,11 @@ mod tests {
 
     #[test]
     fn test_finalize_encode_decode() {
-        finalize_encode_decode(ed25519);
-        finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        finalize_encode_decode(ed25519::fixture);
+        finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        finalize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn finalization_encode_decode<S, F>(fixture: F)
@@ -2619,11 +2601,11 @@ mod tests {
 
     #[test]
     fn test_finalization_encode_decode() {
-        finalization_encode_decode(ed25519);
-        finalization_encode_decode(bls12381_multisig::<MinPk, _>);
-        finalization_encode_decode(bls12381_multisig::<MinSig, _>);
-        finalization_encode_decode(bls12381_threshold::<MinPk, _>);
-        finalization_encode_decode(bls12381_threshold::<MinSig, _>);
+        finalization_encode_decode(ed25519::fixture);
+        finalization_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn backfiller_encode_decode<S, F>(fixture: F)
@@ -2669,11 +2651,11 @@ mod tests {
 
     #[test]
     fn test_backfiller_encode_decode() {
-        backfiller_encode_decode(ed25519);
-        backfiller_encode_decode(bls12381_multisig::<MinPk, _>);
-        backfiller_encode_decode(bls12381_multisig::<MinSig, _>);
-        backfiller_encode_decode(bls12381_threshold::<MinPk, _>);
-        backfiller_encode_decode(bls12381_threshold::<MinSig, _>);
+        backfiller_encode_decode(ed25519::fixture);
+        backfiller_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        backfiller_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        backfiller_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        backfiller_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test]
@@ -2731,11 +2713,11 @@ mod tests {
 
     #[test]
     fn test_response_encode_decode() {
-        response_encode_decode(ed25519);
-        response_encode_decode(bls12381_multisig::<MinPk, _>);
-        response_encode_decode(bls12381_multisig::<MinSig, _>);
-        response_encode_decode(bls12381_threshold::<MinPk, _>);
-        response_encode_decode(bls12381_threshold::<MinSig, _>);
+        response_encode_decode(ed25519::fixture);
+        response_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        response_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        response_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        response_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
@@ -2767,11 +2749,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_notarize_encode_decode() {
-        conflicting_notarize_encode_decode(ed25519);
-        conflicting_notarize_encode_decode(bls12381_multisig::<MinPk, _>);
-        conflicting_notarize_encode_decode(bls12381_multisig::<MinSig, _>);
-        conflicting_notarize_encode_decode(bls12381_threshold::<MinPk, _>);
-        conflicting_notarize_encode_decode(bls12381_threshold::<MinSig, _>);
+        conflicting_notarize_encode_decode(ed25519::fixture);
+        conflicting_notarize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_notarize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_notarize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_notarize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
@@ -2803,11 +2785,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_finalize_encode_decode() {
-        conflicting_finalize_encode_decode(ed25519);
-        conflicting_finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        conflicting_finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        conflicting_finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        conflicting_finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        conflicting_finalize_encode_decode(ed25519::fixture);
+        conflicting_finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_finalize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
@@ -2831,11 +2813,11 @@ mod tests {
 
     #[test]
     fn test_nullify_finalize_encode_decode() {
-        nullify_finalize_encode_decode(ed25519);
-        nullify_finalize_encode_decode(bls12381_multisig::<MinPk, _>);
-        nullify_finalize_encode_decode(bls12381_multisig::<MinSig, _>);
-        nullify_finalize_encode_decode(bls12381_threshold::<MinPk, _>);
-        nullify_finalize_encode_decode(bls12381_threshold::<MinSig, _>);
+        nullify_finalize_encode_decode(ed25519::fixture);
+        nullify_finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        nullify_finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        nullify_finalize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarize_verify_wrong_namespace<S, F>(fixture: F)
@@ -2854,11 +2836,11 @@ mod tests {
 
     #[test]
     fn test_notarize_verify_wrong_namespace() {
-        notarize_verify_wrong_namespace(ed25519);
-        notarize_verify_wrong_namespace(bls12381_multisig::<MinPk, _>);
-        notarize_verify_wrong_namespace(bls12381_multisig::<MinSig, _>);
-        notarize_verify_wrong_namespace(bls12381_threshold::<MinPk, _>);
-        notarize_verify_wrong_namespace(bls12381_threshold::<MinSig, _>);
+        notarize_verify_wrong_namespace(ed25519::fixture);
+        notarize_verify_wrong_namespace(bls12381_multisig::fixture::<MinPk, _>);
+        notarize_verify_wrong_namespace(bls12381_multisig::fixture::<MinSig, _>);
+        notarize_verify_wrong_namespace(bls12381_threshold::fixture::<MinPk, _>);
+        notarize_verify_wrong_namespace(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarize_verify_wrong_scheme<S, F>(f: F)
@@ -2878,11 +2860,11 @@ mod tests {
 
     #[test]
     fn test_notarize_verify_wrong_scheme() {
-        notarize_verify_wrong_scheme(ed25519);
-        notarize_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        notarize_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        notarize_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        notarize_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        notarize_verify_wrong_scheme(ed25519::fixture);
+        notarize_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
+        notarize_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
+        notarize_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);
+        notarize_verify_wrong_scheme(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarization_verify_wrong_scheme<S, F>(f: F)
@@ -2913,11 +2895,11 @@ mod tests {
 
     #[test]
     fn test_notarization_verify_wrong_scheme() {
-        notarization_verify_wrong_scheme(ed25519);
-        notarization_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        notarization_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        notarization_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        notarization_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        notarization_verify_wrong_scheme(ed25519::fixture);
+        notarization_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);
+        notarization_verify_wrong_scheme(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarization_verify_wrong_namespace<S, F>(fixture: F)
@@ -2947,11 +2929,11 @@ mod tests {
 
     #[test]
     fn test_notarization_verify_wrong_namespace() {
-        notarization_verify_wrong_namespace(ed25519);
-        notarization_verify_wrong_namespace(bls12381_multisig::<MinPk, _>);
-        notarization_verify_wrong_namespace(bls12381_multisig::<MinSig, _>);
-        notarization_verify_wrong_namespace(bls12381_threshold::<MinPk, _>);
-        notarization_verify_wrong_namespace(bls12381_threshold::<MinSig, _>);
+        notarization_verify_wrong_namespace(ed25519::fixture);
+        notarization_verify_wrong_namespace(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_verify_wrong_namespace(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_verify_wrong_namespace(bls12381_threshold::fixture::<MinPk, _>);
+        notarization_verify_wrong_namespace(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
@@ -2979,11 +2961,11 @@ mod tests {
 
     #[test]
     fn test_notarization_recover_insufficient_signatures() {
-        notarization_recover_insufficient_signatures(ed25519);
-        notarization_recover_insufficient_signatures(bls12381_multisig::<MinPk, _>);
-        notarization_recover_insufficient_signatures(bls12381_multisig::<MinSig, _>);
-        notarization_recover_insufficient_signatures(bls12381_threshold::<MinPk, _>);
-        notarization_recover_insufficient_signatures(bls12381_threshold::<MinSig, _>);
+        notarization_recover_insufficient_signatures(ed25519::fixture);
+        notarization_recover_insufficient_signatures(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_recover_insufficient_signatures(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_recover_insufficient_signatures(bls12381_threshold::fixture::<MinPk, _>);
+        notarization_recover_insufficient_signatures(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn conflicting_notarize_detection<S, F>(f: F)
@@ -3008,11 +2990,11 @@ mod tests {
 
     #[test]
     fn test_conflicting_notarize_detection() {
-        conflicting_notarize_detection(ed25519);
-        conflicting_notarize_detection(bls12381_multisig::<MinPk, _>);
-        conflicting_notarize_detection(bls12381_multisig::<MinSig, _>);
-        conflicting_notarize_detection(bls12381_threshold::<MinPk, _>);
-        conflicting_notarize_detection(bls12381_threshold::<MinSig, _>);
+        conflicting_notarize_detection(ed25519::fixture);
+        conflicting_notarize_detection(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_notarize_detection(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_notarize_detection(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_notarize_detection(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn nullify_finalize_detection<S, F>(f: F)
@@ -3036,11 +3018,11 @@ mod tests {
 
     #[test]
     fn test_nullify_finalize_detection() {
-        nullify_finalize_detection(ed25519);
-        nullify_finalize_detection(bls12381_multisig::<MinPk, _>);
-        nullify_finalize_detection(bls12381_multisig::<MinSig, _>);
-        nullify_finalize_detection(bls12381_threshold::<MinPk, _>);
-        nullify_finalize_detection(bls12381_threshold::<MinSig, _>);
+        nullify_finalize_detection(ed25519::fixture);
+        nullify_finalize_detection(bls12381_multisig::fixture::<MinPk, _>);
+        nullify_finalize_detection(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_finalize_detection(bls12381_threshold::fixture::<MinPk, _>);
+        nullify_finalize_detection(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn finalization_verify_wrong_scheme<S, F>(f: F)
@@ -3071,11 +3053,11 @@ mod tests {
 
     #[test]
     fn test_finalization_wrong_scheme() {
-        finalization_verify_wrong_scheme(ed25519);
-        finalization_verify_wrong_scheme(bls12381_multisig::<MinPk, _>);
-        finalization_verify_wrong_scheme(bls12381_multisig::<MinSig, _>);
-        finalization_verify_wrong_scheme(bls12381_threshold::<MinPk, _>);
-        finalization_verify_wrong_scheme(bls12381_threshold::<MinSig, _>);
+        finalization_verify_wrong_scheme(ed25519::fixture);
+        finalization_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_verify_wrong_scheme(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     struct MockAttributable(u32);

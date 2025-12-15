@@ -1,15 +1,14 @@
 //! Types used in [aggregation](super).
 
-use crate::{
-    aggregation::scheme::AggregationScheme,
-    scheme::{Context, Scheme, Signature},
-    types::Epoch,
-};
+use crate::{aggregation::scheme::AggregationScheme, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{
+    certificate::{Part, Scheme, Subject},
+    Digest,
+};
 use commonware_utils::union;
 use futures::channel::oneshot;
 use rand::{CryptoRng, Rng};
@@ -124,7 +123,7 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
-impl<D: Digest> Context for &Item<D> {
+impl<D: Digest> Subject for &Item<D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         (ack_namespace(namespace), self.encode().to_vec())
     }
@@ -150,20 +149,20 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub item: Item<D>,
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
-    /// Scheme-specific vote material
-    pub signature: Signature<S>,
+    /// Scheme-specific part material
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
-    /// Verifies the signature on this acknowledgment.
+    /// Verifies the part on this acknowledgment.
     ///
-    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Returns `true` if the part is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
         S: AggregationScheme<D>,
     {
-        scheme.verify_vote::<D>(namespace, &self.item, &self.signature)
+        scheme.verify_part::<D>(namespace, &self.item, &self.part)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -177,12 +176,8 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        let signature = scheme.sign_vote::<D>(namespace, &item)?;
-        Some(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = scheme.sign::<D>(namespace, &item)?;
+        Some(Self { item, epoch, part })
     }
 }
 
@@ -190,7 +185,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.epoch.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
@@ -200,18 +195,14 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let signature = Signature::read(reader)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = Part::read(reader)?;
+        Ok(Self { item, epoch, part })
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.part.encode_size()
     }
 }
 
@@ -224,12 +215,8 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { item, epoch, part })
     }
 }
 
@@ -296,10 +283,10 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
-        let signatures = iter
+        let parts = iter
             .filter(|ack| ack.item == item)
-            .map(|ack| ack.signature.clone());
-        let certificate = scheme.assemble_certificate(signatures)?;
+            .map(|ack| ack.part.clone());
+        let certificate = scheme.assemble(parts)?;
 
         Some(Self { item, certificate })
     }
@@ -431,14 +418,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::{
-        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-        scheme::AggregationScheme,
+    use crate::aggregation::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519, AggregationScheme,
     };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         Hasher, Sha256,
     };
     use commonware_utils::ordered::Quorum;
@@ -551,11 +538,11 @@ mod tests {
 
     #[test]
     fn test_codec() {
-        codec(ed25519);
-        codec(bls12381_multisig::<MinPk, _>);
-        codec(bls12381_multisig::<MinSig, _>);
-        codec(bls12381_threshold::<MinPk, _>);
-        codec(bls12381_threshold::<MinSig, _>);
+        codec(ed25519::fixture);
+        codec(bls12381_multisig::fixture::<MinPk, _>);
+        codec(bls12381_multisig::fixture::<MinSig, _>);
+        codec(bls12381_threshold::fixture::<MinPk, _>);
+        codec(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn activity_invalid_enum<S, F>(fixture: F)
@@ -580,11 +567,11 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        activity_invalid_enum(ed25519);
-        activity_invalid_enum(bls12381_multisig::<MinPk, _>);
-        activity_invalid_enum(bls12381_multisig::<MinSig, _>);
-        activity_invalid_enum(bls12381_threshold::<MinPk, _>);
-        activity_invalid_enum(bls12381_threshold::<MinSig, _>);
+        activity_invalid_enum(ed25519::fixture);
+        activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
+        activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
+        activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);
+        activity_invalid_enum(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]

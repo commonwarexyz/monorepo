@@ -12,7 +12,6 @@ use crate::{
         store::{Blocks, Certificates},
         Update,
     },
-    scheme::{Scheme, SchemeProvider},
     simplex::{
         scheme::SimplexScheme,
         types::{Finalization, Notarization},
@@ -22,7 +21,10 @@ use crate::{
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    PublicKey,
+};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
@@ -103,7 +105,7 @@ pub struct Actor<E, B, P, FC, FB, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
@@ -162,7 +164,7 @@ impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme: SimplexScheme<B::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme: SimplexScheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
@@ -704,8 +706,8 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.scheme_provider
-            .certificate_verifier()
-            .or_else(|| self.scheme_provider.scheme(epoch))
+            .all()
+            .or_else(|| self.scheme_provider.scoped(epoch))
     }
 
     // -------------------- Waiters --------------------

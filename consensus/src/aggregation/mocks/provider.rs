@@ -1,13 +1,11 @@
-//! Mock scheme provider for testing aggregation.
+//! Mock provider for testing aggregation.
 //!
-//! This module provides a simple [`SchemeProvider`] implementation that can be
+//! This module provides a simple [`Provider`] implementation that can be
 //! used in tests. It allows registering signing schemes for specific epochs
 //! and retrieving them later.
 
-use crate::{
-    scheme::{self, Scheme},
-    types::Epoch,
-};
+use crate::types::Epoch;
+use commonware_cryptography::certificate::{self, Scheme};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -15,17 +13,17 @@ use std::{
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct SchemeProvider<S: Scheme> {
+pub struct Provider<S: Scheme> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
 }
 
-impl<S: Scheme> Default for SchemeProvider<S> {
+impl<S: Scheme> Default for Provider<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Scheme> SchemeProvider<S> {
+impl<S: Scheme> Provider<S> {
     pub fn new() -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
@@ -33,7 +31,7 @@ impl<S: Scheme> SchemeProvider<S> {
     }
 }
 
-impl<S: Scheme> SchemeProvider<S> {
+impl<S: Scheme> Provider<S> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -43,10 +41,11 @@ impl<S: Scheme> SchemeProvider<S> {
     }
 }
 
-impl<S: Scheme> scheme::SchemeProvider for SchemeProvider<S> {
+impl<S: Scheme> certificate::Provider for Provider<S> {
+    type Scope = Epoch;
     type Scheme = S;
 
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }

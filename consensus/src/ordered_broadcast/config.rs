@@ -1,10 +1,9 @@
 use super::types::{Activity, Context, SequencersProvider};
 use crate::{
-    scheme::SchemeProvider,
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
-use commonware_cryptography::{Digest, Signer};
+use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -12,7 +11,7 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config<
     C: Signer,
     S: SequencersProvider,
-    P: SchemeProvider,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,

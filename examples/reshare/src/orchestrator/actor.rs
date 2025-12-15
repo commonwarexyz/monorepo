@@ -1,14 +1,13 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochSchemeProvider, SchemeProvider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
-    scheme::Scheme,
     simplex::{
         self,
         scheme::SimplexScheme,
@@ -18,7 +17,9 @@ use commonware_consensus::{
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -47,7 +48,7 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: SchemeProvider<S, C>,
+    pub scheme_provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
@@ -68,7 +69,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -76,7 +77,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: SchemeProvider<S, C>,
+    scheme_provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -94,7 +95,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);

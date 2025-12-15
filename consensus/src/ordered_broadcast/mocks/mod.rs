@@ -2,7 +2,6 @@
 
 mod automaton;
 pub use automaton::Automaton;
-pub mod fixtures;
 mod monitor;
 pub use monitor::Monitor;
 mod reporter;

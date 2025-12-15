@@ -10,10 +10,9 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
 use commonware_consensus::{
-    scheme,
     simplex::{
         config,
-        mocks::{application, fixtures::Fixture, relay, reporter},
+        mocks::{application, relay, reporter},
         scheme::SimplexScheme,
         Engine,
     },
@@ -21,7 +20,10 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{
-    ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest, Sha256,
+    certificate::{mocks::Fixture, Scheme as CertificateScheme},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
@@ -49,7 +51,7 @@ const EXPECTED_PANICS: [&str; 3] = [
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as scheme::Scheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as CertificateScheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: SimplexScheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
@@ -159,6 +161,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             participants,
             schemes,
             verifier: _,
+            ..
         } = P::fixture(&mut context, n);
 
         let mut registrations = register(&mut oracle, &participants).await;

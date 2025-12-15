@@ -1,6 +1,5 @@
 use super::types::Node;
-use crate::scheme::Scheme;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
@@ -58,16 +57,12 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-        scheme::{
-            bls12381_multisig as bls12381_multisig_scheme,
-            bls12381_threshold as bls12381_threshold_scheme, ed25519 as ed25519_scheme,
-            OrderedBroadcastScheme,
-        },
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
         types::Chunk,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _, Signer as _,
@@ -134,11 +129,11 @@ mod tests {
 
     #[test]
     fn test_put_new_tip() {
-        put_new_tip(ed25519);
-        put_new_tip(bls12381_multisig::<MinPk, _>);
-        put_new_tip(bls12381_multisig::<MinSig, _>);
-        put_new_tip(bls12381_threshold::<MinPk, _>);
-        put_new_tip(bls12381_threshold::<MinSig, _>);
+        put_new_tip(ed25519::fixture);
+        put_new_tip(bls12381_multisig::fixture::<MinPk, _>);
+        put_new_tip(bls12381_multisig::fixture::<MinSig, _>);
+        put_new_tip(bls12381_threshold::fixture::<MinPk, _>);
+        put_new_tip(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn put_same_height_same_payload<S, F>(fixture: F)
@@ -160,11 +155,11 @@ mod tests {
 
     #[test]
     fn test_put_same_height_same_payload() {
-        put_same_height_same_payload(ed25519);
-        put_same_height_same_payload(bls12381_multisig::<MinPk, _>);
-        put_same_height_same_payload(bls12381_multisig::<MinSig, _>);
-        put_same_height_same_payload(bls12381_threshold::<MinPk, _>);
-        put_same_height_same_payload(bls12381_threshold::<MinSig, _>);
+        put_same_height_same_payload(ed25519::fixture);
+        put_same_height_same_payload(bls12381_multisig::fixture::<MinPk, _>);
+        put_same_height_same_payload(bls12381_multisig::fixture::<MinSig, _>);
+        put_same_height_same_payload(bls12381_threshold::fixture::<MinPk, _>);
+        put_same_height_same_payload(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn put_higher_tip<S, F>(fixture: F)
@@ -187,11 +182,11 @@ mod tests {
 
     #[test]
     fn test_put_higher_tip() {
-        put_higher_tip(ed25519);
-        put_higher_tip(bls12381_multisig::<MinPk, _>);
-        put_higher_tip(bls12381_multisig::<MinSig, _>);
-        put_higher_tip(bls12381_threshold::<MinPk, _>);
-        put_higher_tip(bls12381_threshold::<MinSig, _>);
+        put_higher_tip(ed25519::fixture);
+        put_higher_tip(bls12381_multisig::fixture::<MinPk, _>);
+        put_higher_tip(bls12381_multisig::fixture::<MinSig, _>);
+        put_higher_tip(bls12381_threshold::fixture::<MinPk, _>);
+        put_higher_tip(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn put_lower_tip_panics<S, F>(fixture: F)
@@ -209,11 +204,20 @@ mod tests {
 
     #[test]
     fn test_put_lower_tip_panics() {
-        assert!(catch_unwind(|| put_lower_tip_panics(ed25519)).is_err());
-        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_multisig::<MinPk, _>)).is_err());
-        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_multisig::<MinSig, _>)).is_err());
-        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_threshold::<MinPk, _>)).is_err());
-        assert!(catch_unwind(|| put_lower_tip_panics(bls12381_threshold::<MinSig, _>)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(ed25519::fixture)).is_err());
+        assert!(
+            catch_unwind(|| put_lower_tip_panics(bls12381_multisig::fixture::<MinPk, _>)).is_err()
+        );
+        assert!(
+            catch_unwind(|| put_lower_tip_panics(bls12381_multisig::fixture::<MinSig, _>)).is_err()
+        );
+        assert!(
+            catch_unwind(|| put_lower_tip_panics(bls12381_threshold::fixture::<MinPk, _>)).is_err()
+        );
+        assert!(
+            catch_unwind(|| put_lower_tip_panics(bls12381_threshold::fixture::<MinSig, _>))
+                .is_err()
+        );
     }
 
     fn put_same_height_different_payload_panics<S, F>(fixture: F)
@@ -231,21 +235,23 @@ mod tests {
 
     #[test]
     fn test_put_same_height_different_payload_panics() {
-        assert!(catch_unwind(|| put_same_height_different_payload_panics(ed25519)).is_err());
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(ed25519::fixture)).is_err()
+        );
         assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_multisig::<MinPk, _>
+            bls12381_multisig::fixture::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_multisig::<MinSig, _>
+            bls12381_multisig::fixture::<MinSig, _>
         ))
         .is_err());
         assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_threshold::<MinPk, _>
+            bls12381_threshold::fixture::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| put_same_height_different_payload_panics(
-            bls12381_threshold::<MinSig, _>
+            bls12381_threshold::fixture::<MinSig, _>
         ))
         .is_err());
     }
@@ -261,11 +267,11 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        get_nonexistent::<ed25519_scheme::Scheme>();
-        get_nonexistent::<bls12381_multisig_scheme::Scheme<PublicKey, MinPk>>();
-        get_nonexistent::<bls12381_multisig_scheme::Scheme<PublicKey, MinSig>>();
-        get_nonexistent::<bls12381_threshold_scheme::Scheme<PublicKey, MinPk>>();
-        get_nonexistent::<bls12381_threshold_scheme::Scheme<PublicKey, MinSig>>();
+        get_nonexistent::<ed25519::Scheme>();
+        get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinPk>>();
+        get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinSig>>();
+        get_nonexistent::<bls12381_threshold::Scheme<PublicKey, MinPk>>();
+        get_nonexistent::<bls12381_threshold::Scheme<PublicKey, MinSig>>();
     }
 
     fn multiple_sequencers<S, F>(fixture: F)
@@ -290,11 +296,11 @@ mod tests {
 
     #[test]
     fn test_multiple_sequencers() {
-        multiple_sequencers(ed25519);
-        multiple_sequencers(bls12381_multisig::<MinPk, _>);
-        multiple_sequencers(bls12381_multisig::<MinSig, _>);
-        multiple_sequencers(bls12381_threshold::<MinPk, _>);
-        multiple_sequencers(bls12381_threshold::<MinSig, _>);
+        multiple_sequencers(ed25519::fixture);
+        multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn put_multiple_updates<S, F>(fixture: F)
@@ -340,10 +346,10 @@ mod tests {
 
     #[test]
     fn test_put_multiple_updates() {
-        put_multiple_updates(ed25519);
-        put_multiple_updates(bls12381_multisig::<MinPk, _>);
-        put_multiple_updates(bls12381_multisig::<MinSig, _>);
-        put_multiple_updates(bls12381_threshold::<MinPk, _>);
-        put_multiple_updates(bls12381_threshold::<MinSig, _>);
+        put_multiple_updates(ed25519::fixture);
+        put_multiple_updates(bls12381_multisig::fixture::<MinPk, _>);
+        put_multiple_updates(bls12381_multisig::fixture::<MinSig, _>);
+        put_multiple_updates(bls12381_threshold::fixture::<MinPk, _>);
+        put_multiple_updates(bls12381_threshold::fixture::<MinSig, _>);
     }
 }

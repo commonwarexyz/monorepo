@@ -8,11 +8,13 @@ use super::{
 };
 use crate::{
     aggregation::{scheme::AggregationScheme, types::Certificate},
-    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest,
+};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -68,7 +70,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    P: SchemeProvider,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
@@ -153,7 +155,7 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: SchemeProvider<Scheme: AggregationScheme<D>>,
+        P: Provider<Scope = Epoch, Scheme: AggregationScheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
@@ -200,7 +202,7 @@ impl<
     /// Gets the scheme for a given epoch, returning an error if unavailable.
     fn scheme(&self, epoch: Epoch) -> Result<Arc<P::Scheme>, Error> {
         self.scheme_provider
-            .scheme(epoch)
+            .scoped(epoch)
             .ok_or(Error::UnknownEpoch(epoch))
     }
 
@@ -505,10 +507,10 @@ impl<
 
         // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.signature.signer) {
+        if acks.contains_key(&ack.part.signer) {
             return Ok(());
         }
-        acks.insert(ack.signature.signer, ack.clone());
+        acks.insert(ack.part.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
         let filtered = acks
@@ -616,10 +618,10 @@ impl<
         // Validate sender matches the signer
         let scheme = self.scheme(ack.epoch)?;
         let participants = scheme.participants();
-        if ack.signature.signer as usize >= participants.len() {
+        let Some(signer) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
-        }
-        if participants.get(ack.signature.signer as usize) != Some(sender) {
+        };
+        if signer != ack.part.signer {
             return Err(Error::PeerMismatch);
         }
 
@@ -642,7 +644,7 @@ impl<
             None => false,
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.signature.signer)),
+                .is_some_and(|acks| acks.contains_key(&ack.part.signer)),
             Some(Pending::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
@@ -651,7 +653,7 @@ impl<
                 }
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.signature.signer))
+                    .is_some_and(|acks| acks.contains_key(&ack.part.signer))
             }
         };
         if have_ack {
@@ -842,7 +844,7 @@ impl<
             let our_digest = our_signer.and_then(|signer| {
                 acks_group
                     .iter()
-                    .find(|ack| ack.epoch == self.epoch && ack.signature.signer == signer)
+                    .find(|ack| ack.epoch == self.epoch && ack.part.signer == signer)
                     .map(|ack| ack.item.digest)
             });
 
@@ -857,7 +859,7 @@ impl<
                 epoch_map
                     .entry(ack.epoch)
                     .or_insert_with(BTreeMap::new)
-                    .insert(ack.signature.signer, ack);
+                    .insert(ack.part.signer, ack);
             }
 
             // Insert as Verified if we have our own ack (meaning we verified the digest),

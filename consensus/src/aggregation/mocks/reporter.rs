@@ -3,11 +3,10 @@ use crate::{
         scheme::AggregationScheme,
         types::{Ack, Activity, Certificate, Index},
     },
-    scheme::Scheme,
     types::Epoch,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

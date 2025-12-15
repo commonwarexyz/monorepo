@@ -1,7 +1,6 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    scheme::Scheme,
     simplex::{
         scheme::SimplexScheme,
         types::{Finalize, Notarize, Proposal, Vote},
@@ -10,7 +9,7 @@ use crate::{
     Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};

@@ -35,11 +35,11 @@
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
-    scheme::Scheme,
     simplex::types::Context,
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{

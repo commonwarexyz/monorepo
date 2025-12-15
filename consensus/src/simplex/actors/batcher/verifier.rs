@@ -1,11 +1,8 @@
-use crate::{
-    scheme::SignatureVerification,
-    simplex::{
-        scheme::SimplexScheme,
-        types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
-    },
+use crate::simplex::{
+    scheme::SimplexScheme,
+    types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Verification, Digest};
 use rand::{CryptoRng, Rng};
 
 /// `Verifier` is a utility for tracking and batch verifying consensus messages.
@@ -204,21 +201,16 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, signatures): (Vec<_>, Vec<_>) = notarizes
-            .into_iter()
-            .map(|n| (n.proposal, n.signature))
-            .unzip();
+        let (proposals, parts): (Vec<_>, Vec<_>) =
+            notarizes.into_iter().map(|n| (n.proposal, n.part)).unzip();
 
         let proposal = &proposals[0];
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
             rng,
             namespace,
             Subject::Notarize { proposal },
-            signatures,
+            parts,
         );
 
         self.notarizes_verified += verified.len();
@@ -227,14 +219,9 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(signature, proposal)| {
-                    Vote::Notarize(Notarize {
-                        proposal,
-                        signature,
-                    })
-                })
+                .map(|(part, proposal)| Vote::Notarize(Notarize { proposal, part }))
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -298,14 +285,11 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
 
         let round = nullifies[0].round;
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
             rng,
             namespace,
             Subject::Nullify { round },
-            nullifies.into_iter().map(|nullify| nullify.signature),
+            nullifies.into_iter().map(|nullify| nullify.part),
         );
 
         self.nullifies_verified += verified.len();
@@ -313,9 +297,9 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
         (
             verified
                 .into_iter()
-                .map(|signature| Vote::Nullify(Nullify { round, signature }))
+                .map(|part| Vote::Nullify(Nullify { round, part }))
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -370,21 +354,16 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, signatures): (Vec<_>, Vec<_>) = finalizes
-            .into_iter()
-            .map(|n| (n.proposal, n.signature))
-            .unzip();
+        let (proposals, parts): (Vec<_>, Vec<_>) =
+            finalizes.into_iter().map(|n| (n.proposal, n.part)).unzip();
 
         let proposal = &proposals[0];
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_parts::<_, D, _>(
             rng,
             namespace,
             Subject::Finalize { proposal },
-            signatures,
+            parts,
         );
 
         self.finalizes_verified += verified.len();
@@ -393,14 +372,9 @@ impl<S: SimplexScheme<D>, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(signature, proposal)| {
-                    Vote::Finalize(Finalize {
-                        proposal,
-                        signature,
-                    })
-                })
+                .map(|(part, proposal)| Vote::Finalize(Finalize { proposal, part }))
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -658,7 +632,7 @@ mod tests {
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
         verifier2.set_leader(leader_vote.signer());
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-        faulty_vote.signature.signer = (schemes.len() as u32) + 10;
+        faulty_vote.part.signer = (schemes.len() as u32) + 10;
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {

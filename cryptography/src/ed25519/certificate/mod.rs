@@ -2,15 +2,26 @@
 //!
 //! This module provides both the generic Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
-use crate::scheme::{utils::Signers, Context, Scheme, Signature, SignatureVerification};
+
+#[cfg(feature = "mocks")]
+pub mod mocks;
+
+#[cfg(feature = "std")]
+use super::Batch;
+use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
+#[cfg(feature = "std")]
+use crate::{certificate::Verification, BatchVerifier};
+use crate::{
+    certificate::{Part, Scheme, Signers, Subject},
+    Digest, Signer as _, Verifier as _,
+};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
-use commonware_cryptography::{
-    ed25519::{self, Batch},
-    BatchVerifier, Digest, Signer as _, Verifier as _,
-};
 use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
+#[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
 /// Generic Ed25519 signing scheme implementation.
@@ -21,17 +32,14 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Generic {
     /// Participants in the committee.
-    pub participants: Set<ed25519::PublicKey>,
+    pub participants: Set<PublicKey>,
     /// Key used for generating signatures.
-    pub signer: Option<(u32, ed25519::PrivateKey)>,
+    pub signer: Option<(u32, PrivateKey)>,
 }
 
 impl Generic {
     /// Creates a new generic Ed25519 scheme instance.
-    pub fn signer(
-        participants: Set<ed25519::PublicKey>,
-        private_key: ed25519::PrivateKey,
-    ) -> Option<Self> {
+    pub fn signer(participants: Set<PublicKey>, private_key: PrivateKey) -> Option<Self> {
         let signer = participants
             .index(&private_key.public_key())
             .map(|index| (index, private_key))?;
@@ -42,8 +50,8 @@ impl Generic {
         })
     }
 
-    /// Builds a verifier that can authenticate votes without generating signatures.
-    pub const fn verifier(participants: Set<ed25519::PublicKey>) -> Self {
+    /// Builds a verifier that can authenticate signatures without generating them.
+    pub const fn verifier(participants: Set<PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -55,69 +63,66 @@ impl Generic {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    /// Signs a message and returns the signer index and signature.
-    pub fn sign_vote<S, D>(
-        &self,
-        namespace: &[u8],
-        context: S::Context<'_, D>,
-    ) -> Option<Signature<S>>
+    /// Signs a subject and returns the signer index and signature.
+    pub fn sign<S, D>(&self, namespace: &[u8], subject: S::Subject<'_, D>) -> Option<Part<S>>
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         D: Digest,
     {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
-        Some(Signature {
+        Some(Part {
             signer: *index,
             signature,
         })
     }
 
-    /// Verifies a single vote from a signer.
-    pub fn verify_vote<S, D>(
+    /// Verifies a single part from a signer.
+    pub fn verify_part<S, D>(
         &self,
         namespace: &[u8],
-        context: S::Context<'_, D>,
-        signature: &Signature<S>,
+        subject: S::Subject<'_, D>,
+        part: &Part<S>,
     ) -> bool
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.key(signature.signer) else {
+        let Some(public_key) = self.participants.key(part.signer) else {
             return false;
         };
 
-        let (namespace, message) = context.namespace_and_message(namespace);
-        public_key.verify(namespace.as_ref(), message.as_ref(), &signature.signature)
+        let (namespace, message) = subject.namespace_and_message(namespace);
+        public_key.verify(namespace.as_ref(), message.as_ref(), &part.signature)
     }
 
-    /// Batch-verifies votes and returns verified votes and invalid signers.
-    pub fn verify_votes<S, R, D, I>(
+    /// Batch-verifies parts and returns verified parts and invalid signers.
+    #[cfg(feature = "std")]
+    pub fn verify_parts<S, R, D, I>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: S::Context<'_, D>,
-        signatures: I,
-    ) -> SignatureVerification<S>
+        subject: S::Subject<'_, D>,
+        parts: I,
+    ) -> Verification<S>
     where
-        S: Scheme<Signature = ed25519::Signature>,
+        S: Scheme<Signature = Ed25519Signature>,
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Signature<S>>,
+        I: IntoIterator<Item = Part<S>>,
     {
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
 
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut batch = Batch::new();
 
-        for sig in signatures.into_iter() {
-            let Some(public_key) = self.participants.key(sig.signer) else {
-                invalid.insert(sig.signer);
+        for part in parts.into_iter() {
+            let Some(public_key) = self.participants.key(part.signer) else {
+                invalid.insert(part.signer);
                 continue;
             };
 
@@ -125,44 +130,80 @@ impl Generic {
                 namespace.as_ref(),
                 message.as_ref(),
                 public_key,
-                &sig.signature,
+                &part.signature,
             );
 
-            candidates.push((sig, public_key));
+            candidates.push((part, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
-            // Batch failed: fall back to per-signer verification to isolate faulty votes.
-            for (sig, public_key) in &candidates {
-                if !public_key.verify(namespace.as_ref(), message.as_ref(), &sig.signature) {
-                    invalid.insert(sig.signer);
+            // Batch failed: fall back to per-signer verification to isolate faulty parts.
+            for (part, public_key) in &candidates {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &part.signature) {
+                    invalid.insert(part.signer);
                 }
             }
         }
 
         let verified = candidates
             .into_iter()
-            .filter_map(|(vote, _)| {
-                if invalid.contains(&vote.signer) {
+            .filter_map(|(part, _)| {
+                if invalid.contains(&part.signer) {
                     None
                 } else {
-                    Some(vote)
+                    Some(part)
                 }
             })
             .collect();
 
-        SignatureVerification::new(verified, invalid.into_iter().collect())
+        Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles a certificate from a collection of votes.
-    pub fn assemble_certificate<S, I>(&self, signatures: I) -> Option<Certificate>
+    /// Verifies parts one-by-one and returns verified parts and invalid signers.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_parts<S, R, D, I>(
+        &self,
+        _rng: &mut R,
+        namespace: &[u8],
+        subject: S::Subject<'_, D>,
+        parts: I,
+    ) -> crate::certificate::Verification<S>
     where
-        S: Scheme<Signature = ed25519::Signature>,
-        I: IntoIterator<Item = Signature<S>>,
+        S: Scheme<Signature = Ed25519Signature>,
+        R: Rng + CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Part<S>>,
+    {
+        let (namespace, message) = subject.namespace_and_message(namespace);
+
+        let mut invalid = alloc::collections::BTreeSet::new();
+        let mut verified = Vec::new();
+
+        for part in parts.into_iter() {
+            let Some(public_key) = self.participants.key(part.signer) else {
+                invalid.insert(part.signer);
+                continue;
+            };
+
+            if public_key.verify(namespace.as_ref(), message.as_ref(), &part.signature) {
+                verified.push(part);
+            } else {
+                invalid.insert(part.signer);
+            }
+        }
+
+        crate::certificate::Verification::new(verified, invalid.into_iter().collect())
+    }
+
+    /// Assembles a certificate from a collection of parts.
+    pub fn assemble<S, I>(&self, parts: I) -> Option<Certificate>
+    where
+        S: Scheme<Signature = Ed25519Signature>,
+        I: IntoIterator<Item = Part<S>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for Signature { signer, signature } in signatures {
+        for Part { signer, signature } in parts {
             if signer as usize >= self.participants.len() {
                 return None;
             }
@@ -187,11 +228,12 @@ impl Generic {
     /// Stages a certificate for batch verification.
     ///
     /// Returns false if the certificate structure is invalid.
-    pub fn batch_verify_certificate<S, D>(
+    #[cfg(feature = "std")]
+    fn batch_verify_certificate<S, D>(
         &self,
         batch: &mut Batch,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
         certificate: &Certificate,
     ) -> bool
     where
@@ -214,7 +256,7 @@ impl Generic {
         }
 
         // Add the certificate to the batch.
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
                 return false;
@@ -226,12 +268,13 @@ impl Generic {
         true
     }
 
-    /// Verifies a certificate.
+    /// Verifies a certificate using batch verification.
+    #[cfg(feature = "std")]
     pub fn verify_certificate<S, R, D>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
         certificate: &Certificate,
     ) -> bool
     where
@@ -240,14 +283,52 @@ impl Generic {
         D: Digest,
     {
         let mut batch = Batch::new();
-        if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, context, certificate) {
+        if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, subject, certificate) {
             return false;
         }
 
         batch.verify(rng)
     }
 
+    /// Verifies a certificate by checking each signature individually.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_certificate<S, R, D>(
+        &self,
+        _rng: &mut R,
+        namespace: &[u8],
+        subject: S::Subject<'_, D>,
+        certificate: &Certificate,
+    ) -> bool
+    where
+        S: Scheme,
+        R: Rng + CryptoRng,
+        D: Digest,
+    {
+        if certificate.signers.len() != self.participants.len() {
+            return false;
+        }
+        if certificate.signers.count() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate.signers.count() < self.participants.quorum() as usize {
+            return false;
+        }
+
+        let (namespace, message) = subject.namespace_and_message(namespace);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            if !public_key.verify(namespace.as_ref(), message.as_ref(), signature) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Verifies multiple certificates in a batch.
+    #[cfg(feature = "std")]
     pub fn verify_certificates<'a, S, R, D, I>(
         &self,
         rng: &mut R,
@@ -258,16 +339,39 @@ impl Generic {
         S: Scheme,
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (S::Context<'a, D>, &'a Certificate)>,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
     {
         let mut batch = Batch::new();
-        for (context, certificate) in certificates {
-            if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, context, certificate) {
+        for (subject, certificate) in certificates {
+            if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, subject, certificate) {
                 return false;
             }
         }
 
         batch.verify(rng)
+    }
+
+    /// Verifies multiple certificates one-by-one.
+    #[cfg(not(feature = "std"))]
+    pub fn verify_certificates<'a, S, R, D, I>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
+    where
+        S: Scheme,
+        R: Rng + CryptoRng,
+        D: Digest,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
+    {
+        for (subject, certificate) in certificates {
+            if !self.verify_certificate::<S, _, D>(rng, namespace, subject, certificate) {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub const fn is_attributable(&self) -> bool {
@@ -286,10 +390,10 @@ impl Generic {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
-    /// Bitmap of validator indices that contributed signatures.
+    /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
-    /// Ed25519 signatures emitted by the respective validators ordered by signer index.
-    pub signatures: Vec<ed25519::Signature>,
+    /// Ed25519 signatures emitted by the respective participants ordered by signer index.
+    pub signatures: Vec<Ed25519Signature>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -297,7 +401,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<ed25519::Signature>())
+            .map(|_| u.arbitrary::<Ed25519Signature>())
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -326,15 +430,15 @@ impl Read for Certificate {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "consensus::scheme::ed25519::Certificate",
+                "cryptography::ed25519::certificate::Certificate",
                 "Certificate contains no signers",
             ));
         }
 
-        let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
-                "consensus::scheme::ed25519::Certificate",
+                "cryptography::ed25519::certificate::Certificate",
                 "Signers and signatures counts differ",
             ));
         }
@@ -349,65 +453,80 @@ impl Read for Certificate {
 mod macros {
     /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
     ///
-    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait implementation.
-    /// The only required parameter is the `Context` type, which varies per protocol.
+    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+    /// implementation, and a `fixture` function for testing.
+    /// The only required parameter is the `Subject` type, which varies per protocol.
     ///
     /// # Example
     /// ```ignore
-    /// impl_ed25519_scheme!(VoteContext<'a, D>);
+    /// impl_certificate_ed25519!(VoteSubject<'a, D>);
     /// ```
     #[macro_export]
-    macro_rules! impl_ed25519_scheme {
-        ($context:ty) => {
+    macro_rules! impl_certificate_ed25519 {
+        ($subject:ty) => {
+            /// Generates a test fixture with Ed25519 identities and signing schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            #[cfg(feature = "mocks")]
+            #[allow(dead_code)]
+            pub fn fixture<R>(rng: &mut R, n: u32) -> $crate::certificate::mocks::Fixture<Scheme>
+            where
+                R: rand::RngCore + rand::CryptoRng,
+            {
+                $crate::ed25519::certificate::mocks::fixture(
+                    rng,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
+
             /// Ed25519 signing scheme wrapper.
             #[derive(Clone, Debug)]
             pub struct Scheme {
-                generic: $crate::scheme::ed25519::Generic,
+                generic: $crate::ed25519::certificate::Generic,
             }
 
             impl Scheme {
                 /// Creates a new scheme instance with the provided key material.
                 ///
-                /// Participants use the same key for both identity and consensus.
+                /// Participants use the same key for both identity and signing.
                 ///
-                /// If the provided private key does not match any consensus key in the committee,
+                /// If the provided private key does not match any signing key in the participant set,
                 /// the instance will act as a verifier (unable to generate signatures).
                 ///
                 /// Returns `None` if the provided private key does not match any participant
-                /// in the committee.
+                /// in the participant set.
                 pub fn signer(
-                    participants: commonware_utils::ordered::Set<
-                        commonware_cryptography::ed25519::PublicKey,
-                    >,
-                    private_key: commonware_cryptography::ed25519::PrivateKey,
+                    participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                    private_key: $crate::ed25519::PrivateKey,
                 ) -> Option<Self> {
                     Some(Self {
-                        generic: $crate::scheme::ed25519::Generic::signer(
+                        generic: $crate::ed25519::certificate::Generic::signer(
                             participants,
                             private_key,
                         )?,
                     })
                 }
 
-                /// Builds a verifier that can authenticate votes without generating signatures.
+                /// Builds a verifier that can authenticate signatures without generating them.
                 ///
-                /// Participants use the same key for both identity and consensus.
+                /// Participants use the same key for both identity and signing.
                 pub const fn verifier(
-                    participants: commonware_utils::ordered::Set<
-                        commonware_cryptography::ed25519::PublicKey,
-                    >,
+                    participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
                 ) -> Self {
                     Self {
-                        generic: $crate::scheme::ed25519::Generic::verifier(participants),
+                        generic: $crate::ed25519::certificate::Generic::verifier(participants),
                     }
                 }
             }
 
-            impl $crate::scheme::Scheme for Scheme {
-                type Context<'a, D: commonware_cryptography::Digest> = $context;
-                type PublicKey = commonware_cryptography::ed25519::PublicKey;
-                type Signature = commonware_cryptography::ed25519::Signature;
-                type Certificate = $crate::scheme::ed25519::Certificate;
+            impl $crate::certificate::Scheme for Scheme {
+                type Subject<'a, D: $crate::Digest> = $subject;
+                type PublicKey = $crate::ed25519::PublicKey;
+                type Signature = $crate::ed25519::Signature;
+                type Certificate = $crate::ed25519::certificate::Certificate;
 
                 fn me(&self) -> Option<u32> {
                     self.generic.me()
@@ -417,61 +536,57 @@ mod macros {
                     &self.generic.participants
                 }
 
-                fn sign_vote<D: commonware_cryptography::Digest>(
+                fn sign<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
-                ) -> Option<$crate::scheme::Signature<Self>> {
-                    self.generic.sign_vote::<_, D>(namespace, context)
+                    subject: Self::Subject<'_, D>,
+                ) -> Option<$crate::certificate::Part<Self>> {
+                    self.generic.sign::<_, D>(namespace, subject)
                 }
 
-                fn verify_vote<D: commonware_cryptography::Digest>(
+                fn verify_part<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
-                    signature: &$crate::scheme::Signature<Self>,
+                    subject: Self::Subject<'_, D>,
+                    part: &$crate::certificate::Part<Self>,
                 ) -> bool {
-                    self.generic
-                        .verify_vote::<_, D>(namespace, context, signature)
+                    self.generic.verify_part::<_, D>(namespace, subject, part)
                 }
 
-                fn verify_votes<R, D, I>(
+                fn verify_parts<R, D, I>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
-                    signatures: I,
-                ) -> $crate::scheme::SignatureVerification<Self>
+                    subject: Self::Subject<'_, D>,
+                    parts: I,
+                ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
-                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
+                    D: $crate::Digest,
+                    I: IntoIterator<Item = $crate::certificate::Part<Self>>,
                 {
                     self.generic
-                        .verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
+                        .verify_parts::<_, _, D, _>(rng, namespace, subject, parts)
                 }
 
-                fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
+                fn assemble<I>(&self, parts: I) -> Option<Self::Certificate>
                 where
-                    I: IntoIterator<Item = $crate::scheme::Signature<Self>>,
+                    I: IntoIterator<Item = $crate::certificate::Part<Self>>,
                 {
-                    self.generic.assemble_certificate(signatures)
+                    self.generic.assemble(parts)
                 }
 
-                fn verify_certificate<
-                    R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
-                >(
+                fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
+                    subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
                     self.generic.verify_certificate::<Self, _, D>(
                         rng,
                         namespace,
-                        context,
+                        subject,
                         certificate,
                     )
                 }
@@ -484,8 +599,8 @@ mod macros {
                 ) -> bool
                 where
                     R: rand::Rng + rand::CryptoRng,
-                    D: commonware_cryptography::Digest,
-                    I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+                    D: $crate::Digest,
+                    I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 {
                     self.generic
                         .verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
@@ -503,7 +618,7 @@ mod macros {
 
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::scheme::ed25519::Generic::certificate_codec_config_unbounded()
+                    $crate::ed25519::certificate::Generic::certificate_codec_config_unbounded()
                 }
             }
         };
@@ -513,12 +628,10 @@ mod macros {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{impl_ed25519_scheme, scheme::Scheme as _};
-    use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
-        sha256::Digest as Sha256Digest,
+    use crate::{
+        certificate::Scheme as _, impl_certificate_ed25519, sha256::Digest as Sha256Digest,
     };
+    use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::{ordered::Set, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
@@ -528,18 +641,18 @@ mod tests {
 
     /// Test context type for generic scheme tests.
     #[derive(Clone, Debug)]
-    pub struct TestContext<'a> {
+    pub struct TestSubject<'a> {
         pub message: &'a [u8],
     }
 
-    impl<'a> Context for TestContext<'a> {
+    impl<'a> Subject for TestSubject<'a> {
         fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
             (namespace.to_vec(), self.message.to_vec())
         }
     }
 
     // Use the macro to generate the test scheme
-    impl_ed25519_scheme!(TestContext<'a>);
+    impl_certificate_ed25519!(TestSubject<'a>);
 
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Scheme) {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -565,13 +678,13 @@ mod tests {
         let (schemes, _) = setup_signers(4, 42);
         let scheme = &schemes[0];
 
-        let signature = scheme
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+        let part = scheme
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(scheme.verify_vote::<Sha256Digest>(
+        assert!(scheme.verify_part::<Sha256Digest>(
             NAMESPACE,
-            TestContext { message: MESSAGE },
-            &signature
+            TestSubject { message: MESSAGE },
+            &part
         ));
     }
 
@@ -579,57 +692,57 @@ mod tests {
     fn test_verifier_cannot_sign() {
         let (_, verifier) = setup_signers(4, 43);
         assert!(verifier
-            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .is_none());
     }
 
     #[test]
-    fn test_verify_votes_filters_invalid() {
+    fn test_verify_parts_filters_invalid() {
         let (schemes, _) = setup_signers(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
         let mut rng = StdRng::seed_from_u64(45);
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
-            signatures.clone(),
+            TestSubject { message: MESSAGE },
+            parts.clone(),
         );
-        assert!(result.invalid_signers.is_empty());
+        assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test 1: Corrupt one vote - invalid signer index
-        let mut votes_corrupted = signatures.clone();
-        votes_corrupted[0].signer = 999;
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        // Test 1: Corrupt one part - invalid signer index
+        let mut parts_corrupted = parts.clone();
+        parts_corrupted[0].signer = 999;
+        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
-            votes_corrupted,
+            TestSubject { message: MESSAGE },
+            parts_corrupted,
         );
-        assert_eq!(result.invalid_signers, vec![999]);
+        assert_eq!(result.invalid, vec![999]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test 2: Corrupt one vote - invalid signature
-        let mut votes_corrupted = signatures;
-        votes_corrupted[0].signature = votes_corrupted[1].signature.clone();
-        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+        // Test 2: Corrupt one part - invalid signature
+        let mut parts_corrupted = parts;
+        parts_corrupted[0].signature = parts_corrupted[1].signature.clone();
+        let result = schemes[0].verify_parts::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
-            votes_corrupted,
+            TestSubject { message: MESSAGE },
+            parts_corrupted,
         );
         // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
-        assert_eq!(result.invalid_signers.len(), 1);
+        assert_eq!(result.invalid.len(), 1);
         assert_eq!(result.verified.len(), quorum - 1);
     }
 
@@ -638,16 +751,16 @@ mod tests {
         let (schemes, _) = setup_signers(4, 46);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         // Verify certificate has correct number of signers
         assert_eq!(certificate.signers.count(), quorum);
@@ -659,19 +772,19 @@ mod tests {
         let (schemes, _) = setup_signers(4, 47);
 
         // Create votes in non-sorted order (indices 2, 0, 1)
-        let signatures = vec![
+        let parts = vec![
             schemes[2]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
             schemes[0]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
             schemes[1]
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
         ];
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         // Verify signers are sorted
         assert_eq!(
@@ -685,22 +798,22 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 48);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -710,22 +823,22 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
 
@@ -735,7 +848,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &corrupted
         ));
     }
@@ -745,16 +858,16 @@ mod tests {
         let (schemes, _) = setup_signers(4, 51);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -765,16 +878,16 @@ mod tests {
         let (schemes, _) = setup_signers(4, 52);
         let sub_quorum = 2; // Less than quorum (3)
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(sub_quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(signatures).is_none());
+        assert!(schemes[0].assemble(parts).is_none());
     }
 
     #[test]
@@ -782,19 +895,19 @@ mod tests {
         let (schemes, _) = setup_signers(4, 53);
         let quorum = quorum(schemes.len() as u32) as usize;
 
-        let mut signatures: Vec<_> = schemes
+        let mut parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
         // Corrupt signer index to be out of range
-        signatures[0].signer = 999;
+        parts[0].signer = 999;
 
-        assert!(schemes[0].assemble_certificate(signatures).is_none());
+        assert!(schemes[0].assemble(parts).is_none());
     }
 
     #[test]
@@ -802,16 +915,16 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 54);
         let participants_len = schemes.len();
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let mut certificate = schemes[0].assemble(parts).unwrap();
 
         // Artificially truncate to below quorum
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
@@ -822,7 +935,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -831,16 +944,16 @@ mod tests {
     fn test_verify_certificate_rejects_mismatched_signature_count() {
         let (schemes, verifier) = setup_signers(4, 55);
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let mut certificate = schemes[0].assemble(parts).unwrap();
 
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
@@ -848,7 +961,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate
         ));
     }
@@ -862,21 +975,21 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let signatures: Vec<_> = schemes
+            let parts: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                    s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
+            certificates.push(schemes[0].assemble(parts).unwrap());
         }
 
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+            .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(57);
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
@@ -891,15 +1004,15 @@ mod tests {
         let mut certificates = Vec::new();
 
         for msg in &messages {
-            let signatures: Vec<_> = schemes
+            let parts: Vec<_> = schemes
                 .iter()
                 .take(quorum)
                 .map(|s| {
-                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                    s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: msg })
                         .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble_certificate(signatures).unwrap());
+            certificates.push(schemes[0].assemble(parts).unwrap());
         }
 
         // Corrupt second certificate
@@ -908,7 +1021,7 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: msg }, cert));
+            .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(59);
         assert!(
@@ -921,20 +1034,20 @@ mod tests {
     fn test_assemble_certificate_rejects_duplicate_signers() {
         let (schemes, _) = setup_signers(4, 60);
 
-        let mut signatures: Vec<_> = schemes
+        let mut parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
         // Add a duplicate of the last vote
-        signatures.push(signatures.last().unwrap().clone());
+        parts.push(parts.last().unwrap().clone());
 
         // This should panic due to duplicate signer
-        schemes[0].assemble_certificate(signatures);
+        schemes[0].assemble(parts);
     }
 
     #[test]
@@ -946,7 +1059,7 @@ mod tests {
         let signer = schemes[0].clone();
         assert!(
             signer
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_some(),
             "signer should produce votes"
         );
@@ -955,7 +1068,7 @@ mod tests {
         let verifier = Scheme::verifier(participants);
         assert!(
             verifier
-                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .is_none(),
             "verifier should not produce votes"
         );
@@ -966,16 +1079,16 @@ mod tests {
         let (schemes, _) = setup_signers(4, 62);
         let participants_len = schemes.len();
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         // Well-formed certificate decodes successfully
         let encoded = certificate.encode();
@@ -1014,16 +1127,16 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 63);
         let participants_len = schemes.len();
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let mut certificate = schemes[0].assemble(parts).unwrap();
 
         // Add an unknown signer (out of range)
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
@@ -1036,7 +1149,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
     }
@@ -1046,22 +1159,22 @@ mod tests {
         let (schemes, verifier) = setup_signers(4, 64);
         let participants_len = schemes.len();
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(3)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                     .unwrap()
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let mut certificate = schemes[0].assemble(parts).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
 
@@ -1073,7 +1186,7 @@ mod tests {
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
-            TestContext { message: MESSAGE },
+            TestSubject { message: MESSAGE },
             &certificate,
         ));
     }

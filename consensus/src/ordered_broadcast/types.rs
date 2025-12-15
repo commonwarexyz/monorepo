@@ -1,15 +1,15 @@
 //! Types used in [crate::ordered_broadcast].
 
 use super::scheme::OrderedBroadcastScheme;
-use crate::{
-    scheme::{self, Scheme, SchemeProvider, Signature},
-    types::Epoch,
-};
+use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{Digest, PublicKey, Signer};
+use commonware_cryptography::{
+    certificate::{self, Part, Provider, Scheme},
+    Digest, PublicKey, Signer,
+};
 use commonware_utils::{ordered::Set, union};
 use futures::channel::oneshot;
 use rand::{CryptoRng, Rng};
@@ -267,14 +267,14 @@ where
 /// This is used as the context type for `Scheme` implementations for validators.
 /// It contains the chunk being acknowledged and the epoch of the validator set.
 #[derive(Debug, Clone)]
-pub struct AckContext<'a, P: PublicKey, D: Digest> {
+pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
     pub chunk: &'a Chunk<P, D>,
     /// The epoch of the validator set.
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> scheme::Context for AckContext<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> certificate::Subject for AckSubject<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
@@ -447,7 +447,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        scheme_provider: &impl SchemeProvider<Scheme = S>,
+        scheme_provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -479,10 +479,10 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
 
         // Verify parent certificate using the scheme for the parent's epoch
         let parent_scheme = scheme_provider
-            .scheme(parent.epoch)
+            .scoped(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);
-        let ack_ctx = AckContext {
+        let ack_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
@@ -528,7 +528,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// 5. Decodes the certificate using the epoch-specific bounded codec config
     pub fn read_staged(
         reader: &mut impl Buf,
-        provider: &impl SchemeProvider<Scheme = S>,
+        provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Self, CodecError> {
         // Decode chunk and signature
         let chunk = Chunk::read(reader)?;
@@ -542,7 +542,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             let epoch = Epoch::read(reader)?;
 
             // Get scheme for parent's epoch
-            let scheme = provider.scheme(epoch).ok_or_else(|| {
+            let scheme = provider.scoped(epoch).ok_or_else(|| {
                 CodecError::Wrapped(
                     "consensus::ordered_broadcast::Node::read_staged",
                     Box::new(Error::UnknownScheme(epoch)),
@@ -682,39 +682,35 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Vote over the chunk.
+    /// Part of the certificate for this chunk.
     ///
-    /// This is a cryptographic signature that can be combined with other votes
+    /// This is a cryptographic part that can be combined with other parts
     /// to form a certificate once a quorum is reached.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
-    /// Create a new ack with the given chunk, epoch, and signature.
-    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: Signature<S>) -> Self {
-        Self {
-            chunk,
-            epoch,
-            signature,
-        }
+    /// Create a new ack with the given chunk, epoch, and part.
+    pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, part: Part<S>) -> Self {
+        Self { chunk, epoch, part }
     }
 
     /// Verify the Ack.
     ///
-    /// This ensures that the vote is valid for the given chunk and epoch,
+    /// This ensures that the part is valid for the given chunk and epoch,
     /// using the provided scheme.
     ///
-    /// Returns true if the signature is valid, false otherwise.
+    /// Returns true if the part is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_vote::<D>(&ack_namespace, ctx, &self.signature)
+        scheme.verify_part::<D>(&ack_namespace, ctx, &self.part)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -726,12 +722,12 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signature = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
-        Some(Self::new(chunk, epoch, signature))
+        let part = scheme.sign::<D>(&ack_namespace, ctx)?;
+        Some(Self::new(chunk, epoch, part))
     }
 }
 
@@ -739,7 +735,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
@@ -749,18 +745,14 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let signature = Signature::read(reader)?;
-        Ok(Self {
-            chunk,
-            epoch,
-            signature,
-        })
+        let part = Part::read(reader)?;
+        Ok(Self { chunk, epoch, part })
     }
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.part.encode_size()
     }
 }
 
@@ -774,12 +766,8 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let chunk = Chunk::<P, D>::arbitrary(u)?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            chunk,
-            epoch,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { chunk, epoch, part })
     }
 }
 
@@ -990,7 +978,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
         S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
@@ -1047,17 +1035,13 @@ where
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks::{
-            fixtures::{
-                bls12381_multisig, bls12381_threshold, ed25519, Fixture, SingleSchemeProvider,
-            },
-            Validators,
-        },
-        scheme::OrderedBroadcastScheme,
+        mocks::Validators,
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::{mocks::Fixture, ConstantProvider},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         Signer,
@@ -1117,22 +1101,22 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate acks from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum]
+        let parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1145,11 +1129,11 @@ mod tests {
 
     #[test]
     fn test_parent_encode_decode() {
-        parent_encode_decode(ed25519);
-        parent_encode_decode(bls12381_multisig::<MinPk, _>);
-        parent_encode_decode(bls12381_multisig::<MinSig, _>);
-        parent_encode_decode(bls12381_threshold::<MinPk, _>);
-        parent_encode_decode(bls12381_threshold::<MinSig, _>);
+        parent_encode_decode(ed25519::fixture);
+        parent_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        parent_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        parent_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        parent_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_encode_decode<S, F>(fixture: F)
@@ -1182,21 +1166,21 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Generate parent certificate
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_signatures: Vec<_> = fixture.schemes[..quorum]
+        let parent_parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_signatures)
+            .assemble(parent_parts)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1223,11 +1207,11 @@ mod tests {
 
     #[test]
     fn test_node_encode_decode() {
-        node_encode_decode(ed25519);
-        node_encode_decode(bls12381_multisig::<MinPk, _>);
-        node_encode_decode(bls12381_multisig::<MinSig, _>);
-        node_encode_decode(bls12381_threshold::<MinPk, _>);
-        node_encode_decode(bls12381_threshold::<MinSig, _>);
+        node_encode_decode(ed25519::fixture);
+        node_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        node_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        node_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        node_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_read_staged<S, F>(fixture: F)
@@ -1239,7 +1223,7 @@ mod tests {
 
         // Create a provider that returns the verifier for any epoch.
         // This simulates the normal case where the scheme is available.
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
 
         // Create common test data: a sequencer public key and the chunk namespace.
         let public_key = fixture.participants[0].clone();
@@ -1266,22 +1250,22 @@ mod tests {
         // Non-genesis nodes have a parent with a certificate. read_staged must
         // look up the scheme for the parent's epoch to decode the certificate.
         let parent_epoch = Epoch::new(5);
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &genesis_chunk,
             epoch: parent_epoch,
         };
 
         // Collect signatures from a quorum of validators to form the parent certificate.
-        let parent_signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_signatures)
+            .assemble(parent_parts)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1324,11 +1308,11 @@ mod tests {
 
     #[test]
     fn test_node_read_staged() {
-        node_read_staged(ed25519);
-        node_read_staged(bls12381_multisig::<MinPk, _>);
-        node_read_staged(bls12381_multisig::<MinSig, _>);
-        node_read_staged(bls12381_threshold::<MinPk, _>);
-        node_read_staged(bls12381_threshold::<MinSig, _>);
+        node_read_staged(ed25519::fixture);
+        node_read_staged(bls12381_multisig::fixture::<MinPk, _>);
+        node_read_staged(bls12381_multisig::fixture::<MinSig, _>);
+        node_read_staged(bls12381_threshold::fixture::<MinPk, _>);
+        node_read_staged(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn ack_encode_decode<S, F>(fixture: F)
@@ -1340,35 +1324,31 @@ mod tests {
         let chunk = Chunk::new(fixture.participants[0].clone(), 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signature = fixture.schemes[0]
-            .sign_vote::<Sha256Digest>(NAMESPACE, ctx)
+        let part = fixture.schemes[0]
+            .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
 
-        let ack = Ack::<PublicKey, S, Sha256Digest> {
-            chunk,
-            epoch,
-            signature,
-        };
+        let ack = Ack::<PublicKey, S, Sha256Digest> { chunk, epoch, part };
         let encoded = ack.encode();
         let decoded =
             Ack::<PublicKey, S, Sha256Digest>::read_cfg(&mut encoded.as_ref(), &()).unwrap();
 
         assert_eq!(decoded.chunk, ack.chunk);
         assert_eq!(decoded.epoch, ack.epoch);
-        assert_eq!(decoded.signature.signer, ack.signature.signer);
+        assert_eq!(decoded.part.signer, ack.part.signer);
     }
 
     #[test]
     fn test_ack_encode_decode() {
-        ack_encode_decode(ed25519);
-        ack_encode_decode(bls12381_multisig::<MinPk, _>);
-        ack_encode_decode(bls12381_multisig::<MinSig, _>);
-        ack_encode_decode(bls12381_threshold::<MinPk, _>);
-        ack_encode_decode(bls12381_threshold::<MinSig, _>);
+        ack_encode_decode(ed25519::fixture);
+        ack_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        ack_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        ack_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        ack_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn activity_encode_decode<S, F>(fixture: F)
@@ -1405,22 +1385,22 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate votes from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum]
+        let parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1448,11 +1428,11 @@ mod tests {
 
     #[test]
     fn test_activity_encode_decode() {
-        activity_encode_decode(ed25519);
-        activity_encode_decode(bls12381_multisig::<MinPk, _>);
-        activity_encode_decode(bls12381_multisig::<MinSig, _>);
-        activity_encode_decode(bls12381_threshold::<MinPk, _>);
-        activity_encode_decode(bls12381_threshold::<MinSig, _>);
+        activity_encode_decode(ed25519::fixture);
+        activity_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        activity_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        activity_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        activity_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test]
@@ -1489,22 +1469,22 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate votes from quorum validators
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum]
+        let parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1524,11 +1504,11 @@ mod tests {
 
     #[test]
     fn test_lock_encode_decode() {
-        lock_encode_decode(ed25519);
-        lock_encode_decode(bls12381_multisig::<MinPk, _>);
-        lock_encode_decode(bls12381_multisig::<MinSig, _>);
-        lock_encode_decode(bls12381_threshold::<MinPk, _>);
-        lock_encode_decode(bls12381_threshold::<MinSig, _>);
+        lock_encode_decode(ed25519::fixture);
+        lock_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
+        lock_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
+        lock_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
+        lock_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_sign_verify<S, F>(fixture: F)
@@ -1550,7 +1530,7 @@ mod tests {
             None,
         );
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
         let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -1560,20 +1540,20 @@ mod tests {
         let parent_epoch = Epoch::new(5);
 
         // Create certificate for parent
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_signatures: Vec<_> = fixture.schemes[..quorum]
+        let parent_parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_signatures)
+            .assemble(parent_parts)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1596,11 +1576,11 @@ mod tests {
 
     #[test]
     fn test_node_sign_verify() {
-        node_sign_verify(ed25519);
-        node_sign_verify(bls12381_multisig::<MinPk, _>);
-        node_sign_verify(bls12381_multisig::<MinSig, _>);
-        node_sign_verify(bls12381_threshold::<MinPk, _>);
-        node_sign_verify(bls12381_threshold::<MinSig, _>);
+        node_sign_verify(ed25519::fixture);
+        node_sign_verify(bls12381_multisig::fixture::<MinPk, _>);
+        node_sign_verify(bls12381_multisig::fixture::<MinSig, _>);
+        node_sign_verify(bls12381_threshold::fixture::<MinPk, _>);
+        node_sign_verify(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn ack_sign_verify<S, F>(fixture: F)
@@ -1622,11 +1602,11 @@ mod tests {
 
     #[test]
     fn test_ack_sign_verify() {
-        ack_sign_verify(ed25519);
-        ack_sign_verify(bls12381_multisig::<MinPk, _>);
-        ack_sign_verify(bls12381_multisig::<MinSig, _>);
-        ack_sign_verify(bls12381_threshold::<MinPk, _>);
-        ack_sign_verify(bls12381_threshold::<MinSig, _>);
+        ack_sign_verify(ed25519::fixture);
+        ack_sign_verify(bls12381_multisig::fixture::<MinPk, _>);
+        ack_sign_verify(bls12381_multisig::fixture::<MinSig, _>);
+        ack_sign_verify(bls12381_threshold::fixture::<MinPk, _>);
+        ack_sign_verify(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn certificate_assembly<S, F>(fixture: F)
@@ -1641,22 +1621,22 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create quorum votes
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum]
+        let parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1669,11 +1649,11 @@ mod tests {
 
     #[test]
     fn test_certificate_assembly() {
-        certificate_assembly(ed25519);
-        certificate_assembly(bls12381_multisig::<MinPk, _>);
-        certificate_assembly(bls12381_multisig::<MinSig, _>);
-        certificate_assembly(bls12381_threshold::<MinPk, _>);
-        certificate_assembly(bls12381_threshold::<MinSig, _>);
+        certificate_assembly(ed25519::fixture);
+        certificate_assembly(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_assembly(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_assembly(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_assembly(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn lock_verify<S, F>(fixture: F)
@@ -1688,20 +1668,20 @@ mod tests {
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create certificate
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum]
+        let parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1717,11 +1697,11 @@ mod tests {
 
     #[test]
     fn test_lock_verify() {
-        lock_verify(ed25519);
-        lock_verify(bls12381_multisig::<MinPk, _>);
-        lock_verify(bls12381_multisig::<MinSig, _>);
-        lock_verify(bls12381_threshold::<MinPk, _>);
-        lock_verify(bls12381_threshold::<MinSig, _>);
+        lock_verify(ed25519::fixture);
+        lock_verify(bls12381_multisig::fixture::<MinPk, _>);
+        lock_verify(bls12381_multisig::fixture::<MinSig, _>);
+        lock_verify(bls12381_threshold::fixture::<MinPk, _>);
+        lock_verify(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test]
@@ -1764,7 +1744,7 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier);
+        let provider = ConstantProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a node with invalid signature
@@ -1780,11 +1760,11 @@ mod tests {
 
     #[test]
     fn test_node_verify_invalid_signature() {
-        node_verify_invalid_signature(ed25519);
-        node_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        node_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        node_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        node_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        node_verify_invalid_signature(ed25519::fixture);
+        node_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
+        node_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
+        node_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
+        node_verify_invalid_signature(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_verify_invalid_parent_signature<S, F>(fixture: F)
@@ -1803,20 +1783,20 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate a valid certificate for the parent
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch,
         };
-        let parent_signatures: Vec<_> = fixture.schemes[..quorum]
+        let parent_parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(parent_signatures)
+            .assemble(parent_parts)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1834,25 +1814,25 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let provider = ConstantProvider::new(fixture.verifier.clone());
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
-        let wrong_ctx = AckContext {
+        let wrong_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: Epoch::new(99), // Different epoch to get different signatures
         };
-        let wrong_signatures: Vec<_> = fixture.schemes[..quorum]
+        let wrong_parts: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), wrong_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), wrong_ctx.clone())
                     .unwrap()
             })
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble_certificate(wrong_signatures)
+            .assemble(wrong_parts)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -1875,11 +1855,11 @@ mod tests {
 
     #[test]
     fn test_node_verify_invalid_parent_signature() {
-        node_verify_invalid_parent_signature(ed25519);
-        node_verify_invalid_parent_signature(bls12381_multisig::<MinPk, _>);
-        node_verify_invalid_parent_signature(bls12381_multisig::<MinSig, _>);
-        node_verify_invalid_parent_signature(bls12381_threshold::<MinPk, _>);
-        node_verify_invalid_parent_signature(bls12381_threshold::<MinSig, _>);
+        node_verify_invalid_parent_signature(ed25519::fixture);
+        node_verify_invalid_parent_signature(bls12381_multisig::fixture::<MinPk, _>);
+        node_verify_invalid_parent_signature(bls12381_multisig::fixture::<MinSig, _>);
+        node_verify_invalid_parent_signature(bls12381_threshold::fixture::<MinPk, _>);
+        node_verify_invalid_parent_signature(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn ack_verify_invalid_signature<S, F>(fixture: F)
@@ -1906,12 +1886,12 @@ mod tests {
         assert!(ack.verify(NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
         let mut tampered_vote = fixture.schemes[1]
-            .sign_vote::<Sha256Digest>(NAMESPACE, ctx)
+            .sign::<Sha256Digest>(NAMESPACE, ctx)
             .expect("Should sign vote");
         // Change the signer index to mismatch with the actual signature
         // The vote was signed by validator 1, but we claim it's from validator 0
@@ -1924,11 +1904,11 @@ mod tests {
 
     #[test]
     fn test_ack_verify_invalid_signature() {
-        ack_verify_invalid_signature(ed25519);
-        ack_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        ack_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        ack_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        ack_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        ack_verify_invalid_signature(ed25519::fixture);
+        ack_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
+        ack_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
+        ack_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
+        ack_verify_invalid_signature(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn ack_verify_wrong_validator<S, F>(f: F)
@@ -1957,11 +1937,11 @@ mod tests {
 
     #[test]
     fn test_ack_verify_wrong_validator() {
-        ack_verify_wrong_validator(ed25519);
-        ack_verify_wrong_validator(bls12381_multisig::<MinPk, _>);
-        ack_verify_wrong_validator(bls12381_multisig::<MinSig, _>);
-        ack_verify_wrong_validator(bls12381_threshold::<MinPk, _>);
-        ack_verify_wrong_validator(bls12381_threshold::<MinSig, _>);
+        ack_verify_wrong_validator(ed25519::fixture);
+        ack_verify_wrong_validator(bls12381_multisig::fixture::<MinPk, _>);
+        ack_verify_wrong_validator(bls12381_multisig::fixture::<MinSig, _>);
+        ack_verify_wrong_validator(bls12381_threshold::fixture::<MinPk, _>);
+        ack_verify_wrong_validator(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn lock_verify_invalid_signature<S, F>(f: F)
@@ -1977,20 +1957,20 @@ mod tests {
         let quorum_size = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate certificate
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum_size]
+        let parts: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -2001,16 +1981,16 @@ mod tests {
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Generate certificate with the wrong keys
-        let wrong_signatures: Vec<_> = wrong_fixture.schemes[..quorum_size]
+        let wrong_parts: Vec<_> = wrong_fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble_certificate(wrong_signatures)
+            .assemble(wrong_parts)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -2025,11 +2005,11 @@ mod tests {
 
     #[test]
     fn test_lock_verify_invalid_signature() {
-        lock_verify_invalid_signature(ed25519);
-        lock_verify_invalid_signature(bls12381_multisig::<MinPk, _>);
-        lock_verify_invalid_signature(bls12381_multisig::<MinSig, _>);
-        lock_verify_invalid_signature(bls12381_threshold::<MinPk, _>);
-        lock_verify_invalid_signature(bls12381_threshold::<MinSig, _>);
+        lock_verify_invalid_signature(ed25519::fixture);
+        lock_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
+        lock_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
+        lock_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
+        lock_verify_invalid_signature(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test]
@@ -2085,20 +2065,20 @@ mod tests {
         // Create a parent with a dummy certificate (content doesn't matter for this test)
         let dummy_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let dummy_epoch = Epoch::new(5);
-        let ctx = AckContext {
+        let ctx = AckSubject {
             chunk: &dummy_chunk,
             epoch: dummy_epoch,
         };
-        let signatures: Vec<_> = fixture.schemes[..quorum_size]
+        let parts: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
                     .unwrap()
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble_certificate(signatures)
+            .assemble(parts)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2115,11 +2095,11 @@ mod tests {
 
     #[test]
     fn test_node_genesis_with_parent_fails() {
-        node_genesis_with_parent_fails(ed25519);
-        node_genesis_with_parent_fails(bls12381_multisig::<MinPk, _>);
-        node_genesis_with_parent_fails(bls12381_multisig::<MinSig, _>);
-        node_genesis_with_parent_fails(bls12381_threshold::<MinPk, _>);
-        node_genesis_with_parent_fails(bls12381_threshold::<MinSig, _>);
+        node_genesis_with_parent_fails(ed25519::fixture);
+        node_genesis_with_parent_fails(bls12381_multisig::fixture::<MinPk, _>);
+        node_genesis_with_parent_fails(bls12381_multisig::fixture::<MinSig, _>);
+        node_genesis_with_parent_fails(bls12381_threshold::fixture::<MinPk, _>);
+        node_genesis_with_parent_fails(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_non_genesis_without_parent_fails<S, F>(fixture: F)
@@ -2146,11 +2126,11 @@ mod tests {
 
     #[test]
     fn test_node_non_genesis_without_parent_fails() {
-        node_non_genesis_without_parent_fails(ed25519);
-        node_non_genesis_without_parent_fails(bls12381_multisig::<MinPk, _>);
-        node_non_genesis_without_parent_fails(bls12381_multisig::<MinSig, _>);
-        node_non_genesis_without_parent_fails(bls12381_threshold::<MinPk, _>);
-        node_non_genesis_without_parent_fails(bls12381_threshold::<MinSig, _>);
+        node_non_genesis_without_parent_fails(ed25519::fixture);
+        node_non_genesis_without_parent_fails(bls12381_multisig::fixture::<MinPk, _>);
+        node_non_genesis_without_parent_fails(bls12381_multisig::fixture::<MinSig, _>);
+        node_non_genesis_without_parent_fails(bls12381_threshold::fixture::<MinPk, _>);
+        node_non_genesis_without_parent_fails(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     fn node_genesis_with_parent_panics<S, F>(fixture: F)
@@ -2170,20 +2150,20 @@ mod tests {
         // Generate a valid parent certificate
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = Epoch::new(5);
-        let parent_ctx = AckContext {
+        let parent_ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_signatures: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign_vote::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
+                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
                     .unwrap()
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble_certificate(parent_signatures)
+            .assemble(parent_parts)
             .expect("Should assemble certificate");
 
         let parent =
@@ -2198,23 +2178,23 @@ mod tests {
 
     #[test]
     fn test_node_genesis_with_parent_panics() {
-        assert!(catch_unwind(|| node_genesis_with_parent_panics(ed25519)).is_err());
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_multisig::<MinPk, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_multisig::<MinSig, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_threshold::<MinPk, _>))
-                .is_err()
-        );
-        assert!(
-            catch_unwind(|| node_genesis_with_parent_panics(bls12381_threshold::<MinSig, _>))
-                .is_err()
-        );
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(ed25519::fixture)).is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_multisig::fixture::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_multisig::fixture::<MinSig, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_threshold::fixture::<MinPk, _>
+        ))
+        .is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(
+            bls12381_threshold::fixture::<MinSig, _>
+        ))
+        .is_err());
     }
 
     fn node_non_genesis_without_parent_panics<S, F>(fixture: F)
@@ -2239,21 +2219,21 @@ mod tests {
 
     #[test]
     fn test_node_non_genesis_without_parent_panics() {
-        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(ed25519)).is_err());
+        assert!(catch_unwind(|| node_non_genesis_without_parent_panics(ed25519::fixture)).is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::<MinPk, _>
+            bls12381_multisig::fixture::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_multisig::<MinSig, _>
+            bls12381_multisig::fixture::<MinSig, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::<MinPk, _>
+            bls12381_threshold::fixture::<MinPk, _>
         ))
         .is_err());
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
-            bls12381_threshold::<MinSig, _>
+            bls12381_threshold::fixture::<MinSig, _>
         ))
         .is_err());
     }

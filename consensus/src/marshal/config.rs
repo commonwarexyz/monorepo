@@ -1,4 +1,8 @@
-use crate::{scheme::SchemeProvider, types::ViewDelta, Block};
+use crate::{
+    types::{Epoch, ViewDelta},
+    Block,
+};
+use commonware_cryptography::certificate::Provider;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -6,7 +10,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub struct Config<B, P>
 where
     B: Block,
-    P: SchemeProvider,
+    P: Provider<Scope = Epoch>,
 {
     /// Provider for epoch-specific signing schemes.
     pub scheme_provider: P,

@@ -6,12 +6,12 @@
 //! per-validator activity tracking and fault detection.
 
 use crate::{
-    scheme::impl_ed25519_scheme,
     simplex::{scheme::SeededScheme, types::Subject},
     types::Round,
 };
+use commonware_cryptography::impl_certificate_ed25519;
 
-impl_ed25519_scheme!(Subject<'a, D>);
+impl_certificate_ed25519!(Subject<'a, D>);
 
 impl SeededScheme for Scheme {
     type Seed = ();
@@ -24,30 +24,31 @@ impl SeededScheme for Scheme {
 #[cfg(test)]
 mod tests {
     use crate::{
-        scheme::Scheme as _,
         simplex::{
-            mocks::fixtures::{ed25519, Fixture},
-            scheme::SeededScheme,
+            scheme::{ed25519, SeededScheme},
             types::Subject,
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, Scheme as _},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_utils::quorum_from_slice;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_seed_returns_none() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
 
         let quorum = quorum_from_slice(&schemes) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign_vote::<Sha256Digest>(
+                s.sign::<Sha256Digest>(
                     b"test",
                     Subject::Nullify {
                         round: Round::new(Epoch::new(1), View::new(1)),
@@ -57,7 +58,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         let round = Round::new(Epoch::new(1), View::new(1));
         assert!(schemes[0].seed(round, &certificate).is_none());

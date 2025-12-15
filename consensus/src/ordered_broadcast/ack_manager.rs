@@ -1,9 +1,9 @@
 use super::types::Ack;
-use crate::{
-    scheme::{Scheme, Signature},
-    types::Epoch,
+use crate::types::Epoch;
+use commonware_cryptography::{
+    certificate::{Part, Scheme},
+    Digest, PublicKey,
 };
-use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
@@ -14,7 +14,7 @@ struct Partials<S: Scheme, D: Digest> {
 
     // A map from payload digest to votes.
     // Each signer should only vote once for each sequencer/height/epoch.
-    pub signatures: HashMap<D, Vec<Signature<S>>>,
+    pub parts: HashMap<D, Vec<Part<S>>>,
 }
 
 /// Evidence for a chunk.
@@ -28,7 +28,7 @@ impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
-            signatures: HashMap::new(),
+            parts: HashMap::new(),
         })
     }
 }
@@ -73,20 +73,20 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
         match evidence {
             Evidence::Certificate(_) => None,
             Evidence::Partials(p) => {
-                if !p.signers.insert(ack.signature.signer) {
+                if !p.signers.insert(ack.part.signer) {
                     // Validator already signed
                     return None;
                 }
 
                 // Add the vote
-                let signatures = p.signatures.entry(ack.chunk.payload).or_default();
-                signatures.push(ack.signature.clone());
+                let parts = p.parts.entry(ack.chunk.payload).or_default();
+                parts.push(ack.part.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble_certificate(signatures.iter().cloned())?;
+                let certificate = scheme.assemble(parts.iter().cloned())?;
 
                 // Take ownership of the votes, which must exist
-                p.signatures.remove(&ack.chunk.payload);
+                p.parts.remove(&ack.chunk.payload);
 
                 Some(certificate)
             }
@@ -149,12 +149,14 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
-    use crate::{
-        ordered_broadcast::{mocks, scheme::OrderedBroadcastScheme, types::Chunk},
-        scheme::Scheme,
+    use crate::ordered_broadcast::{
+        mocks,
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, OrderedBroadcastScheme},
+        types::Chunk,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::{mocks::Fixture, Scheme},
         ed25519::PublicKey,
         Hasher, Sha256,
     };
@@ -164,10 +166,7 @@ mod tests {
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
         use super::*;
-        use crate::ordered_broadcast::{
-            mocks::fixtures,
-            types::{AckContext, Chunk},
-        };
+        use crate::ordered_broadcast::types::{AckSubject, Chunk};
         use commonware_cryptography::Hasher;
 
         pub type Sha256Digest = <Sha256 as Hasher>::Digest;
@@ -183,18 +182,14 @@ mod tests {
         where
             S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         {
-            let context = AckContext {
+            let context = AckSubject {
                 chunk: &chunk,
                 epoch,
             };
-            let signature = scheme
-                .sign_vote::<Sha256Digest>(NAMESPACE, context)
+            let part = scheme
+                .sign::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
-            Ack {
-                chunk,
-                epoch,
-                signature,
-            }
+            Ack { chunk, epoch, part }
         }
 
         /// Create a vector of acks for the given scheme indices.
@@ -236,9 +231,9 @@ mod tests {
         }
 
         /// Generate a fixture using the provided generator function.
-        pub fn setup<S, F>(num_validators: u32, fixture: F) -> fixtures::Fixture<S>
+        pub fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
         where
-            F: FnOnce(&mut StdRng, u32) -> fixtures::Fixture<S>,
+            F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
         {
             let mut rng = StdRng::seed_from_u64(0);
             fixture(&mut rng, num_validators)
@@ -249,7 +244,7 @@ mod tests {
     fn chunk_different_payloads<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         // Use 8 validators so quorum is 6
         let num_validators = 8;
@@ -287,18 +282,18 @@ mod tests {
 
     #[test]
     fn test_chunk_different_payloads() {
-        chunk_different_payloads(mocks::fixtures::ed25519);
-        chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        chunk_different_payloads(ed25519::fixture);
+        chunk_different_payloads(bls12381_multisig::fixture::<MinPk, _>);
+        chunk_different_payloads(bls12381_multisig::fixture::<MinSig, _>);
+        chunk_different_payloads(bls12381_threshold::fixture::<MinPk, _>);
+        chunk_different_payloads(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding certificates for different heights prunes older entries.
     fn sequencer_different_heights<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -333,18 +328,18 @@ mod tests {
 
     #[test]
     fn test_sequencer_different_heights() {
-        sequencer_different_heights(mocks::fixtures::ed25519);
-        sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        sequencer_different_heights(ed25519::fixture);
+        sequencer_different_heights(bls12381_multisig::fixture::<MinPk, _>);
+        sequencer_different_heights(bls12381_multisig::fixture::<MinSig, _>);
+        sequencer_different_heights(bls12381_threshold::fixture::<MinPk, _>);
+        sequencer_different_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
     fn sequencer_contiguous_heights<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -381,18 +376,18 @@ mod tests {
 
     #[test]
     fn test_sequencer_contiguous_heights() {
-        sequencer_contiguous_heights(mocks::fixtures::ed25519);
-        sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        sequencer_contiguous_heights(ed25519::fixture);
+        sequencer_contiguous_heights(bls12381_multisig::fixture::<MinPk, _>);
+        sequencer_contiguous_heights(bls12381_multisig::fixture::<MinSig, _>);
+        sequencer_contiguous_heights(bls12381_threshold::fixture::<MinPk, _>);
+        sequencer_contiguous_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// For the same sequencer and height, the highest epoch's certificate is returned.
     fn chunk_different_epochs<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -427,18 +422,18 @@ mod tests {
 
     #[test]
     fn test_chunk_different_epochs() {
-        chunk_different_epochs(mocks::fixtures::ed25519);
-        chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        chunk_different_epochs(ed25519::fixture);
+        chunk_different_epochs(bls12381_multisig::fixture::<MinPk, _>);
+        chunk_different_epochs(bls12381_multisig::fixture::<MinSig, _>);
+        chunk_different_epochs(bls12381_threshold::fixture::<MinPk, _>);
+        chunk_different_epochs(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Adding the same certificate twice returns false.
     fn add_certificate<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -467,18 +462,18 @@ mod tests {
 
     #[test]
     fn test_add_certificate() {
-        add_certificate(mocks::fixtures::ed25519);
-        add_certificate(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        add_certificate(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        add_certificate(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        add_certificate(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        add_certificate(ed25519::fixture);
+        add_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        add_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        add_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        add_certificate(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Duplicate partial submissions are ignored.
     fn duplicate_partial_submission<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -495,18 +490,18 @@ mod tests {
 
     #[test]
     fn test_duplicate_partial_submission() {
-        duplicate_partial_submission(mocks::fixtures::ed25519);
-        duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        duplicate_partial_submission(ed25519::fixture);
+        duplicate_partial_submission(bls12381_multisig::fixture::<MinPk, _>);
+        duplicate_partial_submission(bls12381_multisig::fixture::<MinSig, _>);
+        duplicate_partial_submission(bls12381_threshold::fixture::<MinPk, _>);
+        duplicate_partial_submission(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Once a certificate is reached, further acks are ignored.
     fn subsequent_acks_after_certificate_reached<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -532,18 +527,18 @@ mod tests {
 
     #[test]
     fn test_subsequent_acks_after_certificate_reached() {
-        subsequent_acks_after_certificate_reached(mocks::fixtures::ed25519);
-        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        subsequent_acks_after_certificate_reached(ed25519::fixture);
+        subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinSig, _>);
+        subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Acks for different sequencers are managed separately.
     fn multiple_sequencers<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -571,18 +566,18 @@ mod tests {
 
     #[test]
     fn test_multiple_sequencers() {
-        multiple_sequencers(mocks::fixtures::ed25519);
-        multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        multiple_sequencers(ed25519::fixture);
+        multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
+        multiple_sequencers(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// If quorum is never reached, no certificate is produced.
     fn partial_quorum_never_reached<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
         let fixture = helpers::setup(num_validators, fixture);
@@ -601,18 +596,18 @@ mod tests {
 
     #[test]
     fn test_partial_quorum_never_reached() {
-        partial_quorum_never_reached(mocks::fixtures::ed25519);
-        partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        partial_quorum_never_reached(ed25519::fixture);
+        partial_quorum_never_reached(bls12381_multisig::fixture::<MinPk, _>);
+        partial_quorum_never_reached(bls12381_multisig::fixture::<MinSig, _>);
+        partial_quorum_never_reached(bls12381_threshold::fixture::<MinPk, _>);
+        partial_quorum_never_reached(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     /// Interleaved acks for different payloads are aggregated separately.
     fn interleaved_payloads<S, F>(fixture: F)
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         // Use 20 validators so quorum is 14
         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
@@ -658,10 +653,10 @@ mod tests {
 
     #[test]
     fn test_interleaved_payloads() {
-        interleaved_payloads(mocks::fixtures::ed25519);
-        interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        interleaved_payloads(ed25519::fixture);
+        interleaved_payloads(bls12381_multisig::fixture::<MinPk, _>);
+        interleaved_payloads(bls12381_multisig::fixture::<MinSig, _>);
+        interleaved_payloads(bls12381_threshold::fixture::<MinPk, _>);
+        interleaved_payloads(bls12381_threshold::fixture::<MinSig, _>);
     }
 }

@@ -16,12 +16,14 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
-    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{Digest, PublicKey, Signer};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest, PublicKey, Signer,
+};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -64,7 +66,7 @@ pub struct Engine<
     E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
-    P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+    P: Provider<Scope = Epoch, Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
@@ -200,7 +202,10 @@ impl<
         E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
+        P: Provider<
+            Scope = Epoch,
+            Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>,
+        >,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
@@ -527,7 +532,7 @@ impl<
             .await;
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_scheme_provider.scheme(self.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scoped(self.epoch) else {
             return Err(Error::UnknownScheme(self.epoch));
         };
 
@@ -608,7 +613,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -829,7 +834,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators_scheme_provider.scheme(epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scoped(epoch) else {
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
@@ -904,7 +909,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -913,7 +918,7 @@ impl<
         let Some(index) = participants.iter().position(|p| p == sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index as u32 != ack.signature.signer {
+        if index as u32 != ack.part.signer {
             return Err(Error::PeerMismatch);
         }
 

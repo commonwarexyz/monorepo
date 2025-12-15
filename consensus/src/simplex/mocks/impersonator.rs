@@ -1,14 +1,11 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
-use crate::{
-    scheme::Scheme,
-    simplex::{
-        scheme::SimplexScheme,
-        types::{Finalize, Notarize, Vote},
-    },
+use crate::simplex::{
+    scheme::SimplexScheme,
+    types::{Finalize, Notarize, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -67,10 +64,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SimplexScheme<H::Digest>, H: Hashe
                         Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.signature.signer == 0 {
-                        n.signature.signer = 1;
+                    if n.part.signer == 0 {
+                        n.part.signer = 1;
                     } else {
-                        n.signature.signer = 0;
+                        n.part.signer = 0;
                     }
 
                     // Send invalid message
@@ -83,10 +80,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SimplexScheme<H::Digest>, H: Hashe
                         Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.signature.signer == 0 {
-                        f.signature.signer = 1;
+                    if f.part.signer == 0 {
+                        f.part.signer = 1;
                     } else {
-                        f.signature.signer = 0;
+                        f.part.signer = 0;
                     }
 
                     // Send invalid message

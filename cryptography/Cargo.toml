@@ -56,6 +56,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = [ "std" ]
 parallel = [ "blake3/rayon", "rayon", "std" ]
+mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-math/arbitrary",

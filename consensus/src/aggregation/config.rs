@@ -1,10 +1,12 @@
 use super::types::{Activity, Index};
 use crate::{
-    scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest,
+};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::NonZeroDuration;
@@ -12,7 +14,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
-    P: SchemeProvider,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,

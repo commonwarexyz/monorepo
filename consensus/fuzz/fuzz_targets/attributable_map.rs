@@ -2,14 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_consensus::{
-    scheme::Signature,
     simplex::{
         scheme::ed25519,
         types::{AttributableMap, Nullify},
     },
     types::{Epoch, Round, View},
 };
-use commonware_cryptography::{ed25519::PrivateKey, Signer};
+use commonware_cryptography::{certificate::Part, ed25519::PrivateKey, Signer};
 use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
@@ -43,7 +42,7 @@ fn make_vote(
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
         round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
-        signature: Signature {
+        part: Part {
             signer: data.signer,
             signature: sig,
         },

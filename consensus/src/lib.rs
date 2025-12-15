@@ -15,7 +15,6 @@ use commonware_cryptography::{Committable, Digestible};
 
 pub mod aggregation;
 pub mod ordered_broadcast;
-pub mod scheme;
 pub mod simplex;
 pub mod types;
 pub mod utils;
@@ -54,7 +53,8 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
-        use crate::{marshal::ingress::mailbox::AncestorStream, scheme::Scheme};
+        use crate::marshal::ingress::mailbox::AncestorStream;
+        use commonware_cryptography::certificate::Scheme;
 
         pub mod application;
         pub mod marshal;

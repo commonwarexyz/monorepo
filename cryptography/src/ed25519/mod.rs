@@ -25,6 +25,7 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
+pub mod certificate;
 mod scheme;
 
 #[cfg(feature = "std")]
