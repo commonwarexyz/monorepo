@@ -118,10 +118,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
-        certificate::{
-            mocks::{ConstantProvider, Fixture},
-            Scheme as _,
-        },
+        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
