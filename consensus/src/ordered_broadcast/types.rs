@@ -1117,7 +1117,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1128,7 +1128,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1182,7 +1182,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1192,7 +1192,7 @@ mod tests {
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1268,7 +1268,7 @@ mod tests {
         };
 
         // Collect signatures from a quorum of validators to form the parent certificate.
-        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1277,7 +1277,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1405,7 +1405,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1416,7 +1416,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1489,7 +1489,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1500,7 +1500,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1560,7 +1560,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1569,7 +1569,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1641,7 +1641,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1652,7 +1652,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1688,7 +1688,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum]
+        let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1697,7 +1697,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1803,7 +1803,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1812,7 +1812,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1839,7 +1839,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: Epoch::new(99), // Different epoch to get different signatures
         };
-        let wrong_parts: Vec<_> = fixture.schemes[..quorum]
+        let wrong_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1848,7 +1848,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble(wrong_parts)
+            .assemble(wrong_attestations)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -1977,7 +1977,7 @@ mod tests {
             chunk: &chunk,
             epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum_size]
+        let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -1986,7 +1986,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1997,7 +1997,7 @@ mod tests {
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Generate certificate with the wrong keys
-        let wrong_parts: Vec<_> = wrong_fixture.schemes[..quorum_size]
+        let wrong_attestations: Vec<_> = wrong_fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -2006,7 +2006,7 @@ mod tests {
             })
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble(wrong_parts)
+            .assemble(wrong_attestations)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -2085,7 +2085,7 @@ mod tests {
             chunk: &dummy_chunk,
             epoch: dummy_epoch,
         };
-        let parts: Vec<_> = fixture.schemes[..quorum_size]
+        let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| {
                 scheme
@@ -2094,7 +2094,7 @@ mod tests {
             })
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parts)
+            .assemble(attestations)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2170,7 +2170,7 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_parts: Vec<_> = fixture.schemes[..quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {
                 scheme
@@ -2179,7 +2179,7 @@ mod tests {
             })
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_parts)
+            .assemble(parent_attestations)
             .expect("Should assemble certificate");
 
         let parent =
