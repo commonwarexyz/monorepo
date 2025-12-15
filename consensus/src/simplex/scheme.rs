@@ -502,7 +502,7 @@ pub mod bls12381_threshold {
     }
 
     impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
-        type Context<'a, D: Digest> = Subject<'a, D>;
+        type Subject<'a, D: Digest> = Subject<'a, D>;
         type PublicKey = P;
         type Signature = Signature<V>;
         type Certificate = Signature<V>;
@@ -2162,12 +2162,12 @@ cfg_if::cfg_if! {
 use crate::{simplex::types::Subject, types::Round};
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Context, Scheme},
+    certificate::{Scheme, Subject as CertSubject},
     Digest,
 };
 use commonware_utils::union;
 
-impl<'a, D: Digest> Context for Subject<'a, D> {
+impl<'a, D: Digest> CertSubject for Subject<'a, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         vote_namespace_and_message(namespace, self)
     }
@@ -2191,10 +2191,10 @@ pub trait SeededScheme: Scheme {
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
 }
 
-pub trait SimplexScheme<D: Digest>: for<'a> SeededScheme<Context<'a, D> = Subject<'a, D>> {}
+pub trait SimplexScheme<D: Digest>: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
 
 impl<D: Digest, S> SimplexScheme<D> for S where
-    S: for<'a> SeededScheme<Context<'a, D> = Subject<'a, D>>
+    S: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>>
 {
 }
 

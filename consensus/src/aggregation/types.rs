@@ -6,7 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Context, Scheme, Signature},
+    certificate::{Scheme, Signature, Subject},
     Digest,
 };
 use commonware_utils::union;
@@ -123,7 +123,7 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
-impl<D: Digest> Context for &Item<D> {
+impl<D: Digest> Subject for &Item<D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         (ack_namespace(namespace), self.encode().to_vec())
     }

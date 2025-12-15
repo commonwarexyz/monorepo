@@ -1,7 +1,7 @@
 //! Signing scheme implementations for `aggregation`.
 //!
 //! This module provides protocol-specific wrappers around the generic signing schemes
-//! in [`crate::scheme`]. Each wrapper binds the scheme's context type to
+//! in [`crate::scheme`]. Each wrapper binds the scheme's subject type to
 //! [`Item`], which represents the data being aggregated and signed.
 //!
 //! # Available Schemes
@@ -18,12 +18,12 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`Scheme`] to the [`Item`] context type used by the
+/// This trait binds a [`Scheme`] to the [`Item`] subject type used by the
 /// aggregation protocol. It is automatically implemented for any scheme
-/// whose context type matches `&'a Item<D>`.
-pub trait AggregationScheme<D: Digest>: for<'a> Scheme<Context<'a, D> = &'a Item<D>> {}
+/// whose subject type matches `&'a Item<D>`.
+pub trait AggregationScheme<D: Digest>: for<'a> Scheme<Subject<'a, D> = &'a Item<D>> {}
 
-impl<D: Digest, S> AggregationScheme<D> for S where S: for<'a> Scheme<Context<'a, D> = &'a Item<D>> {}
+impl<D: Digest, S> AggregationScheme<D> for S where S: for<'a> Scheme<Subject<'a, D> = &'a Item<D>> {}
 
 pub mod ed25519 {
     //! Ed25519 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait

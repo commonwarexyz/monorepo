@@ -15,7 +15,7 @@ use crate::{
         },
         variant::Variant,
     },
-    certificate::{Context, Scheme, Signature, SignatureVerification, Signers},
+    certificate::{Scheme, Signature, SignatureVerification, Signers, Subject},
     Digest, PublicKey,
 };
 #[cfg(not(feature = "std"))]
@@ -89,7 +89,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     pub fn sign_vote<S, D>(
         &self,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
     ) -> Option<Signature<S>>
     where
         S: Scheme<Signature = V::Signature>,
@@ -97,7 +97,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         let signature = sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
         Some(Signature {
@@ -110,7 +110,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     pub fn verify_vote<S, D>(
         &self,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
         signature: &Signature<S>,
     ) -> bool
     where
@@ -121,7 +121,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             return false;
         };
 
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         verify_message::<V>(
             public_key,
             Some(namespace.as_ref()),
@@ -136,7 +136,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<S>
     where
@@ -166,7 +166,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
 
         // Verify the aggregate signature.
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         if aggregate_verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
@@ -231,7 +231,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: S::Context<'_, D>,
+        subject: S::Subject<'_, D>,
         certificate: &Certificate<V>,
     ) -> bool
     where
@@ -260,7 +260,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
 
         // Verify the aggregate signature.
-        let (namespace, message) = context.namespace_and_message(namespace);
+        let (namespace, message) = subject.namespace_and_message(namespace);
         aggregate_verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
@@ -281,10 +281,10 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         S: Scheme,
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (S::Context<'a, D>, &'a Certificate<V>)>,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
     {
-        for (context, certificate) in certificates {
-            if !self.verify_certificate::<S, R, D>(rng, namespace, context, certificate) {
+        for (subject, certificate) in certificates {
+            if !self.verify_certificate::<S, R, D>(rng, namespace, subject, certificate) {
                 return false;
             }
         }
@@ -362,15 +362,15 @@ mod macros {
     ///
     /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
     /// implementation, and a `fixture` function for testing.
-    /// The only required parameter is the `Context` type, which varies per protocol.
+    /// The only required parameter is the `Subject` type, which varies per protocol.
     ///
     /// # Example
     /// ```ignore
-    /// impl_bls12381_multisig_certificate!(VoteContext<'a, D>);
+    /// impl_bls12381_multisig_certificate!(VoteSubject<'a, D>);
     /// ```
     #[macro_export]
     macro_rules! impl_bls12381_multisig_certificate {
-        ($context:ty) => {
+        ($subject:ty) => {
             /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
@@ -435,7 +435,7 @@ mod macros {
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
             > $crate::certificate::Scheme for Scheme<P, V> {
-                type Context<'a, D: $crate::Digest> = $context;
+                type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
                 type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
@@ -451,25 +451,25 @@ mod macros {
                 fn sign_vote<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
+                    subject: Self::Subject<'_, D>,
                 ) -> Option<$crate::certificate::Signature<Self>> {
-                    self.generic.sign_vote::<_, D>(namespace, context)
+                    self.generic.sign_vote::<_, D>(namespace, subject)
                 }
 
                 fn verify_vote<D: $crate::Digest>(
                     &self,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
+                    subject: Self::Subject<'_, D>,
                     signature: &$crate::certificate::Signature<Self>,
                 ) -> bool {
-                    self.generic.verify_vote::<_, D>(namespace, context, signature)
+                    self.generic.verify_vote::<_, D>(namespace, subject, signature)
                 }
 
                 fn verify_votes<R, D, I>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
+                    subject: Self::Subject<'_, D>,
                     signatures: I,
                 ) -> $crate::certificate::SignatureVerification<Self>
                 where
@@ -477,7 +477,7 @@ mod macros {
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Signature<Self>>,
                 {
-                    self.generic.verify_votes::<_, _, D, _>(rng, namespace, context, signatures)
+                    self.generic.verify_votes::<_, _, D, _>(rng, namespace, subject, signatures)
                 }
 
                 fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
@@ -494,10 +494,10 @@ mod macros {
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
-                    context: Self::Context<'_, D>,
+                    subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
                 ) -> bool {
-                    self.generic.verify_certificate::<Self, _, D>(rng, namespace, context, certificate)
+                    self.generic.verify_certificate::<Self, _, D>(rng, namespace, subject, certificate)
                 }
 
                 fn verify_certificates<'a, R, D, I>(
@@ -509,7 +509,7 @@ mod macros {
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: $crate::Digest,
-                    I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+                    I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 {
                     self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
@@ -561,7 +561,7 @@ mod tests {
         pub message: &'a [u8],
     }
 
-    impl<'a> Context for TestContext<'a> {
+    impl<'a> Subject for TestContext<'a> {
         fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
             (namespace.to_vec(), self.message.to_vec())
         }

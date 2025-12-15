@@ -147,7 +147,7 @@ impl<S: Scheme> SignatureVerification<S> {
     }
 }
 
-pub trait Context: Clone + Debug + Send + Sync {
+pub trait Subject: Clone + Debug + Send + Sync {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>);
 }
 
@@ -157,8 +157,8 @@ pub trait Context: Clone + Debug + Send + Sync {
 /// quorum certificates, and verifies recovered certificates. Implementations may override the
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Context type for signing and verifying votes.
-    type Context<'a, D: Digest>: Context;
+    /// Subject type for signing and verifying votes.
+    type Subject<'a, D: Digest>: Subject;
 
     /// Public key type for participant identity used to order and index the committee.
     type PublicKey: PublicKey;
@@ -174,19 +174,19 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a vote for the given context using the supplied namespace for domain separation.
+    /// Signs a vote for the given subject using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Self::Context<'_, D>,
+        subject: Self::Subject<'_, D>,
     ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Self::Context<'_, D>,
+        subject: Self::Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool;
 
@@ -198,7 +198,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Self::Context<'_, D>,
+        subject: Self::Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -209,7 +209,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         let mut invalid = BTreeSet::new();
 
         let verified = signatures.into_iter().filter_map(|vote| {
-            if self.verify_vote(namespace, context.clone(), &vote) {
+            if self.verify_vote(namespace, subject.clone(), &vote) {
                 Some(vote)
             } else {
                 invalid.insert(vote.signer);
@@ -232,7 +232,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: Self::Context<'_, D>,
+        subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
@@ -246,10 +246,10 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+        I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
     {
-        for (context, certificate) in certificates {
-            if !self.verify_certificate(rng, namespace, context, certificate) {
+        for (subject, certificate) in certificates {
+            if !self.verify_certificate(rng, namespace, subject, certificate) {
                 return false;
             }
         }
@@ -453,7 +453,7 @@ mod tests {
             pub message: &'a [u8],
         }
 
-        impl<'a> Context for TestContext<'a> {
+        impl<'a> Subject for TestContext<'a> {
             fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 (namespace.to_vec(), self.message.to_vec())
             }

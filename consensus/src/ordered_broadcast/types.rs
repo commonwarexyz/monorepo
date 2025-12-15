@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Context as CertificateContext, Scheme, Signature},
+    certificate::{Scheme, Signature, Subject as CertificateSubject},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -274,7 +274,7 @@ pub struct AckContext<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> CertificateContext for AckContext<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> CertificateSubject for AckContext<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
