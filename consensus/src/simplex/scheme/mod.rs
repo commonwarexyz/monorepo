@@ -215,7 +215,7 @@ cfg_if::cfg_if! {
 
                     // Create an invalid activity (wrong namespace)
                     let proposal = create_proposal(0, 1);
-                    let signature = schemes[1]
+                    let part = schemes[1]
                         .sign::<Sha256Digest>(
                             &[], // Invalid namespace
                             Subject::Notarize {
@@ -223,10 +223,7 @@ cfg_if::cfg_if! {
                             },
                         )
                         .expect("signing failed");
-                    let notarize = Notarize {
-                        proposal,
-                        signature,
-                    };
+                    let notarize = Notarize { proposal, part };
 
                     // Report it
                     block_on(reporter.report(Activity::Notarize(notarize)));
@@ -256,7 +253,7 @@ cfg_if::cfg_if! {
 
                     // Create an invalid activity (wrong namespace)
                     let proposal = create_proposal(0, 1);
-                    let signature = schemes[1]
+                    let part = schemes[1]
                         .sign::<Sha256Digest>(
                             &[], // Invalid namespace
                             Subject::Notarize {
@@ -264,10 +261,7 @@ cfg_if::cfg_if! {
                             },
                         )
                         .expect("signing failed");
-                    let notarize = Notarize {
-                        proposal,
-                        signature,
-                    };
+                    let notarize = Notarize { proposal, part };
 
                     // Report it
                     block_on(reporter.report(Activity::Notarize(notarize)));
@@ -312,7 +306,7 @@ cfg_if::cfg_if! {
                         .collect();
 
                     let certificate = schemes[0]
-                        .assemble_certificate(votes)
+                        .assemble(votes)
                         .expect("failed to assemble certificate");
 
                     let notarization = Notarization {
@@ -348,7 +342,7 @@ cfg_if::cfg_if! {
 
                     // Create peer activity (from validator 1)
                     let proposal = create_proposal(0, 1);
-                    let signature = schemes[1]
+                    let part = schemes[1]
                         .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Notarize {
@@ -357,10 +351,7 @@ cfg_if::cfg_if! {
                         )
                         .expect("signing failed");
 
-                    let notarize = Notarize {
-                        proposal,
-                        signature,
-                    };
+                    let notarize = Notarize { proposal, part };
 
                     // Report peer per-validator activity
                     block_on(reporter.report(Activity::Notarize(notarize)));
@@ -385,7 +376,7 @@ cfg_if::cfg_if! {
 
                     // Create a peer activity (from validator 1)
                     let proposal = create_proposal(0, 1);
-                    let signature = schemes[1]
+                    let part = schemes[1]
                         .sign::<Sha256Digest>(
                             NAMESPACE,
                             Subject::Notarize {
@@ -394,10 +385,7 @@ cfg_if::cfg_if! {
                         )
                         .expect("signing failed");
 
-                    let notarize = Notarize {
-                        proposal,
-                        signature,
-                    };
+                    let notarize = Notarize { proposal, part };
 
                     // Report the peer per-validator activity
                     block_on(reporter.report(Activity::Notarize(notarize)));

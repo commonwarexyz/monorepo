@@ -33,9 +33,7 @@ use commonware_cryptography::{
         },
         tle,
     },
-    certificate::{
-        Scheme as SchemeTrait, Signature as CertificateSignature, SignatureVerification,
-    },
+    certificate::{Part as CertificatePart, Scheme as SchemeTrait, Verification},
     Digest, PublicKey,
 };
 use commonware_utils::ordered::Set;
@@ -416,7 +414,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-    ) -> Option<CertificateSignature<Self>> {
+    ) -> Option<CertificatePart<Self>> {
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
@@ -434,57 +432,19 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
             seed_signature,
         };
 
-        Some(CertificateSignature {
+        Some(CertificatePart {
             signer: share.index,
             signature,
         })
     }
 
-    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
-    where
-        I: IntoIterator<Item = CertificateSignature<Self>>,
-    {
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
-            .into_iter()
-            .map(|sig| {
-                (
-                    PartialSignature::<V> {
-                        index: sig.signer,
-                        value: sig.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: sig.signer,
-                        value: sig.signature.seed_signature,
-                    },
-                )
-            })
-            .unzip();
-
-        let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required() as usize {
-            return None;
-        }
-
-        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
-            quorum,
-            vote_partials.iter(),
-            seed_partials.iter(),
-        )
-        .ok()?;
-
-        Some(Signature {
-            vote_signature,
-            seed_signature,
-        })
-    }
-
-    fn verify<D: Digest>(
+    fn verify_part<D: Digest>(
         &self,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        signature: &CertificateSignature<Self>,
+        part: &CertificatePart<Self>,
     ) -> bool {
-        let Ok(evaluated) = self.polynomial().partial_public(signature.signer) else {
+        let Ok(evaluated) = self.polynomial().partial_public(part.signer) else {
             return false;
         };
 
@@ -492,8 +452,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
         let sig = aggregate_signatures::<V, _>(&[
-            signature.signature.vote_signature,
-            signature.signature.seed_signature,
+            part.signature.vote_signature,
+            part.signature.seed_signature,
         ]);
 
         aggregate_verify_multiple_messages::<V, _>(
@@ -508,30 +468,30 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         .is_ok()
     }
 
-    fn verify_many<R, D, I>(
+    fn verify_parts<R, D, I>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
         subject: Subject<'_, D>,
-        signatures: I,
-    ) -> SignatureVerification<Self>
+        parts: I,
+    ) -> Verification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = CertificateSignature<Self>>,
+        I: IntoIterator<Item = CertificatePart<Self>>,
     {
         let mut invalid = BTreeSet::new();
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = parts
             .into_iter()
-            .map(|sig| {
+            .map(|part| {
                 (
                     PartialSignature::<V> {
-                        index: sig.signer,
-                        value: sig.signature.vote_signature,
+                        index: part.signer,
+                        value: part.signature.vote_signature,
                     },
                     PartialSignature::<V> {
-                        index: sig.signer,
-                        value: sig.signature.seed_signature,
+                        index: part.signer,
+                        value: part.signature.seed_signature,
                     },
                 )
             })
@@ -567,19 +527,55 @@ impl<P: PublicKey, V: Variant + Send + Sync> SchemeTrait for Scheme<P, V> {
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| CertificateSignature {
+            .map(|(vote, seed)| CertificatePart {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
                     seed_signature: seed.value,
                 },
             })
-            .filter(|sig| !invalid.contains(&sig.signer))
+            .filter(|part| !invalid.contains(&part.signer))
             .collect();
 
-        let invalid_signers = invalid.into_iter().collect();
+        Verification::new(verified, invalid.into_iter().collect())
+    }
 
-        SignatureVerification::new(verified, invalid_signers)
+    fn assemble<I>(&self, parts: I) -> Option<Self::Certificate>
+    where
+        I: IntoIterator<Item = CertificatePart<Self>>,
+    {
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = parts
+            .into_iter()
+            .map(|part| {
+                (
+                    PartialSignature::<V> {
+                        index: part.signer,
+                        value: part.signature.vote_signature,
+                    },
+                    PartialSignature::<V> {
+                        index: part.signer,
+                        value: part.signature.seed_signature,
+                    },
+                )
+            })
+            .unzip();
+
+        let quorum = self.polynomial();
+        if vote_partials.len() < quorum.required() as usize {
+            return None;
+        }
+
+        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
+            quorum,
+            vote_partials.iter(),
+            seed_partials.iter(),
+        )
+        .ok()?;
+
+        Some(Signature {
+            vote_signature,
+            seed_signature,
+        })
     }
 
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
@@ -829,7 +825,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify(
+        assert!(scheme.verify_part(
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -845,7 +841,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify::<Sha256Digest>(
+        assert!(scheme.verify_part::<Sha256Digest>(
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -861,7 +857,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify(
+        assert!(scheme.verify_part(
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -910,7 +906,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(verifier.verify(
+        assert!(verifier.verify_part(
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -945,7 +941,7 @@ mod tests {
             })
             .collect();
 
-        let verification = schemes[0].verify_many(
+        let verification = schemes[0].verify_parts(
             &mut thread_rng(),
             NAMESPACE,
             Subject::Notarize {
@@ -953,11 +949,11 @@ mod tests {
             },
             votes.clone(),
         );
-        assert!(verification.invalid_signers.is_empty());
+        assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
         votes[0].signer = 999;
-        let verification = schemes[0].verify_many(
+        let verification = schemes[0].verify_parts(
             &mut thread_rng(),
             NAMESPACE,
             Subject::Notarize {
@@ -965,7 +961,7 @@ mod tests {
             },
             votes,
         );
-        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.invalid, vec![999]);
         assert_eq!(verification.verified.len(), quorum - 1);
     }
 
@@ -995,7 +991,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(votes).is_none());
+        assert!(schemes[0].assemble(votes).is_none());
     }
 
     #[test]
@@ -1024,9 +1020,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
@@ -1064,9 +1058,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
@@ -1115,9 +1107,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let encoded = certificate.encode();
         let decoded =
@@ -1151,9 +1141,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let seed = schemes[0]
             .seed(proposal.round, &certificate)
@@ -1190,9 +1178,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let seed = schemes[0]
             .seed(proposal.round, &certificate)
@@ -1303,9 +1289,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
         assert!(
@@ -1348,7 +1332,7 @@ mod tests {
             )
             .unwrap();
 
-        certificate_verifier.verify(
+        certificate_verifier.verify_part(
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -1389,9 +1373,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let seed = schemes[0].seed(proposal.round, &certificate).unwrap();
         assert_eq!(seed.signature, certificate.seed_signature);
@@ -1423,9 +1405,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let mut encoded = certificate.encode().freeze();
         let truncated = encoded.split_to(encoded.len() - 1);
@@ -1499,9 +1479,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),

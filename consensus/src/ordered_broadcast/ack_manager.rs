@@ -1,7 +1,7 @@
 use super::types::Ack;
 use crate::types::Epoch;
 use commonware_cryptography::{
-    certificate::{Scheme, Signature},
+    certificate::{Part, Scheme},
     Digest, PublicKey,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,7 +14,7 @@ struct Partials<S: Scheme, D: Digest> {
 
     // A map from payload digest to votes.
     // Each signer should only vote once for each sequencer/height/epoch.
-    pub signatures: HashMap<D, Vec<Signature<S>>>,
+    pub parts: HashMap<D, Vec<Part<S>>>,
 }
 
 /// Evidence for a chunk.
@@ -28,7 +28,7 @@ impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
-            signatures: HashMap::new(),
+            parts: HashMap::new(),
         })
     }
 }
@@ -73,20 +73,20 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
         match evidence {
             Evidence::Certificate(_) => None,
             Evidence::Partials(p) => {
-                if !p.signers.insert(ack.signature.signer) {
+                if !p.signers.insert(ack.part.signer) {
                     // Validator already signed
                     return None;
                 }
 
                 // Add the vote
-                let signatures = p.signatures.entry(ack.chunk.payload).or_default();
-                signatures.push(ack.signature.clone());
+                let parts = p.parts.entry(ack.chunk.payload).or_default();
+                parts.push(ack.part.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble_certificate(signatures.iter().cloned())?;
+                let certificate = scheme.assemble(parts.iter().cloned())?;
 
                 // Take ownership of the votes, which must exist
-                p.signatures.remove(&ack.chunk.payload);
+                p.parts.remove(&ack.chunk.payload);
 
                 Some(certificate)
             }
@@ -186,14 +186,10 @@ mod tests {
                 chunk: &chunk,
                 epoch,
             };
-            let signature = scheme
+            let part = scheme
                 .sign::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
-            Ack {
-                chunk,
-                epoch,
-                signature,
-            }
+            Ack { chunk, epoch, part }
         }
 
         /// Create a vector of acks for the given scheme indices.

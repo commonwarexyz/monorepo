@@ -70,44 +70,44 @@ use rand::{CryptoRng, Rng};
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
-/// Signature emitted by a participant.
+/// A participant's part of a certificate.
 #[derive(Clone, Debug)]
-pub struct Signature<S: Scheme> {
+pub struct Part<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
     /// Scheme-specific signature or share produced for a given subject.
     pub signature: S::Signature,
 }
 
-impl<S: Scheme> PartialEq for Signature<S> {
+impl<S: Scheme> PartialEq for Part<S> {
     fn eq(&self, other: &Self) -> bool {
         self.signer == other.signer && self.signature == other.signature
     }
 }
 
-impl<S: Scheme> Eq for Signature<S> {}
+impl<S: Scheme> Eq for Part<S> {}
 
-impl<S: Scheme> Hash for Signature<S> {
+impl<S: Scheme> Hash for Part<S> {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<S: Scheme> Write for Signature<S> {
+impl<S: Scheme> Write for Part<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Scheme> EncodeSize for Signature<S> {
+impl<S: Scheme> EncodeSize for Part<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Scheme> Read for Signature<S> {
+impl<S: Scheme> Read for Part<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -119,7 +119,7 @@ impl<S: Scheme> Read for Signature<S> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme> arbitrary::Arbitrary<'_> for Signature<S>
+impl<S: Scheme> arbitrary::Arbitrary<'_> for Part<S>
 where
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -130,21 +130,18 @@ where
     }
 }
 
-/// Result of verifying a batch of signatures.
-pub struct SignatureVerification<S: Scheme> {
-    /// Contains the signatures accepted by the scheme.
-    pub verified: Vec<Signature<S>>,
+/// Result of batch-verifying parts.
+pub struct Verification<S: Scheme> {
+    /// Contains the parts accepted by the scheme.
+    pub verified: Vec<Part<S>>,
     /// Identifies the participant indices rejected during batch verification.
-    pub invalid_signers: Vec<u32>,
+    pub invalid: Vec<u32>,
 }
 
-impl<S: Scheme> SignatureVerification<S> {
-    /// Creates a new `SignatureVerification` result.
-    pub const fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
-        Self {
-            verified,
-            invalid_signers,
-        }
+impl<S: Scheme> Verification<S> {
+    /// Creates a new `Verification` result.
+    pub const fn new(verified: Vec<Part<S>>, invalid: Vec<u32>) -> Self {
+        Self { verified, invalid }
     }
 }
 
@@ -156,18 +153,18 @@ pub trait Subject: Clone + Debug + Send + Sync {
 
 /// Cryptographic surface for multi-party certificate schemes.
 ///
-/// A `Scheme` produces signatures, validates them (individually or in batches), assembles
+/// A `Scheme` produces parts, validates them (individually or in batches), assembles
 /// certificates, and verifies recovered certificates. Implementations may override the
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Subject type for signing and verifying signatures.
+    /// Subject type for signing and verification.
     type Subject<'a, D: Digest>: Subject;
 
     /// Public key type for participant identity used to order and index the participant set.
     type PublicKey: PublicKey;
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
-    /// Certificate assembled from a set of signatures.
+    /// Certificate assembled from a set of parts.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     /// Returns the index of "self" in the participant set, if available.
@@ -183,52 +180,52 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
-    ) -> Option<Signature<Self>>;
+    ) -> Option<Part<Self>>;
 
-    /// Verifies a single signature against the participant material managed by the scheme.
-    fn verify<D: Digest>(
+    /// Verifies a single part against the participant material managed by the scheme.
+    fn verify_part<D: Digest>(
         &self,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
-        signature: &Signature<Self>,
+        part: &Part<Self>,
     ) -> bool;
 
-    /// Batch-verifies signatures and separates valid signatures from signer indices that failed
+    /// Batch-verifies parts and separates valid parts from signer indices that failed
     /// verification.
     ///
-    /// Callers must not include duplicate signatures from the same signer.
-    fn verify_many<R, D, I>(
+    /// Callers must not include duplicate parts from the same signer.
+    fn verify_parts<R, D, I>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
-        signatures: I,
-    ) -> SignatureVerification<Self>
+        parts: I,
+    ) -> Verification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Signature<Self>>,
+        I: IntoIterator<Item = Part<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
-        let verified = signatures.into_iter().filter_map(|sig| {
-            if self.verify(namespace, subject.clone(), &sig) {
-                Some(sig)
+        let verified = parts.into_iter().filter_map(|part| {
+            if self.verify_part(namespace, subject.clone(), &part) {
+                Some(part)
             } else {
-                invalid.insert(sig.signer);
+                invalid.insert(part.signer);
                 None
             }
         });
 
-        SignatureVerification::new(verified.collect(), invalid.into_iter().collect())
+        Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Assembles signatures into a certificate, returning `None` if the threshold is not met.
+    /// Assembles parts into a certificate, returning `None` if the threshold is not met.
     ///
-    /// Callers must not include duplicate signatures from the same signer.
-    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
+    /// Callers must not include duplicate parts from the same signer.
+    fn assemble<I>(&self, parts: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Signature<Self>>;
+        I: IntoIterator<Item = Part<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
@@ -516,7 +513,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,
-            CodecConformance<Signature<Scheme>>,
+            CodecConformance<Part<Scheme>>,
         }
     }
 }

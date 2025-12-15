@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
-    certificate::{Scheme, Signature},
+    certificate::{Part, Scheme},
     Digest, PublicKey,
 };
 use rand::{CryptoRng, Rng};
@@ -744,7 +744,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
@@ -753,17 +753,14 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign::<D>(
+        let part = scheme.sign::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self {
-            proposal,
-            signature,
-        })
+        Some(Self { proposal, part })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
@@ -773,12 +770,12 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -790,7 +787,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
+        self.proposal == other.proposal && self.part == other.part
     }
 }
 
@@ -799,20 +796,20 @@ impl<S: Scheme, D: Digest> Eq for Notarize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.signature.encode_size()
+        self.proposal.encode_size() + self.part.encode_size()
     }
 }
 
@@ -821,18 +818,15 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        Ok(Self { proposal, part })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -856,11 +850,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { proposal, part })
     }
 }
 
@@ -885,7 +876,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.part.clone()))?;
 
         Some(Self {
             proposal,
@@ -993,12 +984,12 @@ pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme> PartialEq for Nullify<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.signature == other.signature
+        self.round == other.round && self.part == other.part
     }
 }
 
@@ -1007,7 +998,7 @@ impl<S: Scheme> Eq for Nullify<S> {}
 impl<S: Scheme> Hash for Nullify<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.round.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
@@ -1017,9 +1008,9 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
+        let part = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
 
-        Some(Self { round, signature })
+        Some(Self { round, part })
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
@@ -1029,10 +1020,10 @@ impl<S: Scheme> Nullify<S> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Nullify { round: self.round },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -1045,13 +1036,13 @@ impl<S: Scheme> Nullify<S> {
 impl<S: Scheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.signature.encode_size()
+        self.round.encode_size() + self.part.encode_size()
     }
 }
 
@@ -1060,15 +1051,15 @@ impl<S: Scheme> Read for Nullify<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self { round, signature })
+        Ok(Self { round, part })
     }
 }
 
 impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -1091,8 +1082,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let round = Round::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self { round, signature })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { round, part })
     }
 }
 
@@ -1114,7 +1105,7 @@ impl<S: Scheme> Nullification<S> {
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.part.clone()))?;
 
         Some(Self { round, certificate })
     }
@@ -1216,7 +1207,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub signature: Signature<S>,
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
@@ -1225,17 +1216,14 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        let signature = scheme.sign::<D>(
+        let part = scheme.sign::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self {
-            proposal,
-            signature,
-        })
+        Some(Self { proposal, part })
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
@@ -1245,12 +1233,12 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     where
         S: SimplexScheme<D>,
     {
-        scheme.verify::<D>(
+        scheme.verify_part::<D>(
             namespace,
             Subject::Finalize {
                 proposal: &self.proposal,
             },
-            &self.signature,
+            &self.part,
         )
     }
 
@@ -1262,7 +1250,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
+        self.proposal == other.proposal && self.part == other.part
     }
 }
 
@@ -1271,20 +1259,20 @@ impl<S: Scheme, D: Digest> Eq for Finalize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.signature.hash(state);
+        self.part.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.signature.encode_size()
+        self.proposal.encode_size() + self.part.encode_size()
     }
 }
 
@@ -1293,18 +1281,15 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let signature = Signature::read(reader)?;
+        let part = Part::read(reader)?;
 
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        Ok(Self { proposal, part })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
-        self.signature.signer
+        self.part.signer
     }
 }
 
@@ -1328,11 +1313,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { proposal, part })
     }
 }
 
@@ -1357,7 +1339,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     ) -> Option<Self> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|f| f.signature.clone()))?;
+        let certificate = scheme.assemble(iter.map(|f| f.part.clone()))?;
 
         Some(Self {
             proposal,

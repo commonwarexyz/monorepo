@@ -918,7 +918,7 @@ impl<
         let Some(index) = participants.iter().position(|p| p == sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index as u32 != ack.signature.signer {
+        if index as u32 != ack.part.signer {
             return Err(Error::PeerMismatch);
         }
 

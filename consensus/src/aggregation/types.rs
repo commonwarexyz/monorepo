@@ -6,7 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Scheme, Signature, Subject},
+    certificate::{Part, Scheme, Subject},
     Digest,
 };
 use commonware_utils::union;
@@ -149,20 +149,20 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub item: Item<D>,
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
-    /// Scheme-specific vote material
-    pub signature: Signature<S>,
+    /// Scheme-specific part material
+    pub part: Part<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
-    /// Verifies the signature on this acknowledgment.
+    /// Verifies the part on this acknowledgment.
     ///
-    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Returns `true` if the part is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
     where
         S: AggregationScheme<D>,
     {
-        scheme.verify::<D>(namespace, &self.item, &self.signature)
+        scheme.verify_part::<D>(namespace, &self.item, &self.part)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -176,12 +176,8 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        let signature = scheme.sign::<D>(namespace, &item)?;
-        Some(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = scheme.sign::<D>(namespace, &item)?;
+        Some(Self { item, epoch, part })
     }
 }
 
@@ -189,7 +185,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.epoch.write(writer);
-        self.signature.write(writer);
+        self.part.write(writer);
     }
 }
 
@@ -199,18 +195,14 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let signature = Signature::read(reader)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = Part::read(reader)?;
+        Ok(Self { item, epoch, part })
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.part.encode_size()
     }
 }
 
@@ -223,12 +215,8 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let signature = Signature::arbitrary(u)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let part = Part::arbitrary(u)?;
+        Ok(Self { item, epoch, part })
     }
 }
 
@@ -295,10 +283,10 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
-        let signatures = iter
+        let parts = iter
             .filter(|ack| ack.item == item)
-            .map(|ack| ack.signature.clone());
-        let certificate = scheme.assemble_certificate(signatures)?;
+            .map(|ack| ack.part.clone());
+        let certificate = scheme.assemble(parts)?;
 
         Some(Self { item, certificate })
     }

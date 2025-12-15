@@ -44,7 +44,7 @@ mod tests {
 
         let quorum = quorum_from_slice(&schemes) as usize;
 
-        let signatures: Vec<_> = schemes
+        let parts: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -58,7 +58,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble_certificate(signatures).unwrap();
+        let certificate = schemes[0].assemble(parts).unwrap();
 
         let round = Round::new(Epoch::new(1), View::new(1));
         assert!(schemes[0].seed(round, &certificate).is_none());
