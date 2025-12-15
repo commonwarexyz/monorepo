@@ -73,7 +73,7 @@ impl Simplex for SimplexBls12381MinSig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fuzz, utils::Partition, FuzzInput};
+    use crate::{fuzz, utils::Partition, FuzzInput, N4C3F1};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -100,7 +100,7 @@ mod tests {
         FuzzInput {
             seed,
             partition: Partition::Connected,
-            configuration: (4, 3, 1),
+            configuration: N4C3F1,
             raw_bytes,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::seed_from_u64(seed)),
@@ -117,7 +117,7 @@ mod tests {
             FuzzInput {
                 seed,
                 partition: Partition::Connected,
-                configuration: (4, 3, 1),
+                configuration: N4C3F1,
                 raw_bytes,
                 offset: RefCell::new(0),
                 rng: RefCell::new(StdRng::seed_from_u64(seed)),
