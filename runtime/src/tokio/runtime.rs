@@ -623,6 +623,8 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Uses the host's DNS configuration (e.g., /etc/resolv.conf on Unix,
+        // registry on Windows).
         let resolver = hickory_resolver::Resolver::builder_tokio()
             .map_err(|e| Error::ResolveFailed(e.to_string()))?
             .build();
