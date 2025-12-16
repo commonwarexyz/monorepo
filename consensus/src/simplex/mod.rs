@@ -225,9 +225,7 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
-use crate::types::{Round, View, ViewDelta};
-use commonware_codec::Encode;
-use scheme::SeededScheme;
+use crate::types::{View, ViewDelta};
 
 /// The minimum view we are tracking both in-memory and on-disk.
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
@@ -253,37 +251,6 @@ pub(crate) fn interesting(
     true
 }
 
-/// Selects the leader for a given round using scheme-provided randomness seed when available.
-///
-/// If the active [`SeededScheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
-/// encoded and reduced modulo the number of participants. Otherwise we fall back to
-/// simple round-robin using the view number.
-///
-/// # Panics
-///
-/// Panics if `participants` is empty.
-pub fn select_leader<S>(
-    participants: &[S::PublicKey],
-    round: Round,
-    seed: Option<S::Seed>,
-) -> (S::PublicKey, u32)
-where
-    S: SeededScheme,
-    S::PublicKey: Clone,
-{
-    assert!(
-        !participants.is_empty(),
-        "no participants to select leader from"
-    );
-    let idx = seed.map_or_else(
-        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
-        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
-    );
-    let leader = participants[idx].clone();
-
-    (leader, idx as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +271,7 @@ mod tests {
         Monitor, Viewable,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
