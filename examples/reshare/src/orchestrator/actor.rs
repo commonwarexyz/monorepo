@@ -12,7 +12,7 @@ use commonware_consensus::{
         self, scheme,
         types::{Certificate, Context},
     },
-    types::{Epoch, EpochConfig, ViewDelta},
+    types::{Epoch, EpochConfig, EpochStrategy, ViewDelta},
     Automaton, Relay,
 };
 use commonware_cryptography::{

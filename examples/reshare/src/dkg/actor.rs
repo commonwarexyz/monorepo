@@ -11,7 +11,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::{Epoch, EpochConfig},
+    types::{Epoch, EpochConfig, EpochStrategy},
     Reporter,
 };
 use commonware_cryptography::{

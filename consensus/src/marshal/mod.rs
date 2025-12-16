@@ -112,7 +112,7 @@ mod tests {
             scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::{Epoch, EpochConfig, Round, View, ViewDelta},
+        types::{Epoch, EpochConfig, EpochStrategy, Round, View, ViewDelta},
         Automaton, Block as _, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;

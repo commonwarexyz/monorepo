@@ -36,7 +36,7 @@
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
-    types::{Epoch, EpochConfig, Round},
+    types::{Epoch, EpochConfig, EpochStrategy, Round},
     Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
