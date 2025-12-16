@@ -33,7 +33,10 @@ pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as 
 use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
 
 pub type FixedOperation<K, V> = Operation<K, FixedEncoding<V>>;
+pub type FixedUpdate<K, V> = Update<K, FixedEncoding<V>>;
+
 pub type VariableOperation<K, V> = Operation<K, VariableEncoding<V>>;
+pub type VariableUpdate<K, V> = Update<K, VariableEncoding<V>>;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 

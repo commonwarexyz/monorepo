@@ -28,7 +28,7 @@ use std::{
 mod operation;
 
 mod value;
-pub(crate) use value::{FixedEncoding, FixedValue, ValueEncoding, VariableValue};
+pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
 
 mod ext;
 pub mod ordered;
