@@ -237,7 +237,7 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, buf: impl Buf + Send + 'static) -> Result<(), crate::Error> {
         // Box the buf upfront so we can work with a consistent type throughout.
         let mut buf: Box<dyn Buf + Send> = Box::new(buf);
 

@@ -56,7 +56,7 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, buf: impl Buf + Send + 'static) -> Result<(), crate::Error> {
         let len = buf.remaining();
         self.inner.send(buf).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
@@ -218,7 +218,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
             let buf = stream.recv(vec![0; MSG_SIZE as usize]).await.unwrap();
-            sink.send(buf.as_ref()).await.unwrap();
+            sink.send(bytes::Bytes::from(buf)).await.unwrap();
         });
 
         // Send and receive data as client
@@ -226,7 +226,10 @@ mod tests {
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE as usize];
-        client_sink.send(msg.as_slice()).await.unwrap();
+        client_sink
+            .send(bytes::Bytes::copy_from_slice(&msg))
+            .await
+            .unwrap();
 
         let response = client_stream
             .recv(vec![0; MSG_SIZE as usize])

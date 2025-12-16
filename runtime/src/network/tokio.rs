@@ -19,7 +19,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
+    async fn send(&mut self, mut buf: impl Buf + Send + 'static) -> Result<(), Error> {
         // Time out if we take too long to write
         timeout(self.write_timeout, self.sink.write_all_buf(&mut buf))
             .await

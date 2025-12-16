@@ -12,7 +12,7 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
+    async fn send(&mut self, mut buf: impl Buf + Send + 'static) -> Result<(), Error> {
         let bytes = buf.copy_to_bytes(buf.remaining());
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());

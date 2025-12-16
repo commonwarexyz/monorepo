@@ -11,6 +11,7 @@ pub(crate) mod iouring;
 #[cfg(test)]
 mod tests {
     use crate::{Listener, Sink, Stream};
+    use bytes::Bytes;
     use futures::join;
     use std::net::SocketAddr;
 
@@ -50,7 +51,7 @@ mod tests {
                 .await
                 .expect("Failed to receive");
             assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
-            sink.send(SERVER_SEND_DATA.as_bytes())
+            sink.send(Bytes::from_static(SERVER_SEND_DATA.as_bytes()))
                 .await
                 .expect("Failed to send");
         });
@@ -63,7 +64,7 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            sink.send(CLIENT_SEND_DATA.as_bytes())
+            sink.send(Bytes::from_static(CLIENT_SEND_DATA.as_bytes()))
                 .await
                 .expect("Failed to send data");
 
@@ -103,7 +104,7 @@ mod tests {
                     .expect("Failed to receive");
                 assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
 
-                sink.send(SERVER_SEND_DATA.as_bytes())
+                sink.send(Bytes::from_static(SERVER_SEND_DATA.as_bytes()))
                     .await
                     .expect("Failed to send");
             }
@@ -119,7 +120,7 @@ mod tests {
                     .expect("Failed to dial server");
 
                 // Send a message to the server
-                sink.send(CLIENT_SEND_DATA.as_bytes())
+                sink.send(Bytes::from_static(CLIENT_SEND_DATA.as_bytes()))
                     .await
                     .expect("Failed to send data");
 
@@ -160,7 +161,7 @@ mod tests {
                     .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(read.as_ref())
+                sink.send(Bytes::from(read))
                     .await
                     .expect("Failed to send chunk");
             }
@@ -175,18 +176,18 @@ mod tests {
                 .expect("Failed to dial server");
 
             // Create a pattern of data
-            let pattern = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+            let pattern: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
 
             // Send and verify data in chunks
             for _ in 0..NUM_CHUNKS {
-                sink.send(pattern.as_ref())
+                sink.send(Bytes::copy_from_slice(&pattern))
                     .await
                     .expect("Failed to send chunk");
                 let read = stream
                     .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(read.as_ref(), pattern);
+                assert_eq!(read.as_ref(), &pattern[..]);
             }
         });
 
@@ -243,7 +244,7 @@ mod tests {
                 tokio::spawn(async move {
                     for _ in 0..NUM_MESSAGES {
                         let data = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
-                        sink.send(data.as_ref()).await.unwrap();
+                        sink.send(Bytes::from(data)).await.unwrap();
                     }
                 });
             }
@@ -257,9 +258,9 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
-                    sink.send(payload.as_ref()).await.unwrap();
+                    sink.send(Bytes::copy_from_slice(&payload)).await.unwrap();
                     let echo = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
-                    assert_eq!(echo.as_ref(), payload);
+                    assert_eq!(echo.as_ref(), &payload[..]);
                 }
             }));
         }

@@ -50,7 +50,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
+    async fn send(&mut self, mut buf: impl Buf + Send + 'static) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -159,11 +159,11 @@ mod tests {
     #[test]
     fn test_send_recv() {
         let (mut sink, mut stream) = Channel::init();
-        let data = b"hello world".to_vec();
+        let data = b"hello world";
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            sink.send(data.as_ref()).await.unwrap();
+            sink.send(Bytes::from_static(data)).await.unwrap();
             let buf = stream.recv(vec![0; data.len()]).await.unwrap();
             assert_eq!(buf.as_ref(), data);
         });
@@ -172,13 +172,11 @@ mod tests {
     #[test]
     fn test_send_recv_partial_multiple() {
         let (mut sink, mut stream) = Channel::init();
-        let data = b"hello".to_vec();
-        let data2 = b" world".to_vec();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            sink.send(data.as_ref()).await.unwrap();
-            sink.send(data2.as_ref()).await.unwrap();
+            sink.send(Bytes::from_static(b"hello")).await.unwrap();
+            sink.send(Bytes::from_static(b" world")).await.unwrap();
             let buf = stream.recv(vec![0; 5]).await.unwrap();
             assert_eq!(buf.as_ref(), b"hello");
             let buf = stream.recv(buf).await.unwrap();

@@ -6,7 +6,7 @@ use commonware_runtime::{Sink, Stream};
 /// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    buf: impl Buf + Send,
+    buf: impl Buf + Send + 'static,
     max_message_size: usize,
 ) -> Result<(), Error> {
     // Validate frame size

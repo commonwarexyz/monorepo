@@ -174,7 +174,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     let inner_routine = async move {
         send_frame(
             &mut sink,
-            config.signing_key.public_key().encode().as_ref(),
+            Bytes::from(config.signing_key.public_key().encode()),
             config.max_message_size,
         )
         .await?;
