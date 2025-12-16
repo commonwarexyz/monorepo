@@ -564,7 +564,6 @@ mod test {
             // Set up crash ticker if needed (only for Random crashes)
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
-            let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
             let mut delayed_started = false;
@@ -628,8 +627,7 @@ mod test {
                         if successes >= target {
                             success_target_reached_epoch = Some(epoch);
                         }
-                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)
-                        ).count() >= self.total as usize;
+                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)).count() >= self.total as usize;
 
                         let post_update = if all_reached_epoch {
                             PostUpdate::Stop
@@ -644,16 +642,26 @@ mod test {
                                 continue;
                         }
 
-                        // Check if all non-delayed participants have reached this epoch
+                        // Check if all active participants have reported
                         let active_count = if delayed_started {
                             self.total as usize
                         } else {
                             self.total as usize - delayed.len()
                         };
-                        if status.values().filter(|x| **x >= epoch).count() < active_count {
+                        if status.len() < active_count {
                             continue;
                         }
+
+                        // Compute the minimum epoch that all active participants have reached
+                        let min_epoch = status.values().min().copied().unwrap_or(Epoch::zero());
+
                         if successes >= target {
+                            // Wait for all active participants to reach the target epoch
+                            if let Some(target_epoch) = success_target_reached_epoch {
+                                if min_epoch < target_epoch {
+                                    continue;
+                                }
+                            }
                             // Verify all delayed participants got acknowledged shares
                             if matches!(self.crash, Some(Crash::Delay { .. })) {
                                 let unacknowledged: Vec<_> = delayed
@@ -672,7 +680,6 @@ mod test {
                                 failures,
                             });
                         }
-                        current_epoch = current_epoch.next();
 
                         // Start delayed participants after the specified number of epochs
                         if delayed_started {
@@ -681,10 +688,12 @@ mod test {
                         let Some(Crash::Delay { after, .. }) = &self.crash else {
                             continue;
                         };
-                        if current_epoch.get() != *after {
+                        // min_epoch.next() represents the number of completed epochs
+                        // (e.g., if min_epoch=1, epochs 0 and 1 are complete, so 2 epochs done)
+                        if min_epoch.next().get() < *after {
                             continue;
                         }
-                        info!(epoch = ?current_epoch, "starting delayed participants");
+                        info!(epoch = ?min_epoch, "starting delayed participants");
                         for pk in delayed.iter() {
                             team.start_participant(
                                 &ctx,
