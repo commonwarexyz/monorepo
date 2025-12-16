@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
@@ -21,7 +22,7 @@ p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
-bytes.workspace = true
+
 
 [[bin]]
 name = "bls12381_decode"

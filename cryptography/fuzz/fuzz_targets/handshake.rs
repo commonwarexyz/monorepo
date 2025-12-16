@@ -63,19 +63,29 @@ fn read_ack(frame: &[u8]) {
 }
 
 fn make_range(start: u64, len: u16) -> Option<(Range<u64>, u64)> {
-    let span = (len as u64).saturating_add(1);
-    let end = start.saturating_add(span);
+    let desired_span = (len as u64).saturating_add(1);
+    let end = start.saturating_add(desired_span);
     if end <= start {
         return None;
     }
-    Some((start..end, span))
+    // Calculate actual span based on the actual range
+    let actual_span = end.saturating_sub(start);
+    Some((start..end, actual_span))
 }
 
 fn choose_time(range: &Range<u64>, span: u64, offset: u16, out_of_range: bool) -> u64 {
     if out_of_range {
-        return range.end.saturating_add(offset as u64 + 1);
+        return range.end.saturating_add(offset as u64).saturating_add(1);
     }
-    range.start.saturating_add((offset as u64) % span.max(1))
+
+    let offset_in_range = (offset as u64) % span.max(1);
+    let result = range.start.saturating_add(offset_in_range);
+
+    if result >= range.end {
+        range.start
+    } else {
+        result
+    }
 }
 
 fn mutate_message<T>(original: &T, mask: &[u8]) -> Option<T>
