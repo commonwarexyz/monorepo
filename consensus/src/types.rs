@@ -411,6 +411,67 @@ impl EpochConfig {
         }
         None
     }
+
+    /// Returns the last block height in the given epoch.
+    pub fn last_height_in_epoch(&self, epoch: Epoch) -> u64 {
+        self.first_height_in_epoch(epoch) + self.epoch_length_for_epoch(epoch) - 1
+    }
+
+    /// Returns the first block height in the given epoch.
+    pub fn first_height_in_epoch(&self, epoch: Epoch) -> u64 {
+        let (first_height, _) = self.epoch_info(epoch);
+        first_height
+    }
+
+    /// Returns the epoch length for the given epoch number.
+    fn epoch_length_for_epoch(&self, epoch: Epoch) -> u64 {
+        let (_, epoch_length) = self.epoch_info(epoch);
+        epoch_length
+    }
+
+    /// Returns both the first height and epoch length for the given epoch.
+    fn epoch_info(&self, epoch: Epoch) -> (u64, u64) {
+        let mut current_height = 0;
+        let mut current_epoch = 0;
+
+        for &(range_start, epoch_length) in &self.ranges {
+            // Skip if we haven't reached this range yet
+            if current_height < range_start {
+                current_height = range_start;
+            }
+
+            // For the last range, extend indefinitely
+            let is_last_range = range_start == self.ranges.last().unwrap().0;
+            if is_last_range {
+                let epochs_needed = epoch.get() - current_epoch;
+                let first_height = current_height + epochs_needed * epoch_length;
+                return (first_height, epoch_length);
+            }
+
+            // Find the next range to determine this range's extent
+            let next_range_start = self
+                .ranges
+                .iter()
+                .find(|(start, _)| *start > range_start)
+                .map(|(start, _)| *start)
+                .unwrap_or(u64::MAX);
+
+            let epochs_in_range = (next_range_start - current_height) / epoch_length;
+
+            if epoch.get() < current_epoch + epochs_in_range {
+                let epoch_offset = epoch.get() - current_epoch;
+                let first_height = current_height + epoch_offset * epoch_length;
+                return (first_height, epoch_length);
+            }
+
+            current_epoch += epochs_in_range;
+            current_height = next_range_start;
+        }
+
+        // Fallback (should not reach here with proper validation)
+        let fallback_height = epoch.get() * self.ranges[0].1;
+        (fallback_height, self.ranges[0].1)
+    }
 }
 
 impl Read for Round {

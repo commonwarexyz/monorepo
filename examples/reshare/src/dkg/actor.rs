@@ -11,8 +11,8 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::Epoch,
-    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
+    types::{Epoch, EpochConfig},
+    utils::epoch_with_config,
     Reporter,
 };
 use commonware_cryptography::{
@@ -374,9 +374,10 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let relative_height =
-                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
+                            let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                            let block_epoch = epoch_with_config(&epoch_config, block.height).unwrap();
+                            let first_height = epoch_config.first_height_in_epoch(block_epoch);
+                            let relative_height = block.height - first_height;
                             let mid_point = BLOCKS_PER_EPOCH / 2;
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
@@ -433,7 +434,10 @@ where
                             }
 
                             // Continue if not the last block in the epoch
-                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                            let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                            let block_epoch = epoch_with_config(&epoch_config, block.height).unwrap();
+                            let last_height = epoch_config.last_height_in_epoch(block_epoch);
+                            if block.height != last_height {
                                 // Acknowledge block processing
                                 response.acknowledge();
                                 continue;

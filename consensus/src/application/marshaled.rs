@@ -152,10 +152,9 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let height = utils::last_block_in_epoch(
-            self.epoch_length,
-            epoch.previous().expect("checked to be non-zero above"),
-        );
+        let epoch_config = crate::types::EpochConfig::fixed(self.epoch_length);
+        let height = epoch_config
+            .last_height_in_epoch(epoch.previous().expect("checked to be non-zero above"));
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
@@ -223,8 +222,8 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch =
-                    utils::last_block_in_epoch(epoch_length, consensus_context.epoch());
+                let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
+                let last_in_epoch = epoch_config.last_height_in_epoch(consensus_context.epoch());
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
@@ -349,7 +348,8 @@ where
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
-                    let last_in_epoch = utils::last_block_in_epoch(epoch_length, context.epoch());
+                    let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
+                    let last_in_epoch = epoch_config.last_height_in_epoch(context.epoch());
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
                         let _ = tx.send(true);
@@ -361,7 +361,10 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                if utils::epoch(epoch_length, block.height()) != context.epoch() {
+                let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
+                if utils::epoch_with_config(&epoch_config, block.height()).unwrap()
+                    != context.epoch()
+                {
                     let _ = tx.send(false);
                     return;
                 }

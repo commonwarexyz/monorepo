@@ -510,7 +510,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
+                let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
@@ -547,10 +548,11 @@ mod tests {
                         .iter_mut()
                         .enumerate()
                     {
-                        if (do_finalize && i < QUORUM as usize)
-                            || height == NUM_BLOCKS
-                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
-                        {
+                        if (do_finalize && i < QUORUM as usize) || height == NUM_BLOCKS || {
+                            let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                            let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                            height == epoch_config.last_height_in_epoch(epoch)
+                        } {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
                     }
@@ -558,10 +560,11 @@ mod tests {
                     // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
                     // individual participant.
                     for actor in actors.iter_mut() {
-                        if context.gen_bool(0.2)
-                            || height == NUM_BLOCKS
-                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
-                        {
+                        if context.gen_bool(0.2) || height == NUM_BLOCKS || {
+                            let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                            let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                            height == epoch_config.last_height_in_epoch(epoch)
+                        } {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
                     }
@@ -656,7 +659,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
+                let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
