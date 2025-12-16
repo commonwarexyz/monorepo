@@ -11,7 +11,7 @@
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::journal::variable::Journal] that stores key-value data.
+//! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -206,7 +206,7 @@ pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition to use for storing the journal.
     pub journal_partition: String,
 
-    /// The compression level to use for the [crate::journal::variable::Journal].
+    /// The compression level to use for the [crate::journal::segmented::variable::Journal].
     pub journal_compression: Option<u8>,
 
     /// The size of the write buffer to use for the journal.
@@ -242,9 +242,9 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
     use rand::{Rng, RngCore};
 
     const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
@@ -829,7 +829,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], size)
+                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();
@@ -1213,11 +1213,56 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         let state1 = test_operations_and_restart(1_000);
         let state2 = test_operations_and_restart(1_000);
         assert_eq!(state1, state2);
+    }
+
+    #[test_traced]
+    fn test_put_multiple_updates() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the freezer
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                table_partition: "test_table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize freezer");
+
+            let key = test_key("key1");
+
+            freezer
+                .put(key.clone(), 1)
+                .await
+                .expect("Failed to put data");
+            freezer
+                .put(key.clone(), 2)
+                .await
+                .expect("Failed to put data");
+            freezer.sync().await.expect("Failed to sync");
+            assert_eq!(
+                freezer
+                    .get(Identifier::Key(&key))
+                    .await
+                    .expect("Failed to get data")
+                    .unwrap(),
+                2
+            );
+        });
     }
 }

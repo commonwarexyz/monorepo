@@ -5,12 +5,12 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Epochable, Relay as Re,
+    Automaton as Au, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -23,18 +23,19 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing::debug;
 
-pub enum Message<D: Digest> {
+pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
         epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
-        context: Context<D>,
+        context: Context<D, P>,
         response: oneshot::Sender<D>,
     },
     Verify {
-        context: Context<D>,
+        context: Context<D, P>,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -44,21 +45,21 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+pub struct Mailbox<D: Digest, P: PublicKey> {
+    sender: mpsc::Sender<Message<D, P>>,
 }
 
-impl<D: Digest> Mailbox<D> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+impl<D: Digest, P: PublicKey> Mailbox<D, P> {
+    pub(super) const fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
-    type Context = Context<D>;
+    type Context = Context<D, P>;
 
-    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })
@@ -94,7 +95,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -118,7 +119,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
-    pub participant: P,
+    pub me: P,
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
@@ -127,15 +128,16 @@ pub struct Config<H: Hasher, P: PublicKey> {
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
     hasher: H,
-    participant: P,
+    me: P,
 
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
 
-    mailbox: mpsc::Receiver<Message<H::Digest>>,
+    mailbox: mpsc::Receiver<Message<H::Digest, P>>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    fail_verification: bool,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -143,9 +145,9 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
-    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
+    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
         // Register self on relay
-        let broadcast = cfg.relay.register(cfg.participant.clone());
+        let broadcast = cfg.relay.register(cfg.me.clone());
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -157,7 +159,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             Self {
                 context: ContextCell::new(context),
                 hasher: cfg.hasher,
-                participant: cfg.participant,
+                me: cfg.me,
 
                 relay: cfg.relay,
                 broadcast,
@@ -166,6 +168,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 propose_latency,
                 verify_latency,
+                fail_verification: false,
 
                 pending: HashMap::new(),
 
@@ -175,8 +178,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         )
     }
 
+    pub const fn set_fail_verification(&mut self, fail: bool) {
+        self.fail_verification = fail;
+    }
+
     fn panic(&self, msg: &str) -> ! {
-        panic!("[{:?}] {}", self.participant, msg);
+        panic!("[{:?}] {}", self.me, msg);
     }
 
     fn genesis(&mut self, epoch: Epoch) -> H::Digest {
@@ -189,7 +196,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
-    async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
+    async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.context);
         self.context
@@ -212,7 +219,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn verify(
         &mut self,
-        context: Context<H::Digest>,
+        context: Context<H::Digest, P>,
         payload: H::Digest,
         mut contents: Bytes,
     ) -> bool {
@@ -221,6 +228,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
+
+        // Check if we should fail verification
+        if self.fail_verification {
+            return false;
+        }
 
         // Verify contents
         let (parsed_round, parent, _) =
@@ -244,9 +256,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay
-            .broadcast(&self.participant, (payload, contents))
-            .await;
+        self.relay.broadcast(&self.me, (payload, contents)).await;
     }
 
     pub fn start(mut self) -> Handle<()> {
@@ -258,55 +268,57 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         #[allow(clippy::type_complexity)]
         let mut waiters: HashMap<
             H::Digest,
-            Vec<(Context<H::Digest>, oneshot::Sender<bool>)>,
+            Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
         > = HashMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
-        loop {
-            select! {
-                message = self.mailbox.next() => {
-                    let message =match message {
-                        Some(message) => message,
-                        None => break,
-                    };
-                    match message {
-                        Message::Genesis { epoch, response } => {
-                            let digest = self.genesis(epoch);
-                            let _ = response.send(digest);
-                        }
-                        Message::Propose { context, response } => {
-                            let digest = self.propose(context).await;
-                            let _ = response.send(digest);
-                        }
-                        Message::Verify { context, payload, response } => {
-                            if let Some(contents) = seen.get(&payload) {
-                                let verified = self.verify(context, payload, contents.clone()).await;
-                                let _ = response.send(verified);
-                            } else {
-                                waiters
-                                    .entry(payload)
-                                    .or_default()
-                                    .push((context, response));
-                                continue;
-                            }
-                        }
-                        Message::Broadcast { payload } => {
-                            self.broadcast(payload).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping application");
+            },
+            message = self.mailbox.next() => {
+                let message =match message {
+                    Some(message) => message,
+                    None => break,
+                };
+                match message {
+                    Message::Genesis { epoch, response } => {
+                        let digest = self.genesis(epoch);
+                        let _ = response.send(digest);
+                    }
+                    Message::Propose { context, response } => {
+                        let digest = self.propose(context).await;
+                        let _ = response.send(digest);
+                    }
+                    Message::Verify { context, payload, response } => {
+                        if let Some(contents) = seen.get(&payload) {
+                            let verified = self.verify(context, payload, contents.clone()).await;
+                            let _ = response.send(verified);
+                        } else {
+                            waiters
+                                .entry(payload)
+                                .or_default()
+                                .push((context, response));
+                            continue;
                         }
                     }
-                },
-                broadcast = self.broadcast.next() => {
-                    // Record digest for future use
-                    let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest, contents.clone());
+                    Message::Broadcast { payload } => {
+                        self.broadcast(payload).await;
+                    }
+                }
+            },
+            broadcast = self.broadcast.next() => {
+                // Record digest for future use
+                let (digest, contents) = broadcast.expect("broadcast closed");
+                seen.insert(digest, contents.clone());
 
-                    // Check if we have a waiter
-                    if let Some(waiters) = waiters.remove(&digest) {
-                        for (context, sender) in waiters {
-                            let verified = self.verify(context, digest, contents.clone()).await;
-                            sender.send(verified).expect("Failed to send verification");
-                        }
+                // Check if we have a waiter
+                if let Some(waiters) = waiters.remove(&digest) {
+                    for (context, sender) in waiters {
+                        let verified = self.verify(context, digest, contents.clone()).await;
+                        sender.send(verified).expect("Failed to send verification");
                     }
                 }
             }

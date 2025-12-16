@@ -1,33 +1,23 @@
 use super::types::{Activity, Context};
 use crate::{
-    simplex::signing_scheme::Scheme,
-    types::{Epoch, View},
+    types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Set;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    P: PublicKey,
     S: Scheme,
-    B: Blocker<PublicKey = P>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Identity of the participant.
-    pub me: P,
-
-    /// List of validators for the consensus engine, this is static for the
-    /// lifetime of the engine (i.e. the epoch).
-    pub participants: Set<P>,
-
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
@@ -51,6 +41,10 @@ pub struct Config<
     pub relay: R,
 
     /// Reporter for the consensus engine.
+    ///
+    /// All activity is exported for downstream applications that benefit from total observability,
+    /// consider wrapping with [`crate::simplex::scheme::reporter::AttributableReporter`] to
+    /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
     /// Partition for the consensus engine.
@@ -89,20 +83,17 @@ pub struct Config<
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
-    pub activity_timeout: View,
+    pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many views.
+    /// for this many recent known views (we ignore views we don't have data for).
     ///
     /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking).
-    pub skip_timeout: View,
+    /// many views we are tracking below the finalized tip).
+    pub skip_timeout: ViewDelta,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
-
-    /// Maximum number of notarizations/nullifications to request/respond with at once.
-    pub max_fetch_count: usize,
 
     /// Maximum rate of requests to send to a given peer.
     ///
@@ -114,17 +105,20 @@ pub struct Config<
 }
 
 impl<
-        P: PublicKey,
         S: Scheme,
-        B: Blocker<PublicKey = P>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D>>,
+        A: Automaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<P, S, B, D, A, R, F>
+    > Config<S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
+        assert!(
+            !self.scheme.participants().is_empty(),
+            "there must be at least one participant"
+        );
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
@@ -142,11 +136,11 @@ impl<
             "nullify retry broadcast must be greater than zero"
         );
         assert!(
-            self.activity_timeout > 0,
+            !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
         );
         assert!(
-            self.skip_timeout > 0,
+            !self.skip_timeout.is_zero(),
             "skip timeout must be greater than zero"
         );
         assert!(
@@ -156,10 +150,6 @@ impl<
         assert!(
             self.fetch_timeout > Duration::default(),
             "fetch timeout must be greater than zero"
-        );
-        assert!(
-            self.max_fetch_count > 0,
-            "it must be possible to fetch at least one container per request"
         );
         assert!(
             self.fetch_concurrent > 0,

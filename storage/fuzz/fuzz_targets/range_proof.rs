@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_storage::mmr::{
-    mem::{Config, Mmr},
-    Location, Position,
+    mem::{CleanMmr, Config},
+    Location, Position, StandardHasher,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -28,14 +28,14 @@ fn fuzz(input: FuzzInput) {
         .map(<Sha256 as commonware_cryptography::Hasher>::Digest::from)
         .collect();
 
-    let config = Config::<Sha256> {
+    let config = Config {
         nodes,
         pruned_to_pos: Position::new(input.pruned_to_pos),
         pinned_nodes,
-        pool: None,
     };
 
-    let Ok(mmr) = Mmr::init(config) else {
+    let mut hasher = StandardHasher::<Sha256>::new();
+    let Ok(mmr) = CleanMmr::init(config, &mut hasher) else {
         return;
     };
 

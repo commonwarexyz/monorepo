@@ -18,11 +18,11 @@ pub enum BlockFormat<D: Digest> {
 impl<D: Digest> Write for BlockFormat<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            BlockFormat::Random(random) => {
+            Self::Random(random) => {
                 0u8.write(buf);
                 random.write(buf);
             }
-            BlockFormat::Bridge(finalization) => {
+            Self::Bridge(finalization) => {
                 1u8.write(buf);
                 finalization.write(buf);
             }
@@ -38,11 +38,11 @@ impl<D: Digest> Read for BlockFormat<D> {
         match tag {
             0 => {
                 let random = u128::read(buf)?;
-                Ok(BlockFormat::Random(random))
+                Ok(Self::Random(random))
             }
             1 => {
                 let finalization = Finalization::read(buf)?;
-                Ok(BlockFormat::Bridge(finalization))
+                Ok(Self::Bridge(finalization))
             }
             _ => Err(Error::InvalidEnum(tag)),
         }
@@ -52,8 +52,8 @@ impl<D: Digest> Read for BlockFormat<D> {
 impl<D: Digest> EncodeSize for BlockFormat<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            BlockFormat::Random(random) => random.encode_size(),
-            BlockFormat::Bridge(finalization) => finalization.encode_size(),
+            Self::Random(random) => random.encode_size(),
+            Self::Bridge(finalization) => finalization.encode_size(),
         }
     }
 }
@@ -63,16 +63,17 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
-        types::Round,
+        simplex::{scheme::bls12381_threshold, types::Proposal},
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self, Element},
+            group::{self},
             variant::{MinSig, Variant},
         },
         sha256::Digest as Sha256Digest,
     };
+    use commonware_math::algebra::{CryptoGroup, Random as _};
     use rand::thread_rng;
 
     fn new_digest() -> Sha256Digest {
@@ -80,15 +81,15 @@ mod tests {
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::one();
-        proposal_signature.mul(&scalar);
-        let mut seed_signature = <MinSig as Variant>::Signature::one();
-        seed_signature.mul(&scalar);
+        let scalar = group::Scalar::random(&mut thread_rng());
+        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
+        proposal_signature *= &scalar;
+        let mut seed_signature = <MinSig as Variant>::Signature::generator();
+        seed_signature *= &scalar;
         Finalization {
             proposal: Proposal {
-                round: Round::new(333, 12345),
-                parent: 54321,
+                round: Round::new(Epoch::new(333), View::new(12345)),
+                parent: View::new(54321),
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {

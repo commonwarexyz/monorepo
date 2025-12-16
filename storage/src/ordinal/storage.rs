@@ -56,6 +56,17 @@ impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: CodecFixed<Cfg = ()>> arbitrary::Arbitrary<'_> for Record<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = V::arbitrary(u)?;
+        Ok(Self::new(value))
+    }
+}
+
 /// Implementation of [Ordinal].
 pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
@@ -304,6 +315,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
+    /// Get an iterator over all ranges in the [Ordinal].
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
     /// Retrieve the first index in the [Ordinal].
     pub fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
@@ -314,7 +330,10 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.last_index()
     }
 
-    /// Get up to the next `max` missing items after `start`.
+    /// Returns up to `max` missing items starting from `start`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
     }
@@ -402,5 +421,45 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
+    }
+}
+
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store for Ordinal<E, V> {
+    type Key = u64;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(*key).await
+    }
+}
+
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
+    for Ordinal<E, V>
+{
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.put(key, value).await
+    }
+}
+
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
+    for Ordinal<E, V>
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<u32>>
     }
 }

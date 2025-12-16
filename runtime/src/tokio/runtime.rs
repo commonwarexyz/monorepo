@@ -21,6 +21,7 @@ use crate::{
     Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
+use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -38,6 +39,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
+use tracing::{info_span, Instrument};
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -140,27 +142,27 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub fn with_worker_threads(mut self, n: usize) -> Self {
+    pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
         self
     }
     /// See [Config]
-    pub fn with_max_blocking_threads(mut self, n: usize) -> Self {
+    pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
     }
     /// See [Config]
-    pub fn with_catch_panics(mut self, b: bool) -> Self {
+    pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
     }
     /// See [Config]
-    pub fn with_read_write_timeout(mut self, d: Duration) -> Self {
+    pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
     }
     /// See [Config]
-    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
+    pub const fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
         self.network_cfg.tcp_nodelay = n;
         self
     }
@@ -170,38 +172,38 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
+    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
     }
 
     // Getters
     /// See [Config]
-    pub fn worker_threads(&self) -> usize {
+    pub const fn worker_threads(&self) -> usize {
         self.worker_threads
     }
     /// See [Config]
-    pub fn max_blocking_threads(&self) -> usize {
+    pub const fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
     }
     /// See [Config]
-    pub fn catch_panics(&self) -> bool {
+    pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
     /// See [Config]
-    pub fn read_write_timeout(&self) -> Duration {
+    pub const fn read_write_timeout(&self) -> Duration {
         self.network_cfg.read_write_timeout
     }
     /// See [Config]
-    pub fn tcp_nodelay(&self) -> Option<bool> {
+    pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.network_cfg.tcp_nodelay
     }
     /// See [Config]
-    pub fn storage_directory(&self) -> &PathBuf {
+    pub const fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
     /// See [Config]
-    pub fn maximum_buffer_size(&self) -> usize {
+    pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
 }
@@ -234,7 +236,7 @@ impl Default for Runner {
 
 impl Runner {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn new(cfg: Config) -> Self {
+    pub const fn new(cfg: Config) -> Self {
         Self { cfg }
     }
 }
@@ -344,6 +346,7 @@ impl crate::Runner for Runner {
             network,
             tree: Tree::root(),
             execution: Execution::default(),
+            instrumented: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -378,6 +381,7 @@ pub struct Context {
     network: Network,
     tree: Arc<Tree>,
     execution: Execution,
+    instrumented: bool,
 }
 
 impl Clone for Context {
@@ -391,6 +395,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
+            instrumented: false,
         }
     }
 }
@@ -413,6 +418,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn instrumented(mut self) -> Self {
+        self.instrumented = true;
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -420,12 +430,14 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (_, metric) = spawn_metrics!(self);
+        let (label, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
+        let is_instrumented = self.instrumented;
         self.execution = Execution::default();
+        self.instrumented = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -434,7 +446,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = f(self);
+        let future: BoxFuture<'_, T> = if is_instrumented {
+            f(self)
+                .instrument(info_span!("task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -477,10 +495,10 @@ impl crate::Spawner for Context {
         };
 
         // Wait for all tasks to complete or the timeout to fire
-        let timeout_future = match timeout {
-            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
-            None => futures::future::Either::Right(futures::future::pending()),
-        };
+        let timeout_future = timeout.map_or_else(
+            || futures::future::Either::Right(futures::future::pending()),
+            |duration| futures::future::Either::Left(self.sleep(duration)),
+        );
         select! {
             result = stop_resolved => {
                 result.map_err(|_| Error::Closed)?;
@@ -556,10 +574,10 @@ impl Clock for Context {
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         let now = SystemTime::now();
-        let duration_until_deadline = match deadline.duration_since(now) {
-            Ok(duration) => duration,
-            Err(_) => Duration::from_secs(0), // Deadline is in the past
-        };
+        let duration_until_deadline = deadline.duration_since(now).unwrap_or_else(|_| {
+            // Deadline is in the past
+            Duration::from_secs(0)
+        });
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
     }

@@ -6,14 +6,14 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Hasher,
 };
-use commonware_utils::set::Set;
+use commonware_utils::ordered::Set;
 
 mod actor;
 pub use actor::Application;
 mod ingress;
 mod reporter;
 
-pub type Scheme = commonware_consensus::simplex::signing_scheme::ed25519::Scheme;
+pub type Scheme = commonware_consensus::simplex::scheme::ed25519::Scheme;
 
 /// Configuration for the application.
 pub struct Config<H: Hasher> {

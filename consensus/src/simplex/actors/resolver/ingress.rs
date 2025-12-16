@@ -1,68 +1,101 @@
-use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Notarization, Nullification},
-    },
-    types::View,
+use crate::{simplex::types::Certificate, types::View};
+use bytes::Bytes;
+use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_utils::sequence::U64;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
 };
-use commonware_cryptography::Digest;
-use futures::{channel::mpsc, SinkExt};
-
-pub enum Message<S: Scheme, D: Digest> {
-    Fetch {
-        notarizations: Vec<View>,
-        nullifications: Vec<View>,
-    },
-    Notarized {
-        notarization: Notarization<S, D>,
-    },
-    Nullified {
-        nullification: Nullification<S>,
-    },
-    Finalized {
-        // Used to indicate when to prune old notarizations/nullifications.
-        view: View,
-    },
-}
+use tracing::error;
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: mpsc::Sender<Certificate<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    /// Create a new mailbox.
+    pub const fn new(sender: mpsc::Sender<Certificate<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn fetch(&mut self, notarizations: Vec<View>, nullifications: Vec<View>) {
-        self.sender
-            .send(Message::Fetch {
-                notarizations,
-                nullifications,
+    /// Send a certificate.
+    pub async fn updated(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self.sender.send(certificate).await {
+            error!(?err, "failed to send certificate message");
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Handler {
+    sender: mpsc::Sender<Message>,
+}
+
+impl Handler {
+    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
+        Self { sender }
+    }
+}
+
+#[derive(Debug)]
+pub enum Message {
+    Deliver {
+        view: View,
+        data: Bytes,
+        response: oneshot::Sender<bool>,
+    },
+    Produce {
+        view: View,
+        response: oneshot::Sender<Bytes>,
+    },
+}
+
+impl Consumer for Handler {
+    type Key = U64;
+    type Value = Bytes;
+    type Failure = ();
+
+    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::Deliver {
+                view: View::new(key.into()),
+                data: value,
+                response,
             })
             .await
-            .expect("Failed to send notarizations");
+            .is_err()
+        {
+            error!("failed to deliver resolver message to actor");
+            return false;
+        }
+        receiver.await.unwrap_or(false)
     }
 
-    pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
-        self.sender
-            .send(Message::Notarized { notarization })
-            .await
-            .expect("Failed to send notarization");
+    async fn failed(&mut self, _: Self::Key, _: Self::Failure) {
+        // We don't need to do anything on failure, the resolver will retry.
     }
+}
 
-    pub async fn nullified(&mut self, nullification: Nullification<S>) {
-        self.sender
-            .send(Message::Nullified { nullification })
-            .await
-            .expect("Failed to send nullification");
-    }
+impl Producer for Handler {
+    type Key = U64;
 
-    pub async fn finalized(&mut self, view: View) {
-        self.sender
-            .send(Message::Finalized { view })
+    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::Produce {
+                view: View::new(key.into()),
+                response,
+            })
             .await
-            .expect("Failed to send finalized view");
+            .is_err()
+        {
+            error!("failed to send produce request to actor");
+        }
+        receiver
     }
 }

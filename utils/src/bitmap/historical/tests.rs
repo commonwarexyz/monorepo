@@ -1,5 +1,5 @@
 use super::*;
-use crate::bitmap::Prunable;
+use crate::{bitmap::Prunable, hex};
 
 /// Test basic batch lifecycle: creation, operations, commit, and abort.
 #[test]
@@ -112,20 +112,20 @@ fn test_batch_operations_push_pop_prune() {
     let mut bitmap: BitMap<4> = BitMap::new();
     bitmap
         .with_batch(1, |b| {
-            b.push_chunk(&[0x00, 0x00, 0x00, 0x00]);
+            b.push_chunk(&hex!("0x00000000"));
         })
         .unwrap();
 
     bitmap
         .with_batch(2, |batch| {
-            batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // 32 bits at offset 32
+            batch.push_chunk(&hex!("0xAABBCCDD")); // 32 bits at offset 32
             batch.push_byte(0xFF); // 8 bits at offset 64
         })
         .unwrap();
 
     assert_eq!(bitmap.len(), 72); // 32 + 32 + 8
     let chunk = bitmap.get_chunk_containing(32); // Read second chunk
-    assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
+    assert_eq!(chunk, &hex!("0xAABBCCDD"));
     for i in 64..72 {
         assert!(bitmap.get_bit(i)); // Verify pushed byte
     }
@@ -265,7 +265,7 @@ fn test_historical_reconstruction_with_modifications() {
     let mut bitmap: BitMap<4> = BitMap::new();
     bitmap
         .with_batch(1, |b| {
-            b.push_chunk(&[0xFF, 0x00, 0xFF, 0x00]);
+            b.push_chunk(&hex!("0xFF00FF00"));
         })
         .unwrap();
     bitmap
@@ -404,8 +404,8 @@ fn test_historical_reconstruction_with_pruning() {
     // Commit 1: Create 64 bits (2 chunks), no pruning
     bitmap
         .with_batch(1, |b| {
-            b.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
-            b.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
+            b.push_chunk(&hex!("0xAABBCCDD"));
+            b.push_chunk(&hex!("0x11223344"));
         })
         .unwrap();
 
@@ -421,23 +421,14 @@ fn test_historical_reconstruction_with_pruning() {
     let state_at_1 = bitmap.get_at_commit(1).unwrap();
     assert_eq!(state_at_1.len(), 64);
     assert_eq!(state_at_1.pruned_chunks(), 0); // No pruning
-    assert_eq!(
-        state_at_1.get_chunk_containing(0),
-        &[0xAA, 0xBB, 0xCC, 0xDD]
-    ); // Restored
-    assert_eq!(
-        state_at_1.get_chunk_containing(32),
-        &[0x11, 0x22, 0x33, 0x44]
-    );
+    assert_eq!(state_at_1.get_chunk_containing(0), &hex!("0xAABBCCDD")); // Restored
+    assert_eq!(state_at_1.get_chunk_containing(32), &hex!("0x11223344"));
 
     // Reconstruct state after pruning
     let state_at_2 = bitmap.get_at_commit(2).unwrap();
     assert_eq!(state_at_2.len(), 64);
     assert_eq!(state_at_2.pruned_chunks(), 1); // Pruning preserved
-    assert_eq!(
-        state_at_2.get_chunk_containing(32),
-        &[0x11, 0x22, 0x33, 0x44]
-    );
+    assert_eq!(state_at_2.get_chunk_containing(32), &hex!("0x11223344"));
 }
 
 /// Test edge cases in historical reconstruction.

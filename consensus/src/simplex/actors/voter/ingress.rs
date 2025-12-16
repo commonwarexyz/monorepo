@@ -1,10 +1,17 @@
-use crate::simplex::{signing_scheme::Scheme, types::Voter};
-use commonware_cryptography::Digest;
-use futures::{channel::mpsc, stream, SinkExt};
+use crate::simplex::types::{Certificate, Proposal};
+use commonware_cryptography::{certificate::Scheme, Digest};
+use futures::{channel::mpsc, SinkExt};
+use tracing::error;
 
-// If either of these requests fails, it will not send a reply.
+/// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
-    Verified(Voter<S, D>),
+    /// Leader's proposal from batcher.
+    Proposal(Proposal<D>),
+    /// Certificate from batcher or resolver.
+    ///
+    /// The boolean indicates if the certificate came from the resolver.
+    /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
+    Verified(Certificate<S, D>, bool),
 }
 
 #[derive(Clone)]
@@ -13,16 +20,33 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    /// Create a new mailbox.
+    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn verified(&mut self, voters: Vec<Voter<S, D>>) {
-        self.sender
-            .send_all(&mut stream::iter(
-                voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
-            ))
+    /// Send a leader's proposal.
+    pub async fn proposal(&mut self, proposal: Proposal<D>) {
+        if let Err(err) = self.sender.send(Message::Proposal(proposal)).await {
+            error!(?err, "failed to send proposal message");
+        }
+    }
+
+    /// Send a recovered certificate.
+    pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self
+            .sender
+            .send(Message::Verified(certificate, false))
             .await
-            .expect("Failed to send batch of voters");
+        {
+            error!(?err, "failed to send certificate message");
+        }
+    }
+
+    /// Send a resolved certificate.
+    pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self.sender.send(Message::Verified(certificate, true)).await {
+            error!(?err, "failed to send resolved message");
+        }
     }
 }

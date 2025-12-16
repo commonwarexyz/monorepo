@@ -10,12 +10,14 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-libfuzzer-sys = { workspace = true }
+bytes.workspace = true
+commonware-codec.workspace = true
 commonware-utils = { path = ".." }
-commonware-codec = { workspace = true }
-bytes = { workspace = true }
+futures.workspace = true
+libfuzzer-sys.workspace = true
+num-bigint.workspace = true
+num-rational.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
-futures = { workspace = true }
 
 [[bin]]
 name = "lib_functions"
@@ -69,6 +71,48 @@ bench = false
 [[bin]]
 name = "historical_bitmap"
 path = "fuzz_targets/historical_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prunable"
+path = "fuzz_targets/prunable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ack"
+path = "fuzz_targets/ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net"
+path = "fuzz_targets/net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "set"
+path = "fuzz_targets/set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rational"
+path = "fuzz_targets/rational.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channels"
+path = "fuzz_targets/channels.rs"
 test = false
 doc = false
 bench = false

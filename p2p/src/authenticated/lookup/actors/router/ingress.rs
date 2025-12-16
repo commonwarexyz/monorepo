@@ -4,6 +4,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_utils::channels::ring;
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -25,6 +26,10 @@ pub enum Message<P: PublicKey> {
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
+    /// Get a subscription to peers known by the router.
+    SubscribePeers {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
+    },
 }
 
 impl<P: PublicKey> Mailbox<Message<P>> {
@@ -42,8 +47,11 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     }
 
     /// Notify the router that a peer is no longer available.
+    ///
+    /// This may fail during shutdown if the router has already exited,
+    /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        self.send(Message::Release { peer }).await.unwrap()
+        let _ = self.send(Message::Release { peer }).await;
     }
 }
 
@@ -56,7 +64,7 @@ pub struct Messenger<P: PublicKey> {
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub fn new(sender: Mailbox<Message<P>>) -> Self {
+    pub const fn new(sender: Mailbox<Message<P>>) -> Self {
         Self { sender }
     }
 
@@ -77,6 +85,16 @@ impl<P: PublicKey> Messenger<P> {
                 priority,
                 success: sender,
             })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    /// Returns a subscription channel for the peers known to the router.
+    pub async fn subscribe_peers(&mut self) -> ring::Receiver<Vec<P>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::SubscribePeers { response: sender })
             .await
             .unwrap();
         receiver.await.unwrap()

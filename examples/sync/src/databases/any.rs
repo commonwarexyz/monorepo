@@ -4,12 +4,15 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    mmr::{Location, Proof},
+    qmdb::{
         self,
-        any::fixed::{unordered::Any, Config},
+        any::{
+            unordered::{fixed::Any, FixedOperation},
+            FixedConfig as Config,
+        },
+        store::CleanStore,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
-    store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +21,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::Fixed<Key, Value>;
+pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
@@ -61,19 +64,19 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(Location::from(count)));
+        operations.push(Operation::CommitFloor(None, Location::from(count)));
         operations
     }
 
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
                 Operation::Update(key, value) => {
@@ -82,20 +85,21 @@ where
                 Operation::Delete(key) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                Operation::CommitFloor(metadata, _) => {
+                    database.commit(metadata).await?;
                 }
             }
         }
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
+        self.commit(None).await?;
+        Ok(())
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self) -> Key {
+        CleanStore::root(self)
     }
 
     fn op_count(&self) -> Location {
@@ -111,8 +115,8 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+        CleanStore::historical_proof(self, op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
@@ -133,7 +137,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

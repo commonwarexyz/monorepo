@@ -7,7 +7,7 @@ use tracing::error;
 mod ec2;
 
 /// Returns the version of the crate.
-pub fn crate_version() -> &'static str {
+pub const fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 

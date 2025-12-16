@@ -60,8 +60,9 @@ use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
+    future::BoxFuture,
     task::{waker, ArcWake},
-    Future,
+    Future, FutureExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -77,12 +78,13 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::trace;
+use tracing::{info_span, trace, Instrument};
 
 #[derive(Debug)]
 struct Metrics {
@@ -195,7 +197,7 @@ pub struct Config {
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             seed: 42,
             cycle: Duration::from_millis(1),
@@ -206,41 +208,41 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub fn with_seed(mut self, seed: u64) -> Self {
+    pub const fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
     /// See [Config]
-    pub fn with_cycle(mut self, cycle: Duration) -> Self {
+    pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
         self
     }
     /// See [Config]
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+    pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
     }
     /// See [Config]
-    pub fn with_catch_panics(mut self, catch_panics: bool) -> Self {
+    pub const fn with_catch_panics(mut self, catch_panics: bool) -> Self {
         self.catch_panics = catch_panics;
         self
     }
 
     // Getters
     /// See [Config]
-    pub fn seed(&self) -> u64 {
+    pub const fn seed(&self) -> u64 {
         self.seed
     }
     /// See [Config]
-    pub fn cycle(&self) -> Duration {
+    pub const fn cycle(&self) -> Duration {
         self.cycle
     }
     /// See [Config]
-    pub fn timeout(&self) -> Option<Duration> {
+    pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
     /// See [Config]
-    pub fn catch_panics(&self) -> bool {
+    pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
 
@@ -315,15 +317,13 @@ impl Executor {
             }
         }
 
-        if let Some(deadline) = skip_until {
+        skip_until.map_or(current, |deadline| {
             let mut time = self.time.lock().unwrap();
             *time = deadline;
             let now = *time;
             trace!(now = now.epoch_millis(), "time skipped");
             now
-        } else {
-            current
-        }
+        })
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
@@ -364,6 +364,13 @@ pub struct Checkpoint {
     catch_panics: bool,
 }
 
+impl Checkpoint {
+    /// Get a reference to the [Auditor].
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
@@ -394,7 +401,7 @@ impl Runner {
     pub fn new(cfg: Config) -> Self {
         // Ensure config is valid
         cfg.assert();
-        Runner {
+        Self {
             state: State::Config(cfg),
         }
     }
@@ -439,13 +446,16 @@ impl Runner {
         // Register the root task
         Tasks::register_root(&executor.tasks);
 
-        // Process tasks until root task completes or progress stalls
-        let output = loop {
+        // Process tasks until root task completes or progress stalls.
+        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
+                        // Drop the lock before panicking to avoid mutex poisoning.
+                        drop(current);
                         panic!("runtime timeout");
                     }
                 }
@@ -545,7 +555,7 @@ impl Runner {
 
             // Record that we completed another iteration of the event loop.
             executor.metrics.iterations.inc();
-        };
+        }));
 
         // Clear remaining tasks from the executor.
         //
@@ -562,12 +572,23 @@ impl Runner {
             *future.lock().unwrap() = None;
         }
 
+        // Drop the root task to release any Context references it may still hold.
+        // This is necessary when the loop exits early (e.g., timeout) while the
+        // root future is still Pending and holds captured variables with Context references.
+        drop(root);
+
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
         assert!(
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
+
+        // Handle the result — resume the original panic after cleanup if one was caught.
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
 
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
@@ -651,7 +672,7 @@ struct Tasks {
 
 impl Tasks {
     /// Create a new task queue.
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             counter: Mutex::new(0),
             ready: Mutex::new(Vec::new()),
@@ -763,6 +784,7 @@ pub struct Context {
     storage: Arc<Storage>,
     tree: Arc<Tree>,
     execution: Execution,
+    instrumented: bool,
 }
 
 impl Clone for Context {
@@ -776,6 +798,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
+            instrumented: false,
         }
     }
 }
@@ -807,8 +830,8 @@ impl Context {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
             deadline,
-            metrics: metrics.clone(),
-            auditor: auditor.clone(),
+            metrics,
+            auditor,
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
@@ -825,6 +848,7 @@ impl Context {
                 storage: Arc::new(storage),
                 tree: Tree::root(),
                 execution: Execution::default(),
+                instrumented: false,
             },
             executor,
             panicked,
@@ -866,7 +890,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
-            metrics: metrics.clone(),
+            metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
@@ -880,6 +904,7 @@ impl Context {
                 storage: checkpoint.storage,
                 tree: Tree::root(),
                 execution: Execution::default(),
+                instrumented: false,
             },
             executor,
             panicked,
@@ -913,6 +938,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn instrumented(mut self) -> Self {
+        self.instrumented = true;
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -924,7 +954,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
+        let is_instrumented = self.instrumented;
         self.execution = Execution::default();
+        self.instrumented = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -933,7 +965,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = f(self);
+        let future: BoxFuture<'_, T> = if is_instrumented {
+            f(self)
+                .instrument(info_span!(parent: None, "task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -961,10 +999,10 @@ impl crate::Spawner for Context {
         };
 
         // Wait for all tasks to complete or the timeout to fire
-        let timeout_future = match timeout {
-            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
-            None => futures::future::Either::Right(futures::future::pending()),
-        };
+        let timeout_future = timeout.map_or_else(
+            || futures::future::Either::Right(futures::future::pending()),
+            |duration| futures::future::Either::Left(self.sleep(duration)),
+        );
         select! {
             result = stop_resolved => {
                 result.map_err(|_| Error::Closed)?;

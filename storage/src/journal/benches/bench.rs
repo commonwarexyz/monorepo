@@ -1,5 +1,5 @@
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
-use commonware_storage::journal::fixed::{Config as JConfig, Journal};
+use commonware_storage::journal::contiguous::fixed::{Config as JConfig, Journal};
 use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};

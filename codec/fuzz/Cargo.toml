@@ -9,11 +9,11 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = { workspace = true }
-bytes = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
-thiserror = { workspace = true }
-paste = { workspace = true }
+bytes.workspace = true
+libfuzzer-sys.workspace = true
+paste.workspace = true
+thiserror.workspace = true
 
 [dependencies.commonware-codec]
 path = ".."

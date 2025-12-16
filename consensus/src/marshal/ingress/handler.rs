@@ -50,7 +50,7 @@ pub struct Handler<B: Block> {
 
 impl<B: Block> Handler<B> {
     /// Creates a new handler.
-    pub fn new(sender: mpsc::Sender<Message<B>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<B>>) -> Self {
         Self { sender }
     }
 }
@@ -110,7 +110,7 @@ pub enum Request<B: Block> {
 
 impl<B: Block> Request<B> {
     /// The subject of the request.
-    fn subject(&self) -> u8 {
+    const fn subject(&self) -> u8 {
         match self {
             Self::Block(_) => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
@@ -122,7 +122,7 @@ impl<B: Block> Request<B> {
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
             (Self::Block(_), _) => unreachable!("we should never retain by block"),
@@ -237,10 +237,38 @@ impl<B: Block> Debug for Request<B> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<B: Block> arbitrary::Arbitrary<'_> for Request<B>
+where
+    B::Commitment: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => {
+                let commitment = B::Commitment::arbitrary(u)?;
+                Ok(Self::Block(commitment))
+            }
+            1 => {
+                let height = u.arbitrary::<u64>()?;
+                Ok(Self::Finalized { height })
+            }
+            2 => {
+                let round = Round::arbitrary(u)?;
+                Ok(Self::Notarized { round })
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marshal::mocks::block::Block as TestBlock;
+    use crate::{
+        marshal::mocks::block::Block as TestBlock,
+        types::{Epoch, View},
+    };
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
         sha256::{Digest as Sha256Digest, Sha256},
@@ -285,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_subject_notarized_encoding() {
-        let round = Round::from((67890, 12345));
+        let round = Round::new(Epoch::new(67890), View::new(12345));
         let request = Request::<B>::Notarized { round };
 
         // Test encoding
@@ -318,7 +346,7 @@ mod tests {
         let r1 = Request::<B>::Finalized { height: 100 };
         let r2 = Request::<B>::Finalized { height: 200 };
         let r3 = Request::<B>::Notarized {
-            round: Round::from((333, 150)),
+            round: Round::new(Epoch::new(333), View::new(150)),
         };
 
         let predicate = r1.predicate();
@@ -335,7 +363,7 @@ mod tests {
         let r1 = Request::<B>::Block(commitment);
         let r2 = Request::<B>::Finalized { height: u64::MAX };
         let r3 = Request::<B>::Notarized {
-            round: Round::from((333, 0)),
+            round: Round::new(Epoch::new(333), View::new(0)),
         };
 
         // Verify encode_size matches actual encoded length
@@ -372,13 +400,13 @@ mod tests {
 
         // Notarized ordering by view
         let not1 = Request::<B>::Notarized {
-            round: Round::from((333, 50)),
+            round: Round::new(Epoch::new(333), View::new(50)),
         };
         let not2 = Request::<B>::Notarized {
-            round: Round::from((333, 150)),
+            round: Round::new(Epoch::new(333), View::new(150)),
         };
         let not3 = Request::<B>::Notarized {
-            round: Round::from((333, 150)),
+            round: Round::new(Epoch::new(333), View::new(150)),
         };
 
         assert!(not1 < not2);
@@ -392,7 +420,7 @@ mod tests {
         let block = Request::<B>::Block(commitment);
         let finalized = Request::<B>::Finalized { height: 100 };
         let notarized = Request::<B>::Notarized {
-            round: Round::from((333, 200)),
+            round: Round::new(Epoch::new(333), View::new(200)),
         };
 
         // Block < Finalized < Notarized
@@ -421,7 +449,7 @@ mod tests {
         let block2 = Request::<B>::Block(commitment2);
         let finalized = Request::<B>::Finalized { height: 100 };
         let notarized = Request::<B>::Notarized {
-            round: Round::from((333, 200)),
+            round: Round::new(Epoch::new(333), View::new(200)),
         };
 
         // PartialOrd should always return Some
@@ -452,13 +480,13 @@ mod tests {
 
         let requests = vec![
             Request::<B>::Notarized {
-                round: Round::from((333, 300)),
+                round: Round::new(Epoch::new(333), View::new(300)),
             },
             Request::<B>::Block(commitment2),
             Request::<B>::Finalized { height: 200 },
             Request::<B>::Block(commitment1),
             Request::<B>::Notarized {
-                round: Round::from((333, 250)),
+                round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<B>::Finalized { height: 100 },
             Request::<B>::Block(commitment3),
@@ -487,13 +515,13 @@ mod tests {
         assert_eq!(
             sorted[5],
             Request::<B>::Notarized {
-                round: Round::from((333, 250))
+                round: Round::new(Epoch::new(333), View::new(250))
             }
         );
         assert_eq!(
             sorted[6],
             Request::<B>::Notarized {
-                round: Round::from((333, 300))
+                round: Round::new(Epoch::new(333), View::new(300))
             }
         );
     }
@@ -504,10 +532,10 @@ mod tests {
         let min_finalized = Request::<B>::Finalized { height: 0 };
         let max_finalized = Request::<B>::Finalized { height: u64::MAX };
         let min_notarized = Request::<B>::Notarized {
-            round: Round::from((333, 0)),
+            round: Round::new(Epoch::new(333), View::new(0)),
         };
         let max_notarized = Request::<B>::Notarized {
-            round: Round::from((333, u64::MAX)),
+            round: Round::new(Epoch::new(333), View::new(u64::MAX)),
         };
 
         assert!(min_finalized < max_finalized);
@@ -520,5 +548,15 @@ mod tests {
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Request<B>>,
+        }
     }
 }

@@ -49,7 +49,7 @@ pub async fn rsync_file(
             .arg("-az")
             .arg("-e")
             .arg(format!(
-                "ssh -i {key_file} -o ServerAliveInterval=600 -o StrictHostKeyChecking=no"
+                "ssh -i {key_file} -o IdentitiesOnly=yes -o ServerAliveInterval=600 -o StrictHostKeyChecking=no"
             ))
             .arg(local_path)
             .arg(format!("ubuntu@{ip}:{remote_path}"))
@@ -70,6 +70,8 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         let output = Command::new("ssh")
             .arg("-i")
             .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg("ServerAliveInterval=600")
             .arg("-o")
@@ -93,6 +95,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
         let output = Command::new("ssh")
             .arg("-i")
             .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg("ServerAliveInterval=600")
             .arg("-o")
@@ -122,6 +126,8 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
         let output = Command::new("ssh")
             .arg("-i")
             .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg("ServerAliveInterval=600")
             .arg("-o")

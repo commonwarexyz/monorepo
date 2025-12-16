@@ -1,6 +1,6 @@
 //! A prunable cache for ordered data with index-based lookups.
 //!
-//! Data is stored in [crate::journal::variable::Journal] (an append-only log) and the location of
+//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the location of
 //! written data is tracked in-memory by index to enable **single-read lookups** for cached data.
 //!
 //! Unlike [crate::archive::Archive], the [Cache] is optimized for simplicity and does
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
     use commonware_codec::{varint::UInt, EncodeSize};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU64};
     use rand::Rng;
@@ -414,14 +414,14 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_cache_many_items_and_restart() {
         test_cache_restart(100_000);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         let state1 = test_cache_restart(5_000);
         let state2 = test_cache_restart(5_000);

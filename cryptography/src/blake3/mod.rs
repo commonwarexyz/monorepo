@@ -24,6 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -36,13 +37,6 @@ use zeroize::Zeroize;
 pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
-
-/// Generate a BLAKE3 [Digest] from a message.
-pub fn hash(message: &[u8]) -> Digest {
-    let mut hasher = Blake3::new();
-    hasher.update(message);
-    hasher.finalize()
-}
 
 /// BLAKE3 hasher.
 #[cfg_attr(
@@ -63,6 +57,10 @@ impl Clone for Blake3 {
 
 impl Hasher for Blake3 {
     type Digest = Digest;
+
+    const EMPTY: Self::Digest = Digest(hex!(
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    ));
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel"))]
@@ -95,14 +93,11 @@ impl Hasher for Blake3 {
         self.hasher = CoreBlake3::new();
         self
     }
-
-    fn empty() -> Self::Digest {
-        Self::default().finalize()
-    }
 }
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -166,8 +161,10 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Digest {}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -186,7 +183,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::hex;
 
-    const HELLO_DIGEST: &str = "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24";
+    const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
+        hex!("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24");
 
     #[test]
     fn test_blake3() {
@@ -197,17 +195,17 @@ mod tests {
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test simple hasher
-        let hash = hash(msg);
-        assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
+        let hash = Blake3::hash(msg);
+        assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
     #[test]
@@ -216,25 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Blake3::empty();
-        let digest2 = Blake3::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
     fn test_blake3_empty() {
-        let empty_digest = Blake3::empty();
-
-        // BLAKE3 hash of empty string:
-        // af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
-        let expected_bytes = [
-            0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc,
-            0xc9, 0x49, 0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca,
-            0xe4, 0x1f, 0x32, 0x62,
-        ];
-        let expected_digest = Digest::from(expected_bytes);
+        let empty_digest = Blake3::EMPTY;
+        let expected_digest = Blake3::new().finalize();
 
         assert_eq!(empty_digest, expected_digest);
     }
@@ -252,5 +234,15 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

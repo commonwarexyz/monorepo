@@ -23,7 +23,7 @@ pub struct Completion<P: PublicKey> {
 
 impl<P: PublicKey> Completion<P> {
     /// Creates a completion for a delivered message.
-    fn delivered(
+    const fn delivered(
         origin: P,
         recipient: P,
         channel: Channel,
@@ -40,7 +40,7 @@ impl<P: PublicKey> Completion<P> {
     }
 
     /// Creates a completion for a dropped message.
-    fn dropped(origin: P, recipient: P, channel: Channel, message: Bytes) -> Self {
+    const fn dropped(origin: P, recipient: P, channel: Channel, message: Bytes) -> Self {
         Self {
             origin,
             recipient,
@@ -121,7 +121,7 @@ pub struct State<P: PublicKey> {
 
 impl<P: PublicKey> State<P> {
     /// Creates a new scheduler.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bandwidth_caps: BTreeMap::new(),
             next_flow_id: 0,
@@ -255,7 +255,7 @@ impl<P: PublicKey> State<P> {
             ready_at: None,
         };
 
-        self.queued.entry(key.clone()).or_default().push_back(entry);
+        self.queued.entry(key).or_default().push_back(entry);
 
         let completions = self.launch(origin, recipient, now);
         self.schedule(now);
@@ -373,9 +373,9 @@ impl<P: PublicKey> State<P> {
     /// Recomputes bandwidth allocations and collects any flows that finished in the interval.
     fn rebalance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completed = Vec::new();
-
+        let mut active: Vec<Flow<P>> = Vec::new();
         for (&flow_id, meta) in self.all_flows.iter_mut() {
-            // First, account for bytes already in flight since the previous tick.
+            // Account for bytes already in flight since the last tick
             if !meta.remaining.is_zero() {
                 let elapsed = now
                     .duration_since(meta.last_update)
@@ -389,25 +389,15 @@ impl<P: PublicKey> State<P> {
             meta.last_update = now;
             if meta.remaining.is_zero() {
                 completed.push(flow_id);
+            } else {
+                active.push(Flow {
+                    id: flow_id,
+                    origin: meta.origin.clone(),
+                    recipient: meta.recipient.clone(),
+                    delivered: meta.sequence.is_some(),
+                });
             }
         }
-
-        completed.sort();
-        completed.dedup();
-
-        let mut active: Vec<Flow<P>> = Vec::new();
-        for (&flow_id, meta) in self.all_flows.iter() {
-            if meta.remaining.is_zero() {
-                continue;
-            }
-            active.push(Flow {
-                id: flow_id,
-                origin: meta.origin.clone(),
-                recipient: meta.recipient.clone(),
-                delivered: meta.sequence.is_some(),
-            });
-        }
-
         if active.is_empty() {
             self.next_bandwidth_event = None;
             return self.finish(completed, now);
@@ -417,7 +407,6 @@ impl<P: PublicKey> State<P> {
         let mut ingress_cap = |pk: &P| self.ingress_cap(pk);
         let allocations = bandwidth::allocate(&active, &mut egress_cap, &mut ingress_cap);
         let mut earliest: Option<Duration> = None;
-
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
                 meta.rate = rate.clone();
@@ -439,16 +428,12 @@ impl<P: PublicKey> State<P> {
                     } else {
                         duration.max(SYSTEM_TIME_PRECISION)
                     };
-                    earliest = match earliest {
-                        None => Some(duration),
-                        Some(current) => Some(current.min(duration)),
-                    };
+                    earliest =
+                        earliest.map_or(Some(duration), |current| Some(current.min(duration)));
                 }
             }
         }
-
         completed.sort();
-        completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
@@ -542,7 +527,7 @@ impl<P: PublicKey> State<P> {
         seq: u128,
         buffered: Buffered,
     ) -> Vec<Completion<P>> {
-        let key = (origin.clone(), recipient.clone());
+        let key = (origin, recipient);
         self.buffered
             .entry(key.clone())
             .or_default()
@@ -557,16 +542,11 @@ impl<P: PublicKey> State<P> {
 
         loop {
             let buffered = match self.buffered.entry(key.clone()) {
-                Entry::Occupied(mut occ) => {
-                    if let Some(p) = occ.get_mut().remove(expected_entry) {
-                        if occ.get().is_empty() {
-                            occ.remove();
-                        }
-                        Some(p)
-                    } else {
-                        None
+                Entry::Occupied(mut occ) => occ.get_mut().remove(expected_entry).inspect(|_| {
+                    if occ.get().is_empty() {
+                        occ.remove();
                     }
-                }
+                }),
                 Entry::Vacant(_) => None,
             };
             let Some(buffered) = buffered else { break };
@@ -604,10 +584,8 @@ impl<P: PublicKey> State<P> {
 
             if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
                 let candidate = if ready_at <= now { now } else { ready_at };
-                next_ready = match next_ready {
-                    None => Some(candidate),
-                    Some(current) => Some(current.min(candidate)),
-                };
+                next_ready =
+                    next_ready.map_or(Some(candidate), |current| Some(current.min(candidate)));
             }
         }
 
@@ -721,7 +699,7 @@ impl<P: PublicKey> State<P> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{ed25519, Signer as _};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CHANNEL: Channel = 0;
@@ -837,7 +815,7 @@ mod tests {
         let completions = state.enqueue(
             now,
             origin.clone(),
-            recipient.clone(),
+            recipient,
             CHANNEL,
             make_bytes(2),
             Duration::ZERO,
@@ -892,7 +870,7 @@ mod tests {
         let completions = state.enqueue(
             start,
             origin.clone(),
-            recipient.clone(),
+            recipient,
             CHANNEL,
             msg_b.clone(),
             Duration::from_millis(100),
@@ -997,7 +975,7 @@ mod tests {
         state.enqueue(
             start,
             origin.clone(),
-            recipient.clone(),
+            recipient,
             CHANNEL,
             Bytes::from_static(&[0xAB; 1_000]),
             Duration::ZERO,
@@ -1040,8 +1018,8 @@ mod tests {
 
         let completions = state.enqueue(
             now,
-            origin.clone(),
-            recipient.clone(),
+            origin,
+            recipient,
             CHANNEL,
             Bytes::from_static(b"second"),
             Duration::from_millis(50),
@@ -1104,7 +1082,7 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let pair = (origin.clone(), recipient.clone());
+        let pair = (origin.clone(), recipient);
 
         // The second and third messages remain in the queue without readiness timestamps yet.
         {
@@ -1244,7 +1222,7 @@ mod tests {
         let completions = state.enqueue(
             now,
             origin.clone(),
-            recipient.clone(),
+            recipient,
             CHANNEL,
             msg.clone(),
             Duration::ZERO,
@@ -1285,7 +1263,7 @@ mod tests {
             origin.clone(),
             recipient_b.clone(),
             CHANNEL,
-            msg_b.clone(),
+            msg_b,
             Duration::ZERO,
             true,
         );
@@ -1296,7 +1274,7 @@ mod tests {
             origin.clone(),
             recipient_c.clone(),
             CHANNEL,
-            msg_c.clone(),
+            msg_c,
             Duration::ZERO,
             true,
         );

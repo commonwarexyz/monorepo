@@ -1,36 +1,45 @@
 //! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::marshal::SchemeProvider] implementation.
+//! [commonware_cryptography::certificate::Provider] implementation.
 
-use commonware_consensus::{marshal, simplex::signing_scheme, types::Epoch};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
-use commonware_resolver::p2p;
+use crate::orchestrator::EpochTransition;
+use commonware_consensus::{simplex, types::Epoch};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinSig, Variant},
+    certificate::{self, Scheme},
+    ed25519, PublicKey, Signer,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type Scheme<V> = signing_scheme::bls12381_threshold::Scheme<V>;
+pub type ThresholdScheme<V> = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
+
+/// The ED25519 signing scheme used in simplex.
+pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct SchemeProvider<V: Variant> {
-    schemes: Arc<Mutex<HashMap<Epoch, Arc<Scheme<V>>>>>,
+pub struct Provider<S: Scheme, C: Signer> {
+    schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
+    signer: C,
 }
 
-impl<V: Variant> Default for SchemeProvider<V> {
-    fn default() -> Self {
+impl<S: Scheme, C: Signer> Provider<S, C> {
+    pub fn new(signer: C) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
+            signer,
         }
     }
 }
 
-impl<V: Variant> SchemeProvider<V> {
+impl<S: Scheme, C: Signer> Provider<S, C> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
-    pub fn register(&self, epoch: Epoch, scheme: Scheme<V>) -> bool {
+    pub fn register(&self, epoch: Epoch, scheme: S) -> bool {
         let mut schemes = self.schemes.lock().unwrap();
         schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
@@ -44,35 +53,72 @@ impl<V: Variant> SchemeProvider<V> {
     }
 }
 
-impl<V: Variant> marshal::SchemeProvider for SchemeProvider<V> {
-    type Scheme = Scheme<V>;
+impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
+    type Scope = Epoch;
+    type Scheme = S;
 
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<Scheme<V>>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }
 }
 
-#[derive(Clone)]
-pub struct Coordinator<P> {
-    pub participants: Vec<P>,
+pub trait EpochProvider {
+    type Variant: Variant;
+    type PublicKey: PublicKey;
+    type Scheme: Scheme;
+
+    /// Returns a [Scheme] for the given [EpochTransition].
+    fn scheme_for_epoch(
+        &self,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+    ) -> Self::Scheme;
 }
 
-impl<P> Coordinator<P> {
-    pub fn new(participants: Vec<P>) -> Self {
-        Self { participants }
+impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::PrivateKey> {
+    type Variant = V;
+    type PublicKey = ed25519::PublicKey;
+    type Scheme = ThresholdScheme<V>;
+
+    fn scheme_for_epoch(
+        &self,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+    ) -> Self::Scheme {
+        transition.share.as_ref().map_or_else(
+            || {
+                ThresholdScheme::verifier(
+                    transition.dealers.clone(),
+                    transition
+                        .poly
+                        .clone()
+                        .expect("group polynomial must exist"),
+                )
+            },
+            |share| {
+                ThresholdScheme::signer(
+                    transition.dealers.clone(),
+                    transition
+                        .poly
+                        .clone()
+                        .expect("group polynomial must exist"),
+                    share.clone(),
+                )
+                .expect("share must be in dealers")
+            },
+        )
     }
 }
 
-impl<P: PublicKey> p2p::Coordinator for Coordinator<P> {
-    type PublicKey = P;
+impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
+    type Variant = MinSig;
+    type PublicKey = ed25519::PublicKey;
+    type Scheme = EdScheme;
 
-    fn peers(&self) -> &[Self::PublicKey] {
-        self.participants.as_ref()
-    }
-
-    fn peer_set_id(&self) -> u64 {
-        // In this example, we only have one static peer set.
-        0
+    fn scheme_for_epoch(
+        &self,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+    ) -> Self::Scheme {
+        EdScheme::signer(transition.dealers.clone(), self.signer.clone())
+            .unwrap_or_else(|| EdScheme::verifier(transition.dealers.clone()))
     }
 }

@@ -13,8 +13,10 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channels::ring, NZUsize};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -25,6 +27,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
+    open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -50,6 +53,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 context: ContextCell::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
+                open_subscriptions: Vec::new(),
                 messages_dropped,
             },
             control_sender.clone(),
@@ -60,27 +64,27 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Sends a message to the given `recipient`.
     async fn send(
         &mut self,
-        recipient: &P,
+        recipient: P,
         channel: Channel,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<P>,
     ) {
-        if let Some(messenger) = self.connections.get_mut(recipient) {
+        if let Some(messenger) = self.connections.get_mut(&recipient) {
             if messenger
                 .send(Data { channel, message }, priority)
                 .await
                 .is_ok()
             {
-                sent.push(recipient.clone());
+                sent.push(recipient);
             } else {
                 self.messages_dropped
-                    .get_or_create(&metrics::Message::new_data(recipient, channel))
+                    .get_or_create(&metrics::Message::new_data(&recipient, channel))
                     .inc();
             }
         } else {
             self.messages_dropped
-                .get_or_create(&metrics::Message::new_data(recipient, channel))
+                .get_or_create(&metrics::Message::new_data(&recipient, channel))
                 .inc();
         }
     }
@@ -96,77 +100,106 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
     /// Returns when the `control` channel is closed.
     async fn run(mut self, routing: Channels<P>) {
-        while let Some(msg) = self.control.next().await {
-            match msg {
-                Message::Ready {
-                    peer,
-                    relay,
-                    channels,
-                } => {
-                    debug!(?peer, "peer ready");
-                    self.connections.insert(peer, relay);
-                    let _ = channels.send(routing.clone());
-                }
-                Message::Release { peer } => {
-                    debug!(?peer, "peer released");
-                    self.connections.remove(&peer);
-                }
-                Message::Content {
-                    recipients,
-                    channel,
-                    message,
-                    priority,
-                    success,
-                } => {
-                    let mut sent = Vec::new();
-                    match recipients {
-                        Recipients::One(recipient) => {
-                            self.send(&recipient, channel, message, priority, &mut sent)
-                                .await;
-                        }
-                        Recipients::Some(recipients) => {
-                            for recipient in recipients {
-                                self.send(
-                                    &recipient,
-                                    channel,
-                                    message.clone(),
-                                    priority,
-                                    &mut sent,
-                                )
-                                .await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping router");
+            },
+            msg = self.control.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping router");
+                    break;
+                };
+
+                match msg {
+                    Message::Ready {
+                        peer,
+                        relay,
+                        channels,
+                    } => {
+                        debug!(?peer, "peer ready");
+                        self.connections.insert(peer, relay);
+                        let _ = channels.send(routing.clone());
+                        self.notify_subscribers().await;
+                    }
+                    Message::Release { peer } => {
+                        debug!(?peer, "peer released");
+                        self.connections.remove(&peer);
+                        self.notify_subscribers().await;
+                    }
+                    Message::Content {
+                        recipients,
+                        channel,
+                        message,
+                        priority,
+                        success,
+                    } => {
+                        let mut sent = Vec::new();
+                        match recipients {
+                            Recipients::One(recipient) => {
+                                self.send(recipient, channel, message, priority, &mut sent)
+                                    .await;
                             }
-                        }
-                        Recipients::All => {
-                            // Send to all connected peers
-                            for (recipient, messenger) in self.connections.iter_mut() {
-                                if messenger
-                                    .send(
-                                        Data {
-                                            channel,
-                                            message: message.clone(),
-                                        },
-                                        priority,
-                                    )
-                                    .await
-                                    .is_ok()
-                                {
-                                    sent.push(recipient.clone());
-                                } else {
-                                    self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_data(
-                                            recipient, channel,
-                                        ))
-                                        .inc();
+                            Recipients::Some(recipients) => {
+                                for recipient in recipients {
+                                    self.send(recipient, channel, message.clone(), priority, &mut sent)
+                                        .await;
+                                }
+                            }
+                            Recipients::All => {
+                                // Send to all connected peers
+                                for (recipient, messenger) in self.connections.iter_mut() {
+                                    if messenger
+                                        .send(
+                                            Data {
+                                                channel,
+                                                message: message.clone(),
+                                            },
+                                            priority,
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        sent.push(recipient.clone());
+                                    } else {
+                                        self.messages_dropped
+                                            .get_or_create(&metrics::Message::new_data(
+                                                recipient, channel,
+                                            ))
+                                            .inc();
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Communicate success back to sender (if still alive)
-                    let _ = success.send(sent);
+                        // Communicate success back to sender (if still alive)
+                        let _ = success.send(sent);
+                    }
+                    Message::SubscribePeers { response } => {
+                        let (mut sender, receiver) = ring::channel::<Vec<P>>(NZUsize!(1));
+
+                        // Send existing peers immediately
+                        let peers = self.connections.keys().cloned().collect();
+                        let _ = sender.send(peers).await;
+
+                        self.open_subscriptions.push(sender);
+                        let _ = response.send(receiver);
+                    }
                 }
             }
         }
-        debug!("router shutdown");
+    }
+
+    /// Notifies all open peer subscriptions with the current list of connected peers.
+    async fn notify_subscribers(&mut self) {
+        let peers: Vec<P> = self.connections.keys().cloned().collect();
+        let mut keep = Vec::with_capacity(self.open_subscriptions.len());
+
+        for mut subscriber in self.open_subscriptions.drain(..) {
+            if subscriber.send(peers.clone()).await.is_ok() {
+                keep.push(subscriber);
+            }
+        }
+        self.open_subscriptions = keep;
     }
 }

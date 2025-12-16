@@ -38,7 +38,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
+        Committable, Digestible, Hasher, Sha256, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -46,7 +46,8 @@ mod tests {
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use std::{collections::BTreeMap, time::Duration};
+    use governor::Quota;
+    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -61,6 +62,9 @@ mod tests {
     // Enough time for a message to propagate through the network
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
     type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
 
     async fn initialize_simulation(
@@ -73,6 +77,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets: None,
             },
         );
         network.start();
@@ -85,7 +90,11 @@ mod tests {
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));
         }
 

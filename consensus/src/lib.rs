@@ -19,25 +19,20 @@ pub mod simplex;
 pub mod types;
 pub mod utils;
 
+use types::{Epoch, View};
+
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
 pub trait Epochable {
-    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
-    /// validators is constant.
-    type Epoch;
-
     /// Returns the epoch associated with this object.
-    fn epoch(&self) -> Self::Epoch;
+    fn epoch(&self) -> Epoch;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
-    /// View is the type used to indicate the in-progress consensus decision.
-    type View;
-
     /// Returns the view associated with this object.
-    fn view(&self) -> Self::View;
+    fn view(&self) -> View;
 }
 
 /// Block is the interface for a block in the blockchain.
@@ -53,10 +48,15 @@ pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_cryptography::{Digest, PublicKey};
+        use commonware_cryptography::Digest;
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+        use commonware_runtime::{Spawner, Metrics, Clock};
+        use rand::Rng;
+        use crate::marshal::ingress::mailbox::AncestorStream;
+        use commonware_cryptography::certificate::Scheme;
 
+        pub mod application;
         pub mod marshal;
         mod reporter;
         pub use reporter::*;
@@ -73,13 +73,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context: Epochable;
+            type Context;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -100,6 +100,53 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
+
+        /// Application is a minimal interface for standard implementations that operate over a stream
+        /// of epoched blocks.
+        pub trait Application<E>: Clone + Send + 'static
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// The signing scheme used by the application.
+            type SigningScheme: Scheme;
+
+            /// Context is metadata provided by the consensus engine associated with a given payload.
+            ///
+            /// This often includes things like the proposer, view number, the height, or the epoch.
+            type Context: Epochable;
+
+            /// The block type produced by the application's builder.
+            type Block: Block;
+
+            /// Payload used to initialize the consensus engine in the first epoch.
+            fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+            /// Build a new block on top of the provided parent ancestry. If the build job fails,
+            /// the implementor should return [None].
+            fn propose(
+                &mut self,
+                context: (E, Self::Context),
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> impl Future<Output = Option<Self::Block>> + Send;
+        }
+
+        /// An extension of [Application] that provides the ability to implementations to verify blocks.
+        ///
+        /// Some [Application]s may not require this functionality. When employing
+        /// erasure coding, for example, verification only serves to verify the integrity of the
+        /// received shard relative to the consensus commitment, and can therefore be
+        /// hidden from the application.
+        pub trait VerifyingApplication<E>: Application<E>
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// Verify a block produced by the application's proposer, relative to its ancestry.
+            fn verify(
+                &mut self,
+                context: (E, Self::Context),
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> impl Future<Output = bool> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.
@@ -130,70 +177,6 @@ cfg_if::cfg_if! {
 
             /// Report some activity observed by the consensus implementation.
             fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
-        }
-
-        /// Supervisor is the interface responsible for managing which participants are active at a given time.
-        ///
-        /// ## Synchronization
-        ///
-        /// It is up to the user to ensure changes in this list are synchronized across nodes in the network
-        /// at a given `Index`. If care is not taken to do this, consensus could halt (as different participants
-        /// may have a different view of who is active at a given time).
-        ///
-        /// The simplest way to avoid this complexity is to use a consensus implementation that reaches finalization
-        /// on application data before transitioning to a new `Index` (i.e. [Tendermint](https://arxiv.org/abs/1807.04938)).
-        ///
-        /// Implementations that do not work this way (like `simplex`) must introduce some synchrony bound for changes
-        /// (where it is assumed all participants have finalized some previous set change by some point) or "sync points"
-        /// (i.e. epochs) where participants agree that some finalization occurred at some point in the past.
-        pub trait Supervisor: Clone + Send + Sync + 'static {
-            /// Index is the type used to indicate the in-progress consensus decision.
-            type Index;
-
-            /// Public key used to identify participants.
-            type PublicKey: PublicKey;
-
-            /// Get the **sorted** participants for the given view. This is called when entering a new view before
-            /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]>;
-
-            // Indicate whether some candidate is a participant at the given view.
-            fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
-        }
-
-        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a polynomial with
-        /// a fixed constant `identity`) and `share` for a participant is active at a given time.
-        ///
-        /// ## Synchronization
-        ///
-        /// The same considerations for [crate::Supervisor] apply here.
-        pub trait ThresholdSupervisor: Supervisor {
-            /// Identity is the type against which threshold signatures are verified.
-            type Identity;
-
-            /// Seed is some random value used to bias the leader selection process.
-            type Seed;
-
-            /// Polynomial is the group polynomial over which partial signatures are verified.
-            type Polynomial;
-
-            /// Share is the type used to generate a partial signature that can be verified
-            /// against `Identity`.
-            type Share;
-
-            /// Returns the static identity of the shared secret (typically the constant term
-            /// of a polynomial).
-            fn identity(&self) -> &Self::Identity;
-
-            /// Returns the polynomial over which partial signatures are verified at a given index.
-            fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;
-
-            /// Returns share to sign with at a given index. After resharing, the share
-            /// may change (and old shares may be deleted).
-            ///
-            /// This can be used to generate a partial signature that can be verified
-            /// against `polynomial`.
-            fn share(&self, index: Self::Index) -> Option<&Self::Share>;
         }
 
         /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.

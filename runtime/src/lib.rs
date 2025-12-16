@@ -77,6 +77,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+    PartitionNameInvalid(String),
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
@@ -139,6 +141,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// This is not the default behavior. See [`Spawner::shared`] for more information.
     fn dedicated(self) -> Self;
+
+    /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
+    fn instrumented(self) -> Self;
 
     /// Spawn a task with the current context.
     ///
@@ -251,6 +256,19 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Encode all metrics into a buffer.
     fn encode(&self) -> String;
 }
+
+/// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
+///
+/// This is a convenience type alias for creating per-peer rate limiters
+/// using governor's [HashMapStateStore].
+///
+/// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+pub type RateLimiter<K, C> = governor::RateLimiter<
+    K,
+    governor::state::keyed::HashMapStateStore<K>,
+    C,
+    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+>;
 
 /// Interface that any task scheduler must implement to provide
 /// time-based operations.
@@ -438,11 +456,16 @@ pub trait Stream: Sync + Send + 'static {
 
 /// Interface to interact with storage.
 ///
-///
 /// To support storage implementations that enable concurrent reads and
 /// writes, blobs are responsible for maintaining synchronization.
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
+///
+/// # Partition Names
+///
+/// Partition names must be non-empty and contain only ASCII alphanumeric
+/// characters, dashes (`-`), or underscores (`_`). Names containing other
+/// characters (e.g., `/`, `.`, spaces) will return an error.
 pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
@@ -452,6 +475,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
+    ///
+    /// An Ok result indicates the blob is durably created (or already exists).
     fn open(
         &self,
         partition: &str,
@@ -461,6 +486,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// Remove a blob from a given partition.
     ///
     /// If no `name` is provided, the entire partition is removed.
+    ///
+    /// An Ok result indicates the blob is durably removed.
     fn remove(
         &self,
         partition: &str,
@@ -517,8 +544,9 @@ pub trait Blob: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
-    use commonware_macros::select;
+    use commonware_macros::{select, test_collect_traces};
     use futures::{
         channel::{mpsc, oneshot},
         future::{pending, ready},
@@ -2595,5 +2623,60 @@ mod tests {
             // Wait for the client task to complete
             client_handle.await.unwrap();
         });
+    }
+
+    #[test_collect_traces]
+    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
+        let executor = deterministic::Runner::new(deterministic::Config::default());
+        executor.start(|context| async move {
+            context
+                .with_label("test")
+                .instrumented()
+                .spawn(|context| async move {
+                    tracing::info!(field = "test field", "test log");
+
+                    context
+                        .with_label("inner")
+                        .instrumented()
+                        .spawn(|_| async move {
+                            tracing::info!("inner log");
+                        })
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        });
+
+        let info_traces = traces.get_by_level(Level::INFO);
+        assert_eq!(info_traces.len(), 2);
+
+        // Outer log (single span)
+        info_traces
+            .expect_event_at_index(0, |event| {
+                event.metadata.expect_content_exact("test log")?;
+                event.metadata.expect_field_count(1)?;
+                event.metadata.expect_field_exact("field", "test field")?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test")
+                })
+            })
+            .unwrap();
+
+        info_traces
+            .expect_event_at_index(1, |event| {
+                event.metadata.expect_content_exact("inner log")?;
+                event.metadata.expect_field_count(0)?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test_inner")
+                })
+            })
+            .unwrap();
     }
 }

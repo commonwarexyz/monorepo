@@ -1,34 +1,31 @@
-use super::types::{Activity, Context};
-use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
+use super::types::{Activity, Context, SequencersProvider};
+use crate::{
+    types::{Epoch, EpochDelta},
+    Automaton, Monitor, Relay, Reporter,
+};
+use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
     C: Signer,
-    V: Variant,
+    S: SequencersProvider,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
-    /// The cryptographic scheme used if the engine is a sequencer.
-    pub crypto: C,
+    /// The signer used when this engine acts as a sequencer.
+    pub sequencer_signer: Option<C>,
 
-    /// Tracks the current state of consensus (to determine which participants should
-    /// be involved in the current broadcast attempt).
-    pub monitor: M,
+    /// Provider for epoch-specific sequencers set.
+    pub sequencers_provider: S,
 
-    /// Manages the set of validators and the group polynomial.
-    /// Also manages the cryptographic partial share if the engine is a validator.
-    pub validators: TSu,
-
-    /// Manages the set of sequencers.
-    pub sequencers: Su,
+    /// Provider for epoch-specific validator signing schemes.
+    pub validators_provider: P,
 
     /// Proposes and verifies digests.
     pub automaton: A,
@@ -36,8 +33,12 @@ pub struct Config<
     /// Broadcasts the raw payload.
     pub relay: R,
 
-    /// Notified when a chunk receives a threshold of acks.
+    /// Notified when a chunk receives a quorum of acks.
     pub reporter: Z,
+
+    /// Tracks the current state of consensus (to determine which participants should
+    /// be involved in the current broadcast attempt).
+    pub monitor: M,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.
@@ -49,7 +50,7 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often a proposal is rebroadcast to all validators if no threshold is reached.
+    /// How often a proposal is rebroadcast to all validators if no quorum is reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.
@@ -59,7 +60,7 @@ pub struct Config<
     /// For example, if the current epoch is 10, and the bounds are (1, 2), then
     /// epochs 9, 10, 11, and 12 are kept (and accepted);
     /// all others are pruned or rejected.
-    pub epoch_bounds: (u64, u64),
+    pub epoch_bounds: (EpochDelta, EpochDelta),
 
     /// The number of future heights to accept acks for.
     /// This is used to prevent spam of acks for arbitrary heights.

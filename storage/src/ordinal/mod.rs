@@ -2,7 +2,7 @@
 //!
 //! [Ordinal] is a collection of [commonware_runtime::Blob]s containing ordered records of fixed size.
 //! Because records are fixed size, file position corresponds directly to index. Unlike
-//! [crate::journal::fixed::Journal], [Ordinal] supports out-of-order insertion.
+//! [crate::journal::contiguous::fixed::Journal], [Ordinal] supports out-of-order insertion.
 //!
 //! # Design
 //!
@@ -135,9 +135,9 @@ mod tests {
     use super::*;
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{bitmap::BitMap, hex, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -719,7 +719,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
-                blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], 10)
+                blob.write_at(hex!("0xFFFFFFFF").to_vec(), 10)
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();
@@ -1038,8 +1038,8 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         let state1 = test_operations_and_restart(100);
         let state2 = test_operations_and_restart(100);

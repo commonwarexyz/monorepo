@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
     varint::{SInt, UInt},
-    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
+    Decode, DecodeExt, Encode, EncodeSize, Error, IsUnit, RangeCfg, Read, Write,
 };
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -13,15 +13,14 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 
-const MAX_INPUT_SIZE: usize = 10000;
-const MIN_COLLECTION_SIZE: usize = 0;
-const MAX_COLLECTION_SIZE: usize = 10000;
-
 fn roundtrip_socket(socket: SocketAddr) {
     let encoded = socket.encode();
     let decoded = SocketAddr::decode(encoded.clone())
         .expect("Failed to decode a successfully encoded input!");
 
+    // Check encoding length was correct
+    // NOTE: We add 1 to the length here since this is a full `SocketAddr`,
+    // the first byte represents the address type (e.g., IPv4 or IPv6)
     match socket {
         SocketAddr::V4(_) => {
             assert_eq!(encoded.len(), 6 + 1);
@@ -33,6 +32,47 @@ fn roundtrip_socket(socket: SocketAddr) {
 
     assert_eq!(socket.ip(), decoded.ip());
     assert_eq!(socket.port(), decoded.port());
+}
+
+fn roundtrip_ipv4(addr: Ipv4Addr) {
+    let encoded = addr.encode();
+    assert_eq!(addr.encode_size(), encoded.len());
+    let decoded = Ipv4Addr::decode(&mut &*encoded).expect("Failed to decode Ipv4Addr!");
+    assert_eq!(addr, decoded);
+}
+
+fn roundtrip_ipv6(addr: Ipv6Addr) {
+    let encoded = addr.encode();
+    assert_eq!(addr.encode_size(), encoded.len());
+    let decoded = Ipv6Addr::decode(&mut &*encoded).expect("Failed to decode Ipv6Addr!");
+    assert_eq!(addr, decoded);
+}
+
+fn roundtrip_socket_v4(addr: SocketAddrV4) {
+    let encoded = addr.encode();
+    assert_eq!(addr.encode_size(), encoded.len());
+    let decoded = SocketAddrV4::decode(&mut &*encoded).expect("Failed to decode SocketAddrV4!");
+    assert_eq!(addr, decoded);
+}
+
+fn roundtrip_socket_v6(addr: SocketAddrV6) {
+    let encoded = addr.encode();
+    assert_eq!(addr.encode_size(), encoded.len());
+    let decoded = SocketAddrV6::decode(&mut &*encoded).expect("Failed to decode SocketAddrV6!");
+
+    // The codec intentionally discards flowinfo and scope_id (see codec/src/types/net.rs),
+    // so we only compare ip and port, and verify flowinfo/scope_id are zeroed.
+    assert_eq!(addr.ip(), decoded.ip());
+    assert_eq!(addr.port(), decoded.port());
+    assert_eq!(decoded.flowinfo(), 0);
+    assert_eq!(decoded.scope_id(), 0);
+}
+
+fn roundtrip_byte_array<const N: usize>(arr: [u8; N]) {
+    let encoded = arr.encode();
+    assert_eq!(arr.encode_size(), encoded.len());
+    let decoded = <[u8; N]>::decode(&mut &*encoded).expect("Failed to decode byte array!");
+    assert_eq!(arr, decoded);
 }
 
 fn roundtrip_bytes(input_data_bytes: Bytes) {
@@ -61,7 +101,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
 fn roundtrip_primitive<T, X>(v: T)
 where
-    X: Default,
+    X: IsUnit,
     T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
@@ -70,10 +110,13 @@ where
     assert_eq!(v, decoded);
 }
 
+// NOTE: Separate float cases to handle NaN comparisons
+// TODO should combine these functions with better generics
 fn roundtrip_primitive_f32(v: f32) {
     let encoded = v.encode();
     let decoded: f32 = f32::decode(&mut &*encoded).expect("Failed to decode f32!");
     if v.is_nan() && decoded.is_nan() {
+        // Ignore the NaN case
         return;
     }
     assert_eq!(v, decoded);
@@ -83,6 +126,7 @@ fn roundtrip_primitive_f64(v: f64) {
     let encoded = v.encode();
     let decoded: f64 = f64::decode(&mut &*encoded).expect("Failed to decode f64!");
     if v.is_nan() && decoded.is_nan() {
+        // Ignore the NaN case
         return;
     }
     assert_eq!(v, decoded);
@@ -97,17 +141,67 @@ fn roundtrip_map<K, V>(
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
-        + std::fmt::Debug
-        + PartialEq
-        + Write
-        + EncodeSize,
+    + std::fmt::Debug
+    + PartialEq
+    + Write
+    + EncodeSize,
+{
+    let encoded = map.encode();
+    assert_eq!(encoded.len(), map.encode_size());
+    let config_tuple = (range_cfg, (k_cfg, v_cfg));
+    // TODO could also assert encoded size here with type info
+    let decoded =
+        HashMap::<K, V>::decode_cfg(encoded, &config_tuple).expect("Failed to decode map!");
+    assert_eq!(map, &decoded);
+}
+
+fn roundtrip_set<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
+where
+    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug + PartialEq,
+    HashSet<K>:
+    Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+{
+    let encoded = set.encode();
+    assert_eq!(encoded.len(), set.encode_size());
+    let config_tuple = (range_cfg, k_cfg);
+    let decoded = HashSet::<K>::decode_cfg(encoded, &config_tuple).expect("Failed to decode set!");
+    assert_eq!(set, &decoded);
+}
+
+fn roundtrip_btree_map<K, V>(
+    map: &BTreeMap<K, V>,
+    range_cfg: RangeCfg<usize>,
+    k_cfg: K::Cfg,
+    v_cfg: V::Cfg,
+) where
+    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
+    BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+    + std::fmt::Debug
+    + PartialEq
+    + Write
+    + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
     let config_tuple = (range_cfg, (k_cfg, v_cfg));
     let decoded =
-        HashMap::<K, V>::decode_cfg(encoded, &config_tuple).expect("Failed to decode map!");
+        BTreeMap::<K, V>::decode_cfg(encoded, &config_tuple).expect("Failed to decode btree map!");
     assert_eq!(map, &decoded);
+}
+
+fn roundtrip_btree_set<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
+where
+    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    BTreeSet<K>:
+    Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+{
+    let encoded = set.encode();
+    assert_eq!(encoded.len(), set.encode_size());
+    let config_tuple = (range_cfg, k_cfg);
+    let decoded =
+        BTreeSet::<K>::decode_cfg(encoded, &config_tuple).expect("Failed to decode btree set!");
+    assert_eq!(set, &decoded);
 }
 
 fn roundtrip_vec<T>(vec: Vec<T>)
@@ -136,6 +230,53 @@ where
     assert_eq!(vec, decoded);
 }
 
+fn roundtrip_option<T>(opt: Option<T>)
+where
+    T: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    Option<T>: Decode<Cfg = T::Cfg>,
+{
+    let encoded = opt.encode();
+    assert_eq!(opt.encode_size(), encoded.len());
+    let decoded = Option::<T>::decode(&mut &*encoded).expect("Failed to decode Option<T>!");
+    assert_eq!(opt, decoded);
+}
+
+fn roundtrip_tuple_2<T1, T2>(tuple: (T1, T2))
+where
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug + EncodeSize,
+{
+    let encoded = tuple.encode();
+    assert_eq!(tuple.encode_size(), encoded.len());
+    let decoded = <(T1, T2)>::decode(&mut &*encoded).expect("Failed to decode tuple!");
+    assert_eq!(tuple, decoded);
+}
+
+fn roundtrip_tuple_3<T1, T2, T3>(tuple: (T1, T2, T3))
+where
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    (T1, T2, T3): Encode
+    + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
+    + PartialEq
+    + std::fmt::Debug
+    + EncodeSize,
+{
+    let encoded = tuple.encode();
+    assert_eq!(tuple.encode_size(), encoded.len());
+    let decoded = <(T1, T2, T3)>::decode(&mut &*encoded).expect("Failed to decode tuple!");
+    assert_eq!(tuple, decoded);
+}
+
+fn roundtrip_usize(v: usize) {
+    let encoded = v.encode();
+    assert_eq!(v.encode_size(), encoded.len());
+    let decoded = usize::decode_cfg(encoded, &(..).into()).expect("Failed to decode usize!");
+    assert_eq!(v, decoded);
+}
+
 fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let mut buf = Vec::new();
     for _ in 0..continuation_bytes.min(20) {
@@ -145,33 +286,85 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let _ = UInt::<u16>::decode(Bytes::from(buf.clone()));
     let _ = UInt::<u32>::decode(Bytes::from(buf.clone()));
     let _ = UInt::<u64>::decode(Bytes::from(buf.clone()));
-    let _ = UInt::<u128>::decode(Bytes::from(buf));
+    let _ = UInt::<u128>::decode(Bytes::from(buf.clone()));
+    // Also test signed varint overflow
+    let _ = SInt::<i16>::decode(Bytes::from(buf.clone()));
+    let _ = SInt::<i32>::decode(Bytes::from(buf.clone()));
+    let _ = SInt::<i64>::decode(Bytes::from(buf.clone()));
+    let _ = SInt::<i128>::decode(Bytes::from(buf));
 }
 
-// Wrapped socket for arbitrary
+// Wrapped network types for arbitrary
 #[derive(Arbitrary, Debug)]
 struct WrappedSocketAddr(SocketAddr);
 
 #[derive(Arbitrary, Debug)]
-enum FuzzOperation {
-    // Roundtrip operations (encode then decode with validation)
-    RoundtripPrimitive(PrimitiveValue),
-    RoundtripSocket(WrappedSocketAddr),
-    RoundtripBytes(Vec<u8>),
-    RoundtripVec(Vec<u8>),
-    RoundtripMap(HashMap<u64, u64>),
-
-    // Decode-only operations (fuzz arbitrary bytes)
-    DecodeRawData {
-        data: Vec<u8>,
-        target: DecodeTarget,
-        min_size: u16,
-        max_size: u16,
-    },
-}
+struct WrappedIpv4Addr(Ipv4Addr);
 
 #[derive(Arbitrary, Debug)]
-enum PrimitiveValue {
+struct WrappedIpv6Addr(Ipv6Addr);
+
+#[derive(Arbitrary, Debug)]
+struct WrappedSocketAddrV4(SocketAddrV4);
+
+#[derive(Arbitrary, Debug)]
+struct WrappedSocketAddrV6(SocketAddrV6);
+
+#[derive(Arbitrary, Debug)]
+enum FuzzInput<'a> {
+    Bytes(&'a [u8]),
+
+    // Network types
+    Socket(WrappedSocketAddr),
+    Ipv4(WrappedIpv4Addr),
+    Ipv6(WrappedIpv6Addr),
+    SocketV4(WrappedSocketAddrV4),
+    SocketV6(WrappedSocketAddrV6),
+
+    // Collections
+    Map(HashMap<u64, u64>),
+    Set(HashSet<u64>),
+    BTreeMap(BTreeMap<u32, u32>),
+    BTreeSet(BTreeSet<u32>),
+    Vec(Vec<u8>),
+
+    // Arrays
+    ByteArray4([u8; 4]),
+    ByteArray8([u8; 8]),
+    ByteArray16([u8; 16]),
+    ByteArray32([u8; 32]),
+
+    // Option type
+    OptionSome(u32),
+    OptionNone,
+
+    // Tuples
+    Tuple2(u8, u16),
+    Tuple3(u32, u64, u128),
+
+    VarIntOverflow {
+        // Number of continuation bytes before the last byte
+        continuation_bytes: u8,
+        // Value for the last byte (will test if it has too many bits)
+        last_byte: u8,
+    },
+
+    // Unsigned varints
+    UVarInt16(u16),
+    UVarInt32(u32),
+    UVarInt64(u64),
+    UVarInt128(u128),
+
+    // Signed varints (ZigZag encoding)
+    SVarInt16(i16),
+    SVarInt32(i32),
+    SVarInt64(i64),
+    SVarInt128(i128),
+
+    // Primitive inputs!
+    Bool(bool),
+    Unit,
+    Usize(usize),
     U8(u8),
     U16(u16),
     U32(u32),
@@ -184,277 +377,71 @@ enum PrimitiveValue {
     I128(i128),
     F32(f32),
     F64(f64),
-    Bool(bool),
-    VarIntOverflow {
-        // Number of continuation bytes before the last byte
-        continuation_bytes: u8,
-        // Value for the last byte (will test if it has too many bits)
-        last_byte: u8,
-    },
 }
 
-#[derive(Arbitrary, Debug)]
-enum DecodeTarget {
-    // Primitives
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    Bool,
-
-    // Network types
-    Ipv4Addr,
-    Ipv6Addr,
-    SocketAddrV4,
-    SocketAddrV6,
-
-    // Collections
-    VecU8,
-    VecU32,
-    VecU64,
-    BTreeMapU32U64,
-    BTreeSetU32,
-    HashMapU32U64,
-    HashSetU32,
-
-    // Bytes
-    Bytes,
-
-    // Tuples
-    Tuple2U32U64,
-    Tuple3U8U16U32,
-    Tuple4BoolU32I32U64,
-
-    // VarInts
-    UIntU16,
-    UIntU32,
-    UIntU64,
-    UIntU128,
-    SIntI16,
-    SIntI32,
-    SIntI64,
-    SIntI128,
-
-    // Options
-    OptionU8,
-    OptionU32,
-    OptionU64,
-    OptionBool,
-
-    // Complex collections
-    VecU8Range,
-    OptionVecU8,
-    BTreeMapU8U8,
-    VarIntOverflow {
-        // Number of continuation bytes before the last byte
-        continuation_bytes: u8,
-        // Value for the last byte (will test if it has too many bits)
-        last_byte: u8,
-    },
-}
-
-fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u16) {
-    if data.len() > MAX_INPUT_SIZE {
-        return;
-    }
-
-    let min_size = (min_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
-    let max_size = (max_size as usize).clamp(min_size, MAX_COLLECTION_SIZE);
-    let range_cfg: RangeCfg<usize> = (min_size..=max_size).into();
-
-    match target {
-        // Primitives
-        DecodeTarget::U8 => {
-            let _ = u8::decode(data);
-        }
-        DecodeTarget::U16 => {
-            let _ = u16::decode(data);
-        }
-        DecodeTarget::U32 => {
-            let _ = u32::decode(data);
-        }
-        DecodeTarget::U64 => {
-            let _ = u64::decode(data);
-        }
-        DecodeTarget::U128 => {
-            let _ = u128::decode(data);
-        }
-        DecodeTarget::I8 => {
-            let _ = i8::decode(data);
-        }
-        DecodeTarget::I16 => {
-            let _ = i16::decode(data);
-        }
-        DecodeTarget::I32 => {
-            let _ = i32::decode(data);
-        }
-        DecodeTarget::I64 => {
-            let _ = i64::decode(data);
-        }
-        DecodeTarget::I128 => {
-            let _ = i128::decode(data);
-        }
-        DecodeTarget::Bool => {
-            let _ = bool::decode(data);
-        }
-
+fn fuzz(input: FuzzInput) {
+    match input {
+        FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
         // Network types
-        DecodeTarget::Ipv4Addr => {
-            let _ = Ipv4Addr::decode(data);
-        }
-        DecodeTarget::Ipv6Addr => {
-            let _ = Ipv6Addr::decode(data);
-        }
-        DecodeTarget::SocketAddrV4 => {
-            let _ = SocketAddrV4::decode(data);
-        }
-        DecodeTarget::SocketAddrV6 => {
-            let _ = SocketAddrV6::decode(data);
-        }
-
+        FuzzInput::Socket(it) => roundtrip_socket(it.0),
+        FuzzInput::Ipv4(it) => roundtrip_ipv4(it.0),
+        FuzzInput::Ipv6(it) => roundtrip_ipv6(it.0),
+        FuzzInput::SocketV4(it) => roundtrip_socket_v4(it.0),
+        FuzzInput::SocketV6(it) => roundtrip_socket_v6(it.0),
         // Collections
-        DecodeTarget::VecU8 => {
-            let _ = Vec::<u8>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::VecU32 => {
-            let _ = Vec::<u32>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::VecU64 => {
-            let _ = Vec::<u64>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::BTreeMapU32U64 => {
-            let _ = BTreeMap::<u32, u64>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::BTreeSetU32 => {
-            let _ = BTreeSet::<u32>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::HashMapU32U64 => {
-            let _ = HashMap::<u32, u64>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::HashSetU32 => {
-            let _ = HashSet::<u32>::decode_range(data, range_cfg);
-        }
-
-        // Bytes
-        DecodeTarget::Bytes => {
-            let _ = Bytes::decode_cfg(data, &range_cfg);
-        }
-
+        FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()),
+        FuzzInput::Set(it) => roundtrip_set(&it, (..).into(), ()),
+        FuzzInput::BTreeMap(it) => roundtrip_btree_map(&it, (..).into(), (), ()),
+        FuzzInput::BTreeSet(it) => roundtrip_btree_set(&it, (..).into(), ()),
+        FuzzInput::Vec(it) => roundtrip_vec(it),
+        // Arrays
+        FuzzInput::ByteArray4(arr) => roundtrip_byte_array(arr),
+        FuzzInput::ByteArray8(arr) => roundtrip_byte_array(arr),
+        FuzzInput::ByteArray16(arr) => roundtrip_byte_array(arr),
+        FuzzInput::ByteArray32(arr) => roundtrip_byte_array(arr),
+        // Option types
+        FuzzInput::OptionSome(v) => roundtrip_option(Some(v)),
+        FuzzInput::OptionNone => roundtrip_option::<u32>(None),
         // Tuples
-        DecodeTarget::Tuple2U32U64 => {
-            let _ = <(u32, u64)>::decode(data);
-        }
-        DecodeTarget::Tuple3U8U16U32 => {
-            let _ = <(u8, u16, u32)>::decode(data);
-        }
-        DecodeTarget::Tuple4BoolU32I32U64 => {
-            let _ = <(bool, u32, i32, u64)>::decode(data);
-        }
-
-        // VarInts
-        DecodeTarget::UIntU16 => {
-            let _ = UInt::<u16>::decode(data);
-        }
-        DecodeTarget::UIntU32 => {
-            let _ = UInt::<u32>::decode(data);
-        }
-        DecodeTarget::UIntU64 => {
-            let _ = UInt::<u64>::decode(data);
-        }
-        DecodeTarget::UIntU128 => {
-            let _ = UInt::<u128>::decode(data);
-        }
-        DecodeTarget::SIntI16 => {
-            let _ = SInt::<i16>::decode(data);
-        }
-        DecodeTarget::SIntI32 => {
-            let _ = SInt::<i32>::decode(data);
-        }
-        DecodeTarget::SIntI64 => {
-            let _ = SInt::<i64>::decode(data);
-        }
-        DecodeTarget::SIntI128 => {
-            let _ = SInt::<i128>::decode(data);
-        }
-
-        // Options
-        DecodeTarget::OptionU8 => {
-            let _ = Option::<u8>::decode(data);
-        }
-        DecodeTarget::OptionU32 => {
-            let _ = Option::<u32>::decode(data);
-        }
-        DecodeTarget::OptionU64 => {
-            let _ = Option::<u64>::decode(data);
-        }
-        DecodeTarget::OptionBool => {
-            let _ = Option::<bool>::decode(data);
-        }
-
-        // Complex collections
-        DecodeTarget::VecU8Range => {
-            let _ = Vec::<u8>::decode_cfg(data, &(range_cfg, ()));
-        }
-        DecodeTarget::OptionVecU8 => {
-            let option_cfg = (range_cfg, ());
-            let _ = Option::<Vec<u8>>::decode_cfg(data, &option_cfg);
-        }
-        DecodeTarget::BTreeMapU8U8 => {
-            let _ = BTreeMap::<u8, u8>::decode_range(data, range_cfg);
-        }
-        DecodeTarget::VarIntOverflow {
+        FuzzInput::Tuple2(a, b) => roundtrip_tuple_2((a, b)),
+        FuzzInput::Tuple3(a, b, c) => roundtrip_tuple_3((a, b, c)),
+        FuzzInput::VarIntOverflow {
             continuation_bytes,
             last_byte,
         } => roundtrip_overflow(continuation_bytes, last_byte),
-    }
-}
-
-fn fuzz(operation: FuzzOperation) {
-    match operation {
-        // Roundtrip operations
-        FuzzOperation::RoundtripSocket(wrapped) => roundtrip_socket(wrapped.0),
-        FuzzOperation::RoundtripBytes(data) => roundtrip_bytes(Bytes::from(data)),
-        FuzzOperation::RoundtripVec(vec) => roundtrip_vec(vec),
-        FuzzOperation::RoundtripMap(map) => roundtrip_map(&map, (..).into(), (), ()),
-
-        FuzzOperation::RoundtripPrimitive(prim) => match prim {
-            PrimitiveValue::U8(v) => roundtrip_primitive(v),
-            PrimitiveValue::U16(v) => roundtrip_primitive(v),
-            PrimitiveValue::U32(v) => roundtrip_primitive(v),
-            PrimitiveValue::U64(v) => roundtrip_primitive(v),
-            PrimitiveValue::U128(v) => roundtrip_primitive(v),
-            PrimitiveValue::I8(v) => roundtrip_primitive(v),
-            PrimitiveValue::I16(v) => roundtrip_primitive(v),
-            PrimitiveValue::I32(v) => roundtrip_primitive(v),
-            PrimitiveValue::I64(v) => roundtrip_primitive(v),
-            PrimitiveValue::I128(v) => roundtrip_primitive(v),
-            PrimitiveValue::F32(v) => roundtrip_primitive_f32(v),
-            PrimitiveValue::F64(v) => roundtrip_primitive_f64(v),
-            PrimitiveValue::Bool(v) => roundtrip_primitive(v),
-            PrimitiveValue::VarIntOverflow {
-                continuation_bytes,
-                last_byte,
-            } => roundtrip_overflow(continuation_bytes, last_byte),
-        },
-
-        // Decode-only operations
-        FuzzOperation::DecodeRawData {
-            data,
-            target,
-            min_size,
-            max_size,
-        } => {
-            fuzz_decode_raw(&data, target, min_size, max_size);
+        // Unsigned varints
+        FuzzInput::UVarInt16(v) => roundtrip_primitive(UInt(v)),
+        FuzzInput::UVarInt32(v) => roundtrip_primitive(UInt(v)),
+        FuzzInput::UVarInt64(v) => roundtrip_primitive(UInt(v)),
+        FuzzInput::UVarInt128(v) => roundtrip_primitive(UInt(v)),
+        // Signed varints
+        FuzzInput::SVarInt16(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt32(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt64(v) => roundtrip_primitive(SInt(v)),
+        FuzzInput::SVarInt128(v) => roundtrip_primitive(SInt(v)),
+        // Fixed-width primitives
+        FuzzInput::Bool(v) => roundtrip_primitive(v),
+        FuzzInput::Unit => roundtrip_primitive(()),
+        FuzzInput::Usize(v) => {
+            // Limit to u32::MAX for testing (since usize encodes as u32)
+            let v = v.min(u32::MAX as usize);
+            roundtrip_usize(v)
         }
-    }
+        FuzzInput::U8(v) => roundtrip_primitive(v),
+        FuzzInput::U16(v) => roundtrip_primitive(v),
+        FuzzInput::U32(v) => roundtrip_primitive(v),
+        FuzzInput::U64(v) => roundtrip_primitive(v),
+        FuzzInput::U128(v) => roundtrip_primitive(v),
+        FuzzInput::I8(v) => roundtrip_primitive(v),
+        FuzzInput::I16(v) => roundtrip_primitive(v),
+        FuzzInput::I32(v) => roundtrip_primitive(v),
+        FuzzInput::I64(v) => roundtrip_primitive(v),
+        FuzzInput::I128(v) => roundtrip_primitive(v),
+        FuzzInput::F32(v) => roundtrip_primitive_f32(v),
+        FuzzInput::F64(v) => roundtrip_primitive_f64(v),
+    };
 }
 
-fuzz_target!(|operation: FuzzOperation| {
-    fuzz(operation);
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

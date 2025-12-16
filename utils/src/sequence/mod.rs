@@ -15,6 +15,8 @@ pub use u64::U64;
 pub mod prefixed_u64;
 pub mod u32;
 pub use u32::U32;
+pub mod unit;
+pub use unit::Unit;
 
 /// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]
@@ -45,6 +47,17 @@ pub trait Span:
     + Codec<Cfg = ()>
 {
 }
+
+impl Span for u8 {}
+impl Span for u16 {}
+impl Span for u32 {}
+impl Span for u64 {}
+impl Span for u128 {}
+impl Span for i8 {}
+impl Span for i16 {}
+impl Span for i32 {}
+impl Span for i64 {}
+impl Span for i128 {}
 
 /// Types that can be fallibly read from a fixed-size byte sequence.
 ///

@@ -116,32 +116,32 @@ pub struct Config {
 impl Config {
     // Setters
     /// See [Config]
-    pub fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
+    pub const fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
         self.tcp_nodelay = tcp_nodelay;
         self
     }
     /// See [Config]
-    pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+    pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
         self.read_timeout = read_timeout;
         self
     }
     /// See [Config]
-    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
         self.write_timeout = write_timeout;
         self
     }
 
     // Getters
     /// See [Config]
-    pub fn tcp_nodelay(&self) -> Option<bool> {
+    pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.tcp_nodelay
     }
     /// See [Config]
-    pub fn read_timeout(&self) -> Duration {
+    pub const fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
     /// See [Config]
-    pub fn write_timeout(&self) -> Duration {
+    pub const fn write_timeout(&self) -> Duration {
         self.write_timeout
     }
 }
@@ -221,6 +221,7 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::network::{tests, tokio as TokioNetwork};
+    use commonware_macros::test_group;
     use std::time::Duration;
 
     #[tokio::test]
@@ -235,9 +236,9 @@ mod tests {
         .await;
     }
 
+    #[test_group("slow")]
     #[tokio::test]
-    #[ignore]
-    async fn stress_test_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             TokioNetwork::Network::from(
                 TokioNetwork::Config::default()

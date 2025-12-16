@@ -5,8 +5,8 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Receiver, Sender};
-use commonware_resolver::p2p::{self, Coordinator};
+use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
+use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
 use governor::clock::Clock as GClock;
@@ -14,12 +14,15 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P: PublicKey, C: Coordinator<PublicKey = P>> {
+pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey = P>> {
     /// The public key to identify this node.
     pub public_key: P,
 
-    /// The coordinator of peers that can be consulted for fetching data.
-    pub coordinator: C,
+    /// The provider of peers that can be consulted for fetching data.
+    pub manager: C,
+
+    /// The blocker that will be used to block peers that send invalid responses.
+    pub blocker: B,
 
     /// The size of the request mailbox backlog.
     pub mailbox_size: usize,
@@ -38,17 +41,18 @@ pub struct Config<P: PublicKey, C: Coordinator<PublicKey = P>> {
 }
 
 /// Initialize a P2P resolver.
-pub fn init<E, C, B, S, R, P>(
+pub fn init<E, C, Bl, B, S, R, P>(
     ctx: &E,
-    config: Config<P, C>,
+    config: Config<P, C, Bl>,
     backfill: (S, R),
 ) -> (
     mpsc::Receiver<handler::Message<B>>,
-    p2p::Mailbox<handler::Request<B>>,
+    p2p::Mailbox<handler::Request<B>, P>,
 )
 where
     E: Rng + Spawner + Clock + GClock + Metrics,
-    C: Coordinator<PublicKey = P>,
+    C: Manager<PublicKey = P>,
+    Bl: Blocker<PublicKey = P>,
     B: Block,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
@@ -59,7 +63,8 @@ where
     let (resolver_engine, resolver) = p2p::Engine::new(
         ctx.with_label("resolver"),
         p2p::Config {
-            coordinator: config.coordinator,
+            manager: config.manager,
+            blocker: config.blocker,
             consumer: handler.clone(),
             producer: handler,
             mailbox_size: config.mailbox_size,

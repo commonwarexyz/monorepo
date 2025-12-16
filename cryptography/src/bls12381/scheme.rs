@@ -7,14 +7,15 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
+//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
+//! use commonware_math::algebra::Random;
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = bls12381::PrivateKey::from_rng(&mut OsRng);
+//! let mut signer = bls12381::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = &b"demo"[..];
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -29,7 +30,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, PrivateKeyExt, Signer as _};
+use crate::{Array, BatchVerifier, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
@@ -38,6 +39,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -143,17 +145,33 @@ impl crate::Signer for PrivateKey {
         PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
-        let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
-        Signature::from(signature)
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+        self.sign_inner(Some(namespace), msg)
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(rng);
+impl PrivateKey {
+    #[inline(always)]
+    fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
+        ops::sign_message::<MinPk>(&self.key, namespace, message).into()
+    }
+}
+
+impl Random for PrivateKey {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
         let raw = private.encode_fixed();
         Self { raw, key: private }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::random(&mut rand))
     }
 }
 
@@ -162,8 +180,20 @@ impl crate::PublicKey for PublicKey {}
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
-        ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
+        self.verify_inner(Some(namespace), msg, sig)
+    }
+}
+
+impl PublicKey {
+    #[inline(always)]
+    fn verify_inner(
+        &self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        signature: &Signature,
+    ) -> bool {
+        ops::verify_message::<MinPk>(&self.key, namespace, message, &signature.signature).is_ok()
     }
 }
 
@@ -261,6 +291,18 @@ impl Display for PublicKey {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        Ok(private_key.public_key())
+    }
+}
+
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
@@ -351,11 +393,49 @@ impl Display for Signature {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(private_key.sign(&[], &message))
+    }
+}
+
 /// BLS12-381 batch verifier.
 pub struct Batch {
     publics: Vec<<MinPk as Variant>::Public>,
     hms: Vec<<MinPk as Variant>::Signature>,
     signatures: Vec<<MinPk as Variant>::Signature>,
+}
+
+impl Batch {
+    #[inline(always)]
+    fn add_inner(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.publics.push(public_key.key);
+        let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+            Cow::Owned(union_unique(namespace, message))
+        });
+        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
+        self.hms.push(hm);
+        self.signatures.push(signature.signature);
+        true
+    }
 }
 
 impl BatchVerifier<PublicKey> for Batch {
@@ -369,20 +449,12 @@ impl BatchVerifier<PublicKey> for Batch {
 
     fn add(
         &mut self,
-        namespace: Option<&[u8]>,
+        namespace: &[u8],
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        self.publics.push(public_key.key);
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
-        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
-        self.hms.push(hm);
-        self.signatures.push(signature.signature);
-        true
+        self.add_inner(Some(namespace), message, public_key, signature)
     }
 
     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
@@ -394,8 +466,9 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bls12381, Verifier as _};
+    use crate::bls12381;
     use commonware_codec::{DecodeExt, Encode};
+    use rstest::rstest;
 
     #[test]
     fn test_codec_private_key() {
@@ -430,24 +503,19 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    #[test]
-    fn test_sign() {
-        let cases = [
-            vector_sign_1(),
-            vector_sign_2(),
-            vector_sign_3(),
-            vector_sign_4(),
-            vector_sign_5(),
-            vector_sign_6(),
-            vector_sign_7(),
-            vector_sign_8(),
-            vector_sign_9(),
-        ];
-        for (index, test) in cases.into_iter().enumerate() {
-            let (private_key, message, expected) = test;
-            let signature = private_key.sign(None, &message);
-            assert_eq!(signature, expected, "vector_sign_{}", index + 1);
-        }
+    #[rstest]
+    #[case(vector_sign_1())]
+    #[case(vector_sign_2())]
+    #[case(vector_sign_3())]
+    #[case(vector_sign_4())]
+    #[case(vector_sign_5())]
+    #[case(vector_sign_6())]
+    #[case(vector_sign_7())]
+    #[case(vector_sign_8())]
+    #[case(vector_sign_9())]
+    fn test_sign(#[case] (private_key, message, expected): (PrivateKey, Vec<u8>, Signature)) {
+        let signature = private_key.sign_inner(None, &message);
+        assert_eq!(signature, expected);
     }
 
     #[test]
@@ -457,58 +525,58 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_verify() {
-        let cases = [
-            vector_verify_1(),
-            vector_verify_2(),
-            vector_verify_3(),
-            vector_verify_4(),
-            vector_verify_5(),
-            vector_verify_6(),
-            vector_verify_7(),
-            vector_verify_8(),
-            vector_verify_9(),
-            vector_verify_10(),
-            vector_verify_11(),
-            vector_verify_12(),
-            vector_verify_13(),
-            vector_verify_14(),
-            vector_verify_15(),
-            vector_verify_16(),
-            vector_verify_17(),
-            vector_verify_18(),
-            vector_verify_19(),
-            vector_verify_20(),
-            vector_verify_21(),
-            vector_verify_22(),
-            vector_verify_23(),
-            vector_verify_24(),
-            vector_verify_25(),
-            vector_verify_26(),
-            vector_verify_27(),
-            vector_verify_28(),
-            vector_verify_29(),
-        ];
-
+    #[rstest]
+    #[case(vector_verify_1())]
+    #[case(vector_verify_2())]
+    #[case(vector_verify_3())]
+    #[case(vector_verify_4())]
+    #[case(vector_verify_5())]
+    #[case(vector_verify_6())]
+    #[case(vector_verify_7())]
+    #[case(vector_verify_8())]
+    #[case(vector_verify_9())]
+    #[case(vector_verify_10())]
+    #[case(vector_verify_11())]
+    #[case(vector_verify_12())]
+    #[case(vector_verify_13())]
+    #[case(vector_verify_14())]
+    #[case(vector_verify_15())]
+    #[case(vector_verify_16())]
+    #[case(vector_verify_17())]
+    #[case(vector_verify_18())]
+    #[case(vector_verify_19())]
+    #[case(vector_verify_20())]
+    #[case(vector_verify_21())]
+    #[case(vector_verify_22())]
+    #[case(vector_verify_23())]
+    #[case(vector_verify_24())]
+    #[case(vector_verify_25())]
+    #[case(vector_verify_26())]
+    #[case(vector_verify_27())]
+    #[case(vector_verify_28())]
+    #[case(vector_verify_29())]
+    fn test_verify(
+        #[case] (public_key, message, signature, expected): (
+            Result<PublicKey, CodecError>,
+            Vec<u8>,
+            Result<Signature, CodecError>,
+            bool,
+        ),
+    ) {
         let mut batch = Batch::new();
-        for (index, test) in cases.into_iter().enumerate() {
-            let (public_key, message, signature, expected) = test;
-            let expected = if !expected {
-                public_key.is_err()
-                    || signature.is_err()
-                    || !public_key
-                        .unwrap()
-                        .verify(None, &message, &signature.unwrap())
-            } else {
-                let public_key = public_key.unwrap();
-                let signature = signature.unwrap();
-                batch.add(None, &message, &public_key, &signature);
-                public_key.verify(None, &message, &signature)
-            };
-            assert!(expected, "vector_verify_{}", index + 1);
-        }
-        assert!(batch.verify(&mut rand::thread_rng()));
+        let expected = if !expected {
+            public_key.is_err()
+                || signature.is_err()
+                || !public_key
+                    .unwrap()
+                    .verify_inner(None, &message, &signature.unwrap())
+        } else {
+            let public_key = public_key.unwrap();
+            let signature = signature.unwrap();
+            batch.add_inner(None, &message, &public_key, &signature);
+            public_key.verify_inner(None, &message, &signature)
+        };
+        assert!(expected);
     }
 
     /// Parse `sign` vector from hex encoded data.
@@ -1077,5 +1145,17 @@ mod tests {
             "0xa42ae16f1c2a5fa69c04cb5998d2add790764ce8dd45bf25b29b4700829232052b52352dcff1cf255b3a7810ad7269601810f03b2bc8b68cf289cf295b206770605a190b6842583e47c3d1c0f73c54907bfb2a602157d46a4353a20283018763",
         );
         (v.0, v.1, v.2, true)
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PublicKey>,
+            CodecConformance<PrivateKey>,
+            CodecConformance<Signature>,
+        }
     }
 }

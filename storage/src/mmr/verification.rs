@@ -12,7 +12,7 @@
 //! past state of the MMR rather than its current state.
 
 use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
@@ -28,7 +28,7 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from a valid [Proof] over the given range of elements. The
     /// resulting store can be used to generate proofs over any sub-range of the original range.
     /// Returns an error if the proof is invalid or could not be verified against the given root.
-    pub fn new<I, H, E>(
+    pub fn new<H, E>(
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
@@ -36,14 +36,13 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
-        Ok(ProofStore::new_from_digests(proof.size, digests))
+        Ok(Self::new_from_digests(proof.size, digests))
     }
 
     /// Create a new [ProofStore] from the result of calling
@@ -170,8 +169,8 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use crate::mmr::{location::LocationRangeExt as _, mem::DirtyMmr, StandardHasher as Standard};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
@@ -184,7 +183,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr = Mmr::default();
+            let mut mmr = DirtyMmr::new();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -192,7 +191,8 @@ mod tests {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher, None);
+            let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
@@ -206,7 +206,7 @@ mod tests {
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
-                    &root,
+                    root,
                 )
                 .unwrap();
 
@@ -222,7 +222,7 @@ mod tests {
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
-                        &root
+                        root
                     ));
                     subrange_start += 1;
                     subrange_end -= 1;

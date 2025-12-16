@@ -53,7 +53,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        Committable, PrivateKeyExt, Signer,
+        Committable, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -61,8 +61,13 @@ mod tests {
         Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZU32;
     use futures::StreamExt;
+    use governor::Quota;
     use std::time::Duration;
+
+    /// Default rate limit quota for tests (high enough to not interfere with normal operation)
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     const MAILBOX_SIZE: usize = 1024;
     const LINK: Link = Link {
@@ -88,11 +93,12 @@ mod tests {
             (Sender<PublicKey>, Receiver<PublicKey>),
         )>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets: None,
             },
         );
         network.start();
@@ -105,8 +111,9 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender1, receiver1) = oracle.register(peer.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(peer.clone(), 1).await.unwrap();
+            let mut control = oracle.control(peer.clone());
+            let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
+            let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 

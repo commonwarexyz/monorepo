@@ -2,20 +2,19 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
+        scheme::{self, SeededScheme},
         select_leader,
-        signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
-            Participants, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
     types::{Round, View},
     Monitor, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Set;
+use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -26,51 +25,50 @@ use std::{
 
 // Records which validators have participated in a given view/payload pair.
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
+type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Activity<S, D>>>>;
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<P: PublicKey, S: Scheme> {
+pub struct Config<S: Scheme> {
     pub namespace: Vec<u8>,
-    pub participants: Set<P>,
+    pub participants: Set<S::PublicKey>,
     pub scheme: S,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
     context: E,
-    participants: Participants<P>,
+    pub participants: Set<S::PublicKey>,
     scheme: S,
 
     namespace: Vec<u8>,
 
-    pub leaders: Arc<Mutex<HashMap<View, P>>>,
+    pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub seeds: Arc<Mutex<HashMap<View, Option<S::Seed>>>>,
-    pub notarizes: Arc<Mutex<Participation<P, D>>>,
+    pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
-    pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
+    pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
-    pub finalizes: Arc<Mutex<Participation<P, D>>>,
+    pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
-    pub faults: Arc<Mutex<Faults<P, S, D>>>,
+    pub faults: Arc<Mutex<Faults<S, D>>>,
     pub invalid: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<E, P, S, D> Reporter<E, P, S, D>
+impl<E, S, D> Reporter<E, S, D>
 where
     E: Rng + CryptoRng,
-    P: PublicKey + Eq + Hash + Clone,
-    S: Scheme,
+    S: SeededScheme,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(context: E, cfg: Config<P, S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
             namespace: cfg.namespace,
-            participants: cfg.participants.into(),
+            participants: cfg.participants,
             scheme: cfg.scheme,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             seeds: Arc::new(Mutex::new(HashMap::new())),
@@ -82,27 +80,26 @@ where
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             invalid: Arc::new(Mutex::new(0)),
-            latest: Arc::new(Mutex::new(0)),
+            latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
         // We use the seed from view N to select the leader for view N+1
-        let next_round = Round::new(round.epoch(), round.view() + 1);
+        let next_round = Round::new(round.epoch(), round.view().next());
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let leader_index = select_leader::<S, _>(&self.participants, next_round, seed);
-            self.participants[leader_index as usize].clone()
+            let (leader, _) = select_leader::<S>(self.participants.as_ref(), next_round, seed);
+            leader
         });
     }
 }
 
-impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>
+impl<E, S, D> crate::Reporter for Reporter<E, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
-    P: PublicKey + Eq + Hash + Clone,
-    S: Scheme,
+    S: scheme::Scheme<D>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -134,10 +131,10 @@ where
             Activity::Notarization(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
@@ -160,7 +157,7 @@ where
                 self.record_leader(notarization.round(), seed);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify::<D>(&self.scheme, &self.namespace) {
+                if !nullify.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -181,7 +178,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Nullify {
+                    Subject::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -224,10 +221,10 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,
@@ -317,11 +314,10 @@ where
     }
 }
 
-impl<E, P, S, D> Monitor for Reporter<E, P, S, D>
+impl<E, S, D> Monitor for Reporter<E, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
-    P: PublicKey + Eq + Hash + Clone,
-    S: Scheme,
+    S: SeededScheme,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

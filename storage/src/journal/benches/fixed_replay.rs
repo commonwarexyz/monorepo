@@ -4,11 +4,12 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _,
 };
-use commonware_storage::journal::fixed::Journal;
+use commonware_storage::journal::contiguous::fixed::Journal;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
-use criterion::{black_box, criterion_group, Criterion};
+use criterion::{criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
 use std::{
+    hint::black_box,
     num::NonZeroU64,
     time::{Duration, Instant},
 };

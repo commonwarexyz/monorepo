@@ -4,12 +4,11 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    mmr::{Location, Proof},
+    qmdb::{
         self,
         immutable::{self, Config},
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
-    store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::Variable<Key, Value>;
+pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
@@ -27,13 +26,11 @@ pub fn create_config() -> Config<Translator, ()> {
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: "log_journal".into(),
+        log_partition: "log".into(),
         log_items_per_section: NZU64!(512),
         log_compression: None,
         log_codec_config: (),
         log_write_buffer: NZUsize!(1024),
-        locations_journal_partition: "locations_journal".into(),
-        locations_items_per_blob: NZU64!(4096),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -84,7 +81,7 @@ where
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
@@ -93,18 +90,17 @@ where
                 Operation::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
-                _ => {}
             }
         }
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
         self.commit(None).await
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self) -> Key {
+        self.root()
     }
 
     fn op_count(&self) -> Location {
@@ -121,7 +117,7 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 

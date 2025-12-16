@@ -1,4 +1,4 @@
-//! This client binary creates or opens an [commonware_storage::adb::any] database and
+//! This client binary creates or opens an [commonware_storage::qmdb::any] database and
 //! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
 //! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
@@ -8,9 +8,13 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::{adb::sync, mmr::StandardHasher};
+use commonware_storage::qmdb::sync;
 use commonware_sync::{
-    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+    any, crate_version,
+    databases::{DatabaseType, Syncable},
+    immutable,
+    net::Resolver,
+    Digest, Error, Key,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;
@@ -85,10 +89,10 @@ where
                             debug!("sync client disconnected, terminating target update task");
                             return Ok(());
                         }
-                        Err(e) => {
-                            warn!(error = %e, "failed to send target update to sync client");
+                        Err(err) => {
+                            warn!(?err, "failed to send target update to sync client");
                             return Err(Error::TargetUpdateChannel {
-                                reason: e.to_string(),
+                                reason: err.to_string(),
                             });
                         }
                     }
@@ -96,8 +100,8 @@ where
                     debug!(current_target = ?current_target, "target unchanged");
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "failed to get sync target from server");
+            Err(err) => {
+                warn!(?err, "failed to get sync target from server");
             }
         }
     }
@@ -150,7 +154,7 @@ where
             };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut StandardHasher::new());
+        let got_root = database.root();
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -211,7 +215,7 @@ where
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut StandardHasher::new());
+        let got_root = database.root();
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -363,17 +367,6 @@ fn main() {
         eprintln!("❌ Configuration error: {e}");
         std::process::exit(1);
     });
-    info!(
-        database_type = %config.database_type.as_str(),
-        server = %config.server,
-        batch_size = config.batch_size,
-        storage_dir = %config.storage_dir,
-        metrics_port = config.metrics_port,
-        target_update_interval = ?config.target_update_interval,
-        sync_interval = ?config.sync_interval,
-        max_outstanding_requests = config.max_outstanding_requests,
-        "client starting with configuration"
-    );
 
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
@@ -388,6 +381,17 @@ fn main() {
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
             None,
         );
+        info!(
+            database_type = %config.database_type.as_str(),
+            server = %config.server,
+            batch_size = config.batch_size,
+            storage_dir = %config.storage_dir,
+            metrics_port = config.metrics_port,
+            target_update_interval = ?config.target_update_interval,
+            sync_interval = ?config.sync_interval,
+            max_outstanding_requests = config.max_outstanding_requests,
+            "client starting with configuration"
+        );
 
         // Dispatch based on database type
         let result = match config.database_type {
@@ -395,8 +399,8 @@ fn main() {
             DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
         };
 
-        if let Err(e) = result {
-            error!(error = %e, "❌ continuous sync failed");
+        if let Err(err) = result {
+            error!(?err, "❌ continuous sync failed");
             std::process::exit(1);
         }
     });

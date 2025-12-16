@@ -21,7 +21,19 @@
 //! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
 //! it responds to.
 //!
-//! Lastly, the `Coordinator` manages the set of peers that can be used to fetch data.
+//! # Targeting
+//!
+//! Callers can restrict fetches to specific target peers using [`Mailbox::fetch_targeted`]. Only
+//! target peers are tried, there is no automatic fallback to other peers. Targets persist through
+//! transient failures (timeout, "no data" response, send failure) since the peer might be slow or
+//! receive the data later.
+//!
+//! While a fetch is in progress, callers can modify targeting:
+//! - [`Mailbox::fetch_targeted`] adds peers to the existing target set
+//! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
+//!
+//! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
+//! or blocked peer), the targets for that key are cleared automatically.
 //!
 //! # Performance Considerations
 //!
@@ -29,7 +41,6 @@
 //! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
 
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
 use commonware_utils::Span;
 use futures::channel::oneshot;
 use std::future::Future;
@@ -56,45 +67,31 @@ pub trait Producer: Clone + Send + 'static {
     fn produce(&mut self, key: Self::Key) -> impl Future<Output = oneshot::Receiver<Bytes>> + Send;
 }
 
-/// Manages the set of peers that can be used to fetch data.
-pub trait Coordinator: Clone + Send + Sync + 'static {
-    /// Type used to uniquely identify peers.
-    type PublicKey: PublicKey;
-
-    /// Returns the current list of peers that can be used to fetch data.
-    ///
-    /// This is also used to filter requests from peers.
-    fn peers(&self) -> &[Self::PublicKey];
-
-    /// Returns an identifier for the peer set.
-    ///
-    /// Used as a low-overhead way to check if the list of peers has changed, this value must change
-    /// to a novel value whenever the list of peers changes. For example, it could be an
-    /// incrementing counter, or an epoch.
-    fn peer_set_id(&self) -> u64;
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},
+        mocks::{Consumer, Event, Key, Producer},
         Config, Engine, Mailbox,
     };
     use crate::Resolver;
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+        Blocker, Manager,
+    };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
-    use futures::{SinkExt, StreamExt};
-    use std::time::Duration;
+    use futures::StreamExt;
+    use governor::Quota;
+    use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
-    const RATE_LIMIT: u32 = 10;
+    const RATE_LIMIT: NonZeroU32 = NZU32!(10);
     const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -118,11 +115,12 @@ mod tests {
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
             },
         );
         network.start();
@@ -132,10 +130,16 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+        let mut manager = oracle.manager();
+        manager.update(0, peers.clone().try_into().unwrap()).await;
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register(0, Quota::per_second(RATE_LIMIT))
+                .await
+                .unwrap();
             connections.push((sender, receiver));
         }
 
@@ -161,23 +165,25 @@ mod tests {
 
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
-        coordinator: &Coordinator<PublicKey>,
+        manager: impl Manager<PublicKey = PublicKey>,
+        blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
-    ) -> Mailbox<Key> {
+    ) -> Mailbox<Key, PublicKey> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                coordinator: coordinator.clone(),
+                manager,
+                blocker,
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
-                    public_key,
-                    rate_limit: governor::Quota::per_second(NZU32!(RATE_LIMIT)),
+                    me: Some(public_key),
+                    rate_limit: Quota::per_second(RATE_LIMIT),
                     initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                 },
@@ -207,23 +213,26 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 2"));
 
-            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -250,17 +259,18 @@ mod tests {
     fn test_cancel_fetch() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (_oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, _peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
-            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
@@ -301,33 +311,38 @@ mod tests {
             let key = Key(3);
             prod3.insert(key.clone(), Bytes::from("data for key 3"));
 
-            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -348,24 +363,25 @@ mod tests {
     }
 
     /// Tests fetching when no peers are available.
-    /// This test sets up a single peer with an empty coordinator (no peers).
+    /// This test sets up a single peer with an empty peer provider (no peers).
     /// It initiates a fetch, waits beyond the retry timeout, cancels the fetch,
     /// and verifies that the consumer receives a failure notification.
     #[test_traced]
     fn test_no_peers_available() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (_oracle, mut schemes, _peers, mut connections) =
+            let (oracle, mut schemes, _peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
-            let coordinator = Coordinator::new(vec![]);
             let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 prod1,
@@ -406,33 +422,38 @@ mod tests {
             let mut prod3 = Producer::default();
             prod3.insert(key3.clone(), Bytes::from("data for key 3"));
 
-            let coordinator = Coordinator::new(peers.clone());
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -493,23 +514,26 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 6"));
 
-            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -584,41 +608,42 @@ mod tests {
             let mut prod3 = Producer::default();
             prod3.insert(key_a.clone(), valid_data_a.clone());
 
-            // Set up coordinators
-            let coordinator1 = Coordinator::new(vec![peers[1].clone(), peers[2].clone()]);
-            let coordinator2 = Coordinator::new(vec![peers[0].clone()]);
-            let coordinator3 = Coordinator::new(vec![peers[0].clone()]);
-
             // Set up consumer for Peer1 with expected values
             let (mut cons1, mut cons_out1) = Consumer::new();
             cons1.add_expected(key_a.clone(), valid_data_a.clone());
             cons1.add_expected(key_b.clone(), valid_data_b.clone());
 
             // Spawn actors
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator1,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator2,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &coordinator3,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
@@ -626,7 +651,7 @@ mod tests {
             .await;
 
             // Fetch keyA multiple times to ensure that Peer2 is blocked.
-            for _ in 0..10 {
+            for _ in 0..20 {
                 // Fetch keyA
                 mailbox1.fetch(key_a.clone()).await;
 
@@ -658,6 +683,12 @@ mod tests {
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),
             }
+
+            // Check oracle
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
         });
     }
 
@@ -677,23 +708,26 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
@@ -748,41 +782,29 @@ mod tests {
             let mut prod3 = Producer::default();
             prod3.insert(key2.clone(), Bytes::from("data from peer 3"));
 
-            // Create a coordinator with initial peer 2
-            let coordinator = Coordinator::new(vec![peers[1].clone()]);
-
-            // Create an update channel for the coordinator
-            let mut update_sender = coordinator.create_update_channel(context.clone());
-
             let (cons1, mut cons_out1) = Consumer::new();
 
+            let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &coordinator,
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 cons1,
                 Producer::default(),
             )
             .await;
 
+            let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &Coordinator::new(vec![peers[0].clone()]),
-                schemes.remove(0),
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
-
-            let _mailbox3 = setup_and_spawn_actor(
-                &context,
-                &Coordinator::new(vec![peers[0].clone()]),
-                schemes.remove(0),
-                connections.remove(0),
-                Consumer::dummy(),
-                prod3,
             )
             .await;
 
@@ -799,11 +821,18 @@ mod tests {
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
-            // Change peer set to only include peer 3 via the update channel
-            update_sender
-                .send(CoordinatorMsg::UpdatePeers(vec![peers[2].clone()]))
-                .await
-                .expect("Failed to send update");
+            // Change peer set to include peer 3
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
 
             // Need to wait for the peer set change to propagate
             context.sleep(Duration::from_millis(200)).await;
@@ -819,6 +848,550 @@ mod tests {
                     assert_eq!(value, Bytes::from("data from peer 3"));
                 }
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_targeted() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(1);
+            let invalid_data = Bytes::from("invalid data");
+            let valid_data = Bytes::from("valid data");
+
+            // Peer 2 has invalid data, peer 3 has valid data
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), invalid_data.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_data.clone());
+
+            // Consumer expects only valid_data
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key.clone(), valid_data.clone());
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Start fetch with targets for both peer 2 (invalid data) and peer 3 (valid data)
+            // When peer 2 returns invalid data, only peer 2 should be removed from targets
+            // Peer 3 should still be tried as a target and succeed
+            mailbox1
+                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .await;
+
+            // Should eventually succeed from peer 3
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_data);
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Verify peer 2 was blocked (sent invalid data)
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
+
+            // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
+            let metrics = context.encode();
+            assert!(metrics.contains("_fetch_total{status=\"Success\"} 1"));
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_targeted_no_fallback() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+
+            let key = Key(1);
+
+            // Only peer 4 has the data, peers 2 and 3 don't
+            let mut prod4 = Producer::default();
+            prod4.insert(key.clone(), Bytes::from("data from peer 4"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox4 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod4,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Start fetch with targets for peers 2 and 3 (both don't have data)
+            // Peer 4 has data but is NOT a target - it should NEVER be tried
+            mailbox1
+                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .await;
+
+            // Wait enough time for targets to fail and retry multiple times
+            // The fetch should not succeed because peer 4 (which has data) is not targeted
+            select! {
+                event = cons_out1.next() => {
+                    panic!("Fetch should not succeed, but got: {event:?}");
+                },
+                _ = context.sleep(Duration::from_secs(3)) => {
+                    // Expected: no success event because peer 4 is not targeted
+                },
+            };
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_all_targeted() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let key3 = Key(3);
+
+            // Peer 2 has key1
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), Bytes::from("data for key 1"));
+
+            // Peer 3 has key3
+            let mut prod3 = Producer::default();
+            prod3.insert(key3.clone(), Bytes::from("data for key 3"));
+
+            // Peer 4 has key2
+            let mut prod4 = Producer::default();
+            prod4.insert(key2.clone(), Bytes::from("data for key 2"));
+
+            // Consumer expects all three keys
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key1.clone(), Bytes::from("data for key 1"));
+            cons1.add_expected(key2.clone(), Bytes::from("data for key 2"));
+            cons1.add_expected(key3.clone(), Bytes::from("data for key 3"));
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox4 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod4,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Fetch keys with mixed targeting:
+            // - key1 targeted to peer 2 (has data) -> should succeed from target
+            // - key2 targeted to peer 4 (has data) -> should succeed from target
+            // - key3 no targeting -> fetched from any peer (peer 3 has it)
+            mailbox1
+                .fetch_all_targeted(vec![
+                    (key1.clone(), vec![peers[1].clone()]), // peer 2 has key1
+                    (key2.clone(), vec![peers[3].clone()]), // peer 4 has key2
+                ])
+                .await;
+            mailbox1.fetch(key3.clone()).await; // no targeting for key3
+
+            // Collect all three events
+            let mut results = HashMap::new();
+            for _ in 0..3 {
+                let event = cons_out1.next().await.unwrap();
+                match event {
+                    Event::Success(key, value) => {
+                        results.insert(key, value);
+                    }
+                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
+                }
+            }
+
+            // Verify all keys received correct data
+            assert_eq!(results.len(), 3);
+            assert_eq!(results.get(&key1).unwrap(), &Bytes::from("data for key 1"));
+            assert_eq!(results.get(&key2).unwrap(), &Bytes::from("data for key 2"));
+            assert_eq!(results.get(&key3).unwrap(), &Bytes::from("data for key 3"));
+
+            // Verify metrics: 3 successful fetches
+            let metrics = context.encode();
+            assert!(metrics.contains("_fetch_total{status=\"Success\"} 3"));
+        });
+    }
+
+    /// Tests that calling fetch() on an in-progress targeted fetch clears the targets,
+    /// allowing the fetch to succeed from any available peer.
+    #[test_traced]
+    fn test_fetch_clears_targets() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(1);
+            let valid_data = Bytes::from("valid data");
+
+            // Peer 2 has no data, peer 3 has the data
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_data.clone());
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Start fetch with target for peer 2 only (who doesn't have data)
+            mailbox1
+                .fetch_targeted(key.clone(), vec![peers[1].clone()])
+                .await;
+
+            // Wait for the targeted fetch to fail a few times
+            context.sleep(Duration::from_millis(500)).await;
+
+            // Call fetch() which should clear the targets and allow fallback to any peer
+            mailbox1.fetch(key.clone()).await;
+
+            // Should now succeed from peer 3 (who has data but wasn't originally targeted)
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_data);
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_retain() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Retain before fetching should have no effect
+            mailbox1.retain(|_| true).await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            mailbox1.fetch(key.clone()).await;
+
+            // Retain with predicate that excludes the key
+            // This must clean up fetch timers entry for the key
+            let key_clone = key.clone();
+            mailbox1.retain(move |k| k != &key_clone).await;
+
+            // Consumer should receive failed event
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual) => {
+                    assert_eq!(key_actual, key);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been retained out"),
+            }
+
+            // Now add link so fetches can complete
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Fetch same key again, if fetch timers wasn't cleaned up, this would
+            // be treated as a duplicate and silently ignored
+            mailbox1.fetch(key.clone()).await;
+
+            // Should succeed
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 5"));
+                }
+                Event::Failed(_) => unreachable!(),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_clear() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            // No link yet - fetch will stay in-flight
+            let key = Key(6);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 6"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Clear before fetching should have no effect
+            mailbox1.clear().await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Start a fetch (no link, so fetch stays in-flight with timer in fetch timers)
+            mailbox1.fetch(key.clone()).await;
+
+            // Clear all fetches
+            mailbox1.clear().await;
+
+            // Consumer should receive failed event
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual) => {
+                    assert_eq!(key_actual, key);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been cleared"),
+            }
+
+            // Now add link so fetches can complete
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Fetch same key again, if fetch_timers wasn't cleaned up, this would
+            // be treated as a duplicate and silently ignored
+            mailbox1.fetch(key.clone()).await;
+
+            // Should succeed
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 6"));
+                }
+                Event::Failed(_) => unreachable!(),
             }
         });
     }

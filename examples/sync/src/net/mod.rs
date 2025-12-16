@@ -35,11 +35,11 @@ pub enum ErrorCode {
 impl Write for ErrorCode {
     fn write(&self, buf: &mut impl BufMut) {
         let discriminant = match self {
-            ErrorCode::InvalidRequest => 0u8,
-            ErrorCode::DatabaseError => 1u8,
-            ErrorCode::NetworkError => 2u8,
-            ErrorCode::Timeout => 3u8,
-            ErrorCode::InternalError => 4u8,
+            Self::InvalidRequest => 0u8,
+            Self::DatabaseError => 1u8,
+            Self::NetworkError => 2u8,
+            Self::Timeout => 3u8,
+            Self::InternalError => 4u8,
         };
         discriminant.write(buf);
     }
@@ -57,11 +57,11 @@ impl Read for ErrorCode {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let discriminant = u8::read(buf)?;
         match discriminant {
-            0 => Ok(ErrorCode::InvalidRequest),
-            1 => Ok(ErrorCode::DatabaseError),
-            2 => Ok(ErrorCode::NetworkError),
-            3 => Ok(ErrorCode::Timeout),
-            4 => Ok(ErrorCode::InternalError),
+            0 => Ok(Self::InvalidRequest),
+            1 => Ok(Self::DatabaseError),
+            2 => Ok(Self::NetworkError),
+            3 => Ok(Self::Timeout),
+            4 => Ok(Self::InternalError),
             _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
@@ -117,33 +117,29 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_storage::mmr::Location;
     use commonware_utils::NZU64;
+    use rstest::rstest;
 
-    #[test]
-    fn test_error_code_roundtrip_serialization() {
-        let test_cases = vec![
-            ErrorCode::InvalidRequest,
-            ErrorCode::DatabaseError,
-            ErrorCode::NetworkError,
-            ErrorCode::Timeout,
-            ErrorCode::InternalError,
-        ];
+    #[rstest]
+    #[case(ErrorCode::InvalidRequest)]
+    #[case(ErrorCode::DatabaseError)]
+    #[case(ErrorCode::NetworkError)]
+    #[case(ErrorCode::Timeout)]
+    #[case(ErrorCode::InternalError)]
+    fn test_error_code_roundtrip_serialization(#[case] error_code: ErrorCode) {
+        // Serialize
+        let encoded = error_code.encode().to_vec();
 
-        for error_code in test_cases {
-            // Serialize
-            let encoded = error_code.encode().to_vec();
+        // Deserialize
+        let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
 
-            // Deserialize
-            let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
-
-            // Verify they match
-            match (&error_code, &decoded) {
-                (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
-                (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
-                (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
-                (ErrorCode::Timeout, ErrorCode::Timeout) => {}
-                (ErrorCode::InternalError, ErrorCode::InternalError) => {}
-                _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
-            }
+        // Verify they match
+        match (&error_code, &decoded) {
+            (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
+            (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
+            (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+            (ErrorCode::Timeout, ErrorCode::Timeout) => {}
+            (ErrorCode::InternalError, ErrorCode::InternalError) => {}
+            _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
         }
     }
 

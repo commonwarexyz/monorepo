@@ -10,11 +10,25 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"
 documentation = "https://docs.rs/commonware-codec"
 
+[lints]
+workspace = true
+
 [features]
-default = ["std"]
-std = ["thiserror/std", "bytes/std"]
+default = [ "std" ]
+std = [ "bytes/std", "rand?/std", "rand_chacha?/std", "thiserror/std" ]
+arbitrary = [
+	"dep:arbitrary",
+	"dep:commonware-conformance",
+	"dep:rand",
+	"dep:rand_chacha",
+	"std",
+]
 
 [dependencies]
-thiserror = { workspace = true }
-bytes = { workspace = true }
-paste = { workspace = true }
+arbitrary = { workspace = true, optional = true }
+bytes.workspace = true
+commonware-conformance = { workspace = true, optional = true }
+paste.workspace = true
+rand = { workspace = true, optional = true }
+rand_chacha = { workspace = true, optional = true }
+thiserror.workspace = true

@@ -56,10 +56,10 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-use commonware_p2p::authenticated::discovery;
+use commonware_cryptography::{ed25519, Signer as _};
+use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
-use commonware_utils::NZU32;
+use commonware_utils::{ordered::Set, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -69,7 +69,7 @@ use std::{
 use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
 
 #[doc(hidden)]
 fn main() {
@@ -119,7 +119,6 @@ fn main() {
     info!(port, "loaded port");
 
     // Configure allowed peers
-    let mut recipients = Vec::new();
     let allowed_keys = matches
         .get_many::<u64>("friends")
         .expect("Please provide friends to chat with")
@@ -127,11 +126,15 @@ fn main() {
     if allowed_keys.len() == 0 {
         panic!("Please provide at least one friend");
     }
-    for peer in allowed_keys {
-        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
-        info!(key = ?verifier, "registered authorized key");
-        recipients.push(verifier);
-    }
+    let recipients: Set<_> = allowed_keys
+        .into_iter()
+        .map(|peer| {
+            let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
+            info!(key = ?verifier, "registered authorized key");
+            verifier
+        })
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -170,7 +173,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.register(0, recipients).await;
+        oracle.update(0, recipients).await;
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;

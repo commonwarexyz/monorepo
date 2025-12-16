@@ -85,7 +85,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut set = HashSet::with_capacity(len);
+        let mut set = Self::with_capacity(len);
 
         // Read items in ascending order
         read_ordered_set(buf, len, cfg, |item| set.insert(item), HASHSET_TYPE)?;
@@ -306,7 +306,7 @@ mod tests {
         2u8.write(&mut expected2); // Item 2
         5u8.write(&mut expected2); // Item 5
         assert_eq!(set2.encode(), expected2.freeze());
-        assert_eq!(set2.encode_size(), 1 + 3 * u8::SIZE);
+        assert_eq!(set2.encode_size(), 1 + 3);
 
         // Case 3: HashSet<Bytes>
         // HashSet sorts items for encoding: "apple", "banana", "cherry"
@@ -326,5 +326,15 @@ mod tests {
             + Bytes::from_static(b"banana").encode_size()
             + Bytes::from_static(b"cherry").encode_size();
         assert_eq!(set3.encode_size(), expected_size);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<HashSet<u32>>
+        }
     }
 }
