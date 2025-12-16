@@ -1,4 +1,3 @@
-use crate::qmdb::any::operation::update::Ordered as Update;
 use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::{
@@ -10,7 +9,7 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{CleanAny, DirtyAny, ValueEncoding},
+        any::{operation::update::Ordered as Update, CleanAny, DirtyAny, ValueEncoding},
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as _},
         store::{Batchable, LogStore},

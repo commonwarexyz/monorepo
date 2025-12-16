@@ -78,7 +78,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            any::unordered::{FixedOperation as Operation, Update},
+            any::unordered::{fixed::Operation, Update},
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
