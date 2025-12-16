@@ -397,16 +397,14 @@ impl<R, K: Space<R>> Space<R> for Poly<K> {
             .expect("at least 1 point");
 
         let mut row = Vec::with_capacity(cols);
-        let coeffs = (0..rows)
-            .map(|i| {
-                row.clear();
-                for p in polys {
-                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
-                }
-                K::msm(&row, scalars, concurrency)
-            })
-            .collect::<Vec<_>>();
-        Self { coeffs }
+        let coeffs = (0..rows).map(|i| {
+            row.clear();
+            for p in polys {
+                row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
+            }
+            K::msm(&row, scalars, concurrency)
+        });
+        Poly::from_iter_unchecked(coeffs)
     }
 }
 
