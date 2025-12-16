@@ -4,7 +4,7 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Round, View},
@@ -30,7 +30,7 @@ pub enum Mutation {
 }
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
+pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> {
     context: E,
     validator: PublicKey,
     scheme: S,
@@ -43,7 +43,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> {
     last_notarized: u64,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme> Disrupter<E, S>
+impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {

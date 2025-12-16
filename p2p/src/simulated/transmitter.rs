@@ -699,7 +699,7 @@ impl<P: PublicKey> State<P> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{ed25519, Signer as _};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CHANNEL: Channel = 0;

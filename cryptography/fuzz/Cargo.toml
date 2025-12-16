@@ -14,6 +14,7 @@ blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
+commonware-math.workspace = true
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }

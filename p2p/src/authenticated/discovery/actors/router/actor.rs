@@ -15,7 +15,8 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channels::ring, NZUsize};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -26,6 +27,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
+    open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -51,6 +53,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 context: ContextCell::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
+                open_subscriptions: Vec::new(),
                 messages_dropped,
             },
             control_sender.clone(),
@@ -117,10 +120,12 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         debug!(?peer, "peer ready");
                         self.connections.insert(peer, relay);
                         let _ = channels.send(routing.clone());
+                        self.notify_subscribers().await;
                     }
                     Message::Release { peer } => {
                         debug!(?peer, "peer released");
                         self.connections.remove(&peer);
+                        self.notify_subscribers().await;
                     }
                     Message::Content {
                         recipients,
@@ -170,8 +175,31 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         // Communicate success back to sender (if still alive)
                         let _ = success.send(sent);
                     }
+                    Message::SubscribePeers { response } => {
+                        let (mut sender, receiver) = ring::channel::<Vec<P>>(NZUsize!(1));
+
+                        // Send existing peers immediately
+                        let peers = self.connections.keys().cloned().collect();
+                        let _ = sender.send(peers).await;
+
+                        self.open_subscriptions.push(sender);
+                        let _ = response.send(receiver);
+                    }
                 }
             }
         }
+    }
+
+    /// Notifies all open peer subscriptions with the current list of connected peers.
+    async fn notify_subscribers(&mut self) {
+        let peers: Vec<P> = self.connections.keys().cloned().collect();
+        let mut keep = Vec::with_capacity(self.open_subscriptions.len());
+
+        for mut subscriber in self.open_subscriptions.drain(..) {
+            if subscriber.send(peers.clone()).await.is_ok() {
+                keep.push(subscriber);
+            }
+        }
+        self.open_subscriptions = keep;
     }
 }

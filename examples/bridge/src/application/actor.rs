@@ -13,10 +13,7 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{simplex::types::Activity, types::Epoch, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        poly,
-        variant::{MinSig, Variant},
-    },
+    bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
@@ -48,12 +45,12 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 context,
                 indexer: config.indexer,
                 namespace: config.namespace,
-                public: *poly::public::<MinSig>(&config.identity),
+                public: *config.identity.public(),
                 other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(config.participants, &config.identity, config.share)
+            Scheme::signer(config.participants, config.identity, config.share)
                 .expect("share must be in participants"),
             Mailbox::new(sender),
         )

@@ -2,7 +2,7 @@ use super::round::Round;
 use crate::{
     simplex::{
         interesting, min_active,
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,
@@ -11,7 +11,7 @@ use crate::{
     types::{Epoch, Round as Rnd, View, ViewDelta},
     Viewable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{CryptoRng, Rng};
@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 const GENESIS_VIEW: View = View::zero();
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: Scheme> {
+pub struct Config<S: certificate::Scheme> {
     pub scheme: S,
     pub namespace: Vec<u8>,
     pub epoch: Epoch,
@@ -41,7 +41,7 @@ pub struct Config<S: Scheme> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> {
     context: E,
     scheme: S,
     namespace: Vec<u8>,
@@ -60,7 +60,7 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, D> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
@@ -533,10 +533,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 mod tests {
     use super::*;
     use crate::simplex::{
-        mocks::fixtures::{ed25519, Fixture},
+        scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_runtime::{deterministic, Runner};
     use std::time::Duration;
 
@@ -550,7 +550,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let mut state: State<_, _, Sha256Digest> = State::new(
                 context,
@@ -633,7 +633,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
@@ -717,7 +717,7 @@ mod tests {
     fn timeout_helpers_reuse_and_reset_deadlines() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[0].clone(); // leader of view 1
             let retry = Duration::from_secs(3);
@@ -777,7 +777,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 namespace: namespace.clone(),
@@ -831,7 +831,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
@@ -884,7 +884,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
@@ -930,7 +930,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
@@ -978,7 +978,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 namespace: namespace.clone(),
@@ -1021,7 +1021,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519(&mut context, 4);
+            } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
             let mut scheme_iter = schemes.into_iter();
             let local_scheme = scheme_iter.next().unwrap();
@@ -1091,7 +1091,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 namespace,

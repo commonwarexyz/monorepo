@@ -121,6 +121,20 @@ impl<H: Hasher> PartialEq for Chunk<H> {
 
 impl<H: Hasher> Eq for Chunk<H> {}
 
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Chunk<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            shard: u.arbitrary()?,
+            index: u.arbitrary()?,
+            proof: u.arbitrary()?,
+        })
+    }
+}
+
 /// Prepare data for encoding.
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     // Compute shard length
@@ -859,5 +873,15 @@ mod tests {
             CONCURRENCY,
         )
         .is_err())
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Chunk<Sha256>>,
+        }
     }
 }

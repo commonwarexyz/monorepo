@@ -13,7 +13,7 @@ use commonware_collector::{
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, PrivateKeyExt, Sha256, Signer,
+    Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{deterministic, Clock, Runner};

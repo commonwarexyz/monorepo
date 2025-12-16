@@ -13,17 +13,17 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
 //! use commonware_utils::NZU32;
 //! use rand::rngs::OsRng;
 //!
-//! // Configure threshold
-//! let (n, t) = (5, 4);
+//! // Configure number of players
+//! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, NZU32!(n));
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
@@ -32,20 +32,20 @@
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify_message::<MinSig>(&commitment, namespace, message, p).expect("signature should be valid");
+//!     partial_verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
+//! let threshold_sig = threshold_signature_recover::<MinSig, _>(&sharing, &partials).unwrap();
 //!
 //! // Verify threshold signature
-//! let threshold_pub = public::<MinSig>(&commitment);
-//! verify_message::<MinSig>(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
+//! let threshold_pub = sharing.public();
+//! verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;
 pub mod ops;
-pub mod poly;
+pub mod sharing;
 pub mod variant;
 
 use thiserror::Error;

@@ -56,7 +56,7 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::{ordered::Set, TryCollect, NZU32};
@@ -69,7 +69,7 @@ use std::{
 use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
 
 #[doc(hidden)]
 fn main() {

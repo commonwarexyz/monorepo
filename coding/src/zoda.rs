@@ -113,16 +113,16 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
-use crate::{
-    field::F,
-    poly::{EvaluationVector, Matrix},
-    Config, Scheme, ValidatingScheme,
-};
+use crate::{Config, Scheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
+};
+use commonware_math::{
+    fields::goldilocks::F,
+    ntt::{EvaluationVector, Matrix},
 };
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
@@ -182,9 +182,18 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
+fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
+    let mut h = H::new();
+    for x in row {
+        h.update(&x.to_le_bytes());
+    }
+    h.finalize()
+}
+
 mod topology {
     use super::Error;
-    use crate::{field::F, Config};
+    use crate::Config;
+    use commonware_math::fields::goldilocks::F;
     use commonware_utils::BigRationalExt as _;
     use num_rational::BigRational;
 
@@ -375,6 +384,22 @@ impl<H: Hasher> Read for Shard<H> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Shard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            data_bytes: u.arbitrary::<u32>()? as usize,
+            root: u.arbitrary()?,
+            inclusion_proof: u.arbitrary()?,
+            rows: u.arbitrary()?,
+            checksum: Arc::new(u.arbitrary()?),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
     inclusion_proof: Proof<H::Digest>,
@@ -413,8 +438,22 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
+            // TODO (#2506): use correct bounds on inclusion proof size
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for ReShard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            inclusion_proof: u.arbitrary()?,
+            shard: u.arbitrary()?,
         })
     }
 }
@@ -514,7 +553,7 @@ impl<H: Hasher> CheckingData<H> {
             these_shuffled_indices
                 .iter()
                 .zip(reshard.shard.iter())
-                .map(|(&i, row)| (F::slice_digest::<H>(row), i))
+                .map(|(&i, row)| (row_digest::<H>(row), i))
                 .collect::<Vec<_>>()
         };
         if !reshard.inclusion_proof.verify_multi_inclusion(
@@ -554,6 +593,7 @@ pub enum Error {
     FailedToCreateInclusionProof(MmrError),
 }
 
+// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
 const NAMESPACE: &[u8] = b"commonware-zoda";
 
 #[derive(Clone, Copy)]
@@ -612,7 +652,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             let row_hashes = pool.install(|| {
                 (0..encoded_data.rows())
                     .into_par_iter()
-                    .map(|i| F::slice_digest::<H>(&encoded_data[i]))
+                    .map(|i| row_digest::<H>(&encoded_data[i]))
                     .collect::<Vec<_>>()
             });
             for hash in &row_hashes {
@@ -620,7 +660,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             }
         } else {
             for row in encoded_data.iter() {
-                mmr.add(&mut hasher, &F::slice_digest::<H>(row));
+                mmr.add(&mut hasher, &row_digest::<H>(row));
             }
         }
         let mmr = mmr.merkleize(&mut hasher, None);
@@ -830,6 +870,17 @@ mod tests {
                 assert!(actual < expected);
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Shard<Sha256>>,
+            CodecConformance<ReShard<Sha256>>,
         }
     }
 }

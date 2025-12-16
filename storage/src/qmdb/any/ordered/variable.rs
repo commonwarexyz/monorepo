@@ -5,6 +5,7 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::ordered::fixed]
 //! instead for better performance._
 
+use super::operation::VariableOperation as Operation;
 use crate::{
     index::ordered::Index,
     journal::{
@@ -13,14 +14,8 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{
-            ordered::{IndexedLog, Operation as OperationTrait},
-            VariableConfig,
-        },
-        operation::{
-            variable::{ordered::Operation, Value},
-            Committable as _, KeyData,
-        },
+        any::{ordered::IndexedLog, VariableConfig, VariableValue},
+        operation::Committable as _,
         Error,
     },
     translator::Translator,
@@ -29,31 +24,14 @@ use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-
-impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
-    fn new_update(key: K, value: V, next_key: K) -> Self {
-        Self::Update(KeyData {
-            key,
-            value,
-            next_key,
-        })
-    }
-
-    fn new_delete(key: K) -> Self {
-        Self::Delete(key)
-    }
-
-    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
-        Self::CommitFloor(metadata, location)
-    }
-}
+use tracing::warn;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
@@ -80,13 +58,19 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
             Operation::is_commit,
         )
         .await?;
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .await?;
+            log.sync().await?;
+        }
 
         let index = Index::new(context.with_label("index"), cfg.translator);
         let log = Self::init_from_log(index, log, None, |_, _| {}).await?;

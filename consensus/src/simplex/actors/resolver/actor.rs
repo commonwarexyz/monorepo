@@ -5,7 +5,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{resolver::state::State, voter},
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::Certificate,
     },
     types::{Epoch, View},
@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::{requester, StaticManager},
@@ -31,9 +31,8 @@ use tracing::debug;
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
 > {
     context: ContextCell<E>,
@@ -53,11 +52,10 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-    > Actor<E, P, S, B, D>
+    > Actor<E, S, B, D>
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -84,8 +82,8 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = P>,
-        receiver: impl Receiver<PublicKey = P>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
@@ -93,8 +91,8 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = P>,
-        receiver: impl Receiver<PublicKey = P>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         let participants = self.scheme.participants().clone();
         let me = self
@@ -226,7 +224,7 @@ impl<
         &mut self,
         message: Message,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, P>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
             Message::Deliver {

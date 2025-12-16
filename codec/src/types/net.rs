@@ -323,13 +323,14 @@ mod test {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::conformance::CodecConformance;
 
-        crate::conformance_tests! {
-            Ipv4Addr,
-            Ipv6Addr,
-            SocketAddrV4,
-            SocketAddrV6,
-            SocketAddr,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Ipv4Addr>,
+            CodecConformance<Ipv6Addr>,
+            CodecConformance<SocketAddrV4>,
+            CodecConformance<SocketAddrV6>,
+            CodecConformance<SocketAddr>,
         }
     }
 }

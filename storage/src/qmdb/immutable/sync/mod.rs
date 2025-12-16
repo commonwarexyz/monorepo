@@ -2,8 +2,8 @@ use crate::{
     journal::contiguous::variable,
     mmr::Location,
     qmdb::{
-        immutable,
-        operation::variable::{immutable::Operation, Value},
+        any::VariableValue,
+        immutable::{self, Operation},
         sync, Error,
     },
     translator::Translator,
@@ -17,7 +17,7 @@ impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     H: Hasher,
     T: Translator,
 {
@@ -123,7 +123,7 @@ pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
     K: Array,
-    V: Value,
+    V: VariableValue,
     T: Translator,
     D: commonware_cryptography::Digest,
 {
@@ -155,7 +155,7 @@ mod tests {
         mmr::Location,
         qmdb::{
             immutable,
-            operation::variable::immutable::Operation,
+            immutable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -164,8 +164,9 @@ mod tests {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256, Digest, Sha256};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
@@ -263,7 +264,7 @@ mod tests {
             let metadata = Some(Sha256::fill(1));
             target_db.commit(metadata).await.unwrap();
             let target_op_count = target_db.op_count();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
+            let target_oldest_retained_loc = target_db.oldest_retained_loc();
             let target_root = target_db.root();
 
             // Capture target database state before moving into config
@@ -294,10 +295,7 @@ mod tests {
 
             // Verify database state
             assert_eq!(got_db.op_count(), target_op_count);
-            assert_eq!(
-                got_db.oldest_retained_loc().unwrap(),
-                target_oldest_retained_loc
-            );
+            assert_eq!(got_db.oldest_retained_loc(), target_oldest_retained_loc);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(), target_root);
@@ -356,7 +354,7 @@ mod tests {
             target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
 
             let target_op_count = target_db.op_count();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
+            let target_oldest_retained_loc = target_db.oldest_retained_loc();
             let target_root = target_db.root();
 
             let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
@@ -378,10 +376,7 @@ mod tests {
 
             // Verify database state
             assert_eq!(got_db.op_count(), target_op_count);
-            assert_eq!(
-                got_db.oldest_retained_loc().unwrap(),
-                target_oldest_retained_loc
-            );
+            assert_eq!(got_db.oldest_retained_loc(), target_oldest_retained_loc);
             assert_eq!(got_db.root(), target_root);
             assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
@@ -407,7 +402,7 @@ mod tests {
 
             // Capture target state
             let target_root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc().unwrap();
+            let lower_bound = target_db.oldest_retained_loc();
             let op_count = target_db.op_count();
 
             // Perform sync
@@ -435,7 +430,7 @@ mod tests {
             // Save state before closing
             let expected_root = synced_db.root();
             let expected_op_count = synced_db.op_count();
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc().unwrap();
+            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
 
             // Close and reopen the database to test persistence
             synced_db.close().await.unwrap();
@@ -447,7 +442,7 @@ mod tests {
             assert_eq!(reopened_db.root(), expected_root);
             assert_eq!(reopened_db.op_count(), expected_op_count);
             assert_eq!(
-                reopened_db.oldest_retained_loc().unwrap(),
+                reopened_db.oldest_retained_loc(),
                 expected_oldest_retained_loc
             );
 
@@ -480,7 +475,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture the state after first commit
-            let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
@@ -614,7 +609,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             let target_root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc().unwrap();
+            let lower_bound = target_db.oldest_retained_loc();
             let op_count = target_db.op_count();
 
             // Add final op after capturing the range
@@ -679,7 +674,7 @@ mod tests {
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit(None).await.unwrap();
             let root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc().unwrap();
+            let lower_bound = target_db.oldest_retained_loc();
             let upper_bound = target_db.op_count(); // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
@@ -737,7 +732,7 @@ mod tests {
 
             // Prepare target
             let root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc().unwrap();
+            let lower_bound = target_db.oldest_retained_loc();
             let upper_bound = target_db.op_count();
 
             // Sync should complete immediately without fetching
@@ -782,7 +777,7 @@ mod tests {
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
@@ -840,7 +835,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
@@ -898,7 +893,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
@@ -911,7 +906,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture final target state
-            let final_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let final_lower_bound = target_db.oldest_retained_loc();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root();
 
@@ -951,13 +946,14 @@ mod tests {
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc(), final_lower_bound);
 
             synced_db.destroy().await.unwrap();
-            let target_db =
-                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -973,7 +969,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
@@ -1029,7 +1025,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture target state
-            let lower_bound = target_db.oldest_retained_loc().unwrap();
+            let lower_bound = target_db.oldest_retained_loc();
             let upper_bound = target_db.op_count();
             let root = target_db.root();
 
@@ -1064,7 +1060,7 @@ mod tests {
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), root);
             assert_eq!(synced_db.op_count(), upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc(), lower_bound);
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)

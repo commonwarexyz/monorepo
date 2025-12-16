@@ -1,12 +1,10 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Finalization, Notarization},
-    },
+    simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
     Block,
 };
 use commonware_codec::Codec;
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
@@ -351,7 +349,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
             .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
-            let Cache::<R, B, S> {
+            let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,

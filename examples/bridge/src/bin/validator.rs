@@ -2,7 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
-use commonware_codec::{Decode, DecodeExt, RangeCfg};
+use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{self, Engine},
     types::{Epoch, ViewDelta},
@@ -10,19 +10,15 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        poly::{Poly, Public},
+        sharing::Sharing,
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{
-    from_hex,
-    ordered::{Quorum, Set},
-    union, NZUsize, TryCollect, NZU32,
-};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -118,13 +114,12 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = validators.quorum();
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
+    let identity: Sharing<MinSig> =
+        Sharing::decode_cfg(identity.as_ref(), &NZU32!(validators.len() as u32))
             .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")

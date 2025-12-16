@@ -306,7 +306,7 @@ mod tests {
         2u8.write(&mut expected2); // Item 2
         5u8.write(&mut expected2); // Item 5
         assert_eq!(set2.encode(), expected2.freeze());
-        assert_eq!(set2.encode_size(), 1 + 3 * u8::SIZE);
+        assert_eq!(set2.encode_size(), 1 + 3);
 
         // Case 3: HashSet<Bytes>
         // HashSet sorts items for encoding: "apple", "banana", "cherry"
@@ -331,9 +331,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::conformance::CodecConformance;
 
-        crate::conformance_tests! {
-            HashSet<u32>
+        commonware_conformance::conformance_tests! {
+            CodecConformance<HashSet<u32>>
         }
     }
 }

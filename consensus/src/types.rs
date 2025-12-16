@@ -748,11 +748,12 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Epoch,
-            View,
-            Round
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Epoch>,
+            CodecConformance<View>,
+            CodecConformance<Round>,
         }
     }
 }

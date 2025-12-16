@@ -3,14 +3,16 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{
-        Element, Point, Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH,
-    },
+    group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
     ops::*,
-    poly::{Eval, Poly},
     variant::{MinPk, MinSig, Variant},
 };
+use commonware_math::{
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
+    poly::Poly,
+};
 use libfuzzer_sys::fuzz_target;
+use rand::{rngs::StdRng, SeedableRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -26,10 +28,6 @@ enum FuzzOperation {
     ScalarInverse {
         scalar: Scalar,
     },
-    ScalarSetFromIndex {
-        value: u32,
-    },
-
     // Point operations (G1)
     G1Arithmetic {
         a: G1,
@@ -169,17 +167,6 @@ enum FuzzOperation {
     },
 
     // Polynomial operations
-    PolyNew {
-        degree: u32,
-    },
-    PolyEvaluate {
-        poly: Poly<Scalar>,
-        index: u32,
-    },
-    PolyRecover {
-        threshold: u32,
-        evals: Vec<Eval<Scalar>>,
-    },
     PolyAdd {
         a: Poly<Scalar>,
         b: Poly<Scalar>,
@@ -187,11 +174,6 @@ enum FuzzOperation {
     PolyCommit {
         scalar_poly: Poly<Scalar>,
         use_g1: bool,
-    },
-    PolyGetSet {
-        poly: Poly<Scalar>,
-        index: u32,
-        value: Scalar,
     },
 
     // Simple aggregate operations
@@ -225,7 +207,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=47)?;
+        let choice = u.int_in_range(0..=42)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -363,56 +345,37 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 message: arbitrary_bytes(u, 0, 100)?,
                 use_minpk: u.arbitrary()?,
             }),
-            33 => Ok(FuzzOperation::PolyNew {
-                degree: u.int_in_range(0..=20)?,
-            }),
-            34 => Ok(FuzzOperation::PolyEvaluate {
-                poly: arbitrary_poly_scalar(u)?,
-                index: u.arbitrary()?,
-            }),
-            35 => Ok(FuzzOperation::PolyRecover {
-                threshold: u.int_in_range(1..=10)?,
-                evals: arbitrary_vec_eval_scalar(u, 0, 20)?,
-            }),
-            36 => Ok(FuzzOperation::PolyAdd {
+            33 => Ok(FuzzOperation::PolyAdd {
                 a: arbitrary_poly_scalar(u)?,
                 b: arbitrary_poly_scalar(u)?,
             }),
-            37 => Ok(FuzzOperation::PolyCommit {
+            34 => Ok(FuzzOperation::PolyCommit {
                 scalar_poly: arbitrary_poly_scalar(u)?,
                 use_g1: u.arbitrary()?,
             }),
-            38 => Ok(FuzzOperation::PolyGetSet {
-                poly: arbitrary_poly_scalar(u)?,
-                index: u.int_in_range(0..=20)?,
-                value: arbitrary_scalar(u)?,
-            }),
-            39 => Ok(FuzzOperation::AggregatePublicKeysG1 {
+            35 => Ok(FuzzOperation::AggregatePublicKeysG1 {
                 keys: arbitrary_vec_g1(u, 0, 10)?,
             }),
-            40 => Ok(FuzzOperation::AggregatePublicKeysG2 {
+            36 => Ok(FuzzOperation::AggregatePublicKeysG2 {
                 keys: arbitrary_vec_g2(u, 0, 10)?,
             }),
-            41 => Ok(FuzzOperation::AggregateSignaturesG1 {
+            37 => Ok(FuzzOperation::AggregateSignaturesG1 {
                 sigs: arbitrary_vec_g1(u, 0, 10)?,
             }),
-            42 => Ok(FuzzOperation::AggregateSignaturesG2 {
+            38 => Ok(FuzzOperation::AggregateSignaturesG2 {
                 sigs: arbitrary_vec_g2(u, 0, 10)?,
             }),
-            43 => Ok(FuzzOperation::SerializeScalar {
+            39 => Ok(FuzzOperation::SerializeScalar {
                 scalar: arbitrary_scalar(u)?,
             }),
-            44 => Ok(FuzzOperation::SerializeG1 {
+            40 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
             }),
-            45 => Ok(FuzzOperation::SerializeG2 {
+            41 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
             }),
-            46 => Ok(FuzzOperation::SerializeShare {
+            42 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
-            }),
-            47 => Ok(FuzzOperation::ScalarSetFromIndex {
-                value: u.arbitrary()?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
@@ -420,16 +383,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    let bytes: [u8; PRIVATE_KEY_LENGTH] = u.arbitrary()?;
-    let scalar = Scalar::zero();
-
-    match Scalar::read(&mut bytes.as_slice()) {
-        Ok(s) => Ok(s),
-        Err(_) => {
-            Scalar::from_index(u.int_in_range(0..=u32::MAX)?);
-            Ok(scalar)
-        }
-    }
+    u.arbitrary()
 }
 
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -441,7 +395,7 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
             if u.arbitrary()? {
                 Ok(G1::zero())
             } else {
-                Ok(G1::one())
+                Ok(G1::generator())
             }
         }
     }
@@ -456,7 +410,7 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
             if u.arbitrary()? {
                 Ok(G2::zero())
             } else {
-                Ok(G2::one())
+                Ok(G2::generator())
             }
         }
     }
@@ -471,8 +425,10 @@ fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
 
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
-    let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
+    let seed: [u8; 32] = u.arbitrary()?;
+    let constant = arbitrary_scalar(u)?;
+    let mut rng = StdRng::from_seed(seed);
+    Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
 
 fn arbitrary_vec_scalar(
@@ -502,22 +458,6 @@ fn arbitrary_vec_g2(
     (0..len).map(|_| arbitrary_g2(u)).collect()
 }
 
-fn arbitrary_vec_eval_scalar(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Eval<Scalar>>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| {
-            Ok(Eval {
-                index: u.int_in_range(1..=100)?,
-                value: arbitrary_scalar(u)?,
-            })
-        })
-        .collect()
-}
-
 fn arbitrary_bytes(
     u: &mut Unstructured,
     min: usize,
@@ -531,64 +471,59 @@ fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::ScalarArithmetic { mut a, b } => {
             let mut a_clone = a.clone();
-            a.add(&b);
-            a_clone.mul(&b);
+            a += &b;
+            a_clone *= &b;
         }
 
         FuzzOperation::ScalarSubtraction { mut a, b } => {
-            a.sub(&b);
+            a -= &b;
         }
 
         FuzzOperation::ScalarInverse { scalar } => {
-            if let Some(inv) = scalar.inverse() {
-                let mut check = scalar.clone();
-                check.mul(&inv);
-                assert_eq!(check, Scalar::one());
+            let inv = scalar.inv();
+            if scalar == Scalar::zero() {
+                assert_eq!(inv, Scalar::zero());
+            } else {
+                assert_eq!(scalar * &inv, Scalar::one());
             }
         }
 
-        FuzzOperation::ScalarSetFromIndex { value } => {
-            Scalar::from_index(value);
-        }
-
         FuzzOperation::G1Arithmetic { mut a, b } => {
-            a.add(&b);
+            a += &b;
         }
 
         FuzzOperation::G1ScalarMul { mut point, scalar } => {
-            point.mul(&scalar);
+            point *= &scalar;
         }
 
         FuzzOperation::G1Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G1::msm(&points[..len], &scalars[..len]);
+                let _ = G1::msm(&points[..len], &scalars[..len], 1);
             }
         }
 
         FuzzOperation::G1HashToPoint { message } => {
-            let mut point = G1::zero();
-            point.map(G1_MESSAGE, &message);
+            let _ = G1::hash_to_group(G1_MESSAGE, &message);
         }
 
         FuzzOperation::G2Arithmetic { mut a, b } => {
-            a.add(&b);
+            a += &b;
         }
 
         FuzzOperation::G2ScalarMul { mut point, scalar } => {
-            point.mul(&scalar);
+            point *= &scalar;
         }
 
         FuzzOperation::G2Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G2::msm(&points[..len], &scalars[..len]);
+                let _ = G2::msm(&points[..len], &scalars[..len], 1);
             }
         }
 
         FuzzOperation::G2HashToPoint { message } => {
-            let mut point = G2::zero();
-            point.map(G2_MESSAGE, &message);
+            let _ = G2::hash_to_group(G2_MESSAGE, &message);
         }
 
         FuzzOperation::KeypairGeneration => {
@@ -758,24 +693,8 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PolyNew { degree } => {
-            // Skip random polynomial generation that requires RNG
-            let coeffs = vec![Scalar::zero(); (degree + 1) as usize];
-            let _ = Poly::from(coeffs);
-        }
-
-        FuzzOperation::PolyEvaluate { poly, index } => {
-            let _ = poly.evaluate(index);
-        }
-
-        FuzzOperation::PolyRecover { threshold, evals } => {
-            let _ = Poly::<Scalar>::recover(threshold, &evals);
-        }
-
-        FuzzOperation::PolyAdd { mut a, b } => {
-            if a.degree() == b.degree() {
-                a.add(&b);
-            }
+        FuzzOperation::PolyAdd { a, b } => {
+            let _ = a + &b;
         }
 
         FuzzOperation::PolyCommit {
@@ -786,17 +705,6 @@ fn fuzz(op: FuzzOperation) {
                 let _ = Poly::<G1>::commit(scalar_poly);
             } else {
                 let _ = Poly::<G2>::commit(scalar_poly);
-            }
-        }
-
-        FuzzOperation::PolyGetSet {
-            mut poly,
-            index,
-            value,
-        } => {
-            if index <= poly.degree() {
-                let _ = poly.get(index);
-                poly.set(index, value);
             }
         }
 
@@ -844,8 +752,7 @@ fn fuzz(op: FuzzOperation) {
             let mut encoded = Vec::new();
             share.write(&mut encoded);
             if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
-                assert_eq!(share.index, decoded.index);
-                assert_eq!(share.private, decoded.private);
+                assert_eq!(share, decoded);
             }
         }
     }

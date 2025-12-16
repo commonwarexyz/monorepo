@@ -1,12 +1,9 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Certificate, Nullification},
-    },
+    simplex::types::{Certificate, Nullification},
     types::View,
     Viewable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
 use std::collections::BTreeMap;
@@ -152,15 +149,14 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{ed25519 as build_fixture, Fixture},
-            signing_scheme::ed25519 as ed_scheme,
+            scheme::ed25519,
             types::{
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_macros::test_async;
     use rand::{rngs::StdRng, SeedableRng};
     use std::{
@@ -171,7 +167,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
 
-    type TestScheme = ed_scheme::Scheme;
+    type TestScheme = ed25519::Scheme;
 
     #[derive(Clone, Default)]
     struct MockResolver {
@@ -222,7 +218,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = build_fixture(&mut rng, 5);
+        } = ed25519::fixture(&mut rng, 5);
         (schemes, verifier)
     }
 
