@@ -8,7 +8,7 @@ hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
 
 ["commonware_math::poly::test::conformance::CodecConformance<Poly<F>>"]
 n_cases = 65536
-hash = "f727e3c0e5c29828d9821a08f6eba25c1aa2aad0604eddeaa2508d4192925236"
+hash = "d1165e4ea7dcced78dfd3f9dec2351eac667b8d3925770c3ae6c390330a96e8c"
 
 ["commonware_math::test::test::conformance::CodecConformance<F>"]
 n_cases = 65536
