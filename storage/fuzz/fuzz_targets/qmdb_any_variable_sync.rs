@@ -6,7 +6,9 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location, MAX_LOCATION},
     qmdb::{
-        any::VariableConfig as Config, store::CleanStore as _, verify_proof, VariableUnordered,
+        any::{unordered::Variable as VariableUnordered, VariableConfig as Config},
+        store::CleanStore as _,
+        verify_proof,
     },
     translator::TwoCap,
 };

@@ -7,9 +7,11 @@ use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        any::{FixedEncoding, UnorderedUpdate},
+        any::{
+            unordered::Fixed as FixedUnordered, FixedConfig as Config, FixedEncoding,
+            UnorderedOperation, UnorderedUpdate,
+        },
         store::CleanStore,
-        FixedConfig as Config, FixedUnordered, UnorderedOperation,
     },
 };
 use commonware_utils::{NZUsize, NZU64};

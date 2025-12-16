@@ -39,11 +39,7 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 
-pub use any::{
-    ordered::{Fixed as FixedOrdered, Variable as VariableOrdered},
-    unordered::{Fixed as FixedUnordered, Variable as VariableUnordered},
-    FixedConfig, OrderedOperation, UnorderedOperation, VariableConfig,
-};
+pub use any::{FixedConfig, OrderedOperation, UnorderedOperation, VariableConfig};
 pub use verify::{
     create_multi_proof, create_proof, create_proof_store, create_proof_store_from_digests,
     digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,

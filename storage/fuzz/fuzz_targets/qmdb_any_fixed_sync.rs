@@ -5,8 +5,9 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
-        any::FixedEncoding, store::CleanStore as _, sync, FixedConfig as Config, FixedUnordered,
-        UnorderedOperation,
+        any::{unordered::Fixed as FixedUnordered, FixedEncoding, UnorderedOperation},
+        store::CleanStore as _,
+        sync, FixedConfig as Config,
     },
     translator::TwoCap,
 };

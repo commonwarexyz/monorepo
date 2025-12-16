@@ -4,8 +4,7 @@ use crate::{
     mmr::{mem::Clean, Location, Position, StandardHasher},
     qmdb::{
         self,
-        any::{FixedEncoding, FixedValue, UnorderedOperation},
-        FixedUnordered,
+        any::{unordered::Fixed as FixedUnordered, FixedEncoding, FixedValue, UnorderedOperation},
     },
     translator::Translator,
 };
