@@ -1,3 +1,4 @@
+use crate::qmdb::any::operation::update::Ordered as Update;
 use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::{
@@ -32,7 +33,7 @@ use tracing::debug;
 pub mod fixed;
 pub mod variable;
 
-pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+pub use crate::qmdb::any::operation::Ordered as Operation;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 

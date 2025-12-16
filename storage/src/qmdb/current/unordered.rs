@@ -2,6 +2,7 @@
 //! keys, and hence does not support exclusion proofs. Use the [super::ordered] variant if exclusion
 //! proofs are required.
 
+use crate::qmdb::any::unordered::Update;
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
     mmr::{
@@ -10,7 +11,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation as Operation, Update},
+            unordered::fixed::{Any, Operation},
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},

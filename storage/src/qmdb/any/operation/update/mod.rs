@@ -23,8 +23,8 @@ pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
 
 #[cfg(test)]
 mod tests {
+    use super::ordered::Update as OrderedUpdate;
     use crate::qmdb::any::{
-        ordered::Update as OrderedUpdate,
         unordered::Update as UnorderedUpdate,
         value::{FixedEncoding, VariableEncoding},
     };

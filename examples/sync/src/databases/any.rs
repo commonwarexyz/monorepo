@@ -8,7 +8,10 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation, Update},
+            unordered::{
+                fixed::{Any, Operation as FixedOperation},
+                Update,
+            },
             FixedConfig as Config,
         },
         store::CleanStore,
