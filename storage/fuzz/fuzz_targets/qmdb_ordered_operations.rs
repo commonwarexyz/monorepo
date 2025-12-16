@@ -10,7 +10,8 @@ use commonware_runtime::{
 use commonware_storage::{
     mmr::{Location, Position, Proof, StandardHasher as Standard},
     qmdb::{
-        any::ordered::Fixed as FixedOrdered, any::FixedConfig as Config, store::CleanStore as _,
+        any::{ordered::Fixed as FixedOrdered, FixedConfig as Config},
+        store::CleanStore as _,
         verify_proof,
     },
     translator::EightCap,

@@ -71,7 +71,17 @@ where
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::*;
+    // Import generic test functions from parent test module
+    use super::{
+        super::test::{
+            test_any_db_build_and_authenticate, test_any_db_empty, test_any_db_empty_recovery,
+            test_any_db_historical_proof_basic,
+            test_any_db_historical_proof_different_historical_sizes,
+            test_any_db_historical_proof_edge_cases, test_any_db_historical_proof_invalid,
+            test_any_db_multiple_commits_delete_replayed, test_any_db_non_empty_recovery,
+        },
+        *,
+    };
     use crate::{
         index::{unordered::Index, Unordered as _},
         mmr::Location,
@@ -91,12 +101,6 @@ pub(crate) mod test {
     };
     use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-
-    // Import generic test functions from parent test module
-    use super::super::test::{
-        test_any_db_build_and_authenticate, test_any_db_empty, test_any_db_empty_recovery,
-        test_any_db_multiple_commits_delete_replayed, test_any_db_non_empty_recovery,
-    };
 
     /// A type alias for the concrete database type used in these unit tests.
     type FixedDb = Db<
@@ -333,5 +337,79 @@ pub(crate) mod test {
     #[test_traced("DEBUG")]
     fn test_any_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_fixed_db_test(ctx).await });
+    }
+
+    /// Helper to apply random operations to a database.
+    async fn apply_fixed_test_ops(db: &mut FixedDbTest, n: usize) {
+        let ops = create_fixed_test_ops(n);
+        for op in ops {
+            match op {
+                FixedOperation::Update(UnorderedUpdate(key, value)) => {
+                    db.update(key, value).await.unwrap();
+                }
+                FixedOperation::Delete(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                FixedOperation::CommitFloor(metadata, _) => {
+                    db.commit(metadata).await.unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_any_fixed_db_historical_proof_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_fixed_db_test(context.clone()).await;
+            test_any_db_historical_proof_basic(context, db, |db, n| {
+                Box::pin(async move { apply_fixed_test_ops(db, n).await })
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_db_historical_proof_edge_cases() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_fixed_db_test(context.clone()).await;
+            test_any_db_historical_proof_edge_cases(
+                context.clone(),
+                db,
+                |db, n| Box::pin(async move { apply_fixed_test_ops(db, n).await }),
+                |ctx| Box::pin(create_fixed_db_test(ctx)),
+                create_fixed_test_ops,
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_db_historical_proof_different_historical_sizes() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_fixed_db_test(context.clone()).await;
+            test_any_db_historical_proof_different_historical_sizes(
+                context.clone(),
+                db,
+                |db, n| Box::pin(async move { apply_fixed_test_ops(db, n).await }),
+                |ctx| Box::pin(create_fixed_db_test(ctx)),
+                create_fixed_test_ops,
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_db_historical_proof_invalid() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_fixed_db_test(context.clone()).await;
+            test_any_db_historical_proof_invalid(context, db, |db, n| {
+                Box::pin(async move { apply_fixed_test_ops(db, n).await })
+            })
+            .await;
+        });
     }
 }

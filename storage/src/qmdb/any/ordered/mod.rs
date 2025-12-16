@@ -1112,15 +1112,17 @@ pub(crate) fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bo
 pub(super) mod test {
     use super::*;
     use crate::{
-        mmr::Location,
+        mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::CleanAny,
             store::{DirtyStore as _, LogStore as _},
+            verify_proof,
         },
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_codec::Encode;
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::deterministic::Context;
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, NZU64};
     use core::{future::Future, pin::Pin};
 
     pub(crate) async fn test_ordered_any_db_empty<D>(
@@ -1281,6 +1283,564 @@ pub(super) mod test {
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.root(), root);
 
+        db.destroy().await.unwrap();
+    }
+
+    /// Test recovery on non-empty db.
+    pub(crate) async fn test_ordered_any_db_non_empty_recovery<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
+        V: Clone,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        let mut db = db.into_dirty();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.update(k, v).await.unwrap();
+        }
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
+        let root = db.root();
+        let op_count = db.op_count();
+        let inactivity_floor_loc = db.inactivity_floor_loc();
+
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.update(k, v).await.unwrap();
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_eq!(db.root(), root);
+
+        let mut dirty = db.into_dirty();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            dirty.update(k, v).await.unwrap();
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for _ in 0..3 {
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.update(k, v).await.unwrap();
+            }
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.update(k, v).await.unwrap();
+        }
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+        let db = reopen_db(context.clone()).await;
+        assert!(db.op_count() > op_count);
+        assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test recovery on empty db.
+    pub(crate) async fn test_ordered_any_db_empty_recovery<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
+        V: Clone,
+    {
+        let root = db.root();
+
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.update(k, v).await.unwrap();
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.update(k, v).await.unwrap();
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for _ in 0..3 {
+            for i in 0u64..1000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.update(k, v).await.unwrap();
+            }
+        }
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_dirty();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.update(k, v).await.unwrap();
+        }
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+        let db = reopen_db(context.clone()).await;
+        assert!(db.op_count() > 1);
+        assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that replaying multiple updates of the same key on startup doesn't leave behind old
+    /// data in the snapshot.
+    pub(crate) async fn test_ordered_any_db_log_replay<D>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+    ) where
+        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        // Update the same key many times.
+        const UPDATES: u64 = 100;
+        let k = Sha256::hash(&UPDATES.to_be_bytes());
+        let mut db = db.into_dirty();
+        for i in 0u64..UPDATES {
+            let v = Sha256::hash(&(i * 1000).to_be_bytes());
+            db.update(k, v).await.unwrap();
+        }
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+        let root = db.root();
+        db.close().await.unwrap();
+
+        // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test making multiple commits, one of which deletes a key from a previous commit.
+    pub(crate) async fn test_ordered_any_db_multiple_commits_delete_replayed<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
+        V: Clone + Eq + std::fmt::Debug,
+    {
+        let mut map = std::collections::HashMap::<Digest, V>::default();
+        const ELEMENTS: u64 = 10;
+        let metadata_value = make_value(42);
+        let mut db = db.into_dirty();
+        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
+        for j in 0u64..ELEMENTS {
+            for i in 0u64..ELEMENTS {
+                let k = key_at(j, i);
+                let v = make_value(i * 1000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+            let mut clean_db = db.merkleize().await.unwrap();
+            clean_db.commit(Some(metadata_value.clone())).await.unwrap();
+            db = clean_db.into_dirty();
+        }
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
+        let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
+
+        db.delete(k).await.unwrap();
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
+
+        let root = db.root();
+        db.close().await.unwrap();
+        let db = reopen_db(context.clone()).await;
+        assert_eq!(root, db.root());
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test historical proof - basic case.
+    pub(crate) async fn test_ordered_any_db_historical_proof_basic<D, V>(
+        _context: Context,
+        mut db: D,
+        _make_value: impl Fn(u64) -> V,
+        apply_ops: impl Fn(&mut D, usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+    ) where
+        D: CleanAny<
+            Key = Digest,
+            Value = V,
+            Digest = Digest,
+            Operation: Encode + PartialEq + std::fmt::Debug,
+        >,
+        V: Clone,
+    {
+        apply_ops(&mut db, 20).await;
+        db.commit(None).await.unwrap();
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let root_hash = db.root();
+        let original_op_count = db.op_count();
+
+        // Historical proof should match "regular" proof when historical size == current database size
+        let max_ops = NZU64!(10);
+        let (historical_proof, historical_ops) = db
+            .historical_proof(original_op_count, Location::new_unchecked(5), max_ops)
+            .await
+            .unwrap();
+        let (regular_proof, regular_ops) =
+            db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
+
+        assert_eq!(historical_proof.size, regular_proof.size);
+        assert_eq!(historical_proof.digests, regular_proof.digests);
+        assert_eq!(historical_ops, regular_ops);
+        assert!(verify_proof(
+            &mut hasher,
+            &historical_proof,
+            Location::new_unchecked(5),
+            &historical_ops,
+            &root_hash
+        ));
+
+        // Add more operations to the database
+        apply_ops(&mut db, 5).await;
+        db.commit(None).await.unwrap();
+
+        // Historical proof should remain the same even though database has grown
+        let (historical_proof, historical_ops) = db
+            .historical_proof(original_op_count, Location::new_unchecked(5), NZU64!(10))
+            .await
+            .unwrap();
+        assert_eq!(
+            historical_proof.size,
+            Position::try_from(original_op_count).unwrap()
+        );
+        assert_eq!(historical_proof.size, regular_proof.size);
+        assert_eq!(historical_ops.len(), 10);
+        assert_eq!(historical_proof.digests, regular_proof.digests);
+        assert_eq!(historical_ops, regular_ops);
+        assert!(verify_proof(
+            &mut hasher,
+            &historical_proof,
+            Location::new_unchecked(5),
+            &historical_ops,
+            &root_hash
+        ));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test historical proof - edge cases.
+    pub(crate) async fn test_ordered_any_db_historical_proof_edge_cases<D, V>(
+        _context: Context,
+        mut db: D,
+        _make_value: impl Fn(u64) -> V,
+        apply_ops: impl Fn(&mut D, usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+    ) where
+        D: CleanAny<
+            Key = Digest,
+            Value = V,
+            Digest = Digest,
+            Operation: Encode + PartialEq + std::fmt::Debug,
+        >,
+        V: Clone,
+    {
+        apply_ops(&mut db, 50).await;
+        db.commit(None).await.unwrap();
+
+        // Test singleton historical proof
+        let (single_proof, single_ops) = db
+            .historical_proof(
+                Location::new_unchecked(2),
+                Location::new_unchecked(1),
+                NZU64!(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            single_proof.size,
+            Position::try_from(Location::new_unchecked(2)).unwrap()
+        );
+        assert_eq!(single_ops.len(), 1);
+
+        // Test requesting more operations than available in historical position
+        let (_limited_proof, limited_ops) = db
+            .historical_proof(
+                Location::new_unchecked(10),
+                Location::new_unchecked(5),
+                NZU64!(20),
+            )
+            .await
+            .unwrap();
+        assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+
+        // Test proof at minimum historical position
+        let (min_proof, min_ops) = db
+            .historical_proof(
+                Location::new_unchecked(4),
+                Location::new_unchecked(1),
+                NZU64!(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            min_proof.size,
+            Position::try_from(Location::new_unchecked(4)).unwrap()
+        );
+        assert_eq!(min_ops.len(), 3);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test historical proof - different historical sizes.
+    pub(crate) async fn test_ordered_any_db_historical_proof_different_historical_sizes<D, V>(
+        _context: Context,
+        mut db: D,
+        _make_value: impl Fn(u64) -> V,
+        apply_ops: impl Fn(&mut D, usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+    ) where
+        D: CleanAny<
+            Key = Digest,
+            Value = V,
+            Digest = Digest,
+            Operation: Encode + PartialEq + std::fmt::Debug,
+        >,
+        V: Clone,
+    {
+        apply_ops(&mut db, 100).await;
+        db.commit(None).await.unwrap();
+
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let root = db.root();
+
+        let start_loc = Location::new_unchecked(20);
+        let max_ops = NZU64!(10);
+        let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+
+        // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
+        let historical_size = db.op_count();
+
+        for _ in 1..10 {
+            apply_ops(&mut db, 100).await;
+            db.commit(None).await.unwrap();
+
+            let (historical_proof, historical_ops) = db
+                .historical_proof(historical_size, start_loc, max_ops)
+                .await
+                .unwrap();
+            assert_eq!(proof.size, historical_proof.size);
+            assert_eq!(ops, historical_ops);
+            assert_eq!(proof.digests, historical_proof.digests);
+
+            // Verify proof against reference root
+            assert!(verify_proof(
+                &mut hasher,
+                &historical_proof,
+                start_loc,
+                &historical_ops,
+                &root
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test historical proof - invalid inputs.
+    pub(crate) async fn test_ordered_any_db_historical_proof_invalid<D, V>(
+        _context: Context,
+        mut db: D,
+        _make_value: impl Fn(u64) -> V,
+        apply_ops: impl Fn(&mut D, usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+    ) where
+        D: CleanAny<Key = Digest, Value = V, Digest = Digest, Operation: Encode + Clone>,
+        V: Clone,
+    {
+        apply_ops(&mut db, 10).await;
+        db.commit(None).await.unwrap();
+
+        let historical_op_count = Location::new_unchecked(5);
+        let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
+        let (proof, ops) = db
+            .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
+            .await
+            .unwrap();
+        assert_eq!(proof.size, historical_mmr_size);
+        assert_eq!(ops.len(), 4);
+
+        let mut hasher = StandardHasher::<Sha256>::new();
+
+        // Changing the proof digests should cause verification to fail
+        {
+            let mut proof = proof.clone();
+            proof.digests[0] = Sha256::hash(b"invalid");
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &root_hash
+            ));
+        }
+        {
+            let mut proof = proof.clone();
+            proof.digests.push(Sha256::hash(b"invalid"));
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the start location should cause verification to fail
+        {
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(1),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the root digest should cause verification to fail
+        {
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &Sha256::hash(b"invalid")
+            ));
+        }
+
+        // Changing the proof size should cause verification to fail
+        {
+            let mut proof = proof.clone();
+            proof.size = Position::new(100);
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test span maintenance under collisions.
+    pub(crate) async fn test_ordered_any_db_span_maintenance_under_collisions<D>(db: D)
+    where
+        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    {
+        let mut db = db.into_dirty();
+
+        // Create keys that will have collisions in the snapshot
+        let key1 = FixedBytes::from([0u8, 0u8, 1u8, 0u8]);
+        let key2 = FixedBytes::from([0u8, 0u8, 2u8, 0u8]);
+        let key3 = FixedBytes::from([0u8, 0u8, 3u8, 0u8]);
+        let val = Sha256::fill(1u8);
+
+        // Insert in order
+        db.update(key1.clone(), val).await.unwrap();
+        db.update(key2.clone(), val).await.unwrap();
+        db.update(key3.clone(), val).await.unwrap();
+
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+
+        // Verify spans are correctly maintained
+        assert!(db.get(&key1).await.unwrap().is_some());
+        assert!(db.get(&key2).await.unwrap().is_some());
+        assert!(db.get(&key3).await.unwrap().is_some());
+
+        // Delete middle key
+        let mut db = db.into_dirty();
+        db.delete(key2.clone()).await.unwrap();
+
+        let mut db = db.merkleize().await.unwrap();
+        db.commit(None).await.unwrap();
+
+        // Verify key2 is deleted and spans are correct
+        assert!(db.get(&key1).await.unwrap().is_some());
+        assert!(db.get(&key2).await.unwrap().is_none());
+        assert!(db.get(&key3).await.unwrap().is_some());
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Builds a db with colliding keys to make sure the "cycle around when there are translated
+    /// key collisions" edge case is exercised.
+    pub(crate) async fn test_ordered_any_update_collision_edge_case<D>(db: D)
+    where
+        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    {
+        // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
+        // collisions.
+        let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
+        let key2 = FixedBytes::from([0xFFu8, 0xFFu8, 6u8, 6u8]);
+        // Our last must precede the others to trigger previous-key cycle around.
+        let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 0u8, 0u8]);
+        let val = Sha256::fill(1u8);
+
+        let mut db = db.into_dirty();
+        db.update(key1.clone(), val).await.unwrap();
+        db.update(key2.clone(), val).await.unwrap();
+        db.update(key3.clone(), val).await.unwrap();
+
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
+        assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
+
+        let db = db.merkleize().await.unwrap();
         db.destroy().await.unwrap();
     }
 }

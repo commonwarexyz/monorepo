@@ -59,7 +59,17 @@ where
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::*;
+    // Import generic test functions from parent test module
+    use super::{
+        super::test::{
+            test_any_db_build_and_authenticate, test_any_db_empty,
+            test_any_db_historical_proof_basic,
+            test_any_db_historical_proof_different_historical_sizes,
+            test_any_db_historical_proof_edge_cases, test_any_db_historical_proof_invalid,
+            test_any_db_multiple_commits_delete_replayed,
+        },
+        *,
+    };
     use crate::{
         index::{unordered::Index, Unordered as _},
         mmr::Location,
@@ -79,13 +89,7 @@ pub(crate) mod test {
         Runner as _,
     };
     use commonware_utils::{NZUsize, NZU64};
-    use rand::RngCore;
-
-    // Import generic test functions from parent test module
-    use super::super::test::{
-        test_any_db_build_and_authenticate, test_any_db_empty,
-        test_any_db_multiple_commits_delete_replayed,
-    };
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     /// A type alias for the concrete database type used in these unit tests.
     type VariableDb = Db<
@@ -520,6 +524,108 @@ pub(crate) mod test {
             let seed = ctx.next_u64();
             let cfg = variable_any_db_config(&format!("batch_{seed}"));
             VariableDbTest::init(ctx, cfg).await.unwrap()
+        });
+    }
+
+    type VariableOperation = UnorderedOperation<Digest, VariableEncoding<Vec<u8>>>;
+
+    /// Create n random operations for variable-size testing. Some portion of the updates are deletes.
+    /// create_variable_test_ops(n') is a suffix of create_variable_test_ops(n) for n' > n.
+    fn create_variable_test_ops(n: usize) -> Vec<VariableOperation> {
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            let key = Digest::random(&mut rng);
+            if i % 10 == 0 && i > 0 {
+                ops.push(VariableOperation::Delete(prev_key));
+            } else {
+                let value = to_bytes(i as u64);
+                ops.push(VariableOperation::Update(UnorderedUpdate(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    /// Helper to apply random operations to a database.
+    async fn apply_variable_test_ops(db: &mut VariableDbTest, n: usize) {
+        let ops = create_variable_test_ops(n);
+        for op in ops {
+            match op {
+                VariableOperation::Update(UnorderedUpdate(key, value)) => {
+                    db.update(key, value).await.unwrap();
+                }
+                VariableOperation::Delete(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                VariableOperation::CommitFloor(metadata, _) => {
+                    db.commit(metadata).await.unwrap();
+                }
+            }
+        }
+    }
+
+    /// Create a variable test database with unique partition names
+    async fn create_variable_db_test(mut context: Context) -> VariableDbTest {
+        let seed = context.next_u64();
+        let cfg = variable_any_db_config(&format!("test_{seed}"));
+        VariableDbTest::init(context, cfg).await.unwrap()
+    }
+
+    #[test]
+    fn test_any_variable_db_historical_proof_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_variable_db_test(context.clone()).await;
+            test_any_db_historical_proof_basic(context, db, |db, n| {
+                Box::pin(async move { apply_variable_test_ops(db, n).await })
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_variable_db_historical_proof_edge_cases() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_variable_db_test(context.clone()).await;
+            test_any_db_historical_proof_edge_cases(
+                context.clone(),
+                db,
+                |db, n| Box::pin(async move { apply_variable_test_ops(db, n).await }),
+                |ctx| Box::pin(create_variable_db_test(ctx)),
+                create_variable_test_ops,
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_variable_db_historical_proof_different_historical_sizes() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_variable_db_test(context.clone()).await;
+            test_any_db_historical_proof_different_historical_sizes(
+                context.clone(),
+                db,
+                |db, n| Box::pin(async move { apply_variable_test_ops(db, n).await }),
+                |ctx| Box::pin(create_variable_db_test(ctx)),
+                create_variable_test_ops,
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_any_variable_db_historical_proof_invalid() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = create_variable_db_test(context.clone()).await;
+            test_any_db_historical_proof_invalid(context, db, |db, n| {
+                Box::pin(async move { apply_variable_test_ops(db, n).await })
+            })
+            .await;
         });
     }
 }

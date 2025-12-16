@@ -71,13 +71,27 @@ where
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::*;
+    // Import generic test functions from parent test module
+    use super::{
+        super::test::{
+            test_ordered_any_db_basic, test_ordered_any_db_empty,
+            test_ordered_any_db_empty_recovery, test_ordered_any_db_historical_proof_basic,
+            test_ordered_any_db_historical_proof_different_historical_sizes,
+            test_ordered_any_db_historical_proof_edge_cases,
+            test_ordered_any_db_historical_proof_invalid, test_ordered_any_db_log_replay,
+            test_ordered_any_db_multiple_commits_delete_replayed,
+            test_ordered_any_db_non_empty_recovery,
+            test_ordered_any_db_span_maintenance_under_collisions,
+            test_ordered_any_update_collision_edge_case,
+        },
+        *,
+    };
     use crate::{
         index::ordered::Index,
         mmr::{Location, StandardHasher as Standard},
         qmdb::{
             any::test::fixed_db_config,
-            store::{batch_tests, CleanStore as _},
+            store::{batch_tests, Batchable as _, CleanStore as _},
             verify_proof,
         },
         translator::{OneCap, Translator, TwoCap},
@@ -92,9 +106,6 @@ pub(crate) mod test {
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::HashMap;
-
-    // Import generic test functions from parent test module
-    use super::super::test::{test_ordered_any_db_basic, test_ordered_any_db_empty};
 
     /// A type alias for the concrete database type used in these unit tests.
     type FixedDb = Db<
@@ -348,5 +359,244 @@ pub(crate) mod test {
     #[test_traced("DEBUG")]
     fn test_ordered_any_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_db_test(ctx).await });
+    }
+
+    #[inline]
+    fn to_digest(i: u64) -> Digest {
+        Sha256::hash(&i.to_be_bytes())
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_non_empty_db_recovery() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_db_test(context.clone()).await;
+            test_ordered_any_db_non_empty_recovery(
+                context,
+                db,
+                |ctx| Box::pin(open_db_test(ctx)),
+                to_digest,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_empty_db_recovery() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_db_test(context.clone()).await;
+            test_ordered_any_db_empty_recovery(
+                context,
+                db,
+                |ctx| Box::pin(open_db_test(ctx)),
+                to_digest,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_log_replay() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_db_test(context.clone()).await;
+            test_ordered_any_db_log_replay(context, db, |ctx| Box::pin(open_db_test(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_multiple_commits_delete_gets_replayed() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_db_test(context.clone()).await;
+            test_ordered_any_db_multiple_commits_delete_replayed(
+                context,
+                db,
+                |ctx| Box::pin(open_db_test(ctx)),
+                to_digest,
+            )
+            .await;
+        });
+    }
+
+    /// Helper to apply random operations to a database.
+    async fn apply_fixed_ops(db: &mut DbTest, n: usize) {
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+        static mut COUNTER: u64 = 0;
+        // Use a counter to generate different keys each call
+        let seed = unsafe {
+            COUNTER += 1;
+            COUNTER
+        };
+        let mut rng = StdRng::seed_from_u64(seed);
+        for _ in 0..n {
+            let key = Digest::random(&mut rng);
+            let value = Digest::random(&mut rng);
+            db.update(key, value).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_historical_proof_basic() {
+        let executor = Runner::default();
+        executor.start(|mut context| async move {
+            let seed = context.next_u64();
+            let config = create_test_config(seed);
+            let db = DbTest::init(context.clone(), config).await.unwrap();
+            test_ordered_any_db_historical_proof_basic(context, db, to_digest, |db, n| {
+                Box::pin(async move { apply_fixed_ops(db, n).await })
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
+        let executor = Runner::default();
+        executor.start(|mut context| async move {
+            let seed = context.next_u64();
+            let config = create_test_config(seed);
+            let db = DbTest::init(context.clone(), config).await.unwrap();
+            test_ordered_any_db_historical_proof_edge_cases(
+                context.clone(),
+                db,
+                to_digest,
+                |db, n| Box::pin(async move { apply_fixed_ops(db, n).await }),
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_historical_proof_different_historical_sizes() {
+        let executor = Runner::default();
+        executor.start(|mut context| async move {
+            let seed = context.next_u64();
+            let config = create_test_config(seed);
+            let db = DbTest::init(context.clone(), config).await.unwrap();
+            test_ordered_any_db_historical_proof_different_historical_sizes(
+                context,
+                db,
+                to_digest,
+                |db, n| Box::pin(async move { apply_fixed_ops(db, n).await }),
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_historical_proof_invalid() {
+        let executor = Runner::default();
+        executor.start(|mut context| async move {
+            let seed = context.next_u64();
+            let config = create_test_config(seed);
+            let db = DbTest::init(context.clone(), config).await.unwrap();
+            test_ordered_any_db_historical_proof_invalid(context, db, to_digest, |db, n| {
+                Box::pin(async move { apply_fixed_ops(db, n).await })
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_db_span_maintenance_under_collisions(db).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_update_collision_edge_case() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_update_collision_edge_case(db).await;
+        });
+    }
+
+    /// Builds a db with one key, and then creates another non-colliding key preceeding it in a
+    /// batch. The prev_key search will have to "cycle around" in order to find the correct next_key
+    /// value.
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_batch_create_with_cycling_next_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let mid_key = FixedBytes::from([0xAAu8; 4]);
+            let val = Sha256::fill(1u8);
+
+            db.create(mid_key.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Batch-insert a preceeding non-translated-colliding key.
+            let preceeding_key = FixedBytes::from([0x55u8; 4]);
+            let mut batch = db.start_batch();
+            assert!(batch.create(preceeding_key.clone(), val).await.unwrap());
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&preceeding_key).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, mid_key);
+            let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, preceeding_key);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Builds a db with three keys A < B < C, then batch-deletes B. Verifies that A's next_key is
+    /// correctly updated to C (skipping the deleted B).
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_batch_delete_middle_key() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let key_a = FixedBytes::from([0x11u8; 4]);
+            let key_b = FixedBytes::from([0x22u8; 4]);
+            let key_c = FixedBytes::from([0x33u8; 4]);
+            let val = Sha256::fill(1u8);
+
+            // Create three keys in order: A -> B -> C -> A (circular)
+            db.create(key_a.clone(), val).await.unwrap();
+            db.create(key_b.clone(), val).await.unwrap();
+            db.create(key_c.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify initial spans
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_b);
+            let span_b = db.get_span(&key_b).await.unwrap().unwrap();
+            assert_eq!(span_b.1.next_key, key_c);
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            // Batch-delete the middle key B
+            let mut batch = db.start_batch();
+            batch.delete(key_b.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Verify B is deleted
+            assert!(db.get(&key_b).await.unwrap().is_none());
+
+            // Verify A's next_key is now C (not B)
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_c);
+
+            // Verify C's next_key is still A
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            db.destroy().await.unwrap();
+        });
     }
 }
