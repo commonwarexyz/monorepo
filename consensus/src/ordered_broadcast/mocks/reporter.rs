@@ -1,33 +1,39 @@
 use crate::{
-    ordered_broadcast::types::{Activity, Chunk, Lock, Proposal},
+    ordered_broadcast::{
+        scheme,
+        types::{Activity, Chunk, Lock, Proposal},
+    },
     types::Epoch,
-    Reporter as Z,
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use rand::{CryptoRng, Rng};
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
-enum Message<C: PublicKey, V: Variant, D: Digest> {
+enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Proposal(Proposal<C, D>),
-    Locked(Lock<C, V, D>),
+    Locked(Lock<C, S, D>),
     GetTip(C, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C, oneshot::Sender<Option<u64>>),
     Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<C: PublicKey, V: Variant, D: Digest> {
-    mailbox: mpsc::Receiver<Message<C, V, D>>,
+pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
+    mailbox: mpsc::Receiver<Message<C, S, D>>,
+
+    // RNG used for signature verification with scheme.
+    rng: R,
 
     // Application namespace
     namespace: Vec<u8>,
 
-    // Public key of the group
-    public: V::Public,
+    // Scheme for verification
+    scheme: S,
 
     // Notified proposals
     proposals: HashSet<Chunk<C, D>>,
@@ -43,18 +49,26 @@ pub struct Reporter<C: PublicKey, V: Variant, D: Digest> {
     highest: HashMap<C, (u64, Epoch)>,
 }
 
-impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
+impl<R, C, S, D> Reporter<R, C, S, D>
+where
+    R: Rng + CryptoRng,
+    C: PublicKey,
+    S: Scheme,
+    D: Digest,
+{
     pub fn new(
+        rng: R,
         namespace: &[u8],
-        public: V::Public,
+        scheme: S,
         limit_misses: Option<usize>,
-    ) -> (Self, Mailbox<C, V, D>) {
+    ) -> (Self, Mailbox<C, S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
+                rng,
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
-                public,
+                scheme,
                 proposals: HashSet::new(),
                 limit_misses,
                 digests: HashMap::new(),
@@ -65,7 +79,10 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
         )
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self)
+    where
+        S: scheme::Scheme<C, D>,
+    {
         let mut misses = 0;
         while let Some(msg) = self.mailbox.next().await {
             match msg {
@@ -84,13 +101,14 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&self.namespace, &self.public) {
+                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
                         panic!("Invalid proof");
                     }
 
                     // Test encoding/decoding
                     let encoded = lock.encode();
-                    Lock::<C, V, D>::decode(encoded).unwrap();
+                    Lock::<C, S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
+                        .unwrap();
 
                     // Check if the proposal is known
                     if let Some(misses_allowed) = self.limit_misses {
@@ -167,12 +185,12 @@ impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: PublicKey, V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<C, V, D>>,
+pub struct Mailbox<C: PublicKey, S: Scheme, D: Digest> {
+    sender: mpsc::Sender<Message<C, S, D>>,
 }
 
-impl<C: PublicKey, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
-    type Activity = Activity<C, V, D>;
+impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
+    type Activity = Activity<C, S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
@@ -192,7 +210,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
     }
 }
 
-impl<C: PublicKey, V: Variant, D: Digest> Mailbox<C, V, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
     pub async fn get_tip(&mut self, sequencer: C) -> Option<(u64, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender

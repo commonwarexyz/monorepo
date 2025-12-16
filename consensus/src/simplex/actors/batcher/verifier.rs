@@ -1,10 +1,8 @@
 use crate::simplex::{
-    signing_scheme::Scheme,
-    types::{
-        Attributable, Finalize, Notarize, Nullify, Proposal, SignatureVerification, Subject, Vote,
-    },
+    scheme::Scheme,
+    types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Verification, Digest};
 use rand::{CryptoRng, Rng};
 
 /// `Verifier` is a utility for tracking and batch verifying consensus messages.
@@ -16,7 +14,7 @@ use rand::{CryptoRng, Rng};
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
-pub struct Verifier<S: Scheme, D: Digest> {
+pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
 
@@ -44,7 +42,7 @@ pub struct Verifier<S: Scheme, D: Digest> {
     finalizes_verified: usize,
 }
 
-impl<S: Scheme, D: Digest> Verifier<S, D> {
+impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Creates a new `Verifier`.
     ///
     /// # Arguments
@@ -203,19 +201,19 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, signatures): (Vec<_>, Vec<_>) = notarizes
+        let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
             .into_iter()
-            .map(|n| (n.proposal, n.signature))
+            .map(|n| (n.proposal, n.attestation))
             .unzip();
 
         let proposal = &proposals[0];
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self
-            .scheme
-            .verify_votes(rng, namespace, Subject::Notarize { proposal }, signatures);
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
+            rng,
+            namespace,
+            Subject::Notarize { proposal },
+            attestations,
+        );
 
         self.notarizes_verified += verified.len();
 
@@ -223,14 +221,14 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(signature, proposal)| {
+                .map(|(attestation, proposal)| {
                     Vote::Notarize(Notarize {
                         proposal,
-                        signature,
+                        attestation,
                     })
                 })
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -294,14 +292,11 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
         let round = nullifies[0].round;
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self.scheme.verify_votes::<_, D, _>(
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
             namespace,
             Subject::Nullify { round },
-            nullifies.into_iter().map(|nullify| nullify.signature),
+            nullifies.into_iter().map(|nullify| nullify.attestation),
         );
 
         self.nullifies_verified += verified.len();
@@ -309,9 +304,9 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         (
             verified
                 .into_iter()
-                .map(|signature| Vote::Nullify(Nullify { round, signature }))
+                .map(|attestation| Vote::Nullify(Nullify { round, attestation }))
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -366,19 +361,19 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let (proposals, signatures): (Vec<_>, Vec<_>) = finalizes
+        let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
             .into_iter()
-            .map(|n| (n.proposal, n.signature))
+            .map(|n| (n.proposal, n.attestation))
             .unzip();
 
         let proposal = &proposals[0];
 
-        let SignatureVerification {
-            verified,
-            invalid_signers,
-        } = self
-            .scheme
-            .verify_votes(rng, namespace, Subject::Finalize { proposal }, signatures);
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
+            rng,
+            namespace,
+            Subject::Finalize { proposal },
+            attestations,
+        );
 
         self.finalizes_verified += verified.len();
 
@@ -386,14 +381,14 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             verified
                 .into_iter()
                 .zip(proposals)
-                .map(|(signature, proposal)| {
+                .map(|(attestation, proposal)| {
                     Vote::Finalize(Finalize {
                         proposal,
-                        signature,
+                        attestation,
                     })
                 })
                 .collect(),
-            invalid_signers,
+            invalid,
         )
     }
 
@@ -434,7 +429,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::signing_scheme::{bls12381_threshold, ed25519},
+        simplex::scheme::{bls12381_threshold, ed25519},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -499,7 +494,7 @@ mod tests {
     }
 
     // Helper to create a Notarize message for any signing scheme
-    fn create_notarize<S: Scheme>(
+    fn create_notarize<S: Scheme<Sha256>>(
         scheme: &S,
         round: Round,
         parent_view: View,
@@ -510,12 +505,12 @@ mod tests {
     }
 
     // Helper to create a Nullify message for any signing scheme
-    fn create_nullify<S: Scheme>(scheme: &S, round: Round) -> Nullify<S> {
+    fn create_nullify<S: Scheme<Sha256>>(scheme: &S, round: Round) -> Nullify<S> {
         Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap()
     }
 
     // Helper to create a Finalize message for any signing scheme
-    fn create_finalize<S: Scheme>(
+    fn create_finalize<S: Scheme<Sha256>>(
         scheme: &S,
         round: Round,
         parent_view: View,
@@ -525,7 +520,7 @@ mod tests {
         Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
-    fn add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn add_notarize<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -581,7 +576,7 @@ mod tests {
         add_notarize(generate_ed25519_schemes(5, 123));
     }
 
-    fn set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn set_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -613,7 +608,7 @@ mod tests {
         set_leader(generate_ed25519_schemes(5, 124));
     }
 
-    fn ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_notarizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -651,7 +646,7 @@ mod tests {
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
         verifier2.set_leader(leader_vote.signer());
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-        faulty_vote.signature.signer = (schemes.len() as u32) + 10;
+        faulty_vote.attestation.signer = (schemes.len() as u32) + 10;
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
@@ -675,7 +670,7 @@ mod tests {
         ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
     }
 
-    fn add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn add_nullify<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -696,7 +691,7 @@ mod tests {
         add_nullify(generate_ed25519_schemes(5, 127));
     }
 
-    fn ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_nullifies<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -731,7 +726,7 @@ mod tests {
         ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
     }
 
-    fn add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn add_finalize<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -767,7 +762,7 @@ mod tests {
         add_finalize(generate_ed25519_schemes(5, 129));
     }
 
-    fn ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_and_verify_finalizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -807,7 +802,7 @@ mod tests {
         ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
-    fn leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn leader_proposal_filters_messages<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -841,7 +836,7 @@ mod tests {
         leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
     }
 
-    fn set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn set_leader_twice_panics<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
         verifier.set_leader(0);
         verifier.set_leader(1);
@@ -858,7 +853,7 @@ mod tests {
     fn test_set_leader_twice_panics_ed() {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
-    fn notarizes_wait_for_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn notarizes_wait_for_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -891,7 +886,7 @@ mod tests {
         notarizes_wait_for_quorum(generate_ed25519_schemes(5, 203));
     }
 
-    fn ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -924,7 +919,7 @@ mod tests {
         ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
     }
 
-    fn ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -956,7 +951,7 @@ mod tests {
         ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
     }
 
-    fn verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn verify_notarizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -972,7 +967,7 @@ mod tests {
         verify_notarizes_empty(generate_ed25519_schemes(3, 206));
     }
 
-    fn verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn verify_nullifies_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -990,7 +985,7 @@ mod tests {
         verify_nullifies_empty(generate_ed25519_schemes(3, 207));
     }
 
-    fn verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn verify_finalizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -1009,7 +1004,7 @@ mod tests {
         verify_finalizes_empty(generate_ed25519_schemes(3, 208));
     }
 
-    fn ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -1051,7 +1046,7 @@ mod tests {
         ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
     }
 
-    fn ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_nullifies_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1073,7 +1068,7 @@ mod tests {
         ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
     }
 
-    fn ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1100,7 +1095,7 @@ mod tests {
         ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
     }
 
-    fn ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_notarizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1142,7 +1137,7 @@ mod tests {
         ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(5, 212));
     }
 
-    fn ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_nullifies_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1176,7 +1171,7 @@ mod tests {
         ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(5, 213));
     }
 
-    fn ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn ready_finalizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,

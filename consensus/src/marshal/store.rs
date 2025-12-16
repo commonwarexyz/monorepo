@@ -1,10 +1,7 @@
 //! Interface for a store of finalized blocks, used by [Actor](super::Actor).
 
-use crate::{
-    simplex::{signing_scheme::Scheme, types::Finalization},
-    Block,
-};
-use commonware_cryptography::{Committable, Digest};
+use crate::{simplex::types::Finalization, Block};
+use commonware_cryptography::{certificate::Scheme, Committable, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},

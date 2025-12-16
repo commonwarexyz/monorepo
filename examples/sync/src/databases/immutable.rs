@@ -109,7 +109,6 @@ where
 
     fn lower_bound(&self) -> Location {
         self.oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap())
     }
 
     fn historical_proof(

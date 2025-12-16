@@ -21,6 +21,7 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 
 pub mod bls12381;
+pub mod certificate;
 pub mod ed25519;
 pub mod sha256;
 use rand_core::CryptoRngCore;

@@ -89,7 +89,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_known_op_count = Location::new(0).unwrap();
+        let mut last_known_op_count = Location::new(1).unwrap();
 
         for op in data.operations.iter().take(MAX_OPS) {
             match op {

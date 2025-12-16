@@ -5,12 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Activity},
+    simplex::types::Activity,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::Mailbox;
@@ -51,10 +51,8 @@ mod tests {
     use crate::{
         simplex::{
             actors::{batcher, resolver},
-            mocks::{
-                self,
-                fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            },
+            mocks,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             select_leader,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
@@ -64,7 +62,8 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        ed25519,
+        certificate::mocks::Fixture,
+        ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
@@ -80,7 +79,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    fn build_notarization<S: Scheme>(
+    fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -99,7 +98,7 @@ mod tests {
         (votes, certificate)
     }
 
-    fn build_finalization<S: Scheme>(
+    fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -126,7 +125,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -339,11 +338,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls12381_threshold::<MinPk, _>);
-        stale_backfill(bls12381_threshold::<MinSig, _>);
-        stale_backfill(bls12381_multisig::<MinPk, _>);
-        stale_backfill(bls12381_multisig::<MinSig, _>);
-        stale_backfill(ed25519);
+        stale_backfill(bls12381_threshold::fixture::<MinPk, _>);
+        stale_backfill(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill(bls12381_multisig::fixture::<MinPk, _>);
+        stale_backfill(bls12381_multisig::fixture::<MinSig, _>);
+        stale_backfill(ed25519::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -357,7 +356,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -622,17 +621,17 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls12381_threshold::<MinPk, _>);
-        append_old_interesting_view(bls12381_threshold::<MinSig, _>);
-        append_old_interesting_view(bls12381_multisig::<MinPk, _>);
-        append_old_interesting_view(bls12381_multisig::<MinSig, _>);
-        append_old_interesting_view(ed25519);
+        append_old_interesting_view(bls12381_threshold::fixture::<MinPk, _>);
+        append_old_interesting_view(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view(bls12381_multisig::fixture::<MinPk, _>);
+        append_old_interesting_view(bls12381_multisig::fixture::<MinSig, _>);
+        append_old_interesting_view(ed25519::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -793,16 +792,16 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls12381_threshold::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_threshold::<MinSig, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519);
+        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519::fixture);
     }
 
     fn certificate_conflicts_proposal<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -984,16 +983,16 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal(bls12381_threshold::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_threshold::<MinSig, _>);
-        certificate_conflicts_proposal(bls12381_multisig::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_multisig::<MinSig, _>);
-        certificate_conflicts_proposal(ed25519);
+        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_conflicts_proposal(ed25519::fixture);
     }
 
     fn proposal_conflicts_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1158,16 +1157,16 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate(bls12381_threshold::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_threshold::<MinSig, _>);
-        proposal_conflicts_certificate(bls12381_multisig::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_multisig::<MinSig, _>);
-        proposal_conflicts_certificate(ed25519);
+        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_conflicts_certificate(ed25519::fixture);
     }
 
     fn certificate_verifies_proposal<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1324,11 +1323,11 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal(bls12381_threshold::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_threshold::<MinSig, _>);
-        certificate_verifies_proposal(bls12381_multisig::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_multisig::<MinSig, _>);
-        certificate_verifies_proposal(ed25519);
+        certificate_verifies_proposal(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_verifies_proposal(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_verifies_proposal(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_verifies_proposal(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_verifies_proposal(ed25519::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1340,7 +1339,7 @@ mod tests {
     /// 3. Our proposal should be dropped when the conflict is detected
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey, Seed = ()>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey, Seed = ()>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1365,11 +1364,12 @@ mod tests {
                 participants,
                 schemes,
                 verifier: _,
+                ..
             } = fixture(&mut context, n);
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let (leader, leader_idx) = select_leader::<S, _>(&participants, view2_round, None);
+            let (leader, leader_idx) = select_leader::<S>(&participants, view2_round, None);
 
             // Create a voter with the leader's identity
             let leader_scheme = schemes[leader_idx as usize].clone();
@@ -1542,14 +1542,14 @@ mod tests {
 
     #[test]
     fn test_drop_our_proposal_on_conflict() {
-        drop_our_proposal_on_conflict(bls12381_multisig::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_multisig::<MinSig, _>);
-        drop_our_proposal_on_conflict(ed25519);
+        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(ed25519::fixture);
     }
 
     fn populate_resolver_on_restart<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1763,16 +1763,16 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart(bls12381_threshold::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_threshold::<MinSig, _>);
-        populate_resolver_on_restart(bls12381_multisig::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_multisig::<MinSig, _>);
-        populate_resolver_on_restart(ed25519);
+        populate_resolver_on_restart(bls12381_threshold::fixture::<MinPk, _>);
+        populate_resolver_on_restart(bls12381_threshold::fixture::<MinSig, _>);
+        populate_resolver_on_restart(bls12381_multisig::fixture::<MinPk, _>);
+        populate_resolver_on_restart(bls12381_multisig::fixture::<MinSig, _>);
+        populate_resolver_on_restart(ed25519::fixture);
     }
 
     fn finalization_from_resolver<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -1916,11 +1916,11 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver(bls12381_threshold::<MinPk, _>);
-        finalization_from_resolver(bls12381_threshold::<MinSig, _>);
-        finalization_from_resolver(bls12381_multisig::<MinPk, _>);
-        finalization_from_resolver(bls12381_multisig::<MinSig, _>);
-        finalization_from_resolver(ed25519);
+        finalization_from_resolver(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_from_resolver(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_from_resolver(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_from_resolver(ed25519::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -1931,7 +1931,7 @@ mod tests {
     /// 3. Voter sends it back to resolver (unnecessary)
     fn no_resolver_boomerang<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -2088,18 +2088,18 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang(bls12381_threshold::<MinPk, _>);
-        no_resolver_boomerang(bls12381_threshold::<MinSig, _>);
-        no_resolver_boomerang(bls12381_multisig::<MinPk, _>);
-        no_resolver_boomerang(bls12381_multisig::<MinSig, _>);
-        no_resolver_boomerang(ed25519);
+        no_resolver_boomerang(bls12381_threshold::fixture::<MinPk, _>);
+        no_resolver_boomerang(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang(bls12381_multisig::fixture::<MinPk, _>);
+        no_resolver_boomerang(bls12381_multisig::fixture::<MinSig, _>);
+        no_resolver_boomerang(ed25519::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
     /// immediately rather than waiting for the timeout.
     fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -2296,10 +2296,10 @@ mod tests {
 
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
-        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinPk, _>);
-        verification_failure_emits_nullify_immediately(bls12381_threshold::<MinSig, _>);
-        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinPk, _>);
-        verification_failure_emits_nullify_immediately(bls12381_multisig::<MinSig, _>);
-        verification_failure_emits_nullify_immediately(ed25519);
+        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
+        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
+        verification_failure_emits_nullify_immediately(ed25519::fixture);
     }
 }

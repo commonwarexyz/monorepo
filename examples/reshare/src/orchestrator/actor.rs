@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochSchemeProvider, SchemeProvider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
@@ -9,14 +9,15 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self,
-        signing_scheme::Scheme,
+        self, scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, EpochConfig, ViewDelta},
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -45,7 +46,7 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: SchemeProvider<S, C>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
@@ -66,7 +67,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -74,7 +75,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: SchemeProvider<S, C>,
+    provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -91,8 +92,8 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -105,7 +106,7 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
@@ -296,8 +297,8 @@ where
                         }
 
                         // Register the new signing scheme with the scheme provider.
-                        let scheme = self.scheme_provider.scheme_for_epoch(&transition);
-                        assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
+                        let scheme = self.provider.scheme_for_epoch(&transition);
+                        assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                         // Enter the new epoch.
                         let engine = self
@@ -322,7 +323,7 @@ where
                         engine.abort();
 
                         // Unregister the signing scheme for the epoch.
-                        assert!(self.scheme_provider.unregister(&epoch));
+                        assert!(self.provider.unregister(&epoch));
 
                         info!(%epoch, "exited epoch");
                     }

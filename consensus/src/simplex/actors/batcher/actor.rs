@@ -4,13 +4,13 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
     types::{Epoch, View, ViewDelta},
     Epochable, Reporter, Viewable,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -27,15 +27,14 @@ use tracing::{debug, trace, warn};
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + Rng + CryptoRng,
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    participants: Set<P>,
+    participants: Set<S::PublicKey>,
     scheme: S,
 
     blocker: B,
@@ -58,12 +57,11 @@ pub struct Actor<
 
 impl<
         E: Spawner + Metrics + Clock + Rng + CryptoRng,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, P, S, B, D, R>
+    > Actor<E, S, B, D, R>
 {
     pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
@@ -131,7 +129,7 @@ impl<
         )
     }
 
-    fn new_round(&self) -> Round<P, S, B, D, R> {
+    fn new_round(&self) -> Round<S, B, D, R> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
@@ -143,8 +141,8 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        vote_receiver: impl Receiver<PublicKey = P>,
-        certificate_receiver: impl Receiver<PublicKey = P>,
+        vote_receiver: impl Receiver<PublicKey = S::PublicKey>,
+        certificate_receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -155,8 +153,8 @@ impl<
     pub async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        vote_receiver: impl Receiver<PublicKey = P>,
-        certificate_receiver: impl Receiver<PublicKey = P>,
+        vote_receiver: impl Receiver<PublicKey = S::PublicKey>,
+        certificate_receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
         let mut vote_receiver: WrappedReceiver<_, Vote<S, D>> =
@@ -167,8 +165,7 @@ impl<
         // Initialize view data structures
         let mut current = View::zero();
         let mut finalized = View::zero();
-        #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
+        let mut work = BTreeMap::new();
         let mut shutdown = self.context.stopped();
         loop {
             // Handle next message

@@ -6,6 +6,10 @@ hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 n_cases = 65536
 hash = "a75d6312366816126114abdc9d7fbd246891cab210eeae6a02781625aa1ad6a4"
 
+["commonware_cryptography::bls12381::certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>"]
+n_cases = 65536
+hash = "300d04d83f33581f5bce771224f35a4f41a50887e6f83648a43013d8e8292815"
+
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<AckOrReveal<ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "0081c641fd7d19194dcb85e69527d4e4fb6f722f10029ed754813e97da825e89"
@@ -69,6 +73,18 @@ hash = "47795d1da003840d57a425277356731bb3bebe5ac11c08ab7cb204f5e52b2d62"
 ["commonware_cryptography::bls12381::tle::tests::conformance::CodecConformance<Ciphertext<MinPk>>"]
 n_cases = 65536
 hash = "731c5d3dfb09b6e6f1cf50136ba82f036fffab855ec953be59877bb95a48e1dd"
+
+["commonware_cryptography::certificate::tests::conformance::CodecConformance<Attestation<Scheme>>"]
+n_cases = 65536
+hash = "dcbe92d97768657dc0c779e2058b44669a985dd8a1dbbf94427237f0fb4b78d2"
+
+["commonware_cryptography::certificate::tests::conformance::CodecConformance<Signers>"]
+n_cases = 65536
+hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
+
+["commonware_cryptography::ed25519::certificate::tests::conformance::CodecConformance<Certificate>"]
+n_cases = 65536
+hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
 
 ["commonware_cryptography::ed25519::scheme::tests::conformance::CodecConformance<PrivateKey>"]
 n_cases = 65536

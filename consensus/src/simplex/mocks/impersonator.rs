@@ -1,11 +1,11 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
 use crate::simplex::{
-    signing_scheme::Scheme,
+    scheme,
     types::{Finalize, Notarize, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -26,7 +26,9 @@ pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hash
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E, S, H> {
+impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
+    Impersonator<E, S, H>
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -62,10 +64,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E,
                         Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.signature.signer == 0 {
-                        n.signature.signer = 1;
+                    if n.attestation.signer == 0 {
+                        n.attestation.signer = 1;
                     } else {
-                        n.signature.signer = 0;
+                        n.attestation.signer = 0;
                     }
 
                     // Send invalid message
@@ -78,10 +80,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E,
                         Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.signature.signer == 0 {
-                        f.signature.signer = 1;
+                    if f.attestation.signer == 0 {
+                        f.attestation.signer = 1;
                     } else {
-                        f.signature.signer = 0;
+                        f.attestation.signer = 0;
                     }
 
                     // Send invalid message
