@@ -22,9 +22,12 @@ use crate::{
     translator::Translator,
 };
 
-pub mod fixed;
 pub mod sync;
-pub mod variable;
+
+#[cfg(test)]
+mod fixed;
+#[cfg(test)]
+mod variable;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -176,7 +179,7 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = Any<
+    pub(crate) type FixedDb = Any<
         Context,
         Digest,
         FixedEncoding<Digest>,

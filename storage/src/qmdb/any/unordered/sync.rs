@@ -4,7 +4,7 @@ use crate::{
     mmr::{mem::Clean, Location, Position, StandardHasher},
     qmdb::{
         self,
-        any::{unordered::fixed::Any, FixedEncoding, FixedValue, UnorderedOperation},
+        any::{db::IndexedLog, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate},
     },
     translator::Translator,
 };
@@ -20,6 +20,18 @@ use tracing::debug;
 
 // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
 type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
+
+/// A specialized type alias for fixed-size unordered Any databases used by sync.
+type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+    E,
+    K,
+    FixedEncoding<V>,
+    UnorderedUpdate<K, FixedEncoding<V>>,
+    fixed::Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    S,
+>;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
 where
@@ -267,11 +279,8 @@ mod tests {
             self,
             any::{
                 unordered::fixed::{
-                    test::{
-                        any_db_config, apply_ops, create_test_config, create_test_db,
-                        create_test_ops, AnyTest,
-                    },
-                    Any,
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest,
                 },
                 UnorderedUpdate,
             },

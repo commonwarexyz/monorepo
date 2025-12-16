@@ -4,14 +4,16 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    index::unordered::Index,
+    journal::contiguous::fixed::Journal,
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
     },
     qmdb::{
         any::{
-            unordered::fixed::Any, CleanAny, DirtyAny, FixedEncoding, FixedValue,
-            UnorderedOperation, UnorderedUpdate,
+            db::IndexedLog, CleanAny, DirtyAny, FixedEncoding, FixedValue, UnorderedOperation,
+            UnorderedUpdate,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -27,10 +29,22 @@ use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
 
+type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
+
+/// A fixed-size, unordered Any database.
+type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+    E,
+    K,
+    FixedEncoding<V>,
+    UnorderedUpdate<K, FixedEncoding<V>>,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    S,
+>;
+
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
-
-type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting authentication of
 /// whether a key ever had a specific value, and whether the key currently has that value.

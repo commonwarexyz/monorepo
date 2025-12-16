@@ -1,22 +1,37 @@
 use crate::{
-    mmr::{Location, Proof},
+    index::unordered::Index,
+    journal::contiguous::fixed::Journal,
+    mmr::{mem::Clean, Location, Proof},
     qmdb::{
         self,
         any::{
-            unordered::fixed::Any, FixedEncoding, FixedValue, UnorderedOperation, VariableValue,
+            db::IndexedLog, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate,
+            VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
         store::CleanStore as _,
     },
     translator::Translator,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
+
+/// A fixed-size, unordered Any database.
+type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+    E,
+    K,
+    FixedEncoding<V>,
+    UnorderedUpdate<K, FixedEncoding<V>>,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    S,
+>;
 
 /// Result from a fetch operation
 pub struct FetchResult<Op, D: Digest> {

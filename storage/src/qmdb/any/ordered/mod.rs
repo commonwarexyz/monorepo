@@ -22,7 +22,8 @@ use crate::{
     translator::Translator,
 };
 
-pub mod fixed;
+#[cfg(test)]
+mod fixed;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

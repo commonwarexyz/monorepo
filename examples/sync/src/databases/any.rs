@@ -4,11 +4,13 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
+    index::unordered::Index,
+    journal::contiguous::fixed::Journal,
     mmr::{Location, Proof},
     qmdb::{
         self,
         any::{
-            unordered::fixed::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation,
+            unordered::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation,
             UnorderedUpdate,
         },
         store::CleanStore,
@@ -18,7 +20,14 @@ use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
-pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Any<
+    E,
+    Key,
+    FixedEncoding<Value>,
+    Journal<E, UnorderedOperation<Key, FixedEncoding<Value>>>,
+    Index<Translator, Location>,
+    Hasher,
+>;
 
 /// Operation type alias.
 pub type Operation = UnorderedOperation<Key, FixedEncoding<Value>>;

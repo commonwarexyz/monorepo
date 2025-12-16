@@ -25,7 +25,7 @@ use std::{
     ops::Range,
 };
 
-mod db;
+pub mod db;
 pub use db::span_contains;
 
 mod operation;
