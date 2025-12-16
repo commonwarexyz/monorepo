@@ -4,9 +4,11 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{self, hasher::Standard, MAX_LOCATION},
+    index::unordered::Index,
+    journal::contiguous::variable::Journal,
+    mmr::{hasher::Standard, Location, MAX_LOCATION},
     qmdb::{
-        any::{unordered::variable::Any, VariableConfig as Config},
+        any::{unordered::Any, UnorderedOperation, VariableConfig as Config, VariableEncoding},
         store::CleanStore as _,
         verify_proof,
     },
@@ -14,7 +16,6 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use mmr::location::Location;
 use std::{collections::HashMap, num::NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
@@ -154,17 +155,23 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
     }
 }
 
+type AnyDb = Any<
+    deterministic::Context,
+    Key,
+    VariableEncoding<Vec<u8>>,
+    Journal<deterministic::Context, UnorderedOperation<Key, VariableEncoding<Vec<u8>>>>,
+    Index<TwoCap, Location>,
+    Sha256,
+>;
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("qmdb_any_variable_fuzz_test"),
-        )
-        .await
-        .expect("Failed to init source db");
+        let mut db = AnyDb::init(context.clone(), test_config("qmdb_any_variable_fuzz_test"))
+            .await
+            .expect("Failed to init source db");
 
         let mut historical_roots: HashMap<
             Location,
@@ -273,12 +280,9 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-                        context.clone(),
-                        test_config("src"),
-                    )
-                    .await
-                    .expect("Failed to init source db");
+                    db = AnyDb::init(context.clone(), test_config("src"))
+                        .await
+                        .expect("Failed to init source db");
                     has_uncommitted = false;
                 }
             }

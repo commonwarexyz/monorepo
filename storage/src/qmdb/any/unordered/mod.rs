@@ -1,4 +1,4 @@
-use commonware_codec::{Codec, Read};
+use commonware_codec::{Codec, CodecFixed, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -7,13 +7,14 @@ use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
+        contiguous::fixed::Journal as FixedJournal,
         contiguous::variable::{Config as VariableJournalConfig, Journal as VariableJournal},
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
         any::{
-            db::IndexedLog, UnorderedOperation, UnorderedUpdate, VariableConfig, VariableEncoding,
-            VariableValue,
+            db::IndexedLog, init_fixed_authenticated_log, FixedConfig, FixedEncoding, FixedValue,
+            UnorderedOperation, UnorderedUpdate, VariableConfig, VariableEncoding, VariableValue,
         },
         Error,
     },
@@ -87,15 +88,52 @@ where
     }
 }
 
+impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
+    Any<
+        E,
+        K,
+        FixedEncoding<V>,
+        FixedJournal<E, UnorderedOperation<K, FixedEncoding<V>>>,
+        Index<T, Location>,
+        H,
+    >
+where
+    UnorderedOperation<K, FixedEncoding<V>>: CodecFixed<Cfg = ()>,
+{
+    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: FixedConfig<T>) -> Result<Self, Error> {
+        Self::init_with_callback(context, cfg, None, |_, _| {}).await
+    }
+
+    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
+    ///
+    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
+    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
+    /// is built from the log, `callback` is invoked for each operation with its activity status and
+    /// previous location (if any).
+    pub(crate) async fn init_with_callback(
+        context: E,
+        cfg: FixedConfig<T>,
+        known_inactivity_floor: Option<Location>,
+        callback: impl FnMut(bool, Option<Location>),
+    ) -> Result<Self, Error> {
+        let translator = cfg.translator.clone();
+        let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        let index = Index::new(context.with_label("index"), translator);
+        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
+
+        Ok(log)
+    }
+}
+
 // pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
     use crate::{
-        mmr::{
-            mem::{Clean, Mmr as MemMmr},
-            Location, Proof, StandardHasher,
-        },
+        journal::contiguous::fixed::Journal,
+        mmr::{mem::Mmr as MemMmr, Location, Proof, StandardHasher},
         qmdb::{
             any::{
                 test::{fixed_db_config, variable_db_config},
@@ -107,7 +145,7 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::{Codec, Encode};
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{Context, Runner},
@@ -118,10 +156,24 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
+    type FixedDb = Any<
+        Context,
+        Digest,
+        FixedEncoding<Digest>,
+        Journal<Context, UnorderedOperation<Digest, FixedEncoding<Digest>>>,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.<
-    type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap, Clean<Digest>>;
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type VariableDb = Any<
+        Context,
+        Digest,
+        VariableEncoding<Digest>,
+        VariableJournal<Context, UnorderedOperation<Digest, VariableEncoding<Digest>>>,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
 
     /// Return an `Any` database initialized with a fixed config.
     pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {

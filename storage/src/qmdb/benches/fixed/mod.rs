@@ -7,15 +7,14 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
-    index::ordered::Index,
+    index::{ordered::Index as OIndex, unordered::Index as UIndex},
     journal::contiguous::{fixed::Journal as FixedJournal, variable::Journal as VariableJournal},
     mmr::Location,
     qmdb::{
         any::{
-            ordered::Any,
-            unordered::{fixed::Any as UAny, variable::Any as UVAny},
-            FixedConfig as AConfig, FixedEncoding, OrderedOperation,
-            VariableConfig as VariableAnyConfig, VariableEncoding,
+            ordered::Any, unordered::Any as UAny, FixedConfig as AConfig, FixedEncoding,
+            OrderedOperation, UnorderedOperation, VariableConfig as VariableAnyConfig,
+            VariableEncoding,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
@@ -91,8 +90,17 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type UAnyDb =
-    UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type UAnyDb = UAny<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    FixedEncoding<<Sha256 as Hasher>::Digest>,
+    FixedJournal<
+        Context,
+        UnorderedOperation<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
+    >,
+    UIndex<EightCap, Location>,
+    Sha256,
+>;
 type OAnyDb = Any<
     Context,
     <Sha256 as Hasher>::Digest,
@@ -101,7 +109,7 @@ type OAnyDb = Any<
         Context,
         OrderedOperation<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
     >,
-    Index<EightCap, Location>,
+    OIndex<EightCap, Location>,
     Sha256,
 >;
 type UCurrentDb = UCurrent<
@@ -121,8 +129,20 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-type UVAnyDb =
-    UVAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type UVAnyDb = UAny<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    VariableEncoding<<Sha256 as Hasher>::Digest>,
+    VariableJournal<
+        Context,
+        UnorderedOperation<
+            <Sha256 as Hasher>::Digest,
+            VariableEncoding<<Sha256 as Hasher>::Digest>,
+        >,
+    >,
+    UIndex<EightCap, Location>,
+    Sha256,
+>;
 type OVAnyDb = Any<
     Context,
     <Sha256 as Hasher>::Digest,
@@ -131,7 +151,7 @@ type OVAnyDb = Any<
         Context,
         OrderedOperation<<Sha256 as Hasher>::Digest, VariableEncoding<<Sha256 as Hasher>::Digest>>,
     >,
-    Index<EightCap, Location>,
+    OIndex<EightCap, Location>,
     Sha256,
 >;
 
@@ -201,9 +221,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 async fn get_any_unordered_fixed(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
-        .await
-        .unwrap()
+    UAnyDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an ordered any QMDB instance.
@@ -239,7 +257,7 @@ async fn get_store(ctx: Context) -> StoreDb {
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    UVAny::init(ctx, variable_any_cfg).await.unwrap()
+    UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {

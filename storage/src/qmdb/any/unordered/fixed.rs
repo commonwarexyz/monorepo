@@ -4,23 +4,16 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::{mem::Clean, Location},
-    qmdb::{
-        any::{
-            db::IndexedLog, init_fixed_authenticated_log, FixedConfig as Config, FixedEncoding,
-            FixedValue, UnorderedOperation, UnorderedUpdate,
-        },
-        Error,
-    },
-    translator::Translator,
+    qmdb::any::{db::IndexedLog, FixedEncoding, UnorderedOperation, UnorderedUpdate},
 };
-use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_cryptography::DigestOf;
 
 type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
+///
+/// This is a specialized type alias for fixed-size values that bakes in the Journal and Index types.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
     E,
     K,
@@ -32,42 +25,6 @@ pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
     S,
 >;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
-{
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        Self::init_with_callback(context, cfg, None, |_, _| {}).await
-    }
-
-    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-    ///
-    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
-    /// is built from the log, `callback` is invoked for each operation with its activity status and
-    /// previous location (if any).
-    pub(crate) async fn init_with_callback(
-        context: E,
-        cfg: Config<T>,
-        known_inactivity_floor: Option<Location>,
-        callback: impl FnMut(bool, Option<Location>),
-    ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-        let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
-        let log = Self::init_from_log(
-            Index::new(context.clone(), translator),
-            log,
-            known_inactivity_floor,
-            callback,
-        )
-        .await?;
-
-        Ok(log)
-    }
-}
-
-// pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
@@ -75,9 +32,9 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            any::UnorderedUpdate,
+            any::FixedConfig as Config,
             store::{batch_tests, CleanStore as _},
-            verify_proof,
+            verify_proof, Error,
         },
         translator::TwoCap,
     };
@@ -96,7 +53,7 @@ pub(super) mod test {
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;
 
-    type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
+    type Operation = UnorderedOperation<Digest, FixedEncoding<Digest>>;
 
     pub(crate) fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
@@ -152,7 +109,7 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -170,7 +127,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation>) {
         for op in ops {
             match op {
                 Operation::Update(UnorderedUpdate(key, value)) => {

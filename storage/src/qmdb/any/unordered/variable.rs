@@ -1,99 +1,14 @@
-//! An authenticated database that provides succinct proofs of _any_ value ever associated
-//! with a key, where values can have varying sizes.
-//!
-//! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
-//! instead for better performance._
-
-use crate::{
-    index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::variable::{Config as JournalConfig, Journal},
-    },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
-    qmdb::{
-        any::{
-            db::IndexedLog, value::VariableEncoding, UnorderedOperation, UnorderedUpdate,
-            VariableConfig, VariableValue,
-        },
-        operation::Committable as _,
-        Error,
-    },
-    translator::Translator,
-};
-use commonware_codec::Read;
-use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
-
-type Operation<K, V> = UnorderedOperation<K, VariableEncoding<V>>;
-
-/// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
-/// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
-    E,
-    K,
-    VariableEncoding<V>,
-    UnorderedUpdate<K, VariableEncoding<V>>,
-    Journal<E, Operation<K, V>>,
-    Index<T, Location>,
-    H,
-    S,
->;
-
-// impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-//     Any<E, K, V, H, T>
-// {
-//     /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
-//     /// discarded and the state of the db will be as of the last committed operation.
-//     pub async fn init(
-//         context: E,
-//         cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-//     ) -> Result<Self, Error> {
-//         let mmr_config = MmrConfig {
-//             journal_partition: cfg.mmr_journal_partition,
-//             metadata_partition: cfg.mmr_metadata_partition,
-//             items_per_blob: cfg.mmr_items_per_blob,
-//             write_buffer: cfg.mmr_write_buffer,
-//             thread_pool: cfg.thread_pool,
-//             buffer_pool: cfg.buffer_pool.clone(),
-//         };
-
-//         let journal_config = JournalConfig {
-//             partition: cfg.log_partition,
-//             items_per_section: cfg.log_items_per_blob,
-//             compression: cfg.log_compression,
-//             codec_config: cfg.log_codec_config,
-//             buffer_pool: cfg.buffer_pool,
-//             write_buffer: cfg.log_write_buffer,
-//         };
-
-//         let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
-//             context.with_label("log"),
-//             mmr_config,
-//             journal_config,
-//             Operation::<K, V>::is_commit,
-//         )
-//         .await?;
-
-//         let log = Self::init_from_log(
-//             Index::new(context.with_label("index"), cfg.translator),
-//             log,
-//             None,
-//             |_, _| {},
-//         )
-//         .await?;
-
-//         Ok(log)
-//     }
-// }
-
 #[cfg(test)]
 pub(super) mod test {
-    use super::*;
     use crate::{
-        index::Unordered as _,
-        qmdb::store::{batch_tests, CleanStore as _},
+        index::{unordered::Index, Unordered as _},
+        journal::contiguous::variable::Journal as VariableJournal,
+        mmr::Location,
+        qmdb::{
+            any::{unordered::Any, UnorderedOperation, VariableConfig, VariableEncoding},
+            store::{batch_tests, CleanStore as _},
+            Error,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -124,7 +39,17 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest = Any<
+        deterministic::Context,
+        Digest,
+        VariableEncoding<Vec<u8>>,
+        VariableJournal<
+            deterministic::Context,
+            UnorderedOperation<Digest, VariableEncoding<Vec<u8>>>,
+        >,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -339,9 +264,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
-            async fn apply_more_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
-            ) {
+            async fn apply_more_ops(db: &mut AnyTest) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
@@ -401,9 +324,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
-            async fn apply_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
-            ) {
+            async fn apply_ops(db: &mut AnyTest) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
