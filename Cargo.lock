@@ -1247,7 +1247,6 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-math",
- "commonware-utils",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
