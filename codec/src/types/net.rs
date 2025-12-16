@@ -2,7 +2,7 @@
 
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 impl Write for Ipv4Addr {
     #[inline]
@@ -42,6 +42,52 @@ impl Read for Ipv6Addr {
 
 impl FixedSize for Ipv6Addr {
     const SIZE: usize = u128::SIZE;
+}
+
+impl Write for SocketAddrV4 {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.ip().write(buf);
+        self.port().write(buf);
+    }
+}
+
+impl Read for SocketAddrV4 {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let ip = Ipv4Addr::read(buf)?;
+        let port = u16::read(buf)?;
+        Ok(Self::new(ip, port))
+    }
+}
+
+impl FixedSize for SocketAddrV4 {
+    const SIZE: usize = Ipv4Addr::SIZE + u16::SIZE;
+}
+
+impl Write for SocketAddrV6 {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.ip().write(buf);
+        self.port().write(buf);
+    }
+}
+
+impl Read for SocketAddrV6 {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let address = Ipv6Addr::read(buf)?;
+        let port = u16::read(buf)?;
+        Ok(Self::new(address, port, 0, 0))
+    }
+}
+
+impl FixedSize for SocketAddrV6 {
+    const SIZE: usize = Ipv6Addr::SIZE + u16::SIZE;
 }
 
 impl Write for IpAddr {
@@ -165,6 +211,48 @@ mod test {
     }
 
     #[test]
+    fn test_socket_addr_v4() {
+        // Test various SocketAddrV4 instances
+        let addrs = [
+            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 65535),
+        ];
+
+        for addr in addrs.iter() {
+            let encoded = addr.encode();
+            assert_eq!(encoded.len(), 6);
+            let decoded = SocketAddrV4::decode(encoded).unwrap();
+            assert_eq!(*addr, decoded);
+        }
+
+        // Test insufficient data
+        let insufficient = Bytes::from(vec![0u8; 5]); // 5 bytes instead of 6
+        assert!(SocketAddrV4::decode(insufficient).is_err());
+    }
+
+    #[test]
+    fn test_socket_addr_v6() {
+        // Test various SocketAddrV6 instances
+        let addrs = [
+            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
+            SocketAddrV6::new(Ipv6Addr::LOCALHOST, 8080, 0, 0),
+            SocketAddrV6::new(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1), 65535, 0, 0),
+        ];
+
+        for addr in addrs.iter() {
+            let encoded = addr.encode();
+            assert_eq!(encoded.len(), 18);
+            let decoded = SocketAddrV6::decode(encoded).unwrap();
+            assert_eq!(*addr, decoded);
+        }
+
+        // Test insufficient data
+        let insufficient = Bytes::from(vec![0u8; 17]); // 17 bytes instead of 18
+        assert!(SocketAddrV6::decode(insufficient).is_err());
+    }
+
+    #[test]
     fn test_ip_addr() {
         // Test IpAddr::V4
         let addr_v4 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
@@ -268,6 +356,18 @@ mod test {
             &[0xff; 16][..]
         );
 
+        let sock_v4_1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 80);
+        assert_eq!(sock_v4_1.encode(), &[10, 0, 0, 1, 0x00, 0x50][..]);
+        let sock_v4_2 = SocketAddrV4::new(Ipv4Addr::new(192, 168, 20, 30), 65535);
+        assert_eq!(sock_v4_2.encode(), &[192, 168, 20, 30, 0xFF, 0xFF][..]);
+
+        let sock_v6_1 =
+            SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 8080, 0, 0);
+        assert_eq!(
+            sock_v6_1.encode(),
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90][..]
+        );
+
         let sa_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         assert_eq!(sa_v4.encode(), &[0x04, 127, 0, 0, 1, 0x1F, 0x90][..]);
         let sa_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 443);
@@ -285,6 +385,8 @@ mod test {
         commonware_conformance::conformance_tests! {
             CodecConformance<Ipv4Addr>,
             CodecConformance<Ipv6Addr>,
+            CodecConformance<SocketAddrV4>,
+            CodecConformance<SocketAddrV6>,
             CodecConformance<IpAddr>,
             CodecConformance<SocketAddr>,
         }
