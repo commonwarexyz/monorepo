@@ -129,15 +129,14 @@ where
     pub(crate) async fn recover_inactivity_floor(
         log: &AuthenticatedLog<E, C, H, S>,
     ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1);
-        if let Some(last_commit_loc) = last_commit_loc {
-            match log.read(last_commit_loc).await? {
-                Operation::CommitFloor(_, location) => Ok(location),
-                _ => unreachable!("last commit is not a CommitFloor operation"),
-            }
-        } else {
-            Ok(Location::new_unchecked(0))
-        }
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit = log.read(last_commit_loc).await?;
+        let inactivity_floor = match last_commit {
+            Operation::CommitFloor(_, loc) => loc,
+            _ => unreachable!("last commit is not a CommitFloor operation"),
+        };
+
+        Ok(inactivity_floor)
     }
 
     async fn get_update_op(
