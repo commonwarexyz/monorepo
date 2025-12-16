@@ -1,6 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
+        elector::Elector,
         interesting, min_active,
         scheme::Scheme,
         types::{
@@ -27,8 +28,9 @@ use tracing::{debug, warn};
 const GENESIS_VIEW: View = View::zero();
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme> {
+pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub scheme: S,
+    pub elector: L,
     pub namespace: Vec<u8>,
     pub epoch: Epoch,
     pub activity_timeout: ViewDelta,
@@ -41,9 +43,10 @@ pub struct Config<S: certificate::Scheme> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S>> {
     context: E,
     scheme: S,
+    elector: L,
     namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
@@ -60,8 +63,10 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> 
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, D> {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S>>
+    State<E, S, D, L>
+{
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -71,6 +76,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
         Self {
             context,
             scheme: cfg.scheme,
+            elector: cfg.elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
@@ -130,16 +136,34 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
     }
 
     /// Advances the view and updates the leader.
-    fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
+    ///
+    /// If `seed` is `None`, this **must** be the first view after genesis (view 1).
+    /// For all subsequent views, a seed derived from the previous view's certificate
+    /// must be provided.
+    fn enter_view(&mut self, view: View, seed: Option<L::Seed>) -> bool {
         if view <= self.view {
             return false;
         }
+
+        // Seed is required for all views after view 1
+        assert!(seed.is_some() || view == GENESIS_VIEW.next());
+
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
         let advance_deadline = now + self.notarization_timeout;
+
+        // Compute leader using elector
+        let leader = match seed {
+            Some(seed) => {
+                self.elector
+                    .elect(self.scheme.participants(), Rnd::new(self.epoch, view), seed)
+            }
+            None => self.elector.first(self.scheme.participants(), self.epoch),
+        };
+
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
-        round.set_leader(seed); // may not be set until we actually enter
+        round.set_leader(leader); // may not be set until we actually enter
         self.view = view;
 
         // Update metrics
@@ -205,10 +229,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
     ) -> (bool, Option<S::PublicKey>) {
         let view = notarization.view();
         let seed = self
-            .scheme
+            .elector
             .seed(notarization.round(), &notarization.certificate);
         let added = self.create_round(view).add_notarization(notarization);
-        self.enter_view(view.next(), seed);
+        self.enter_view(view.next(), Some(seed));
         added
     }
 
@@ -216,10 +240,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let seed = self
-            .scheme
+            .elector
             .seed(nullification.round(), &nullification.certificate);
         let added = self.create_round(view).add_nullification(nullification);
-        self.enter_view(view.next(), seed);
+        self.enter_view(view.next(), Some(seed));
         added
     }
 
@@ -235,10 +259,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
         }
 
         let seed = self
-            .scheme
+            .elector
             .seed(finalization.round(), &finalization.certificate);
         let added = self.create_round(view).add_finalization(finalization);
-        self.enter_view(view.next(), seed);
+        self.enter_view(view.next(), Some(seed));
         added
     }
 

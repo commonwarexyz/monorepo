@@ -1,4 +1,7 @@
-use super::types::{Activity, Context};
+use super::{
+    elector::Elector,
+    types::{Activity, Context},
+};
 use crate::{
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
@@ -17,6 +20,7 @@ pub struct Config<
     A: Automaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    L: Elector<S>,
 > {
     /// Signing scheme for the consensus engine.
     ///
@@ -28,6 +32,14 @@ pub struct Config<
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
     pub scheme: S,
+
+    /// Leader election strategy.
+    ///
+    /// Determines how leaders are selected for each view. Built-in options include
+    /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
+    /// [`ThresholdRandomness`](super::elector::ThresholdRandomness) for unpredictable
+    /// selection using BLS threshold signatures.
+    pub elector: L,
 
     /// Blocker for the network.
     ///
@@ -111,7 +123,8 @@ impl<
         A: Automaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<S, B, D, A, R, F>
+        L: Elector<S>,
+    > Config<S, B, D, A, R, F, L>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

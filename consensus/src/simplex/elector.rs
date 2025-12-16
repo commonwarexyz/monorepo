@@ -66,7 +66,7 @@ pub trait Elector<S: Scheme>: Send + 'static {
     /// This method **must** be a pure function.
     ///
     /// Returns the index of the selected leader in the participants list.
-    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, seed: &Self::Seed) -> u32;
+    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, seed: Self::Seed) -> u32;
 }
 
 /// Simple round-robin leader election.
@@ -82,7 +82,7 @@ impl<S: Scheme> Elector<S> for RoundRobin {
 
     fn seed(&self, _round: Round, _certificate: &S::Certificate) {}
 
-    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, _seed: &()) -> u32 {
+    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, _seed: ()) -> u32 {
         assert!(
             !participants.is_empty(),
             "no participants to select leader from"
@@ -112,7 +112,7 @@ where
         Seed::new(round, certificate.seed_signature)
     }
 
-    fn elect(&self, participants: &Set<P>, _round: Round, seed: &Self::Seed) -> u32 {
+    fn elect(&self, participants: &Set<P>, _round: Round, seed: Self::Seed) -> u32 {
         assert!(
             !participants.is_empty(),
             "no participants to select leader from"
@@ -160,7 +160,7 @@ mod tests {
                 &elector,
                 &participants,
                 round,
-                &(),
+                (),
             ));
         }
 
@@ -212,7 +212,7 @@ mod tests {
         let participants = Set::default();
         let elector = RoundRobin;
         let round = Round::new(Epoch::new(1), View::new(1));
-        <RoundRobin as Elector<ed25519::Scheme>>::elect(&elector, &participants, round, &());
+        <RoundRobin as Elector<ed25519::Scheme>>::elect(&elector, &participants, round, ());
     }
 
     #[test]
@@ -286,10 +286,14 @@ mod tests {
         let seed2 = <ThresholdRandomness as Elector<S>>::seed(&elector, round2, &cert2);
 
         // Same seed always gives same leader
-        let leader1a =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round1, &seed1);
+        let leader1a = <ThresholdRandomness as Elector<S>>::elect(
+            &elector,
+            &participants,
+            round1,
+            seed1.clone(),
+        );
         let leader1b =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round1, &seed1);
+            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round1, seed1);
         assert_eq!(leader1a, leader1b);
 
         // Different seeds produce different leaders
@@ -297,14 +301,18 @@ mod tests {
         // NOTE: In general, different seeds could produce the same leader by chance.
         // However, for our specific test inputs (rng seed 42, 5 participants), we've
         // verified these produce different results.
-        let leader2 =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round1, &seed2);
+        let leader2 = <ThresholdRandomness as Elector<S>>::elect(
+            &elector,
+            &participants,
+            round1,
+            seed2.clone(),
+        );
         assert_ne!(leader1a, leader2);
 
         // The output of the election is entirely determined by the seed, so using the same seed
         // across different rounds leads to the same result
         let leader3 =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round2, &seed2);
+            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round2, seed2);
         assert_eq!(leader2, leader3);
     }
 
@@ -341,6 +349,6 @@ mod tests {
         let participants = Set::default();
         let elector = ThresholdRandomness;
         let seed = <ThresholdRandomness as Elector<S>>::seed(&elector, round, &cert);
-        <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round, &seed);
+        <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round, seed);
     }
 }

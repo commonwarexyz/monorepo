@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::types::Activity,
+    simplex::{elector::Elector, types::Activity},
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
@@ -25,8 +25,10 @@ pub struct Config<
     A: Automaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    L: Elector<S>,
 > {
     pub scheme: S,
+    pub elector: L,
     pub blocker: B,
     pub automaton: A,
     pub relay: R,

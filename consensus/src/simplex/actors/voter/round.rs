@@ -1,12 +1,9 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
-    simplex::{
-        scheme::SeededScheme,
-        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
-    },
+    simplex::types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     types::Round as Rnd,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -21,7 +18,7 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Per-[Rnd] state machine.
-pub struct Round<S: SeededScheme, D: Digest> {
+pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -47,7 +44,7 @@ pub struct Round<S: SeededScheme, D: Digest> {
     broadcast_finalization: bool,
 }
 
-impl<S: SeededScheme, D: Digest> Round<S, D> {
+impl<S: Scheme, D: Digest> Round<S, D> {
     pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         Self {
             start,
@@ -132,18 +129,11 @@ impl<S: SeededScheme, D: Digest> Round<S, D> {
         self.advance_deadline = None;
     }
 
-    /// Picks and stores the leader for this round using the deterministic lottery.
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) = crate::simplex::select_leader::<S>(
-            self.scheme.participants().as_ref(),
-            self.round,
-            seed,
-        );
-        debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
-        self.leader = Some(Leader {
-            idx: leader_idx,
-            key: leader,
-        });
+    /// Sets the leader for this round using the pre-computed leader index.
+    pub fn set_leader(&mut self, leader: u32) {
+        let key = self.scheme.participants()[leader as usize].clone();
+        debug!(round=?self.round, ?leader, ?key, "leader elected");
+        self.leader = Some(Leader { idx: leader, key });
     }
 
     /// Returns the notarization certificate if we already reconstructed one.
