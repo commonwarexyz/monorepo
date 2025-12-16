@@ -4,11 +4,11 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
-    index::unordered::Index,
-    journal::contiguous::fixed::Journal,
-    mmr::Location,
     qmdb::{
-        any::{unordered::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation},
+        any::{
+            unordered::{FixedDb, Operation as DbOperation},
+            FixedConfig as Config, FixedEncoding,
+        },
         store::CleanStore as _,
         sync,
     },
@@ -20,16 +20,6 @@ use std::sync::Arc;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-
-/// A specialized type alias for fixed-size unordered Any databases.
-type FixedAny<E, K, V, H, T> = Any<
-    E,
-    K,
-    FixedEncoding<V>,
-    Journal<E, UnorderedOperation<K, FixedEncoding<V>>>,
-    Index<T, Location>,
-    H,
->;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -119,7 +109,7 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
 async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
-        Op = UnorderedOperation<Key, FixedEncoding<Value>>,
+        Op = DbOperation<Key, FixedEncoding<Value>>,
     >,
 >(
     context: deterministic::Context,
@@ -131,7 +121,7 @@ async fn test_sync<
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<FixedAny<_, Key, Value, Sha256, TwoCap>, R> =
+    let sync_config: sync::engine::Config<FixedDb<_, Key, Value, Sha256, TwoCap>, R> =
         sync::engine::Config {
             context,
             update_rx: None,
@@ -143,8 +133,7 @@ async fn test_sync<
             max_outstanding_requests: 10,
         };
 
-    if let Ok(synced) = sync::sync::<FixedAny<_, Key, Value, Sha256, TwoCap>, _>(sync_config).await
-    {
+    if let Ok(synced) = sync::sync::<FixedDb<_, Key, Value, Sha256, TwoCap>, _>(sync_config).await {
         let actual_root = synced.root();
         assert_eq!(
             actual_root, expected_root,
@@ -163,12 +152,10 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = FixedAny::<_, Key, Value, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config(TEST_NAME),
-        )
-        .await
-        .expect("Failed to init source db");
+        let mut db =
+            FixedDb::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
+                .await
+                .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -246,7 +233,7 @@ fn fuzz(mut input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = FixedAny::<_, Key, Value, Sha256, TwoCap>::init(
+                    db = FixedDb::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config(TEST_NAME),
                     )

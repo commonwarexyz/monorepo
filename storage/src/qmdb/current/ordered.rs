@@ -48,6 +48,7 @@ pub struct Current<
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
+    #[allow(clippy::type_complexity)]
     any: Any<
         E,
         K,

@@ -847,6 +847,7 @@ fn test_ordered_any_fixed_db_historical_proof_invalid() {
 fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        #[allow(clippy::type_complexity)]
         async fn insert_random<T: Translator>(
             db: &mut Any<
                 Context,

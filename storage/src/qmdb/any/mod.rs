@@ -5,7 +5,10 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::fixed::{Config as JConfig, Journal},
+        contiguous::{
+            fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
+            variable::{Config as VariableJournalConfig, Journal as VariableJournal},
+        },
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
@@ -15,7 +18,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::CodecFixed;
+use commonware_codec::{Codec, CodecFixed, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
@@ -174,8 +177,8 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, O>, H, S>;
+type FixedAuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
+    authenticated::Journal<E, FixedJournal<E, O>, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -187,7 +190,7 @@ pub(crate) async fn init_fixed_authenticated_log<
 >(
     context: E,
     cfg: FixedConfig<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+) -> Result<FixedAuthenticatedLog<E, O, H>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
@@ -197,14 +200,56 @@ pub(crate) async fn init_fixed_authenticated_log<
         buffer_pool: cfg.buffer_pool.clone(),
     };
 
-    let journal_config = JConfig {
+    let journal_config = FixedJournalConfig {
         partition: cfg.log_journal_partition,
         items_per_blob: cfg.log_items_per_blob,
         write_buffer: cfg.log_write_buffer,
         buffer_pool: cfg.buffer_pool,
     };
 
-    let log = AuthenticatedLog::new(
+    let log = FixedAuthenticatedLog::new(
+        context.with_label("log"),
+        mmr_config,
+        journal_config,
+        O::is_commit,
+    )
+    .await?;
+
+    Ok(log)
+}
+
+type VariableAuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
+    authenticated::Journal<E, VariableJournal<E, O>, H, S>;
+
+/// Initialize a variable-size authenticated log from the given config.
+pub(crate) async fn init_variable_authenticated_log<
+    E: Storage + Clock + Metrics,
+    O: Committable + Codec + Read,
+    H: Hasher,
+    T: Translator,
+>(
+    context: E,
+    cfg: VariableConfig<T, <O as Read>::Cfg>,
+) -> Result<VariableAuthenticatedLog<E, O, H>, Error> {
+    let mmr_config = MmrConfig {
+        journal_partition: cfg.mmr_journal_partition,
+        metadata_partition: cfg.mmr_metadata_partition,
+        items_per_blob: cfg.mmr_items_per_blob,
+        write_buffer: cfg.mmr_write_buffer,
+        thread_pool: cfg.thread_pool,
+        buffer_pool: cfg.buffer_pool.clone(),
+    };
+
+    let journal_config = VariableJournalConfig {
+        partition: cfg.log_partition,
+        items_per_section: cfg.log_items_per_blob,
+        compression: cfg.log_compression,
+        codec_config: cfg.log_codec_config,
+        buffer_pool: cfg.buffer_pool,
+        write_buffer: cfg.log_write_buffer,
+    };
+
+    let log = VariableAuthenticatedLog::new(
         context.with_label("log"),
         mmr_config,
         journal_config,

@@ -1,26 +1,22 @@
-use commonware_codec::{Codec, CodecFixed, Read};
-use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
-use tracing::warn;
-
 use crate::{
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::fixed::Journal as FixedJournal,
-        contiguous::variable::{Config as VariableJournalConfig, Journal as VariableJournal},
-    },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    journal::contiguous::{fixed::Journal as FixedJournal, variable::Journal as VariableJournal},
+    mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            db::IndexedLog, init_fixed_authenticated_log, FixedConfig, FixedEncoding, FixedValue,
-            UnorderedOperation, UnorderedUpdate, VariableConfig, VariableEncoding, VariableValue,
+            db::IndexedLog, init_fixed_authenticated_log, init_variable_authenticated_log,
+            FixedConfig, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate,
+            VariableConfig, VariableEncoding, VariableValue,
         },
         Error,
     },
     translator::Translator,
 };
+use commonware_codec::{Codec, CodecFixed, Read};
+use commonware_cryptography::{DigestOf, Hasher};
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
+use tracing::warn;
 
 pub mod sync;
 
@@ -34,15 +30,31 @@ mod variable;
 pub type Any<E, K, V, C, I, H, S = Clean<DigestOf<H>>> =
     IndexedLog<E, K, V, UnorderedUpdate<K, V>, C, I, H, S>;
 
+/// Operation type for unordered databases.
+pub type Operation<K, V> = UnorderedOperation<K, V>;
+
+/// A fixed-size unordered Any database with standard journal and index types.
+pub type FixedDb<E, K, V, H, T> = Any<
+    E,
+    K,
+    FixedEncoding<V>,
+    FixedJournal<E, UnorderedOperation<K, FixedEncoding<V>>>,
+    Index<T, Location>,
+    H,
+>;
+
+/// A variable-size unordered Any database with standard journal and index types.
+pub type VariableDb<E, K, V, H, T> = Any<
+    E,
+    K,
+    VariableEncoding<V>,
+    VariableJournal<E, UnorderedOperation<K, VariableEncoding<V>>>,
+    Index<T, Location>,
+    H,
+>;
+
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<
-        E,
-        K,
-        VariableEncoding<V>,
-        VariableJournal<E, UnorderedOperation<K, VariableEncoding<V>>>,
-        Index<T, Location>,
-        H,
-    >
+    VariableDb<E, K, V, H, T>
 where
     UnorderedOperation<K, VariableEncoding<V>>: Codec,
 {
@@ -52,33 +64,8 @@ where
         context: E,
         cfg: VariableConfig<T, <UnorderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mmr_config = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
-        };
-
-        let journal_config = VariableJournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_blob,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let mut log = authenticated::Journal::<_, VariableJournal<_, _>, _, _>::new(
-            context.with_label("log"),
-            mmr_config,
-            journal_config,
-            |op: &UnorderedOperation<K, VariableEncoding<V>>| {
-                matches!(op, UnorderedOperation::CommitFloor(_, _))
-            },
-        )
-        .await?;
+        let translator = cfg.translator.clone();
+        let mut log = init_variable_authenticated_log(context.clone(), cfg).await?;
 
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
@@ -90,27 +77,13 @@ where
             log.sync().await?;
         }
 
-        let log = Self::init_from_log(
-            Index::new(context.with_label("index"), cfg.translator),
-            log,
-            None,
-            |_, _| {},
-        )
-        .await?;
-
-        Ok(log)
+        let index = Index::new(context.with_label("index"), translator);
+        Self::init_from_log(index, log, None, |_, _| {}).await
     }
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<
-        E,
-        K,
-        FixedEncoding<V>,
-        FixedJournal<E, UnorderedOperation<K, FixedEncoding<V>>>,
-        Index<T, Location>,
-        H,
-    >
+    FixedDb<E, K, V, H, T>
 where
     UnorderedOperation<K, FixedEncoding<V>>: CodecFixed<Cfg = ()>,
 {
@@ -179,7 +152,7 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type FixedDb = Any<
+    type FixedDb = Any<
         Context,
         Digest,
         FixedEncoding<Digest>,

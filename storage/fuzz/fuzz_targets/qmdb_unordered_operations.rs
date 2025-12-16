@@ -4,11 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    index::unordered::Index,
-    journal::contiguous::fixed::Journal,
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
-        any::{unordered::Any, FixedConfig as Config, FixedEncoding, UnorderedOperation},
+        any::{unordered::FixedDb, FixedConfig as Config},
         store::CleanStore as _,
         verify_proof,
     },
@@ -22,16 +20,6 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
-
-/// A specialized type alias for fixed-size unordered Any databases.
-type FixedAny<E, K, V, H, T> = Any<
-    E,
-    K,
-    FixedEncoding<V>,
-    Journal<E, UnorderedOperation<K, FixedEncoding<V>>>,
-    Index<T, Location>,
-    H,
->;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QmdbOperation {
@@ -70,7 +58,7 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = FixedAny::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = FixedDb::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
             .expect("init qmdb");
 
