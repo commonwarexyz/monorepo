@@ -24,8 +24,8 @@ pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
 #[cfg(test)]
 mod tests {
     use crate::qmdb::any::{
-        operation::update::Unordered as UnorderedUpdate,
-        ordered::OrderedUpdate,
+        ordered::Update as OrderedUpdate,
+        unordered::Update as UnorderedUpdate,
         value::{FixedEncoding, VariableEncoding},
     };
     use commonware_codec::{Codec, RangeCfg, Read};

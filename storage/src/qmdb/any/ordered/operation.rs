@@ -1,4 +1,4 @@
-pub use crate::qmdb::any::operation::{update::Ordered as OrderedUpdate, Ordered as Operation};
+pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
 use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
 
 pub type FixedOperation<K, V> = Operation<K, FixedEncoding<V>>;
