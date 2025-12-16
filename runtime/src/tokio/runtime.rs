@@ -32,7 +32,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -618,6 +618,19 @@ impl crate::Network for Context {
 
     async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
         self.network.dial(socket).await
+    }
+}
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        let resolver = hickory_resolver::Resolver::builder_tokio()
+            .map_err(|e| Error::ResolveFailed(e.to_string()))?
+            .build();
+        let response = resolver
+            .lookup_ip(host)
+            .await
+            .map_err(|e| Error::ResolveFailed(e.to_string()))?;
+        Ok(response.iter().collect())
     }
 }
 

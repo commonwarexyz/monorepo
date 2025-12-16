@@ -75,9 +75,9 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -278,6 +278,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
 }
 
 impl Executor {
@@ -838,6 +839,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns: Mutex::new(HashMap::new()),
         });
 
         (
@@ -895,6 +897,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns: Mutex::new(HashMap::new()),
         });
         (
             Self {
@@ -924,6 +927,27 @@ impl Context {
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
+    }
+
+    /// Register a DNS mapping for a hostname.
+    ///
+    /// If `addrs` is `None`, the mapping is removed.
+    /// If `addrs` is `Some`, the mapping is added or updated.
+    pub fn register_dns(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+        let executor = self.executor();
+        let host = host.into();
+        executor.auditor.event(b"register_dns", |hasher| {
+            hasher.update(host.as_bytes());
+        });
+        let mut dns = executor.dns.lock().unwrap();
+        match addrs {
+            Some(addrs) => {
+                dns.insert(host, addrs);
+            }
+            None => {
+                dns.remove(&host);
+            }
+        }
     }
 }
 
@@ -1288,6 +1312,19 @@ impl crate::Network for Context {
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
         self.network.dial(socket).await
+    }
+}
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        let executor = self.executor();
+        executor.auditor.event(b"resolve", |hasher| {
+            hasher.update(host.as_bytes());
+        });
+        let dns = executor.dns.lock().unwrap();
+        dns.get(host)
+            .cloned()
+            .ok_or_else(|| Error::ResolveFailed(host.to_string()))
     }
 }
 

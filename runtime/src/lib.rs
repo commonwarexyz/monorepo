@@ -77,6 +77,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("dns resolution failed: {0}")]
+    ResolveFailed(String),
     #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
     PartitionNameInvalid(String),
     #[error("partition creation failed: {0}")]
@@ -412,6 +414,17 @@ pub trait Network: Clone + Send + Sync + 'static {
         &self,
         socket: SocketAddr,
     ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
+}
+
+/// Interface for DNS resolution.
+pub trait Resolver: Clone + Send + Sync + 'static {
+    /// Resolve a hostname to IP addresses.
+    ///
+    /// Returns a list of IP addresses that the hostname resolves to.
+    fn resolve(
+        &self,
+        host: &str,
+    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
 }
 
 /// Interface that any runtime must implement to handle
