@@ -509,7 +509,8 @@ mod fuzz {
                 .take(size)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Self {
-                coeffs: NonEmptyVec::from_vec_unchecked(coeffs),
+                coeffs: NonEmptyVec::try_from(coeffs)
+                    .map_err(|_| arbitrary::Error::NotEnoughData)?,
             })
         }
     }
