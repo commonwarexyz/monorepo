@@ -597,11 +597,10 @@ mod test {
                                 (epoch, None)
                             }
                             Update::Success { epoch, output, share } => {
-                                let has_share = share.is_some();
-                                info!(epoch = ?epoch, pk = ?update.pk, has_share, ?output, "DKG success");
+                                info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
 
                                 // Check if a delayed participant got an acknowledged share
-                                if delayed.contains(&update.pk) && has_share && output.revealed().position(&update.pk).is_none() {
+                                if delayed.contains(&update.pk) && share.is_some() && output.revealed().position(&update.pk).is_none() {
                                     info!(pk = ?update.pk, "delayed participant acknowledged");
                                     delayed_acknowledged.insert(update.pk.clone());
                                 }
