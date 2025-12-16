@@ -5,7 +5,6 @@ use super::{
         handler::{self, Request},
         mailbox::{Mailbox, Message},
     },
-    SchemeProvider,
 };
 use crate::{
     marshal::{
@@ -14,7 +13,7 @@ use crate::{
         Update,
     },
     simplex::{
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{Finalization, Notarization},
     },
     types::{Epoch, Round, ViewDelta},
@@ -22,7 +21,10 @@ use crate::{
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme as _},
+    PublicKey,
+};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
@@ -99,13 +101,12 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, S, FC, FB, A = Exact>
+pub struct Actor<E, B, P, FC, FB, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
-    FC: Certificates<Commitment = B::Commitment, Scheme = S>,
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
+    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
@@ -114,11 +115,11 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<S, B>>,
+    mailbox: mpsc::Receiver<Message<P::Scheme, B>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
-    scheme_provider: P,
+    provider: P,
     // Epoch length (in blocks)
     epoch_length: u64,
     // Unique application namespace
@@ -144,7 +145,7 @@ where
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, S>,
+    cache: cache::Manager<E, B, P::Scheme>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
@@ -159,13 +160,12 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, S, FC, FB, A> Actor<E, B, P, S, FC, FB, A>
+impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
-    FC: Certificates<Commitment = B::Commitment, Scheme = S>,
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
+    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
@@ -174,8 +174,8 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P, S>,
-    ) -> (Self, Mailbox<S, B>) {
+        config: Config<B, P>,
+    ) -> (Self, Mailbox<P::Scheme, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -224,7 +224,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 epoch_length: config.epoch_length,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -605,7 +605,7 @@ where
 
                                     // Parse finalization
                                     let Ok((finalization, block)) =
-                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -645,7 +645,7 @@ where
 
                                     // Parse notarization
                                     let Ok((notarization, block)) =
-                                        <(Notarization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -704,10 +704,8 @@ where
     ///
     /// Prefers a certificate verifier if available, otherwise falls back
     /// to the scheme for the given epoch.
-    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
-        self.scheme_provider
-            .certificate_verifier()
-            .or_else(|| self.scheme_provider.scheme(epoch))
+    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
+        self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
     // -------------------- Waiters --------------------
@@ -817,7 +815,7 @@ where
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<S, B::Commitment>> {
+    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height))
@@ -836,7 +834,7 @@ where
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<S, B::Commitment>>,
+        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
@@ -856,7 +854,7 @@ where
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<S, B::Commitment>>,
+        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block).await;

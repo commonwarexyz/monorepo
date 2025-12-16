@@ -1,7 +1,7 @@
 use super::Verifier;
 use crate::{
     simplex::{
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
@@ -9,7 +9,7 @@ use crate::{
     },
     Reporter,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_utils::ordered::{Quorum, Set};
 use rand::{CryptoRng, Rng};
@@ -17,13 +17,12 @@ use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Set<P>,
+    participants: Set<S::PublicKey>,
 
     blocker: B,
     reporter: R,
@@ -49,14 +48,13 @@ pub struct Round<
 }
 
 impl<
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Round<P, S, B, D, R>
+    > Round<S, B, D, R>
 {
-    pub fn new(participants: Set<P>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum();
         let len = participants.len();
         Self {
@@ -108,7 +106,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    pub async fn add_network(&mut self, sender: P, message: Vote<S, D>) -> bool {
+    pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");

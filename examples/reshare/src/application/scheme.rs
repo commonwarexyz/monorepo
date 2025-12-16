@@ -1,14 +1,11 @@
 //! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::marshal::SchemeProvider] implementation.
+//! [commonware_cryptography::certificate::Provider] implementation.
 
 use crate::orchestrator::EpochTransition;
-use commonware_consensus::{
-    marshal,
-    simplex::signing_scheme::{self, Scheme},
-    types::Epoch,
-};
+use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
+    certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
 use std::{
@@ -17,19 +14,19 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
+pub type ThresholdScheme<V> = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
-pub type EdScheme = signing_scheme::ed25519::Scheme;
+pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct SchemeProvider<S: Scheme, C: Signer> {
+pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     signer: C,
 }
 
-impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> Provider<S, C> {
     pub fn new(signer: C) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
@@ -38,7 +35,7 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> Provider<S, C> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -56,16 +53,17 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> marshal::SchemeProvider for SchemeProvider<S, C> {
+impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
+    type Scope = Epoch;
     type Scheme = S;
 
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }
 }
 
-pub trait EpochSchemeProvider {
+pub trait EpochProvider {
     type Variant: Variant;
     type PublicKey: PublicKey;
     type Scheme: Scheme;
@@ -77,7 +75,7 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
+impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
     type PublicKey = ed25519::PublicKey;
     type Scheme = ThresholdScheme<V>;
@@ -111,7 +109,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
     }
 }
 
-impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
+impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;

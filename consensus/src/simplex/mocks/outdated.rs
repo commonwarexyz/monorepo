@@ -2,14 +2,14 @@
 
 use crate::{
     simplex::{
-        signing_scheme::Scheme,
+        scheme,
         types::{Finalize, Notarize, Proposal, Vote},
     },
     types::{View, ViewDelta},
     Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -34,7 +34,12 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
+impl<E, S, H> Outdated<E, S, H>
+where
+    E: Clock + Rng + CryptoRng + Spawner,
+    S: scheme::Scheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
