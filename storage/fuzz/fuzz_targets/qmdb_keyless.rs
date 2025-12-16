@@ -184,11 +184,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    if let Some(last_commit_loc) = db.last_commit_loc() {
-                        db.prune(last_commit_loc)
-                            .await
-                            .expect("Prune should not fail");
-                    }
+                    db.prune(db.last_commit_loc())
+                        .await
+                        .expect("Prune should not fail");
                 }
 
                 Operation::Sync => {

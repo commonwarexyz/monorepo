@@ -51,14 +51,15 @@ pub struct IndexedLog<
     /// # Invariants
     ///
     /// - The log is never pruned beyond the inactivity floor.
+    /// - There is always at least one commit operation in the log.
     pub(crate) log: AuthenticatedLog<E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location,
 
-    /// The location of the last commit operation (if any exists).
-    pub(crate) last_commit: Option<Location>,
+    /// The location of the last commit operation.
+    pub(crate) last_commit_loc: Location,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -103,19 +104,14 @@ where
     pub(crate) async fn recover_inactivity_floor(
         log: &AuthenticatedLog<E, C, H, S>,
     ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1);
-        if let Some(last_commit_loc) = last_commit_loc {
-            let last_commit = log.read(last_commit_loc).await?;
-            let inactivity_floor = match last_commit {
-                Operation::CommitFloor(_, loc) => loc,
-                _ => {
-                    unreachable!("last commit is not a CommitFloor operation");
-                }
-            };
-            Ok(inactivity_floor)
-        } else {
-            Ok(Location::new_unchecked(0))
-        }
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit = log.read(last_commit_loc).await?;
+        let inactivity_floor = match last_commit {
+            Operation::CommitFloor(_, loc) => loc,
+            _ => unreachable!("last commit is not a CommitFloor operation"),
+        };
+
+        Ok(inactivity_floor)
     }
 
     /// Whether the snapshot currently has no active keys.
@@ -149,11 +145,6 @@ where
         self.log.oldest_retained_loc()
     }
 
-    /// Returns the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        self.log.pruning_boundary()
-    }
-
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     pub const fn inactivity_floor_loc(&self) -> Location {
@@ -167,14 +158,9 @@ where
             .map(|op| op.map(|(value, _)| value))
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let op = self.log.read(last_commit).await?;
-        match op {
+        match self.log.read(self.last_commit_loc).await? {
             Operation::CommitFloor(value, _) => Ok(value),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
@@ -349,7 +335,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    /// Panics if the last operation is not a commit.
     pub async fn init_from_log<F>(
         mut index: I,
         log: AuthenticatedLog<E, C, H>,
@@ -373,13 +359,13 @@ where
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
 
-        let last_commit = log.size().checked_sub(1);
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
 
         Ok(Self {
             log,
             inactivity_floor_loc,
             snapshot: index,
-            last_commit,
+            last_commit_loc,
             steps: 0,
             active_keys,
         })
@@ -387,8 +373,7 @@ where
 
     /// Returns an [IndexedLog] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
-    /// inactivity floor. The last commit location is set to None and it is the responsibility of the
-    /// caller to ensure it is set correctly.
+    /// inactivity floor. The last operation is assumed to be a commit.
     async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,
@@ -396,12 +381,14 @@ where
     ) -> Result<Self, Error> {
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        assert!(log.read(last_commit_loc).await?.is_commit());
 
         Ok(Self {
             log,
             inactivity_floor_loc,
             snapshot,
-            last_commit: None,
+            last_commit_loc,
             steps: 0,
             active_keys,
         })
@@ -499,7 +486,7 @@ where
     /// Panics if the given operation is not a commit operation.
     pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
-        self.last_commit = Some(self.op_count());
+        self.last_commit_loc = self.op_count();
         self.log.append(op).await?;
 
         self.log.commit().await.map_err(Into::into)
@@ -520,9 +507,7 @@ where
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
     pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        let start_loc = self
-            .last_commit
-            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+        let start_loc = self.last_commit_loc + 1;
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -568,7 +553,7 @@ where
         IndexedLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
+            last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,
@@ -592,7 +577,7 @@ where
         IndexedLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
+            last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,
@@ -878,7 +863,7 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        mmr::{mem::Mmr as MemMmr, Proof, StandardHasher},
+        mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::DirtyStore as _,
@@ -924,15 +909,10 @@ pub(super) mod test {
     ) where
         D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
         let empty_root = db.root();
-        let mut hasher = StandardHasher::<Sha256>::new();
-        assert_eq!(
-            empty_root,
-            *MemMmr::default().merkleize(&mut hasher, None).root()
-        );
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
@@ -942,43 +922,24 @@ pub(super) mod test {
         let mut db = db.into_dirty();
         db.update(k1, v1).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), empty_root);
 
-        let empty_proof = Proof::default();
-        let empty_ops: Vec<u8> = vec![];
-        assert!(verify_proof(
-            &mut hasher,
-            &empty_proof,
-            Location::new_unchecked(0),
-            &empty_ops,
-            &empty_root
-        ));
-
-        // Test calling commit on an empty db which should make it (durably) non-empty.
+        // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let range = db.commit(Some(metadata)).await.unwrap();
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 1);
-        assert_eq!(db.op_count(), 1); // commit op added
+        assert_eq!(range.start, 1);
+        assert_eq!(range.end, 2);
+        assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
-
-        // Empty proof should no longer verify.
-        assert!(!verify_proof(
-            &mut hasher,
-            &empty_proof,
-            Location::new_unchecked(0),
-            &empty_ops,
-            &root
-        ));
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
@@ -1063,7 +1024,7 @@ pub(super) mod test {
             map.remove(&k);
         }
 
-        assert_eq!(db.op_count(), Location::new_unchecked(1477));
+        assert_eq!(db.op_count(), Location::new_unchecked(1478));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
@@ -1071,16 +1032,16 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
-        assert_eq!(db.op_count(), Location::new_unchecked(1956));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+        assert_eq!(db.op_count(), Location::new_unchecked(1957));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
         // Close & reopen and ensure state matches.
         let root = db.root();
         db.close().await.unwrap();
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
-        assert_eq!(db.op_count(), Location::new_unchecked(1956));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+        assert_eq!(db.op_count(), Location::new_unchecked(1957));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
@@ -1143,7 +1104,7 @@ pub(super) mod test {
         db.update(d2, v1).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
+        assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion + initial commit.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
@@ -1153,40 +1114,40 @@ pub(super) mod test {
         assert!(!db.create(d1, v1).await.unwrap());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        // Should have moved 3 active operations to tip, leading to floor of 6.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
-        assert_eq!(db.op_count(), 9); // floor of 6 + 2 active keys + 1 commit.
+        // Should have moved 3 active operations to tip, leading to floor of 7.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
+        assert_eq!(db.op_count(), 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
         assert!(db.delete(d1).await.unwrap());
         assert!(db.delete(d2).await.unwrap());
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
-        assert_eq!(db.op_count(), 11); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
+        assert_eq!(db.op_count(), 12); // 2 new delete ops.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
 
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let mut db = db.into_dirty();
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
-        assert_eq!(db.op_count(), 12); // only commit should remain.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
+        assert_eq!(db.op_count(), 13); // only commit should remain.
 
         // Multiple deletions of the same key should be a no-op.
         assert!(!db.delete(d1).await.unwrap());
-        assert_eq!(db.op_count(), 12);
+        assert_eq!(db.op_count(), 13);
 
         // Deletions of non-existent keys should be a no-op.
         let d3 = Sha256::fill(3u8);
         assert!(!db.delete(d3).await.unwrap());
-        assert_eq!(db.op_count(), 12);
+        assert_eq!(db.op_count(), 13);
 
         // Make sure closing/reopening gets us back to the same state.
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
-        assert_eq!(db.op_count(), 13);
+        assert_eq!(db.op_count(), 14);
         let root = db.root();
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 13);
+        assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
         let mut db = db.into_dirty();
 
@@ -1202,12 +1163,12 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        assert_eq!(db.op_count(), 22);
+        assert_eq!(db.op_count(), 23);
         let root = db.root();
         let mut db = reopen_db(context.clone()).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), 22);
+        assert_eq!(db.op_count(), 23);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
@@ -1333,7 +1294,7 @@ pub(super) mod test {
         let root = db.root();
 
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -1343,7 +1304,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -1353,7 +1314,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -1365,7 +1326,7 @@ pub(super) mod test {
             }
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -1377,7 +1338,7 @@ pub(super) mod test {
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let db = reopen_db(context.clone()).await;
-        assert!(db.op_count() > 0);
+        assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();

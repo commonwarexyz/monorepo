@@ -5,15 +5,15 @@ use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
     mmr::{
         grafting::Storage as GraftingStorage,
-        mem::{Clean, Dirty, Mmr as MemMmr, State},
-        verification, Location, Position, Proof, StandardHasher,
+        mem::{Clean, Dirty, State},
+        Location, Proof, StandardHasher,
     },
     qmdb::{
         any::{
             ordered::{fixed::Any, FixedOperation as Operation, KeyData},
             CleanAny, DirtyAny, FixedValue,
         },
-        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
+        current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
         Error,
     },
@@ -21,7 +21,7 @@ use crate::{
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::FixedSize;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
@@ -58,42 +58,26 @@ pub struct Current<
     cached_root: Option<H::Digest>,
 }
 
-/// The information required to verify a key value proof from a Current qmdb.
+/// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: FixedValue, const N: usize> {
-    /// The key whose value is being proven.
-    pub key: K,
-
-    /// The value of the key.
-    pub value: V,
-
-    /// The location of the operation that assigned this value to the key.
-    pub loc: Location,
-
-    /// The next active key in the key space.
+pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
+    pub proof: OperationProof<D, N>,
     pub next_key: K,
-
-    /// The status bitmap chunk that contains the bit corresponding the operation's location.
-    pub chunk: [u8; N],
 }
 
-// The information required to verify an exclusion proof.
+/// Proof information for verifying a key is not currently active in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProofInfo<K: Array, V: FixedValue, const N: usize> {
+pub enum ExclusionProof<K: Array, V: FixedValue, D: Digest, const N: usize> {
     /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
-    KeyValue(KeyValueProofInfo<K, V, N>),
+    KeyValue(OperationProof<D, N>, KeyData<K, V>),
 
     /// For the Commit variant, we're proving that there exists a Commit operation in the database
     /// that establishes an inactivity floor equal to its own location. This implies there are no
     /// active keys, and therefore any key can be proven excluded against it. The wrapped values
     /// consist of the location of the commit operation and its digest.
-    Commit((Location, Option<V>, [u8; N])),
-
-    /// The DbEmpty variant is similar to Commit, only specifically for the case where the DB is
-    /// completely empty (having no operations at all against which to prove).
-    DbEmpty,
+    Commit(OperationProof<D, N>, Option<V>),
 }
 
 impl<
@@ -123,7 +107,7 @@ impl<
         self.any.get(key).await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await
     }
@@ -145,25 +129,20 @@ impl<
     /// the provided `root`.
     pub fn verify_key_value_proof(
         hasher: &mut H,
-        proof: &Proof<H::Digest>,
-        info: KeyValueProofInfo<K, V, N>,
+        key: K,
+        value: V,
+        proof: &KeyValueProof<K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(KeyData {
-            key: info.key,
-            value: info.value,
-            next_key: info.next_key,
+        let op = Operation::Update(KeyData {
+            key,
+            value,
+            next_key: proof.next_key.clone(),
         });
 
-        verify_key_value_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            info.loc,
-            &info.chunk,
-            root,
-            element,
-        )
+        proof
+            .proof
+            .verify(hasher, Self::grafting_height(), op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -176,52 +155,34 @@ impl<
     /// provided `root`.
     pub fn verify_exclusion_proof(
         hasher: &mut H,
-        proof: &Proof<H::Digest>,
         key: &K,
-        info: ExclusionProofInfo<K, V, N>,
+        proof: ExclusionProof<K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let (loc, chunk, element) = match info {
-            ExclusionProofInfo::KeyValue(info) => {
-                if info.key == *key {
+        let (op_proof, op) = match proof {
+            ExclusionProof::KeyValue(op_proof, data) => {
+                if data.key == *key {
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
+                if !Any::<E, K, V, H, T>::span_contains(&data.key, &data.next_key, key) {
+                    // If the key is not within the span, then this proof cannot prove its
+                    // exclusion.
                     return false;
                 }
 
-                let element = Operation::Update(KeyData {
-                    key: info.key,
-                    value: info.value,
-                    next_key: info.next_key,
-                });
-
-                (info.loc, info.chunk, element)
+                (op_proof, Operation::Update(data))
             }
-            ExclusionProofInfo::Commit((loc, metadata, chunk)) => {
+            ExclusionProof::Commit(op_proof, metadata) => {
                 // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded.
-                let op = Operation::<K, V>::CommitFloor(metadata, loc);
-                (loc, chunk, op)
-            }
-            ExclusionProofInfo::DbEmpty => {
-                // Handle the case where the proof shows the db has 0 operations, hence any key is
-                // proven excluded.
-                let empty_root = MemMmr::empty_mmr_root(hasher);
-                return proof.size == Position::new(0) && *root == empty_root;
+                // excluded. For the db to be empty, the floor must equal the commit operation's
+                // location.
+                let floor_loc = op_proof.loc;
+                (op_proof, Operation::CommitFloor(metadata, floor_loc))
             }
         };
 
-        super::verify_key_value_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            loc,
-            &chunk,
-            root,
-            element,
-        )
+        op_proof.verify(hasher, Self::grafting_height(), op, root)
     }
 }
 
@@ -313,7 +274,7 @@ impl<
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
         super::range_proof(
             hasher,
             &self.status,
@@ -329,27 +290,21 @@ impl<
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub fn verify_range_proof(
-        hasher: &mut StandardHasher<H>,
-        proof: &Proof<H::Digest>,
+        hasher: &mut H,
+        proof: &RangeProof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        verify_range_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            start_loc,
-            ops,
-            chunks,
-            root,
-        )
+        let height = Self::grafting_height();
+
+        proof.verify(hasher, height, start_loc, ops, chunks, root)
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
-    /// not currently assigned any value.
+    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
+    /// currently assigned any value.
     ///
     /// # Errors
     ///
@@ -358,39 +313,23 @@ impl<
         &self,
         hasher: &mut H,
         key: K,
-    ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        let Some((key_data, loc)) = self.any.get_with_loc(&key).await? else {
+    ) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
+        let op_loc = self.any.get_with_loc(&key).await?;
+        let Some((data, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+        let mmr = &self.any.log.mmr;
+        let proof =
+            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
 
-        // loc is valid so it won't overflow from + 1
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk_containing(*loc);
-
-        let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
-            hasher.update(last_chunk);
-            proof.digests.push(hasher.finalize());
-        }
-
-        Ok((
+        Ok(KeyValueProof {
             proof,
-            KeyValueProofInfo {
-                key,
-                value: key_data.value,
-                next_key: key_data.next_key,
-                loc,
-                chunk,
-            },
-        ))
+            next_key: data.next_key,
+        })
     }
 
-    /// Generate and return a proof that the specified `key` does not exist in the db, along with
-    /// the other [KeyValueProofInfo] required to verify the proof.
+    /// Generate and return a proof that the specified `key` does not exist in the db.
     ///
     /// # Errors
     ///
@@ -399,57 +338,40 @@ impl<
         &self,
         hasher: &mut H,
         key: &K,
-    ) -> Result<(Proof<H::Digest>, ExclusionProofInfo<K, V, N>), Error> {
-        if self.op_count() == 0 {
-            return Ok((Proof::default(), ExclusionProofInfo::DbEmpty));
-        }
+    ) -> Result<ExclusionProof<K, V, H::Digest, N>, Error> {
         let height = Self::grafting_height();
         let grafted_mmr =
             GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
-        let (last_chunk, next_bit) = self.status.last_chunk();
 
         let span = self.any.get_span(key).await?;
-        let (loc, proof_info) = match span {
+        let loc = match &span {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
                     // Cannot prove exclusion of a key that exists in the db.
                     return Err(Error::KeyExists);
                 }
-                let chunk = *self.status.get_chunk_containing(*loc);
-                (
-                    loc,
-                    ExclusionProofInfo::KeyValue(KeyValueProofInfo {
-                        key: key_data.key,
-                        value: key_data.value,
-                        next_key: key_data.next_key,
-                        loc,
-                        chunk,
-                    }),
-                )
+                *loc
             }
+            None => self
+                .op_count()
+                .checked_sub(1)
+                .expect("db shouldn't be empty"),
+        };
+
+        let op_proof =
+            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, &grafted_mmr, loc)
+                .await?;
+
+        Ok(match span {
+            Some((_, key_data)) => ExclusionProof::KeyValue(op_proof, key_data),
             None => {
-                let loc = self
-                    .op_count()
-                    .checked_sub(1)
-                    .expect("db shouldn't be empty");
                 let value = match self.any.log.read(loc).await? {
                     Operation::CommitFloor(value, _) => value,
                     _ => unreachable!("last commit is not a CommitFloor operation"),
                 };
-                let chunk = *self.status.get_chunk_containing(*loc);
-                (loc, ExclusionProofInfo::Commit((loc, value, chunk)))
+                ExclusionProof::Commit(op_proof, value)
             }
-        };
-
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
-            hasher.update(last_chunk);
-            proof.digests.push(hasher.finalize());
-        }
-
-        Ok((proof, proof_info))
+        })
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -464,32 +386,6 @@ impl<
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
-    }
-
-    #[cfg(test)]
-    /// Generate an inclusion proof for any operation regardless of its activity state.
-    async fn operation_inclusion_proof(
-        &self,
-        hasher: &mut H,
-        loc: Location,
-    ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
-        let op = self.any.log.read(loc).await?;
-
-        let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
-
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk_containing(*loc);
-
-        let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
-            hasher.update(last_chunk);
-            proof.digests.push(hasher.finalize());
-        }
-
-        Ok((proof, op, loc, chunk))
     }
 
     #[cfg(test)]
@@ -521,9 +417,7 @@ impl<
         let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
 
         // Inactivate the current commit operation.
-        if let Some(last_commit_loc) = self.any.last_commit {
-            status.set_bit(*last_commit_loc, false);
-        }
+        status.set_bit(*self.any.last_commit_loc, false);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -542,10 +436,7 @@ impl<
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = self
-            .any
-            .last_commit
-            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+        let start_loc = self.any.last_commit_loc + 1;
 
         // Commit to log (recovery is ensured after this returns)
         let status = self.commit_to_log(metadata).await?;
@@ -939,7 +830,7 @@ pub mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{hasher::Hasher as _, mem::Mmr},
+        mmr::hasher::Hasher as _,
         qmdb::{any::AnyExt, store::batch_tests},
         translator::OneCap,
     };
@@ -989,18 +880,16 @@ pub mod test {
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
@@ -1010,13 +899,13 @@ pub mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
-            assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
+            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 move + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
             assert!(root1 != root0);
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 3);
+            assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail.
@@ -1029,15 +918,15 @@ pub mod test {
             let metadata = Sha256::hash(&1u64.to_be_bytes());
             let mut db = db.merkleize().await.unwrap();
             db.commit(Some(metadata)).await.unwrap();
-            assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
             let root2 = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 5);
+            assert_eq!(db.op_count(), 6);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
             assert_eq!(db.root(), root2);
 
             // Repeated delete of same key should fail.
@@ -1093,9 +982,8 @@ pub mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.op_count(), 2619);
+            assert_eq!(db.op_count(), 2620);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.op_count(), 2619);
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
@@ -1103,8 +991,8 @@ pub mod test {
             db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 4240);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3382));
+            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1112,8 +1000,8 @@ pub mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone(), "build_big").await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 4240);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3382));
+            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -1149,100 +1037,129 @@ pub mod test {
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
 
-            let (_, loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db
-                .operation_inclusion_proof(hasher.inner(), loc)
-                .await
-                .unwrap();
-            let info = KeyValueProofInfo {
-                key: k,
-                value: v1,
-                next_key: k,
-                loc,
-                chunk: proof.3,
-            };
-            let root = db.root();
+            let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
+            let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
+
             // Proof should be verifiable against current root.
+            let root = db.root();
             assert!(CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof.0,
-                info.clone(),
+                k,
+                v1,
+                &proof,
                 &root,
             ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
-            let mut bad_info = info.clone();
-            bad_info.value = v2;
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof.0,
-                bad_info,
+                k,
+                v2,
+                &proof,
+                &root,
+            ));
+            // Proof should not verify against a mangled next_key.
+            let mut mangled_proof = proof.clone();
+            mangled_proof.next_key = Sha256::fill(0xFF);
+            assert!(!CleanCurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                k,
+                v1,
+                &mangled_proof,
                 &root,
             ));
 
-            // Proof should not be verifiable if we fail to give verification the correct next key.
-            let mut bad_info = info.clone();
-            bad_info.next_key = Sha256::fill(0x02);
-            assert!(!CleanCurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                &proof.0,
-                bad_info,
-                &root,
-            ));
-
-            // update the key to invalidate its previous update
+            // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_dirty();
             db.update(k, v2).await.unwrap();
             let mut db = db.merkleize().await.unwrap();
             db.commit(None).await.unwrap();
-
-            // Proof should not be verifiable against the new root.
             let root = db.root();
+
+            // New value should not be verifiable against the old proof.
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof.0,
-                info.clone(),
+                k,
+                v2,
+                &proof,
                 &root,
             ));
 
-            // Create a proof of the now-inactive operation.
-            let proof_inactive = db
-                .operation_inclusion_proof(hasher.inner(), loc)
+            // But the new value should verify against a new proof.
+            let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
+            assert!(CleanCurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                k,
+                v2,
+                &proof,
+                &root,
+            ));
+            // Old value will not verify against new proof.
+            assert!(!CleanCurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                k,
+                v1,
+                &proof,
+                &root,
+            ));
+
+            // Create a proof of the now-inactive update operation assigining v1 to k against the
+            // current root.
+            let (p, _, chunks) = db
+                .range_proof(hasher.inner(), op_loc, NZU64!(1))
                 .await
                 .unwrap();
-            // This proof should not verify, but only because verification will see that the
-            // corresponding bit in the chunk is false.
-            let proof_inactive_info = KeyValueProofInfo {
+            let proof_inactive = KeyValueProof {
+                proof: OperationProof {
+                    loc: op_loc,
+                    chunk: chunks[0],
+                    range_proof: p,
+                },
+                next_key: k,
+            };
+            // This proof should verify using verify_range_proof which does not check activity
+            // status.
+            let op = Operation::Update(KeyData {
                 key: k,
                 value: v1,
                 next_key: k,
-                loc: proof_inactive.2,
-                chunk: proof_inactive.3,
-            };
+            });
+            assert!(CleanCurrentTest::verify_range_proof(
+                hasher.inner(),
+                &proof_inactive.proof.range_proof,
+                proof_inactive.proof.loc,
+                &[op],
+                &[proof_inactive.proof.chunk],
+                &root,
+            ));
+            // But this proof should *not* verify as a key value proof, since verification will see
+            // that the operation is inactive.
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof_inactive.0,
-                proof_inactive_info,
+                k,
+                v1,
+                &proof_inactive,
                 &root,
             ));
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_with_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
-            assert_ne!(active_loc, info.loc);
+            assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
                 CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<Digest, 32>::leaf_pos(*info.loc)
+                CleanBitMap::<Digest, 32>::leaf_pos(*proof_inactive.proof.loc)
             );
-            let mut info_with_modified_loc = info.clone();
-            info_with_modified_loc.loc = active_loc;
+            let mut fake_proof = proof_inactive.clone();
+            fake_proof.proof.loc = active_loc;
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof_inactive.0,
-                info_with_modified_loc,
+                k,
+                v1,
+                &fake_proof,
                 &root,
             ));
 
@@ -1250,18 +1167,19 @@ pub mod test {
             // like the operation is active by flipping its corresponding bit to 1. This should not
             // fool the verifier if we are correctly incorporating the partial chunk information
             // into the root computation.
-            let mut modified_chunk = proof_inactive.3;
-            let bit_pos = *proof_inactive.2;
+            let mut modified_chunk = proof_inactive.proof.chunk;
+            let bit_pos = *proof_inactive.proof.loc;
             let byte_idx = bit_pos / 8;
             let bit_idx = bit_pos % 8;
             modified_chunk[byte_idx as usize] |= 1 << bit_idx;
 
-            let mut info_with_modified_chunk = info.clone();
-            info_with_modified_chunk.chunk = modified_chunk;
+            let mut fake_proof = proof_inactive.clone();
+            fake_proof.proof.chunk = modified_chunk;
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
-                &proof_inactive.0,
-                info_with_modified_chunk,
+                k,
+                v1,
+                &fake_proof,
                 &root,
             ));
 
@@ -1339,7 +1257,7 @@ pub mod test {
                     .unwrap();
                 assert!(
                     CleanCurrentTest::verify_range_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         loc,
                         &ops,
@@ -1384,42 +1302,52 @@ pub mod test {
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
-                let (proof, info) = db.key_value_proof(hasher.inner(), key).await.unwrap();
-                assert_eq!(info.value, value);
+                let proof = db.key_value_proof(hasher.inner(), key).await.unwrap();
+
                 // Proof should validate against the current value and correct root.
                 assert!(CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
+                    key,
+                    value,
                     &proof,
-                    info.clone(),
                     &root
                 ));
                 // Proof should fail against the wrong value.
                 let wrong_val = Sha256::fill(0xFF);
-                let mut bad_info = info.clone();
-                bad_info.value = wrong_val;
                 assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
+                    key,
+                    wrong_val,
                     &proof,
-                    bad_info.clone(),
                     &root
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::fill(0xEE);
-                let mut bad_info = info.clone();
-                bad_info.key = wrong_key;
                 assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
+                    wrong_key,
+                    value,
                     &proof,
-                    bad_info,
                     &root
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
                 assert!(!CleanCurrentTest::verify_key_value_proof(
                     hasher.inner(),
+                    key,
+                    value,
                     &proof,
-                    info,
                     &wrong_root,
+                ));
+                // Proof should fail with the wrong next-key.
+                let mut bad_proof = proof.clone();
+                bad_proof.next_key = wrong_key;
+                assert!(!CleanCurrentTest::verify_key_value_proof(
+                    hasher.inner(),
+                    key,
+                    value,
+                    &bad_proof,
+                    &root,
                 ));
             }
 
@@ -1467,13 +1395,7 @@ pub mod test {
 
             // Add one key.
             let k = Sha256::fill(0x00);
-            let mut old_info = KeyValueProofInfo {
-                key: k,
-                value: Sha256::fill(0x00),
-                next_key: k,
-                loc: Location::new_unchecked(0),
-                chunk: [0; 32],
-            };
+            let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_dirty();
@@ -1484,29 +1406,23 @@ pub mod test {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
-                assert_eq!(info.value, v);
-                assert_eq!(info.next_key, k);
+                let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert!(
-                    CleanCurrentTest::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        info.clone(),
-                        &root
-                    ),
+                    CleanCurrentTest::verify_key_value_proof(hasher.inner(), k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
                     !CleanCurrentTest::verify_key_value_proof(
                         hasher.inner(),
+                        k,
+                        old_val,
                         &proof,
-                        old_info,
                         &root
                     ),
-                    "proof of update {i} failed to verify"
+                    "proof of update {i} verified when it should not have"
                 );
-                old_info = info.clone();
+                old_val = v;
             }
 
             db.destroy().await.unwrap();
@@ -1679,15 +1595,14 @@ pub mod test {
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root();
-            let (empty_proof, empty_info) = db
+            let empty_proof = db
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &empty_proof,
                 &key_exists_1,
-                empty_info.clone(),
+                empty_proof.clone(),
                 &empty_root,
             ));
 
@@ -1706,11 +1621,11 @@ pub mod test {
             // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
-            let (proof, info) = db
+            let proof = db
                 .exclusion_proof(hasher.inner(), &greater_key)
                 .await
                 .unwrap();
-            let (proof2, info2) = db
+            let proof2 = db
                 .exclusion_proof(hasher.inner(), &lesser_key)
                 .await
                 .unwrap();
@@ -1718,40 +1633,24 @@ pub mod test {
             // Since there's only one span in the DB, the two exclusion proofs should be identical,
             // and the proof should verify any key but the one that exists in the db.
             assert_eq!(proof, proof2);
-            assert_eq!(info, info2);
             // Any key except the one that exists should verify against this proof.
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &greater_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &lesser_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_1,
-                info.clone(),
-                &root,
-            ));
-            // Exclusion proof should fail if we blow away the next_key setting in proof info.
-            let mut corrupt_info = info.clone();
-            if let ExclusionProofInfo::KeyValue(ref mut kv_info) = corrupt_info {
-                kv_info.next_key = Sha256::fill(0x02);
-            }
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
-                hasher.inner(),
-                &proof,
-                &key_exists_1,
-                corrupt_info,
+                proof.clone(),
                 &root,
             ));
 
@@ -1770,7 +1669,7 @@ pub mod test {
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
             let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
-            let (proof, info) = db
+            let proof = db
                 .exclusion_proof(hasher.inner(), &greater_key)
                 .await
                 .unwrap();
@@ -1778,90 +1677,75 @@ pub mod test {
             // key, but fail on middle_key.
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &greater_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &lesser_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &middle_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
 
             // Due to the cycle, lesser & greater keys should produce the same proof.
-            let (new_proof, new_info) = db
+            let new_proof = db
                 .exclusion_proof(hasher.inner(), &lesser_key)
                 .await
                 .unwrap();
             assert_eq!(proof, new_proof);
-            assert_eq!(info, new_info);
 
             // Test the inner span [k, k2).
-            let (proof, info) = db
+            let proof = db
                 .exclusion_proof(hasher.inner(), &middle_key)
                 .await
                 .unwrap();
             // `k` should fail since it's in the db.
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_1,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &middle_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
-            // `k2` should fail since it's in the db and outside its range.
-            let ExclusionProofInfo::KeyValue(ref kv_info) = info else {
-                panic!("expected KeyValue variant");
-            };
-            assert_eq!(kv_info.next_key, key_exists_2);
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_2,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &conflicting_middle_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
 
             // Using lesser/greater keys for the middle-proof should fail.
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &greater_key,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &lesser_key,
-                info,
+                proof.clone(),
                 &root,
             ));
 
@@ -1880,46 +1764,35 @@ pub mod test {
             assert_ne!(db.op_count(), 0);
             assert_ne!(root, empty_root);
 
-            let (proof, info) = db
+            let proof = db
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_1,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_2,
-                info.clone(),
+                proof.clone(),
                 &root,
             ));
 
             // Try fooling the verifier with improper values.
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &empty_proof, // wrong proof
                 &key_exists_1,
-                info.clone(),
+                empty_proof, // wrong proof
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
-                &proof,
                 &key_exists_1,
-                info,
+                proof,
                 &empty_root, // wrong root
-            ));
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
-                hasher.inner(),
-                &proof,
-                &key_exists_1,
-                empty_info, // wrong info
-                &root,
             ));
         });
     }

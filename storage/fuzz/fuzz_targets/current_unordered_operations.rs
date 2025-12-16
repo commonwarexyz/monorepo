@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
+    mmr::{hasher::Hasher as _, Location, StandardHasher as Standard},
     qmdb::current::{unordered::Current, Config},
     translator::TwoCap,
 };
@@ -41,11 +41,10 @@ enum CurrentOperation {
         key: RawKey,
     },
     ArbitraryProof {
-        proof_size: u64,
         start_loc: u64,
-        digests: Vec<[u8; 32]>,
+        bad_digests: Vec<[u8; 32]>,
         max_ops: NonZeroU64,
-        chunks: Vec<[u8; 32]>,
+        bad_chunks: Vec<[u8; 32]>,
     },
 }
 
@@ -98,7 +97,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = Location::new(0).unwrap();
+        let mut last_committed_op_count = Location::new(1).unwrap();
 
         for op in &data.operations {
             match op {
@@ -202,7 +201,7 @@ fn fuzz(data: FuzzInput) {
 
                             assert!(
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    &mut hasher,
+                                    hasher.inner(),
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -215,36 +214,46 @@ fn fuzz(data: FuzzInput) {
                     }
                 }
 
-                CurrentOperation::ArbitraryProof {proof_size, start_loc, digests, max_ops, chunks} => {
+                CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
                     let mut hasher = Standard::<Sha256>::new();
                     let current_op_count = db.op_count();
                     if current_op_count == 0 {
                         continue;
                     }
 
-                    let proof = Proof {
-                        size: Position::new(*proof_size),
-                        digests: digests.iter().map(|d| Digest::from(*d)).collect(),
-                    };
-
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
                     let root = db.root();
 
-                    if let Ok(res) = db
+                    if let Ok((range_proof, ops, chunks)) = db
                         .range_proof(hasher.inner(), start_loc, *max_ops)
                         .await {
+                        // Try to verify the proof when providing bad proof digests.
+                        let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
+                        if range_proof.proof.digests != bad_digests {
+                            let mut bad_proof = range_proof.clone();
+                            bad_proof.proof.digests = bad_digests;
+                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                hasher.inner(),
+                                &bad_proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &root
+                            ), "proof with bad digests should not verify");
+                        }
 
-                        let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                            &mut hasher,
-                            &proof,
-                            start_loc,
-                            &res.1,
-                            chunks,
-                            &root
-                        );
-
+                        // Try to verify the proof when providing bad input chunks.
+                        if &chunks != bad_chunks {
+                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                    hasher.inner(),
+                                    &range_proof,
+                                    start_loc,
+                                    &ops,
+                                    bad_chunks,
+                                    &root
+                                ), "proof with bad chunks should not verify");
+                        }
                     }
-
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
@@ -258,29 +267,17 @@ fn fuzz(data: FuzzInput) {
 
                     let current_root = db.root();
 
-                    match db.key_value_proof(hasher.inner(), k).await {
-                        Ok((proof, info)) => {
-                            let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
+                    match db.key_value_proof(hasher.inner(), k.clone()).await {
+                        Ok(proof) => {
+                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
                                 hasher.inner(),
+                                k,
+                                value,
                                 &proof,
-                                info.clone(),
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
-
-                            let expected_value = expected_state.get(key);
-                            match expected_value {
-                                Some(Some(expected_val)) => {
-                                    let info_bytes: &[u8; 32] = info.value.as_ref().try_into().expect("Value should be 32 bytes");
-                                    assert_eq!(info_bytes, expected_val, "Proof value mismatch for key {key:?}");
-                                }
-                                Some(None) => {
-                                    panic!("Proof generated for deleted key {key:?}");
-                                }
-                                None => {
-                                    panic!("Proof generated for unset key {key:?}");
-                                }
-                            }
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             let expected_value = expected_state.get(key);

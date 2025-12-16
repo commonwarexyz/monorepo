@@ -1,4 +1,5 @@
 //! A collection of authenticated databases inspired by QMDB (Quick Merkle Database).
+//!
 //! # Terminology
 //!
 //! A _key_ in an authenticated database either has a _value_ or it doesn't. Two types of

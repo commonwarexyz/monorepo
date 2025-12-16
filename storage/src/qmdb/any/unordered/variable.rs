@@ -23,6 +23,7 @@ use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use tracing::warn;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -56,13 +57,20 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
             Operation::<K, V>::is_commit,
         )
         .await?;
+
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .await?;
+            log.sync().await?;
+        }
 
         let log = Self::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
@@ -267,17 +275,17 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
 
             let root = db.root();
-            assert_eq!(db.op_count(), 1960);
+            assert_eq!(db.op_count(), 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1960))
+                Some(Location::new_unchecked(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(755));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(749)
+                Location::new_unchecked(756)
             );
             assert_eq!(db.snapshot.items(), 857);
 
@@ -285,15 +293,15 @@ pub(super) mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 1960);
+            assert_eq!(db.op_count(), 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1960))
+                Some(Location::new_unchecked(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(755));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(749)
+                Location::new_unchecked(756)
             );
             assert_eq!(db.snapshot.items(), 857);
 
@@ -386,7 +394,7 @@ pub(super) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             async fn apply_ops(
@@ -403,21 +411,21 @@ pub(super) mod test {
             apply_ops(&mut db).await;
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Insert another 1000 keys then simulate failure after syncing the log.
             apply_ops(&mut db).await;
             db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Insert another 1000 keys then simulate failure (sync only the mmr).
             apply_ops(&mut db).await;
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -425,14 +433,14 @@ pub(super) mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_ops(&mut db).await;
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
-            assert!(db.op_count() > 0);
+            assert!(db.op_count() > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
