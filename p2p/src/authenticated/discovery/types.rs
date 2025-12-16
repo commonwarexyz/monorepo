@@ -766,6 +766,96 @@ mod tests {
         });
     }
 
+    #[test]
+    fn info_with_dns_ingress_sign_and_verify() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let peer_key = PrivateKey::random(&mut context);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: "node.example.com".to_string(),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
+
+            assert_eq!(peer.ingress, dns_ingress);
+            assert_eq!(peer.timestamp, timestamp);
+            assert_eq!(peer.public_key, peer_key.public_key());
+            assert!(peer.verify(NAMESPACE));
+        });
+    }
+
+    #[test]
+    fn info_with_dns_ingress_codec() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let peer_key = PrivateKey::random(&mut context);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: "validator-1.network.io".to_string(),
+                port: 9090,
+            };
+            let original = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
+            let encoded = original.encode();
+            let decoded = Info::<PublicKey>::decode_cfg(encoded, &256).unwrap();
+
+            assert_eq!(decoded.ingress, dns_ingress);
+            assert_eq!(decoded.timestamp, timestamp);
+            assert_eq!(decoded.public_key, original.public_key);
+            assert_eq!(decoded.signature, original.signature);
+            assert!(decoded.verify(NAMESPACE));
+        });
+    }
+
+    #[test]
+    fn info_verifier_accepts_dns_ingress() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
+            let validator = Info::verifier(
+                validator_key.public_key(),
+                false,
+                4,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: "peer.network.com".to_string(),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
+            assert!(validator.validate(&context, &[peer]).is_ok());
+        });
+    }
+
+    #[test]
+    fn info_verifier_dns_bypasses_private_ip_check() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
+            let validator = Info::verifier(
+                validator_key.public_key(),
+                false,
+                4,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: "internal.local".to_string(),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
+            assert!(
+                validator.validate(&context, &[peer]).is_ok(),
+                "DNS ingress should bypass private IP check"
+            );
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

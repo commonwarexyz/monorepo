@@ -2447,11 +2447,11 @@ mod tests {
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
-            let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
+            let addr1: crate::Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let addr2: crate::Address = SocketAddr::from(([127, 0, 0, 1], 4001)).into();
 
             let mut manager = oracle.socket_manager();
-            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+            let peers: Map<_, _> = [(pk1.clone(), addr1.clone()), (pk2.clone(), addr2.clone())]
                 .try_into()
                 .unwrap();
             manager.update(1, peers).await;
@@ -2477,6 +2477,56 @@ mod tests {
             assert_eq!(latest_keys, vec![pk2.clone()]);
             let all_keys: Vec<_> = Vec::from(all);
             assert_eq!(all_keys, vec![pk1, pk2]);
+        });
+    }
+
+    #[test]
+    fn test_socket_manager_with_asymmetric_addresses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+
+            // Use asymmetric addresses where ingress (dial) differs from egress (filter)
+            let addr1 = crate::Address::Asymmetric {
+                ingress: crate::Ingress::Socket(SocketAddr::from(([10, 0, 0, 1], 8080))),
+                egress: SocketAddr::from(([192, 168, 1, 1], 9090)),
+            };
+            let addr2 = crate::Address::Asymmetric {
+                ingress: crate::Ingress::Dns {
+                    host: "node2.example.com".to_string(),
+                    port: 8080,
+                },
+                egress: SocketAddr::from(([192, 168, 1, 2], 9090)),
+            };
+
+            let mut manager = oracle.socket_manager();
+            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+                .try_into()
+                .unwrap();
+            manager.update(1, peers).await;
+
+            // Verify peer set contains expected keys (addresses are ignored by simulated network)
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
+            let keys: Vec<_> = Vec::from(peer_set);
+            assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
+
+            // Verify subscription works
+            let mut subscription = manager.subscribe().await;
+            let (id, latest, _all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            let latest_keys: Vec<_> = Vec::from(latest);
+            assert_eq!(latest_keys, vec![pk1, pk2]);
         });
     }
 

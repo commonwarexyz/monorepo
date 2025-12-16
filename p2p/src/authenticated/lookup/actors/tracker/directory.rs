@@ -504,4 +504,99 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_asymmetric_addresses() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        // Create asymmetric address where ingress differs from egress
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let ingress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+        let asymmetric_addr = PeerAddress::Asymmetric {
+            ingress: Ingress::Socket(ingress_socket),
+            egress: egress_socket,
+        };
+
+        // Create another peer with DNS-based ingress
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let egress_socket_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 9090);
+        let dns_addr = PeerAddress::Asymmetric {
+            ingress: Ingress::Dns {
+                host: "node.example.com".to_string(),
+                port: 8080,
+            },
+            egress: egress_socket_2,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Add set with asymmetric addresses
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_1.clone(), asymmetric_addr.clone()),
+                        (pk_2.clone(), dns_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Verify peer 1 has correct ingress and egress
+            let record_1 = directory.peers.get(&pk_1).unwrap();
+            assert_eq!(
+                record_1.ingress(),
+                Some(Ingress::Socket(ingress_socket)),
+                "Ingress should match the asymmetric address's ingress"
+            );
+            assert_eq!(
+                record_1.egress_ip(),
+                Some(egress_socket.ip()),
+                "Egress IP should be from the egress socket"
+            );
+
+            // Verify peer 2 has DNS ingress and correct egress
+            let record_2 = directory.peers.get(&pk_2).unwrap();
+            assert_eq!(
+                record_2.ingress(),
+                Some(Ingress::Dns {
+                    host: "node.example.com".to_string(),
+                    port: 8080
+                }),
+                "Ingress should be DNS address"
+            );
+            assert_eq!(
+                record_2.egress_ip(),
+                Some(egress_socket_2.ip()),
+                "Egress IP should be from the egress socket"
+            );
+
+            // Verify registered() returns egress IPs for IP filtering
+            let registered = directory.registered();
+            assert!(
+                registered.contains(&egress_socket.ip()),
+                "Registered should contain peer 1's egress IP"
+            );
+            assert!(
+                registered.contains(&egress_socket_2.ip()),
+                "Registered should contain peer 2's egress IP"
+            );
+            assert!(
+                !registered.contains(&ingress_socket.ip()),
+                "Registered should NOT contain peer 1's ingress IP"
+            );
+        });
+    }
 }

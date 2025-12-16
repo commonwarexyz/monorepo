@@ -8,7 +8,7 @@ use futures::{
 };
 use governor::Quota;
 use rand_distr::Normal;
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
     Register {
@@ -263,15 +263,15 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [SocketAddr]s.
+/// Implementation of [crate::Manager] for peers with [crate::Address]es.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 ///
-/// # Note on [SocketAddr]
+/// # Note on [crate::Address]
 ///
-/// Because [SocketAddr]s are never exposed in [crate::simulated],
+/// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
-/// all [SocketAddr]s to be valid.
+/// all addresses to be valid.
 #[derive(Clone, Debug)]
 pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.
@@ -280,10 +280,10 @@ pub struct SocketManager<P: PublicKey> {
 
 impl<P: PublicKey> crate::Manager for SocketManager<P> {
     type PublicKey = P;
-    type Peers = Map<Self::PublicKey, SocketAddr>;
+    type Peers = Map<Self::PublicKey, crate::Address>;
 
     async fn update(&mut self, id: u64, peers: Self::Peers) {
-        // Ignore all SocketAddrs
+        // Ignore all addresses (simulated network doesn't use them)
         self.oracle.update(id, peers.into_keys()).await;
     }
 
