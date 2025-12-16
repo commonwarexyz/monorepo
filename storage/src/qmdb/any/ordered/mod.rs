@@ -4,9 +4,9 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            db::IndexedLog, init_fixed_authenticated_log, init_variable_authenticated_log,
-            FixedConfig, FixedEncoding, FixedValue, OrderedOperation, OrderedUpdate,
-            VariableConfig, VariableEncoding, VariableValue,
+            db::Db, init_fixed_authenticated_log, init_variable_authenticated_log, FixedConfig,
+            FixedEncoding, FixedValue, OrderedOperation, OrderedUpdate, VariableConfig,
+            VariableEncoding, VariableValue,
         },
         Error,
     },
@@ -21,7 +21,7 @@ use tracing::warn;
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, C, I, H, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>;
+    Db<E, K, V, OrderedUpdate<K, V>, C, I, H, S>;
 
 /// Operation type for ordered databases.
 pub type Operation<K, V> = OrderedOperation<K, V>;

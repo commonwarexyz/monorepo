@@ -28,8 +28,8 @@ pub use ordered::span_contains;
 
 mod unordered;
 
-/// An indexed, authenticated log of ordered database operations.
-pub struct IndexedLog<
+/// A QMDB implementation that supports both ordered and unordered databases.
+pub struct Db<
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
@@ -82,7 +82,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, K, V, U, C, I, H, S>
+    > Db<E, K, V, U, C, I, H, S>
 where
     Operation<K, V, U>: Codec,
 {
@@ -118,7 +118,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, K, V, U, C, I, H, S>
+    > Db<E, K, V, U, C, I, H, S>
 where
     Operation<K, V, U>: Codec,
 {
@@ -173,11 +173,11 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H>
+    > Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
     ///
     /// # Panics
@@ -218,7 +218,7 @@ where
         })
     }
 
-    /// Returns an [IndexedLog] initialized directly from the given components. The log is
+    /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     pub(crate) async fn from_components(
@@ -253,13 +253,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H>
+    > Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
     /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, K, V, U, C, I, H, Dirty> {
-        IndexedLog {
+    pub fn into_dirty(self) -> Db<E, K, V, U, C, I, H, Dirty> {
+        Db {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
@@ -278,7 +278,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H>
+    > Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -311,7 +311,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H>
+    > Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -379,7 +379,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H>
+    > Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -445,13 +445,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, K, V, U, C, I, H, Dirty>
+    > Db<E, K, V, U, C, I, H, Dirty>
 where
     Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, K, V, U, C, I, H, Clean<H::Digest>> {
-        IndexedLog {
+    pub fn merkleize(self) -> Db<E, K, V, U, C, I, H, Clean<H::Digest>> {
+        Db {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
@@ -470,7 +470,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, K, V, U, C, I, H>
+    > crate::qmdb::store::LogStorePrunable for Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
@@ -487,13 +487,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::CleanStore for IndexedLog<E, K, V, U, C, I, H>
+    > crate::qmdb::store::CleanStore for Db<E, K, V, U, C, I, H>
 where
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Dirty = IndexedLog<E, K, V, U, C, I, H, Dirty>;
+    type Dirty = Db<E, K, V, U, C, I, H, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
@@ -534,7 +534,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > LogStore for IndexedLog<E, K, V, U, C, I, H, S>
+    > LogStore for Db<E, K, V, U, C, I, H, S>
 where
     Operation<K, V, U>: Codec,
 {
@@ -565,13 +565,13 @@ impl<
         C: Contiguous<Item = Operation<K, V, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::DirtyStore for IndexedLog<E, K, V, U, C, I, H, Dirty>
+    > crate::qmdb::store::DirtyStore for Db<E, K, V, U, C, I, H, Dirty>
 where
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Clean = IndexedLog<E, K, V, U, C, I, H>;
+    type Clean = Db<E, K, V, U, C, I, H>;
 
     async fn merkleize(self) -> Result<Self::Clean, Error> {
         Ok(self.merkleize())

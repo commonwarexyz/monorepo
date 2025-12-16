@@ -7,7 +7,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            db::IndexedLog, value::ValueEncoding, CleanAny, DirtyAny, OrderedOperation,
+            db::Db, value::ValueEncoding, CleanAny, DirtyAny, OrderedOperation,
             OrderedUpdate,
         },
         delete_known_loc,
@@ -48,7 +48,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
+    > Db<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -169,7 +169,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
+    > Db<E, K, V, OrderedUpdate<K, V>, C, I, H, S>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -702,7 +702,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+impl<E, K, V, C, I, H> Batchable for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -915,7 +915,7 @@ impl<
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+    > crate::store::StorePersistable for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -935,7 +935,7 @@ impl<
         C: Contiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+    > crate::store::Store for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -955,7 +955,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+    > crate::store::StoreMut for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -971,7 +971,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+    > crate::store::StoreDeletable for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -987,7 +987,7 @@ impl<
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H>
+    > CleanAny for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     OrderedOperation<K, V>: Codec,
 {
@@ -1025,7 +1025,7 @@ impl<
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, Dirty>
+    > DirtyAny for Db<E, K, V, OrderedUpdate<K, V>, C, I, H, Dirty>
 where
     OrderedOperation<K, V>: Codec,
 {

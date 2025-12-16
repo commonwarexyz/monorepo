@@ -12,7 +12,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            db::IndexedLog, CleanAny, DirtyAny, FixedEncoding, FixedValue, UnorderedOperation,
+            db::Db, CleanAny, DirtyAny, FixedEncoding, FixedValue, UnorderedOperation,
             UnorderedUpdate,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
@@ -32,7 +32,7 @@ use std::num::NonZeroU64;
 type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A fixed-size, unordered Any database.
-type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = Db<
     E,
     K,
     FixedEncoding<V>,

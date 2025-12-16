@@ -5,7 +5,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::IndexedLog, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate,
+            db::Db, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate,
             VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
@@ -22,7 +22,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 type Operation<K, V> = UnorderedOperation<K, FixedEncoding<V>>;
 
 /// A fixed-size, unordered Any database.
-type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
+type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = Db<
     E,
     K,
     FixedEncoding<V>,
