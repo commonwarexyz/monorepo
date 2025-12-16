@@ -35,15 +35,15 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub nodes: status::Counter,
     /// Number of application verifications by status
     pub verify: status::Counter,
-    /// Number of threshold signatures produced
-    pub threshold: Counter,
+    /// Number of certificates produced
+    pub certificates: Counter,
     /// Number of propose attempts by status
     pub propose: status::Counter,
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
     pub verify_duration: histogram::Timed<E>,
-    /// Histogram of time from new proposal to threshold signature generation
+    /// Histogram of time from new proposal to certificate generation
     pub e2e_duration: histogram::Timed<E>,
 }
 
@@ -70,11 +70,11 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Number of application verifications by status",
             verify.clone(),
         );
-        let threshold = Counter::default();
+        let certificates = Counter::default();
         context.register(
-            "threshold",
-            "Number of threshold signatures produced",
-            threshold.clone(),
+            "certificates",
+            "Number of certificates produced",
+            certificates.clone(),
         );
         let propose = status::Counter::default();
         context.register(
@@ -97,7 +97,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         let e2e_duration = Histogram::new(histogram::Buckets::NETWORK);
         context.register(
             "e2e_duration",
-            "Histogram of time from new proposal to threshold signature generation",
+            "Histogram of time from new proposal to certificate generation",
             e2e_duration.clone(),
         );
         let clock = Arc::new(context);
@@ -107,7 +107,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             acks,
             nodes,
             verify,
-            threshold,
+            certificates,
             propose,
             rebroadcast,
             verify_duration: histogram::Timed::new(verify_duration, clock.clone()),

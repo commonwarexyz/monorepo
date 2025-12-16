@@ -2,8 +2,9 @@ mod actor;
 mod ingress;
 mod state;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch};
+use crate::types::Epoch;
 pub use actor::Actor;
+use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use governor::Quota;
 pub use ingress::Mailbox;

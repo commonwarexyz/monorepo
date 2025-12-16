@@ -5,29 +5,29 @@
 //! same round. It does not emit any `Finalize` messages.
 
 use crate::simplex::{
-    signing_scheme::Scheme,
+    scheme::Scheme,
     types::{Nullify, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: Scheme> {
+pub struct Config<S: certificate::Scheme> {
     pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct NullifyOnly<E: Spawner, S: Scheme, H: Hasher> {
+pub struct NullifyOnly<E: Spawner, S: Scheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> NullifyOnly<E, S, H> {
+impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

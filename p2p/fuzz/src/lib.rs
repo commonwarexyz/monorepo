@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     authenticated::{
         discovery,
@@ -9,7 +9,10 @@ use commonware_p2p::{
     },
     Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
+use commonware_runtime::{
+    deterministic::{self, Context},
+    Clock, Handle, Metrics, Runner,
+};
 use commonware_utils::{
     ordered::{Map, Set},
     TryCollect, NZU32,
@@ -56,7 +59,7 @@ const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
-const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Operations that can be performed on the p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -205,7 +208,7 @@ pub trait NetworkScheme: Send + 'static {
 pub struct Discovery;
 
 impl NetworkScheme for Discovery {
-    type Sender = discovery::Sender<ed25519::PublicKey>;
+    type Sender = discovery::Sender<ed25519::PublicKey, deterministic::Context>;
     type Receiver = discovery::Receiver<ed25519::PublicKey>;
     type Oracle = discovery::Oracle<ed25519::PublicKey>;
 
@@ -296,7 +299,7 @@ impl NetworkScheme for Discovery {
 pub struct Lookup;
 
 impl NetworkScheme for Lookup {
-    type Sender = lookup::Sender<ed25519::PublicKey>;
+    type Sender = lookup::Sender<ed25519::PublicKey, deterministic::Context>;
     type Receiver = lookup::Receiver<ed25519::PublicKey>;
     type Oracle = lookup::Oracle<ed25519::PublicKey>;
 
@@ -594,7 +597,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

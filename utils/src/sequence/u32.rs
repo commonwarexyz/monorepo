@@ -18,6 +18,7 @@ pub enum Error {
 
 /// An [Array] implementation for u32.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct U32([u8; u32::SIZE]);
 
@@ -124,5 +125,15 @@ mod tests {
 
         let decoded = U32::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<U32>,
+        }
     }
 }

@@ -4,14 +4,11 @@ use super::{Config, PeerLabel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
-    Clock, Metrics,
+    Clock, Metrics, RateLimiter,
 };
 use commonware_utils::PrioritySet;
 use either::Either;
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
+use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -54,8 +51,7 @@ pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     excluded: HashSet<P>,
 
     // Rate limiter for participants
-    #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<P, HashMapStateStore<P>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<P, E>,
     // Participants and their performance (lower is better)
     participants: PrioritySet<P, u128>,
 
@@ -315,7 +311,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
     use governor::Quota;

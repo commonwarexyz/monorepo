@@ -166,13 +166,12 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
-pub fn extract<E, P, S>(
-    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, P, S, Sha256Digest>>,
+pub fn extract<E, S>(
+    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, S, Sha256Digest>>,
 ) -> Vec<ReplicaState>
 where
     E: Rng + CryptoRng,
-    P: commonware_cryptography::PublicKey,
-    S: commonware_consensus::simplex::signing_scheme::Scheme,
+    S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
 {
     reporters
         .iter()

@@ -11,7 +11,7 @@ struct MockIndex {
     section: u64,
     _offset: u32,
     _len: u32,
-    _next: Option<Box<MockIndex>>,
+    _next: Option<Box<Self>>,
 }
 
 fn benchmark_hashmap_iteration(c: &mut Criterion) {

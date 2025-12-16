@@ -1,20 +1,19 @@
-use super::SchemeProvider;
-use crate::{simplex::signing_scheme::Scheme, types::ViewDelta, Block};
-use commonware_runtime::buffer::PoolRef;
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU64, NonZeroUsize},
+use crate::{
+    types::{Epoch, ViewDelta},
+    Block,
 };
+use commonware_cryptography::certificate::Provider;
+use commonware_runtime::buffer::PoolRef;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P, S>
+pub struct Config<B, P>
 where
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
+    P: Provider<Scope = Epoch>,
 {
     /// Provider for epoch-specific signing schemes.
-    pub scheme_provider: P,
+    pub provider: P,
 
     /// The length of an epoch in number of blocks.
     pub epoch_length: u64,
@@ -50,6 +49,4 @@ where
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
-
-    pub _marker: PhantomData<S>,
 }

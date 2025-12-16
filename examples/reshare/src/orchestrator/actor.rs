@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochSchemeProvider, SchemeProvider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
@@ -9,15 +9,16 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self,
-        signing_scheme::Scheme,
+        self, scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -28,7 +29,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota, RateLimiter};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -46,13 +47,12 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub scheme_provider: SchemeProvider<S, C>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
-    pub rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -68,7 +68,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -76,12 +76,11 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    scheme_provider: SchemeProvider<S, C>,
+    provider: Provider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
-    rate_limit: governor::Quota,
     pool_ref: PoolRef,
 }
 
@@ -94,8 +93,8 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme<PublicKey = C::PublicKey>,
-    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -108,11 +107,10 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                rate_limit: config.rate_limit,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -190,9 +188,6 @@ where
         );
         mux.start();
 
-        // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
-
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
@@ -220,9 +215,6 @@ where
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                if rate_limiter.check_key(&from).is_err() {
-                    continue;
-                }
                 let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
@@ -304,8 +296,8 @@ where
                         }
 
                         // Register the new signing scheme with the scheme provider.
-                        let scheme = self.scheme_provider.scheme_for_epoch(&transition);
-                        assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
+                        let scheme = self.provider.scheme_for_epoch(&transition);
+                        assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                         // Enter the new epoch.
                         let engine = self
@@ -330,7 +322,7 @@ where
                         engine.abort();
 
                         // Unregister the signing scheme for the epoch.
-                        assert!(self.scheme_provider.unregister(&epoch));
+                        assert!(self.provider.unregister(&epoch));
 
                         info!(%epoch, "exited epoch");
                     }

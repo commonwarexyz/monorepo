@@ -407,7 +407,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Signer};
     use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
     use commonware_runtime::{
         deterministic::{Context, Runner},

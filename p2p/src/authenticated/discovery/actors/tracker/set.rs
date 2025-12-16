@@ -69,7 +69,7 @@ impl<P: PublicKey> Deref for Set<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+    use commonware_cryptography::{ed25519, Signer};
     use std::collections::HashSet;
 
     fn create_test_peers() -> Vec<ed25519::PublicKey> {

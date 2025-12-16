@@ -963,6 +963,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-storage",
@@ -988,6 +989,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
+ "governor",
  "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
@@ -1005,6 +1007,8 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
+ "governor",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]
@@ -1036,14 +1040,11 @@ version = "0.0.63"
 dependencies = [
  "arbitrary",
  "bytes",
- "commonware-macros",
+ "commonware-conformance",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "serde",
- "sha2 0.10.9",
  "thiserror 2.0.17",
- "toml",
 ]
 
 [[package]]
@@ -1062,9 +1063,12 @@ dependencies = [
 name = "commonware-coding"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
+ "commonware-math",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1130,6 +1134,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-conformance"
+version = "0.0.63"
+dependencies = [
+ "commonware-conformance-macros",
+ "commonware-macros",
+ "futures",
+ "serde",
+ "sha2 0.10.9",
+ "toml",
+]
+
+[[package]]
+name = "commonware-conformance-macros"
+version = "0.0.63"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.63"
 dependencies = [
@@ -1138,8 +1163,11 @@ dependencies = [
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-conformance",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1167,6 +1195,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -1188,13 +1217,15 @@ dependencies = [
  "cfg-if",
  "chacha20poly1305",
  "commonware-codec",
- "commonware-macros",
+ "commonware-conformance",
+ "commonware-math",
  "commonware-utils",
  "criterion",
  "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
  "p256",
+ "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1215,6 +1246,7 @@ dependencies = [
  "blst",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-math",
  "commonware-utils",
  "ed25519-zebra",
  "libfuzzer-sys",
@@ -1275,6 +1307,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
+ "commonware-math",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -1330,13 +1363,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-math"
+version = "0.0.63"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-conformance",
+ "commonware-utils",
+ "proptest",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "rayon",
+]
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
@@ -1385,6 +1437,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
@@ -1406,9 +1459,11 @@ dependencies = [
 name = "commonware-resolver"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bimap",
  "bytes",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1473,11 +1528,14 @@ name = "commonware-storage"
 version = "0.0.63"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -1574,9 +1632,11 @@ dependencies = [
 name = "commonware-utils"
 version = "0.0.63"
 dependencies = [
+ "arbitrary",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "criterion",
  "futures",
  "getrandom 0.2.16",
@@ -3241,6 +3301,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
+ "arbitrary",
  "num-integer",
  "num-traits",
 ]

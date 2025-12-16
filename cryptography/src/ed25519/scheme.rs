@@ -1,14 +1,12 @@
-use crate::{Array, PrivateKeyExt};
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use crate::BatchVerifier;
-        use std::borrow::{Cow, ToOwned};
-    } else {
-        use alloc::borrow::{Cow, ToOwned};
-    }
-}
+use crate::{Array, BatchVerifier};
+#[cfg(not(feature = "std"))]
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display},
@@ -17,6 +15,8 @@ use core::{
 };
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::{Cow, ToOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -61,8 +61,8 @@ impl PrivateKey {
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl Random for PrivateKey {
+    fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
         let raw = key.to_bytes();
         Self { raw, key }
@@ -157,7 +157,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
-        Ok(Self::from_rng(&mut rand))
+        Ok(Self::random(&mut rand))
     }
 }
 
@@ -264,10 +264,11 @@ impl Display for PublicKey {
 impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
+        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
-        let private_key = PrivateKey::from_rng(&mut rand);
+        let private_key = PrivateKey::random(&mut rand);
         Ok(private_key.public_key())
     }
 }
@@ -362,10 +363,11 @@ impl Display for Signature {
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
+        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
-        let private_key = PrivateKey::from_rng(&mut rand);
+        let private_key = PrivateKey::random(&mut rand);
         let len = u.arbitrary::<usize>()? % 256;
         let message = u
             .arbitrary_iter()?
@@ -415,9 +417,9 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
-            Cow::Owned(union_unique(namespace, message))
-        });
+        let payload = namespace
+            .map(|ns| Cow::Owned(union_unique(ns, message)))
+            .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
             signature.signature,
@@ -434,6 +436,7 @@ mod tests {
     use super::*;
     use crate::ed25519;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
     use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
@@ -589,7 +592,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::from_rng(&mut OsRng);
+        let private_key_2 = PrivateKey::random(&mut OsRng);
         let bad_signature = private_key_2.sign_inner(None, message.as_ref());
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -829,11 +832,12 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            PrivateKey,
-            PublicKey,
-            Signature,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PrivateKey>,
+            CodecConformance<PublicKey>,
+            CodecConformance<Signature>,
         }
     }
 }

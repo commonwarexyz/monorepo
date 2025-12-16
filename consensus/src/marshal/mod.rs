@@ -72,32 +72,8 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use crate::Block;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-use std::sync::Arc;
-
-/// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SchemeProvider: Clone + Send + Sync + 'static {
-    /// The signing scheme to provide.
-    type Scheme: Scheme;
-
-    /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
-
-    /// Return a certificate verifier that can validate certificates independent of epoch.
-    ///
-    /// This method allows implementations to provide a verifier that can validate
-    /// certificates from any epoch (without epoch-specific state). For example,
-    /// [`bls12381_threshold::Scheme`](crate::simplex::signing_scheme::bls12381_threshold::Scheme)
-    /// maintains a static public key across epochs that can be used to verify certificates from any
-    /// epoch, even after the committee has rotated and the underlying secret shares have been refreshed.
-    ///
-    /// The default implementation returns `None`. Callers should fall back to
-    /// [`SchemeProvider::scheme`] for epoch-specific verification.
-    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
-        None
-    }
-}
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
@@ -128,14 +104,12 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
-        SchemeProvider,
     };
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
-            mocks::fixtures::{bls12381_threshold, Fixture},
-            signing_scheme::{bls12381_threshold, Scheme},
+            scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round, View, ViewDelta},
@@ -144,6 +118,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
+        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
@@ -165,9 +140,7 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
-        sync::Arc,
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -177,26 +150,7 @@ mod tests {
     type K = PublicKey;
     type V = MinPk;
     type S = bls12381_threshold::Scheme<K, V>;
-    type P = ConstantSchemeProvider;
-
-    #[derive(Clone)]
-    struct ConstantSchemeProvider(Arc<S>);
-    impl SchemeProvider for ConstantSchemeProvider {
-        type Scheme = S;
-
-        fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
-            Some(self.0.clone())
-        }
-
-        fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
-            Some(self.0.clone())
-        }
-    }
-    impl From<S> for ConstantSchemeProvider {
-        fn from(scheme: S) -> Self {
-            Self(Arc::new(scheme))
-        }
-    }
+    type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -215,18 +169,19 @@ mod tests {
         jitter: Duration::from_millis(50),
         success_rate: 0.7,
     };
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
         validator: K,
-        scheme_provider: P,
+        provider: P,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
-        let config: Config<B, _, _> = Config {
-            scheme_provider,
+        let config = Config {
+            provider,
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
@@ -238,12 +193,11 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            _marker: PhantomData,
         };
 
         // Create the resolver
         let mut control = oracle.control(validator.clone());
-        let backfill = control.register(1).await.unwrap();
+        let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
@@ -270,7 +224,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2).await.unwrap();
+        let network = control.register(2, TEST_QUOTA).await.unwrap();
         broadcast_engine.start(network);
 
         // Initialize finalizations by height
@@ -466,7 +420,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -482,7 +436,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -612,7 +566,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -628,7 +582,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -716,7 +670,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 validator.clone(),
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -778,7 +732,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -786,7 +740,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -833,7 +787,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -841,7 +795,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -909,7 +863,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -917,7 +871,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -977,7 +931,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -985,7 +939,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1088,7 +1042,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1096,7 +1050,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1148,7 +1102,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1156,7 +1110,7 @@ mod tests {
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1230,14 +1184,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1289,14 +1243,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1347,14 +1301,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1401,14 +1355,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1486,14 +1440,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me.clone(),
-                schemes[0].clone().into(),
+                ConstantProvider::new(schemes[0].clone()),
             )
             .await;
 
@@ -1612,7 +1566,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Set up two validators
             let mut actors = Vec::new();
@@ -1621,7 +1575,7 @@ mod tests {
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
-                    schemes[i].clone().into(),
+                    ConstantProvider::new(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1724,7 +1678,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();
@@ -1732,7 +1686,7 @@ mod tests {
                 context.with_label(&format!("validator-{i}")),
                 &mut oracle,
                 validator.clone(),
-                schemes[i].clone().into(),
+                ConstantProvider::new(schemes[i].clone()),
             )
             .await
             .1;
@@ -1759,7 +1713,7 @@ mod tests {
                 context.with_label(&format!("validator-{i}")),
                 &mut oracle,
                 validator.clone(),
-                schemes[i].clone().into(),
+                ConstantProvider::new(schemes[i].clone()),
             )
             .await
             .1;

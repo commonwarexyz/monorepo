@@ -24,6 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -160,8 +161,10 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Digest {}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -236,9 +239,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use commonware_codec::conformance::CodecConformance;
 
-        commonware_codec::conformance_tests! {
-            Digest,
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
         }
     }
 }
