@@ -44,7 +44,6 @@ features = ["js"]
 axum.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
-hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }

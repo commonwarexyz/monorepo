@@ -23,7 +23,6 @@ use crate::{
 use commonware_macros::select;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use hickory_resolver::{Resolver, TokioResolver};
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -124,11 +123,6 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
-
-    /// Timeout for DNS resolution.
-    ///
-    /// Defaults to 5 seconds.
-    dns_timeout: Duration,
 }
 
 impl Config {
@@ -143,7 +137,6 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
-            dns_timeout: Duration::from_secs(5),
         }
     }
 
@@ -183,11 +176,6 @@ impl Config {
         self.maximum_buffer_size = n;
         self
     }
-    /// See [Config]
-    pub const fn with_dns_timeout(mut self, d: Duration) -> Self {
-        self.dns_timeout = d;
-        self
-    }
 
     // Getters
     /// See [Config]
@@ -217,10 +205,6 @@ impl Config {
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
-    }
-    /// See [Config]
-    pub const fn dns_timeout(&self) -> Duration {
-        self.dns_timeout
     }
 }
 
@@ -354,20 +338,12 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Initialize resolver (uses the host's DNS configuration,
-        // e.g. /etc/resolv.conf on Unix, registry on Windows)
-        let mut resolver_builder =
-            Resolver::builder_tokio().expect("failed to create DNS resolver");
-        resolver_builder.options_mut().timeout = self.cfg.dns_timeout;
-        let resolver = resolver_builder.build();
-
         // Run the future
         let context = Context {
             storage,
             name: label.name(),
             executor: executor.clone(),
             network,
-            resolver,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -403,7 +379,6 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    resolver: TokioResolver,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -417,7 +392,6 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            resolver: self.resolver.clone(),
             tree: child,
             execution: Execution::default(),
             instrumented: false,
@@ -648,12 +622,15 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        let response = self
-            .resolver
-            .lookup_ip(host)
+        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
+        // registry on Windows). This delegates to the system's libc resolver.
+        //
+        // The `:0` port is required by lookup_host's API but is not used
+        // for DNS resolution.
+        let addrs = tokio::net::lookup_host(format!("{host}:0"))
             .await
             .map_err(|e| Error::ResolveFailed(e.to_string()))?;
-        Ok(response.iter().collect())
+        Ok(addrs.map(|addr| addr.ip()).collect())
     }
 }
 
