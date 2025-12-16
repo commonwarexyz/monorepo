@@ -326,7 +326,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
                                 hasher.inner(),
                                 &k,
-                                proof,
+                                &proof,
                                 &current_root,
                             );
                             assert!(verification_result, "Exclusion proof verification failed for key {key:?}");

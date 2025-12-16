@@ -55,6 +55,7 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -75,9 +76,9 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -278,6 +279,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
 }
 
 impl Executor {
@@ -361,6 +363,7 @@ pub struct Checkpoint {
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
 
@@ -601,6 +604,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            dns: executor.dns,
             catch_panics: executor.panicker.catch(),
         };
 
@@ -838,6 +842,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns: Mutex::new(HashMap::new()),
         });
 
         (
@@ -887,6 +892,7 @@ impl Context {
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
+            dns: checkpoint.dns,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -924,6 +930,31 @@ impl Context {
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
+    }
+
+    /// Register a DNS mapping for a hostname.
+    ///
+    /// If `addrs` is `None`, the mapping is removed.
+    /// If `addrs` is `Some`, the mapping is added or updated.
+    pub fn resolver_register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+        // Update the auditor
+        let executor = self.executor();
+        let host = host.into();
+        executor.auditor.event(b"resolver_register", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(addrs.encode());
+        });
+
+        // Update the DNS mapping
+        let mut dns = executor.dns.lock().unwrap();
+        match addrs {
+            Some(addrs) => {
+                dns.insert(host, addrs);
+            }
+            None => {
+                dns.remove(&host);
+            }
+        }
     }
 }
 
@@ -1291,6 +1322,23 @@ impl crate::Network for Context {
     }
 }
 
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Get the record
+        let executor = self.executor();
+        let dns = executor.dns.lock().unwrap();
+        let result = dns.get(host).cloned();
+        drop(dns);
+
+        // Update the auditor
+        executor.auditor.event(b"resolve", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(result.encode());
+        });
+        result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
+    }
+}
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         let executor = self.executor();
@@ -1353,7 +1401,9 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Resolver, Runner as _, Storage,
+    };
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
@@ -1533,6 +1583,36 @@ mod tests {
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_dns_mappings_persist() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let host = "example.com";
+        let addrs = vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
+        ];
+
+        // Register DNS mapping and recover the runtime
+        let (state, checkpoint) = executor.start_and_recover({
+            let addrs = addrs.clone();
+            |context| async move {
+                context.resolver_register(host, Some(addrs));
+                context.auditor().state()
+            }
+        });
+
+        // Verify auditor state is the same
+        assert_eq!(state, checkpoint.auditor.state());
+
+        // Check that DNS mappings persist after recovery
+        let executor = Runner::from(checkpoint);
+        executor.start(move |context| async move {
+            let resolved = context.resolve(host).await.unwrap();
+            assert_eq!(resolved, addrs);
         });
     }
 

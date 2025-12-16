@@ -17,6 +17,7 @@ workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
+commonware-codec.workspace = true
 commonware-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true

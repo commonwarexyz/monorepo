@@ -582,6 +582,7 @@ pub enum Error {
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 
 ### Naming Conventions
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)
