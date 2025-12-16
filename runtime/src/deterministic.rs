@@ -933,10 +933,10 @@ impl Context {
     ///
     /// If `addrs` is `None`, the mapping is removed.
     /// If `addrs` is `Some`, the mapping is added or updated.
-    pub fn register_dns(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+    pub fn register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
         let executor = self.executor();
         let host = host.into();
-        executor.auditor.event(b"register_dns", |hasher| {
+        executor.auditor.event(b"register", |hasher| {
             hasher.update(host.as_bytes());
         });
         let mut dns = executor.dns.lock().unwrap();
