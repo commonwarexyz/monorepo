@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 fn roundtrip_socket(socket: SocketAddr) {
@@ -48,24 +48,11 @@ fn roundtrip_ipv6(addr: Ipv6Addr) {
     assert_eq!(addr, decoded);
 }
 
-fn roundtrip_socket_v4(addr: SocketAddrV4) {
+fn roundtrip_ip_addr(addr: IpAddr) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = SocketAddrV4::decode(&mut &*encoded).expect("Failed to decode SocketAddrV4!");
+    let decoded = IpAddr::decode(&mut &*encoded).expect("Failed to decode IpAddr!");
     assert_eq!(addr, decoded);
-}
-
-fn roundtrip_socket_v6(addr: SocketAddrV6) {
-    let encoded = addr.encode();
-    assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = SocketAddrV6::decode(&mut &*encoded).expect("Failed to decode SocketAddrV6!");
-
-    // The codec intentionally discards flowinfo and scope_id (see codec/src/types/net.rs),
-    // so we only compare ip and port, and verify flowinfo/scope_id are zeroed.
-    assert_eq!(addr.ip(), decoded.ip());
-    assert_eq!(addr.port(), decoded.port());
-    assert_eq!(decoded.flowinfo(), 0);
-    assert_eq!(decoded.scope_id(), 0);
 }
 
 fn roundtrip_byte_array<const N: usize>(arr: [u8; N]) {
@@ -299,16 +286,13 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
 struct WrappedSocketAddr(SocketAddr);
 
 #[derive(Arbitrary, Debug)]
+struct WrappedIpAddr(IpAddr);
+
+#[derive(Arbitrary, Debug)]
 struct WrappedIpv4Addr(Ipv4Addr);
 
 #[derive(Arbitrary, Debug)]
 struct WrappedIpv6Addr(Ipv6Addr);
-
-#[derive(Arbitrary, Debug)]
-struct WrappedSocketAddrV4(SocketAddrV4);
-
-#[derive(Arbitrary, Debug)]
-struct WrappedSocketAddrV6(SocketAddrV6);
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput<'a> {
@@ -316,10 +300,9 @@ enum FuzzInput<'a> {
 
     // Network types
     Socket(WrappedSocketAddr),
+    Ip(WrappedIpAddr),
     Ipv4(WrappedIpv4Addr),
     Ipv6(WrappedIpv6Addr),
-    SocketV4(WrappedSocketAddrV4),
-    SocketV6(WrappedSocketAddrV6),
 
     // Collections
     Map(HashMap<u64, u64>),
@@ -384,10 +367,9 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
         // Network types
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
+        FuzzInput::Ip(it) => roundtrip_ip_addr(it.0),
         FuzzInput::Ipv4(it) => roundtrip_ipv4(it.0),
         FuzzInput::Ipv6(it) => roundtrip_ipv6(it.0),
-        FuzzInput::SocketV4(it) => roundtrip_socket_v4(it.0),
-        FuzzInput::SocketV6(it) => roundtrip_socket_v6(it.0),
         // Collections
         FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()),
         FuzzInput::Set(it) => roundtrip_set(&it, (..).into(), ()),

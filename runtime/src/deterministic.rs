@@ -55,6 +55,7 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -939,20 +940,7 @@ impl Context {
         let host = host.into();
         executor.auditor.event(b"resolver_register", |hasher| {
             hasher.update(host.as_bytes());
-            match &addrs {
-                Some(addrs) => {
-                    hasher.update(b"add");
-                    for addr in addrs {
-                        match addr {
-                            IpAddr::V4(v4) => hasher.update(v4.octets()),
-                            IpAddr::V6(v6) => hasher.update(v6.octets()),
-                        }
-                    }
-                }
-                None => {
-                    hasher.update(b"remove");
-                }
-            }
+            hasher.update(addrs.encode());
         });
 
         // Update the DNS mapping
@@ -1343,14 +1331,7 @@ impl crate::Resolver for Context {
         // Update the auditor
         executor.auditor.event(b"resolve", |hasher| {
             hasher.update(host.as_bytes());
-            if let Some(addrs) = &result {
-                for addr in addrs {
-                    match addr {
-                        IpAddr::V4(v4) => hasher.update(v4.octets()),
-                        IpAddr::V6(v6) => hasher.update(v6.octets()),
-                    }
-                }
-            }
+            hasher.update(result.encode());
         });
         result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
     }

@@ -48,8 +48,7 @@
 //! - Networking:
 //!   [`std::net::Ipv4Addr`],
 //!   [`std::net::Ipv6Addr`],
-//!   [`std::net::SocketAddrV4`],
-//!   [`std::net::SocketAddrV6`],
+//!   [`std::net::IpAddr`],
 //!   [`std::net::SocketAddr`]
 //! - Collections:
 //!   [`std::collections::HashMap`],
