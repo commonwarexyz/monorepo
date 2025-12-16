@@ -14,7 +14,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use rand::{prelude::IteratorRandom, CryptoRng, Rng};
+use rand::{CryptoRng, Rng};
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -504,18 +504,21 @@ where
             return;
         };
 
-        let victim = self
+        let participants: Vec<_> = self
             .scheme
             .participants()
             .iter()
             .enumerate()
             .filter(|(idx, _)| u32::try_from(*idx).ok() != Some(me))
             .map(|(_, pk)| pk.clone())
-            .choose(&mut self.context);
+            .collect();
 
-        let Some(victim) = victim else {
+        if participants.is_empty() {
             return;
-        };
+        }
+
+        let idx = (self.fuzz_input.random_u64() as usize) % participants.len();
+        let victim = participants[idx].clone();
 
         // Send 10 messages to victim
         for _ in 0..10 {
