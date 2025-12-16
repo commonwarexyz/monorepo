@@ -23,6 +23,7 @@ use crate::{
 use commonware_macros::select;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use hickory_resolver::{Resolver, TokioResolver};
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -340,7 +341,7 @@ impl crate::Runner for Runner {
 
         // Initialize resolver (uses the host's DNS configuration,
         // e.g. /etc/resolv.conf on Unix, registry on Windows)
-        let resolver = hickory_resolver::Resolver::builder_tokio()
+        let resolver = Resolver::builder_tokio()
             .expect("failed to create DNS resolver")
             .build();
 
@@ -386,7 +387,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    resolver: hickory_resolver::TokioResolver,
+    resolver: TokioResolver,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
