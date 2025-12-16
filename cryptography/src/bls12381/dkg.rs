@@ -297,7 +297,6 @@ use commonware_math::{
     poly::{Interpolator, Poly},
 };
 use commonware_utils::{
-    max_faults,
     ordered::{Map, Quorum, Set},
     TryCollect, NZU32,
 };
@@ -336,6 +335,7 @@ pub enum Error {
 pub struct Output<V: Variant, P> {
     summary: Summary,
     public: Sharing<V>,
+    dealers: Set<P>,
     players: Set<P>,
     revealed: Set<P>,
 }
@@ -357,6 +357,11 @@ impl<V: Variant, P: Ord> Output<V, P> {
         &self.public
     }
 
+    /// Return the dealers who were selected in this round of the DKG.
+    pub const fn dealers(&self) -> &Set<P> {
+        &self.dealers
+    }
+
     /// Return the players who participated in this round of the DKG, and should have shares.
     pub const fn players(&self) -> &Set<P> {
         &self.players
@@ -374,6 +379,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
         self.summary.encode_size()
             + self.public.encode_size()
+            + self.dealers.encode_size()
             + self.players.encode_size()
             + self.revealed.encode_size()
     }
@@ -383,6 +389,7 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.summary.write(buf);
         self.public.write(buf);
+        self.dealers.write(buf);
         self.players.write(buf);
         self.revealed.write(buf);
     }
@@ -393,13 +400,15 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_players: &Self::Cfg,
+        &max_participants: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
+        let max_participants_usize = max_participants.get() as usize;
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(buf, &max_players)?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players.get() as usize), ()))?,
+            public: Read::read_cfg(buf, &max_participants)?,
+            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
+            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals
         })
     }
 }
@@ -415,6 +424,14 @@ where
         let public: Sharing<V> = u.arbitrary()?;
 
         let total = public.total().get() as usize;
+        let num_dealers = u.int_in_range(1..=total)?;
+        let dealers = Set::try_from(
+            u.arbitrary_iter::<P>()?
+                .take(num_dealers)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+
         let players = Set::try_from(
             u.arbitrary_iter::<P>()?
                 .take(total)
@@ -422,7 +439,7 @@ where
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
-        let max_revealed = max_faults(total as u32) as usize;
+        let max_revealed = commonware_utils::max_faults(total as u32) as usize;
         let revealed = u.int_in_range(0..=max_revealed)?;
         let revealed = Set::try_from(
             u.arbitrary_iter::<P>()?
@@ -434,6 +451,7 @@ where
         Ok(Self {
             summary,
             public,
+            dealers,
             players,
             revealed,
         })
@@ -1315,6 +1333,14 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             .try_collect()
             .expect("players are unique");
 
+        // Extract dealers before consuming selected
+        let dealers: Set<P> = selected
+            .keys()
+            .iter()
+            .cloned()
+            .try_collect()
+            .expect("selected dealers are unique");
+
         // Recover the public polynomial
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
@@ -1345,6 +1371,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         let output = Output {
             summary: info.summary,
             public: Sharing::new(info.mode, NZU32!(n), public),
+            dealers,
             players: info.players,
             revealed,
         };
@@ -1520,6 +1547,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     let output = Output {
         summary: Summary::random(&mut rng),
         public: Sharing::new(mode, n, Poly::commit(private)),
+        dealers: players.clone(),
         players,
         revealed: Set::default(),
     };
@@ -2064,7 +2092,34 @@ mod test_plan {
                 let observer_output = observe_result?;
                 let selection = selection.expect("select should succeed if observe succeeded");
 
-                // Map selected dealers and players to their key indices
+                // Compute expected dealers: good dealers up to required_commitments
+                // The select function iterates dealer_logs (BTreeMap) in public key order
+                let required_commitments = info.required_commitments() as usize;
+                let expected_dealers: Set<ed25519::PublicKey> = dealer_set
+                    .iter()
+                    .filter(|pk| {
+                        let i = keys.iter().position(|k| &k.public_key() == *pk).unwrap() as u32;
+                        !round.bad(previous_successful_round.is_some(), i)
+                    })
+                    .take(required_commitments)
+                    .cloned()
+                    .try_collect()
+                    .expect("dealers are unique");
+                let expected_dealer_indices: BTreeSet<u32> = expected_dealers
+                    .iter()
+                    .filter_map(|pk| {
+                        keys.iter()
+                            .position(|k| &k.public_key() == pk)
+                            .map(|i| i as u32)
+                    })
+                    .collect();
+                assert_eq!(
+                    observer_output.dealers(),
+                    &expected_dealers,
+                    "Output dealers should match expected good dealers"
+                );
+
+                // Map selected dealers to their key indices (for later use)
                 let selected_dealers: BTreeSet<u32> = selection
                     .keys()
                     .iter()
@@ -2074,6 +2129,10 @@ mod test_plan {
                             .map(|i| i as u32)
                     })
                     .collect();
+                assert_eq!(
+                    selected_dealers, expected_dealer_indices,
+                    "Selection should match expected dealers"
+                );
                 let selected_players: Set<ed25519::PublicKey> = round
                     .players
                     .iter()
