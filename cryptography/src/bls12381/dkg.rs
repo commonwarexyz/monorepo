@@ -440,13 +440,18 @@ where
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
         let max_revealed = commonware_utils::max_faults(total as u32) as usize;
-        let revealed = u.int_in_range(0..=max_revealed)?;
-        let revealed = Set::try_from(
-            u.arbitrary_iter::<P>()?
-                .take(revealed)
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let num_revealed = u.int_in_range(0..=max_revealed)?;
+        let mut revealed_indices: Vec<usize> = (0..players.len()).collect();
+        for i in 0..revealed_indices.len() {
+            let j = u.int_in_range(i..=revealed_indices.len() - 1)?;
+            revealed_indices.swap(i, j);
+        }
+        let revealed = Set::from_iter_dedup(
+            revealed_indices
+                .into_iter()
+                .take(num_revealed)
+                .map(|i| players.get(i).unwrap().clone()),
+        );
 
         Ok(Self {
             summary,
