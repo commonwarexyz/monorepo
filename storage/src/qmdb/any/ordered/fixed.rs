@@ -11,7 +11,8 @@ use crate::{
     qmdb::{
         any::{
             init_fixed_authenticated_log,
-            ordered::{FixedOperation as Operation, IndexedLog},
+            ordered::{self, IndexedLog},
+            value::FixedEncoding,
             FixedConfig as Config, FixedValue,
         },
         Error,
@@ -22,6 +23,9 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
+
+pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
