@@ -64,7 +64,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::lookup::{self, Network}, Manager, Sender, Recipients};
+//! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::{NZU32, ordered::Map};
@@ -117,10 +117,13 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.update(
-//!         0,
-//!         [(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)].try_into().unwrap()
-//!     ).await;
+//!     let peers: Map<_, Address> = [
+//!         (my_sk.public_key(), my_addr.into()),
+//!         (peer1, peer1_addr.into()),
+//!         (peer2, peer2_addr.into()),
+//!         (peer3, peer3_addr.into()),
+//!     ].try_into().unwrap();
+//!     oracle.update(0, peers).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;

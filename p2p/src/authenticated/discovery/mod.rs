@@ -122,7 +122,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::discovery::{self, Network}, Manager, Sender, Recipients};
+//! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
@@ -149,7 +149,8 @@
 //! // Configure bootstrappers
 //! //
 //! // In production, it is likely that the address of bootstrappers will be some public address.
-//! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
+//! let bootstrapper_addr: Ingress = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001).into();
+//! let bootstrappers = vec![(peer1.clone(), bootstrapper_addr)];
 //!
 //! // Configure namespace
 //! //
