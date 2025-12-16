@@ -124,6 +124,11 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
+
+    /// Timeout for DNS resolution.
+    ///
+    /// Defaults to 5 seconds.
+    dns_timeout: Duration,
 }
 
 impl Config {
@@ -138,6 +143,7 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
+            dns_timeout: Duration::from_secs(5),
         }
     }
 
@@ -177,6 +183,11 @@ impl Config {
         self.maximum_buffer_size = n;
         self
     }
+    /// See [Config]
+    pub const fn with_dns_timeout(mut self, d: Duration) -> Self {
+        self.dns_timeout = d;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -206,6 +217,10 @@ impl Config {
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
+    }
+    /// See [Config]
+    pub const fn dns_timeout(&self) -> Duration {
+        self.dns_timeout
     }
 }
 
@@ -341,9 +356,10 @@ impl crate::Runner for Runner {
 
         // Initialize resolver (uses the host's DNS configuration,
         // e.g. /etc/resolv.conf on Unix, registry on Windows)
-        let resolver = Resolver::builder_tokio()
-            .expect("failed to create DNS resolver")
-            .build();
+        let mut resolver_builder =
+            Resolver::builder_tokio().expect("failed to create DNS resolver");
+        resolver_builder.options_mut().timeout = self.cfg.dns_timeout;
+        let resolver = resolver_builder.build();
 
         // Run the future
         let context = Context {
