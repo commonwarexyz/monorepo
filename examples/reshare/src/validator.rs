@@ -321,7 +321,7 @@ mod test {
         async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
@@ -415,7 +415,7 @@ mod test {
         async fn start_participant(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) {
@@ -430,7 +430,7 @@ mod test {
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
             delayed: &HashSet<PublicKey>,

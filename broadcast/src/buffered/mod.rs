@@ -65,13 +65,23 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
+    type Registrations = BTreeMap<
+        PublicKey,
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+    >;
 
     async fn initialize_simulation(
         context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
-    ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
+    ) -> (
+        Vec<PublicKey>,
+        Registrations,
+        Oracle<PublicKey, deterministic::Context>,
+    ) {
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {

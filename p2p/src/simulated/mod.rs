@@ -180,8 +180,8 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter, SplitSender,
-    SplitTarget,
+    CheckedSender, Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter,
+    SplitSender, SplitTarget,
 };
 
 #[cfg(test)]
@@ -1012,7 +1012,7 @@ mod tests {
 
     async fn test_bandwidth_between_peers(
         context: &mut deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         sender_bps: Option<usize>,
         receiver_bps: Option<usize>,
         message_size: usize,

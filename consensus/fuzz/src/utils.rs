@@ -62,8 +62,8 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
-pub async fn link_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+pub async fn link_peers<P: PublicKey, E: governor::clock::Clock>(
+    oracle: &mut Oracle<P, E>,
     validators: &[P],
     action: Action,
     filter: Option<fn(usize, usize, usize) -> bool>,
@@ -97,15 +97,15 @@ pub async fn link_peers<P: PublicKey>(
     }
 }
 
-pub async fn register<P: PublicKey>(
-    oracle: &mut Oracle<P>,
+pub async fn register<P: PublicKey, E: governor::clock::Clock>(
+    oracle: &mut Oracle<P, E>,
     validators: &[P],
 ) -> HashMap<
     P,
     (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
+        (Sender<P, E>, Receiver<P>),
     ),
 > {
     let mut registrations = HashMap::new();
