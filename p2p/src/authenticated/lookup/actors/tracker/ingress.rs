@@ -1,13 +1,16 @@
 use super::Reservation;
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::Metadata},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+use crate::{
+    authenticated::{
+        lookup::actors::{peer, tracker::Metadata},
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    },
+    types::Address as PeerAddress,
+    Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::{Map, Set};
 use futures::channel::{mpsc, oneshot};
-use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -16,7 +19,7 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register {
         index: u64,
-        peers: Map<C, SocketAddr>,
+        peers: Map<C, PeerAddress>,
     },
 
     // ---------- Used by peer set provider ----------
@@ -58,15 +61,15 @@ pub enum Message<C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
+    /// The tracker will respond with an [`Option<(Reservation<C>, Ingress)>`], which will be
+    /// `None` if the reservation cannot be granted (e.g., if the peer is already connected,
+    /// blocked or already has an active reservation).
     Dial {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<C>>>,
+        /// Sender to respond with the reservation and ingress address.
+        reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
     },
 
     // ---------- Used by listener ----------
@@ -114,7 +117,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Dial` message to the tracker.
-    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
+    pub async fn dial(&mut self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Dial {
             public_key,
@@ -182,7 +185,7 @@ impl<C: PublicKey> Oracle<C> {
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
-    type Peers = Map<C, SocketAddr>;
+    type Peers = Map<C, PeerAddress>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -191,8 +194,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index`.
-    ///   Each element is a tuple containing the public key and the socket address of the peer.
-    ///   The peer must be dialable at and dial from the given socket address.
+    ///   Each element contains the public key and address specification of the peer.
     async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }

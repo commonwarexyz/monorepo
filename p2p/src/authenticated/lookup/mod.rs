@@ -171,7 +171,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        deterministic, tokio, Clock, Metrics, Network as RNetwork, Resolver, Runner, Spawner,
     };
     use commonware_utils::{
         ordered::{Map, Set},
@@ -216,7 +216,14 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner
+            + Clock
+            + ReasonablyRealtime
+            + Rng
+            + CryptoRng
+            + RNetwork
+            + Resolver
+            + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -232,7 +239,7 @@ mod tests {
         }
         let peers = peers_and_sks
             .iter()
-            .map(|(_, pub_key, addr)| (pub_key.clone(), *addr))
+            .map(|(_, pub_key, addr)| (pub_key.clone(), (*addr).into()))
             .collect::<Vec<_>>();
 
         // Create networks

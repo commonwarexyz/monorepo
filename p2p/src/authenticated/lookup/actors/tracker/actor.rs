@@ -223,12 +223,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        authenticated::lookup::actors::peer,
-        Blocker,
-        Manager,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
-    };
+    use crate::{authenticated::lookup::actors::peer, Blocker, Manager};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -316,7 +311,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, [(pk.clone(), addr)].try_into().unwrap())
+                .update(0, [(pk.clone(), addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -345,7 +340,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, [(pk1.clone(), addr)].try_into().unwrap())
+                .update(0, [(pk1.clone(), addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -401,7 +396,7 @@ mod tests {
             oracle
                 .update(
                     0,
-                    [(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)]
+                    [(peer_pk.clone(), peer_addr.into()), (peer_pk2.clone(), peer_addr2.into())]
                         .try_into()
                         .unwrap(),
                 )
@@ -435,7 +430,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
+                .update(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -470,7 +465,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
+                .update(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -494,19 +489,19 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
+                .update(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
                 .await;
 
-            let reservation = mailbox.dial(boot_pk.clone()).await;
-            assert!(reservation.is_some());
-            if let Some(res) = reservation {
+            let result = mailbox.dial(boot_pk.clone()).await;
+            assert!(result.is_some());
+            if let Some((res, ingress)) = result {
                 match res.metadata() {
-                    crate::authenticated::lookup::actors::tracker::Metadata::Dialer(pk, addr) => {
+                    crate::authenticated::lookup::actors::tracker::Metadata::Dialer(pk) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, boot_addr);
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }
+                assert_eq!(ingress, crate::Ingress::Socket(boot_addr));
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
@@ -531,7 +526,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
+                .update(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
