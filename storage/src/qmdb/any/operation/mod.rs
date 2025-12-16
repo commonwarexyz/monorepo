@@ -7,16 +7,16 @@ use commonware_utils::{hex, Array};
 use std::fmt;
 
 mod fixed;
-mod update;
-pub use update::{OrderedUpdate, UnorderedUpdate, Update};
+pub(super) mod update;
+pub use update::Update;
 mod variable;
 
 const DELETE_CONTEXT: u8 = 0xD1;
 const UPDATE_CONTEXT: u8 = 0xD2;
 const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub type Ordered<K, V> = Operation<K, V, OrderedUpdate<K, V>>;
-pub type Unordered<K, V> = Operation<K, V, UnorderedUpdate<K, V>>;
+pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
+pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
@@ -88,7 +88,7 @@ where
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, OrderedUpdate<K, V>>
+impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
 where
     K: Array + fmt::Display,
     V: ValueEncoding,
@@ -138,7 +138,7 @@ mod tests {
         type Op = Ordered<K, FixedEncoding<V>>;
 
         let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
-        let update = Op::Update(OrderedUpdate {
+        let update = Op::Update(update::Ordered {
             key: FixedBytes::from([4, 3, 2, 1]),
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
@@ -159,7 +159,7 @@ mod tests {
         type Op = Unordered<K, FixedEncoding<V>>;
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
-        let update = Op::Update(UnorderedUpdate(FixedBytes::from([9, 8, 7, 6]), 77u64));
+        let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
         let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
 
         roundtrip(&delete, &());
@@ -175,7 +175,7 @@ mod tests {
         let cfg = (RangeCfg::from(..), ());
 
         let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
-        let update = Op::Update(OrderedUpdate {
+        let update = Op::Update(update::Ordered {
             key: FixedBytes::from([2, 2, 2, 2]),
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
@@ -198,7 +198,7 @@ mod tests {
         let cfg = (RangeCfg::from(..), ());
 
         let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
-        let update = Op::Update(UnorderedUpdate(
+        let update = Op::Update(update::Unordered(
             FixedBytes::from([5, 5, 5, 5]),
             vec![7, 7, 7, 7],
         ));

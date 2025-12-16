@@ -1,5 +1,5 @@
 use crate::qmdb::any::{
-    operation::{update::sealed::Sealed, Update},
+    operation::{update::sealed::Sealed, Update as UpdateTrait},
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
@@ -11,14 +11,14 @@ use commonware_utils::{hex, Array};
 use std::fmt;
 
 #[derive(Clone, PartialEq, Debug, Eq)]
-pub struct OrderedUpdate<K: Array + Ord, V: ValueEncoding> {
+pub struct Update<K: Array + Ord, V: ValueEncoding> {
     pub key: K,
     pub value: V::Value,
     pub next_key: K,
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array + Ord, V: ValueEncoding> arbitrary::Arbitrary<'_> for OrderedUpdate<K, V>
+impl<K: Array + Ord, V: ValueEncoding> arbitrary::Arbitrary<'_> for Update<K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
@@ -32,9 +32,9 @@ where
     }
 }
 
-impl<K: Array, V: ValueEncoding> Sealed for OrderedUpdate<K, V> {}
+impl<K: Array, V: ValueEncoding> Sealed for Update<K, V> {}
 
-impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {
+impl<K: Array, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
     fn key(&self) -> &K {
         &self.key
     }
@@ -50,11 +50,11 @@ impl<K: Array, V: ValueEncoding> Update<K, V> for OrderedUpdate<K, V> {
     }
 }
 
-impl<K: Array, V: FixedValue> FixedSize for OrderedUpdate<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
     const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
 }
 
-impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> Write for Update<K, FixedEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
         self.value.write(buf);
@@ -62,7 +62,7 @@ impl<K: Array, V: FixedValue> Write for OrderedUpdate<K, FixedEncoding<V>> {
     }
 }
 
-impl<K: Array, V: FixedValue> Read for OrderedUpdate<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -77,13 +77,13 @@ impl<K: Array, V: FixedValue> Read for OrderedUpdate<K, FixedEncoding<V>> {
     }
 }
 
-impl<K: Array, V: VariableValue> EncodeSize for OrderedUpdate<K, VariableEncoding<V>> {
+impl<K: Array, V: VariableValue> EncodeSize for Update<K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
         K::SIZE + self.value.encode_size() + K::SIZE
     }
 }
 
-impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>> {
+impl<K: Array, V: VariableValue> Write for Update<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
         self.value.write(buf);
@@ -91,7 +91,7 @@ impl<K: Array, V: VariableValue> Write for OrderedUpdate<K, VariableEncoding<V>>
     }
 }
 
-impl<K: Array, V: VariableValue> Read for OrderedUpdate<K, VariableEncoding<V>> {
+impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {

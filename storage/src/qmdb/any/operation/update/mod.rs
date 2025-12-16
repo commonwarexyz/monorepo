@@ -7,10 +7,10 @@ mod sealed {
 }
 
 mod ordered;
-pub use ordered::OrderedUpdate;
+pub use ordered::Update as Ordered;
 
 mod unordered;
-pub use unordered::UnorderedUpdate;
+pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
 pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
@@ -24,7 +24,8 @@ pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
 #[cfg(test)]
 mod tests {
     use crate::qmdb::any::{
-        operation::{OrderedUpdate, UnorderedUpdate},
+        operation::update::Unordered as UnorderedUpdate,
+        ordered::OrderedUpdate,
         value::{FixedEncoding, VariableEncoding},
     };
     use commonware_codec::{Codec, RangeCfg, Read};

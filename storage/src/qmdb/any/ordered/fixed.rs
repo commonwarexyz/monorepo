@@ -72,7 +72,7 @@ mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher as Standard},
         qmdb::{
-            any::ordered::KeyData,
+            any::ordered::OrderedUpdate,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -158,7 +158,7 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(KeyData {
+                ops.push(Operation::Update(OrderedUpdate {
                     key,
                     value,
                     next_key,
@@ -824,7 +824,7 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(KeyData {
+            let changed_op = Operation::Update(OrderedUpdate {
                 key: Sha256::hash(b"key1"),
                 value: Sha256::hash(b"value1"),
                 next_key: Sha256::hash(b"key2"),
