@@ -51,6 +51,11 @@ impl<T> NonEmptyVec<T> {
         NonZeroUsize::new(self.0.len()).unwrap()
     }
 
+    /// Returns `true` if the vector contains exactly one element.
+    pub const fn is_singleton(&self) -> bool {
+        self.0.len() == 1
+    }
+
     /// Returns a reference to the first element.
     ///
     /// Unlike [`slice::first`], this doesn't return an `Option`.
@@ -434,6 +439,18 @@ mod tests {
         assert_eq!(v.len().get(), 1);
         assert_eq!(v.first(), &42);
         assert_eq!(v.last(), &42);
+    }
+
+    #[test]
+    fn test_is_singleton() {
+        let v = non_empty_vec![42];
+        assert!(v.is_singleton());
+
+        let v = non_empty_vec![1, 2];
+        assert!(!v.is_singleton());
+
+        let v = non_empty_vec![1, 2, 3];
+        assert!(!v.is_singleton());
     }
 
     #[test]

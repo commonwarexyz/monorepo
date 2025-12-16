@@ -129,7 +129,7 @@ impl<H: Hasher> Tree<H> {
 
         // Construct the tree level-by-level
         let mut current_level = levels.last();
-        while current_level.len().get() > 1 {
+        while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             for chunk in current_level.chunks(2) {
                 // Hash the left child
@@ -175,7 +175,7 @@ impl<H: Hasher> Tree<H> {
         let mut siblings = Vec::with_capacity(self.levels.len().get() - 1);
         let mut index = position as usize;
         for level in &self.levels {
-            if level.len().get() == 1 {
+            if level.is_singleton() {
                 break;
             }
             let sibling_index = if index.is_multiple_of(2) {
@@ -226,7 +226,7 @@ impl<H: Hasher> Tree<H> {
         let mut siblings = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
             // If the level has only one node, we're done
-            if level.len().get() == 1 {
+            if level.is_singleton() {
                 break;
             }
 
