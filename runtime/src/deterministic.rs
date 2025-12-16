@@ -933,11 +933,11 @@ impl Context {
     ///
     /// If `addrs` is `None`, the mapping is removed.
     /// If `addrs` is `Some`, the mapping is added or updated.
-    pub fn register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+    pub fn resolver_register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
         // Update the auditor
         let executor = self.executor();
         let host = host.into();
-        executor.auditor.event(b"register", |hasher| {
+        executor.auditor.event(b"resolver_register", |hasher| {
             hasher.update(host.as_bytes());
             match &addrs {
                 Some(addrs) => {

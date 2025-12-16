@@ -2291,7 +2291,7 @@ mod tests {
             // Register DNS mappings
             let ip1: IpAddr = "192.168.1.1".parse().unwrap();
             let ip2: IpAddr = "192.168.1.2".parse().unwrap();
-            context.register("example.com", Some(vec![ip1, ip2]));
+            context.resolver_register("example.com", Some(vec![ip1, ip2]));
 
             // Resolve registered hostname
             let addrs = context.resolve("example.com").await.unwrap();
@@ -2302,7 +2302,7 @@ mod tests {
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
 
             // Remove mapping
-            context.register("example.com", None);
+            context.resolver_register("example.com", None);
             let result = context.resolve("example.com").await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
         });
