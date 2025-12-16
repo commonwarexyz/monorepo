@@ -1,14 +1,131 @@
+use commonware_codec::{Codec, CodecFixed, Read};
+use commonware_cryptography::{DigestOf, Hasher};
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
+
+use crate::{
+    index::ordered::Index,
+    journal::{
+        authenticated,
+        contiguous::fixed::Journal as FixedJournal,
+        contiguous::variable::{Config as VariableJournalConfig, Journal as VariableJournal},
+    },
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    qmdb::{
+        any::{
+            db::IndexedLog, init_fixed_authenticated_log, FixedConfig, FixedEncoding, FixedValue,
+            OrderedOperation, OrderedUpdate, VariableConfig, VariableEncoding, VariableValue,
+        },
+        Error,
+    },
+    translator::Translator,
+};
+
 pub mod fixed;
-pub mod variable;
+
+/// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
+/// value ever associated with a key.
+pub type Any<E, K, V, C, I, H, S = Clean<DigestOf<H>>> =
+    IndexedLog<E, K, V, OrderedUpdate<K, V>, C, I, H, S>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+    Any<
+        E,
+        K,
+        VariableEncoding<V>,
+        VariableJournal<E, OrderedOperation<K, VariableEncoding<V>>>,
+        Index<T, Location>,
+        H,
+    >
+where
+    OrderedOperation<K, VariableEncoding<V>>: Codec,
+{
+    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(
+        context: E,
+        cfg: VariableConfig<T, <OrderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        let mmr_config = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool.clone(),
+        };
+
+        let journal_config = VariableJournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_blob,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let log = authenticated::Journal::<_, VariableJournal<_, _>, _, _>::new(
+            context.with_label("log"),
+            mmr_config,
+            journal_config,
+            |op: &OrderedOperation<K, VariableEncoding<V>>| {
+                matches!(op, OrderedOperation::CommitFloor(_, _))
+            },
+        )
+        .await?;
+
+        let index = Index::new(context.with_label("index"), cfg.translator);
+        let log = Self::init_from_log(index, log, None, |_, _| {}).await?;
+
+        Ok(log)
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
+    Any<
+        E,
+        K,
+        FixedEncoding<V>,
+        FixedJournal<E, OrderedOperation<K, FixedEncoding<V>>>,
+        Index<T, Location>,
+        H,
+    >
+where
+    OrderedOperation<K, FixedEncoding<V>>: CodecFixed<Cfg = ()>,
+{
+    /// Returns an [Any] qmdb initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: FixedConfig<T>) -> Result<Self, Error> {
+        Self::init_with_callback(context, cfg, None, |_, _| {}).await
+    }
+
+    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
+    ///
+    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
+    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
+    /// is built from the log, `callback` is invoked for each operation with its activity status and
+    /// previous location (if any).
+    pub(crate) async fn init_with_callback(
+        context: E,
+        cfg: FixedConfig<T>,
+        known_inactivity_floor: Option<Location>,
+        callback: impl FnMut(bool, Option<Location>),
+    ) -> Result<Self, Error> {
+        let translator = cfg.translator.clone();
+        let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        let index = Index::new(context.with_label("index"), translator);
+        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
+
+        Ok(log)
+    }
+}
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        mmr::{
-            mem::{Clean, Mmr as MemMmr},
-            Location, StandardHasher as Standard,
-        },
+        journal::contiguous::fixed::Journal,
+        mmr::{mem::Mmr as MemMmr, Location, StandardHasher as Standard},
         qmdb::{
             any::{
                 test::{fixed_db_config, variable_db_config},
@@ -28,10 +145,24 @@ mod test {
     use core::{future::Future, pin::Pin};
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type FixedDb = Any<
+        Context,
+        FixedBytes<4>,
+        FixedEncoding<Digest>,
+        Journal<Context, OrderedOperation<FixedBytes<4>, FixedEncoding<Digest>>>,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type VariableDb = variable::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Clean<Digest>>;
+    type VariableDb = Any<
+        Context,
+        FixedBytes<4>,
+        VariableEncoding<Digest>,
+        VariableJournal<Context, OrderedOperation<FixedBytes<4>, VariableEncoding<Digest>>>,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_fixed_db(context: Context) -> FixedDb {

@@ -3,10 +3,13 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
+    index::ordered::Index,
+    journal::contiguous::variable::Journal,
+    mmr::Location,
     qmdb::{
         any::{
-            ordered::variable::Any as OAny, unordered::variable::Any as UAny,
-            VariableConfig as AConfig,
+            ordered::Any as OAny, unordered::variable::Any as UAny, OrderedOperation,
+            VariableConfig as AConfig, VariableEncoding,
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
     },
@@ -60,7 +63,14 @@ const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 type UAnyDb = UAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type OAnyDb = OAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+type OAnyDb = OAny<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    VariableEncoding<Vec<u8>>,
+    Journal<Context, OrderedOperation<<Sha256 as Hasher>::Digest, VariableEncoding<Vec<u8>>>>,
+    Index<EightCap, Location>,
+    Sha256,
+>;
 
 fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -105,7 +115,9 @@ async fn get_any_unordered(ctx: Context) -> UAnyDb {
 async fn get_any_ordered(ctx: Context) -> OAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OAny::init(ctx, any_cfg).await.unwrap()
+    OAny::<_, _, VariableEncoding<Vec<u8>>, _, _, _>::init(ctx, any_cfg)
+        .await
+        .unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

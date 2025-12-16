@@ -3,6 +3,8 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    index::ordered::Index,
+    journal::contiguous::fixed::Journal,
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, Mmr as MemMmr, State},
@@ -10,7 +12,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::fixed::Any, span_contains, CleanAny, DirtyAny, FixedEncoding, FixedValue,
+            ordered::Any, span_contains, CleanAny, DirtyAny, FixedEncoding, FixedValue,
             OrderedOperation, OrderedUpdate,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
@@ -46,7 +48,15 @@ pub struct Current<
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T, S>,
+    any: Any<
+        E,
+        K,
+        FixedEncoding<V>,
+        Journal<E, OrderedOperation<K, FixedEncoding<V>>>,
+        Index<T, Location>,
+        H,
+        S,
+    >,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.

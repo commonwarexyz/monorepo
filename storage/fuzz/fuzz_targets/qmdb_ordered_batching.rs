@@ -4,8 +4,11 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
+    index::ordered::Index,
+    journal::contiguous::fixed::Journal,
+    mmr::Location,
     qmdb::{
-        any::{ordered::fixed::Any, FixedConfig as Config},
+        any::{ordered::Any, FixedConfig as Config, FixedEncoding, OrderedOperation},
         store::Batchable as _,
     },
     translator::EightCap,
@@ -57,9 +60,16 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
-            .await
-            .expect("init qmdb");
+        let mut db = Any::<
+            _,
+            Key,
+            FixedEncoding<Value>,
+            Journal<_, OrderedOperation<Key, FixedEncoding<Value>>>,
+            Index<EightCap, Location>,
+            Sha256,
+        >::init(context.clone(), cfg.clone())
+        .await
+        .expect("init qmdb");
         let mut batch = Some(db.start_batch());
         let mut last_commit = None;
 
