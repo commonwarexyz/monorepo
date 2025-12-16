@@ -614,6 +614,7 @@ mod test {
                         }
                         status.insert(update.pk, epoch);
 
+                        // If this is a new output, increment successes
                         if let Some(o) = outputs.get(epoch.get() as usize) {
                             if o.as_ref() != output.as_ref() {
                                 return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
@@ -624,11 +625,14 @@ mod test {
                             }
                             outputs.push(output);
                         }
+
+                        // If we've reached the target number of successes, record the epoch (recall, epoch increases even after failure)
                         if successes >= target {
                             success_target_reached_epoch = Some(epoch);
                         }
-                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)).count() >= self.total as usize;
 
+                        // If all have reached the epoch, stop
+                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)).count() >= self.total as usize;
                         let post_update = if all_reached_epoch {
                             PostUpdate::Stop
                         } else {
@@ -654,7 +658,6 @@ mod test {
 
                         // Compute the minimum epoch that all active participants have reached
                         let min_epoch = status.values().min().copied().unwrap_or(Epoch::zero());
-
                         if successes >= target {
                             // Wait for all active participants to reach the target epoch
                             if let Some(target_epoch) = success_target_reached_epoch {
