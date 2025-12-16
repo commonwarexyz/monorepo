@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
+use commonware_runtime::{Error as RuntimeError, Resolver};
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -40,6 +41,23 @@ impl Ingress {
         match self {
             Self::Socket(addr) => Some(addr.ip()),
             Self::Dns { .. } => None,
+        }
+    }
+
+    /// Resolve this ingress address to a socket address.
+    ///
+    /// For `Socket` variants, returns the address directly.
+    /// For `Dns` variants, performs DNS resolution and returns the first resolved IP.
+    pub async fn resolve(&self, resolver: &impl Resolver) -> Result<SocketAddr, RuntimeError> {
+        match self {
+            Self::Socket(addr) => Ok(*addr),
+            Self::Dns { host, port } => {
+                let ips = resolver.resolve(host).await?;
+                let ip = ips
+                    .first()
+                    .ok_or(RuntimeError::ResolveFailed(host.clone()))?;
+                Ok(SocketAddr::new(*ip, *port))
+            }
         }
     }
 }

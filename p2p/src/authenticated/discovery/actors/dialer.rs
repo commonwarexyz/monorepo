@@ -1,18 +1,15 @@
 //! Actor responsible for dialing peers and establishing connections.
 
-use crate::{
-    authenticated::{
-        discovery::{
-            actors::{
-                spawner,
-                tracker::{self, Metadata, Reservation},
-            },
-            metrics,
+use crate::authenticated::{
+    discovery::{
+        actors::{
+            spawner,
+            tracker::{self, Metadata, Reservation},
         },
-        mailbox::UnboundedMailbox,
-        Mailbox,
+        metrics,
     },
-    Ingress,
+    mailbox::UnboundedMailbox,
+    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -24,7 +21,7 @@ use commonware_utils::{IpAddrExt, SystemTimeExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{seq::SliceRandom, CryptoRng, Rng};
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 use tracing::debug;
 
 /// Configuration for the dialer actor.
@@ -112,10 +109,10 @@ impl<E: Spawner + Clock + GClock + Network + Resolver + Rng + CryptoRng + Metric
             let allow_private_ips = self.allow_private_ips;
             move |context| async move {
                 // Resolve ingress to socket address
-                let address = match Self::resolve_ingress(&context, &ingress).await {
-                    Some(addr) => addr,
-                    None => {
-                        debug!(?ingress, "failed to resolve ingress address");
+                let address = match ingress.resolve(&context).await {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        debug!(?ingress, ?err, "failed to resolve ingress address");
                         return;
                     }
                 };
@@ -151,18 +148,6 @@ impl<E: Spawner + Clock + GClock + Network + Resolver + Rng + CryptoRng + Metric
                 supervisor.spawn(instance, reservation).await;
             }
         });
-    }
-
-    /// Resolve an ingress address to a socket address.
-    async fn resolve_ingress(context: &impl Resolver, ingress: &Ingress) -> Option<SocketAddr> {
-        match ingress {
-            Ingress::Socket(addr) => Some(*addr),
-            Ingress::Dns { host, port } => {
-                let ips = context.resolve(host).await.ok()?;
-                let ip = *ips.first()?;
-                Some(SocketAddr::new(ip, *port))
-            }
-        }
     }
 
     /// Start the dialer actor.

@@ -24,7 +24,7 @@ use commonware_utils::{IpAddrExt, SystemTimeExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{seq::SliceRandom, CryptoRng, Rng};
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 use tracing::debug;
 
 /// Configuration for the dialer actor.
@@ -112,22 +112,12 @@ impl<E: Spawner + Clock + GClock + Network + Resolver + Rng + CryptoRng + Metric
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             move |context| async move {
-                // Resolve address if needed
-                let address: SocketAddr = match ingress {
-                    Ingress::Socket(addr) => addr,
-                    Ingress::Dns { host, port } => {
-                        let ips = match context.resolve(&host).await {
-                            Ok(ips) => ips,
-                            Err(err) => {
-                                debug!(?host, ?err, "failed to resolve DNS");
-                                return;
-                            }
-                        };
-                        let Some(ip) = ips.first() else {
-                            debug!(?host, "DNS resolved to no addresses");
-                            return;
-                        };
-                        SocketAddr::new(*ip, port)
+                // Resolve ingress to socket address
+                let address = match ingress.resolve(&context).await {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        debug!(?ingress, ?err, "failed to resolve ingress address");
+                        return;
                     }
                 };
 
