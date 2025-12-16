@@ -1851,6 +1851,15 @@ mod test_plan {
             let keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
+
+            // Precompute mapping from public key to key index to avoid confusion
+            // between key indices and positions in sorted Sets.
+            let pk_to_key_idx: BTreeMap<ed25519::PublicKey, u32> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.public_key(), i as u32))
+                .collect();
+
             // The max_read_size needs to account for shifted polynomial degrees.
             // Find the maximum positive shift across all rounds.
             let max_shift = self
@@ -1975,9 +1984,7 @@ mod test_plan {
 
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
-                        // Find the key index for this player by searching the keys array
-                        let player_key_idx =
-                            keys.iter().position(|k| &k.public_key() == player).unwrap() as u32;
+                        let player_key_idx = pk_to_key_idx[player];
                         if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
                             priv_msg.share = Scalar::random(&mut rng);
                         }
@@ -1993,11 +2000,7 @@ mod test_plan {
                         let i_player = players
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
-                        // Find the key index for this player by searching the keys array
-                        let player_key_idx = keys
-                            .iter()
-                            .position(|k| k.public_key() == player_pk)
-                            .unwrap() as u32;
+                        let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[i_player as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
