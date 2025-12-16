@@ -12,8 +12,8 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::Any, span_contains, CleanAny, DirtyAny, FixedEncoding, FixedValue,
-            OrderedOperation, OrderedUpdate,
+            ordered::Fixed as OrderedDb, span_contains, CleanAny, DirtyAny, Db, FixedEncoding,
+            FixedValue, OrderedOperation, OrderedUpdate,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -46,20 +46,21 @@ pub struct Current<
     const N: usize,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
-    /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
+    /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
     #[allow(clippy::type_complexity)]
-    any: Any<
+    any: Db<
         E,
         K,
         FixedEncoding<V>,
+        OrderedUpdate<K, FixedEncoding<V>>,
         Journal<E, OrderedOperation<K, FixedEncoding<V>>>,
         Index<T, Location>,
         H,
         S,
     >,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
+    /// The bitmap over the activity status of each operation. Supports augmenting database proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     status: BitMap<H::Digest, N, S>,
 
@@ -243,7 +244,7 @@ impl<
 
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
-        let any = Any::init_with_callback(
+        let any = OrderedDb::init_with_callback(
             context.with_label("any"),
             config.to_any_config(),
             Some(last_known_inactivity_floor),
@@ -400,7 +401,7 @@ impl<
         // Clean up bitmap metadata partition.
         CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
 
-        // Clean up Any components (MMR and log).
+        // Clean up database components (MMR and log).
         self.any.destroy().await
     }
 

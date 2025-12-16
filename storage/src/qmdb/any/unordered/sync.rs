@@ -269,9 +269,9 @@ mod tests {
             any::{
                 unordered::test::{
                     apply_fixed_ops as apply_ops, create_fixed_test_config as create_test_config,
-                    create_fixed_test_db as create_test_db,
-                    create_fixed_test_ops as create_test_ops, fixed_any_db_config as any_db_config,
-                    FixedAnyTest as AnyTest,
+                    create_fixed_db_test as create_test_db,
+                    create_fixed_test_ops as create_test_ops, fixed_db_test_config as any_db_config,
+                    FixedDbTest as AnyTest,
                 },
                 UnorderedUpdate,
             },
