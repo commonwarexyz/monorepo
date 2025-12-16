@@ -9,7 +9,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self, scheme,
+        self,
+        elector::RoundRobin,
+        scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
@@ -353,6 +355,7 @@ where
             self.context.with_label("consensus_engine"),
             simplex::Config {
                 scheme,
+                elector: RoundRobin,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
