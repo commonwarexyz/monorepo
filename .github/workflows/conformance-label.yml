@@ -1,0 +1,23 @@
+name: Conformance Label
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance-label-check:
+    name: Conformance Label Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Check for conformance changes requiring label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./.github/scripts/check_conformance_label.sh
