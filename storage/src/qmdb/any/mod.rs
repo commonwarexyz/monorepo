@@ -1,6 +1,6 @@
 //! Authenticated databases that provides succinct proofs of _any_ value ever associated with
-//! a key. The submodules provide two classes of variants, one specialized for fixed-size values and
-//! the other allowing variable-size values.
+//! a key. The submodules provide two classes of variants, one specialized for ordered keys and
+//! the other for unordered keys.
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -269,8 +269,14 @@ pub(crate) async fn init_variable_authenticated_log<
     Ok(log)
 }
 
-/// A QMDB implementation generic over ordered/unordered operations
-/// and fixed/variable-length values.
+/// A QMDB implementation that can prove a key held a value at some point.
+/// This type is generic over ordered/unordered keys and fixed/variable-length values.
+/// Consider using one of the following, which provide concrete types for some of the generic
+/// parameters of this type:
+/// - [ordered::Fixed] for ordered keys and fixed-length values
+/// - [ordered::Variable] for ordered keys and variable-length values
+/// - [unordered::Fixed] for unordered keys and fixed-length values
+/// - [unordered::Variable] for unordered keys and variable-length values
 pub struct Db<
     E: Storage + Clock + Metrics,
     K: Array,

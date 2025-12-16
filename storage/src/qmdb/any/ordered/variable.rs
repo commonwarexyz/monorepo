@@ -56,3 +56,56 @@ where
         Self::init_from_log(index, log, None, |_, _| {}).await
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test {
+    use super::*;
+    use crate::{
+        index::ordered::Index, mmr::Location, qmdb::any::test::variable_db_config,
+        translator::TwoCap,
+    };
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::deterministic::{Context, Runner};
+    use commonware_runtime::Runner as _;
+    use commonware_utils::sequence::FixedBytes;
+
+    // Import generic test functions from parent test module
+    use super::super::test::{test_ordered_any_db_basic, test_ordered_any_db_empty};
+
+    /// A type alias for the concrete database type used in these unit tests.
+    type VariableDb = Db<
+        Context,
+        FixedBytes<4>,
+        VariableEncoding<Digest>,
+        OrderedUpdate<FixedBytes<4>, VariableEncoding<Digest>>,
+        VariableJournal<Context, OrderedOperation<FixedBytes<4>, VariableEncoding<Digest>>>,
+        Index<TwoCap, Location>,
+        Sha256,
+    >;
+
+    /// Return a database initialized with a variable config.
+    pub(crate) async fn open_variable_db(context: Context) -> VariableDb {
+        VariableDb::init(context, variable_db_config("partition"))
+            .await
+            .unwrap()
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_variable_db_empty() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_variable_db(context.clone()).await;
+            test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_variable_db_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_variable_db(context.clone()).await;
+            test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+}
