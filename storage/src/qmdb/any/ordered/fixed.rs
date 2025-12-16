@@ -420,33 +420,59 @@ pub(crate) mod test {
         });
     }
 
-    /// Helper to apply random operations to a database.
-    async fn apply_fixed_ops(db: &mut DbTest, n: usize) {
+    type FixedOperation = OrderedOperation<Digest, FixedEncoding<Digest>>;
+
+    /// Create n random operations. Some portion of the updates are deletes.
+    /// create_fixed_test_ops(n') is a suffix of create_fixed_test_ops(n) for n' > n.
+    fn create_fixed_test_ops(n: usize) -> Vec<FixedOperation> {
         use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
-        static mut COUNTER: u64 = 0;
-        // Use a counter to generate different keys each call
-        let seed = unsafe {
-            COUNTER += 1;
-            COUNTER
-        };
-        let mut rng = StdRng::seed_from_u64(seed);
-        for _ in 0..n {
-            let key = Digest::random(&mut rng);
-            let value = Digest::random(&mut rng);
-            db.update(key, value).await.unwrap();
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(FixedOperation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(FixedOperation::Update(OrderedUpdate {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    /// Helper to apply test operations to a database.
+    async fn apply_fixed_test_ops(db: &mut DbTest, n: usize) {
+        let ops = create_fixed_test_ops(n);
+        for op in ops {
+            match op {
+                FixedOperation::Update(data) => {
+                    db.update(data.key, data.value).await.unwrap();
+                }
+                FixedOperation::Delete(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                FixedOperation::CommitFloor(metadata, _) => {
+                    db.commit(metadata).await.unwrap();
+                }
+            }
         }
     }
 
     #[test]
     fn test_ordered_any_fixed_db_historical_proof_basic() {
         let executor = Runner::default();
-        executor.start(|mut context| async move {
-            let seed = context.next_u64();
-            let config = create_test_config(seed);
-            let db = DbTest::init(context.clone(), config).await.unwrap();
+        executor.start(|context| async move {
+            let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_basic(context, db, to_digest, |db, n| {
-                Box::pin(async move { apply_fixed_ops(db, n).await })
+                Box::pin(async move { apply_fixed_test_ops(db, n).await })
             })
             .await;
         });
@@ -455,15 +481,14 @@ pub(crate) mod test {
     #[test]
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = Runner::default();
-        executor.start(|mut context| async move {
-            let seed = context.next_u64();
-            let config = create_test_config(seed);
-            let db = DbTest::init(context.clone(), config).await.unwrap();
+        executor.start(|context| async move {
+            let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_edge_cases(
                 context.clone(),
                 db,
                 to_digest,
-                |db, n| Box::pin(async move { apply_fixed_ops(db, n).await }),
+                |db, n| Box::pin(async move { apply_fixed_test_ops(db, n).await }),
+                |ctx| Box::pin(create_db_test(ctx)),
             )
             .await;
         });
@@ -472,15 +497,13 @@ pub(crate) mod test {
     #[test]
     fn test_ordered_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = Runner::default();
-        executor.start(|mut context| async move {
-            let seed = context.next_u64();
-            let config = create_test_config(seed);
-            let db = DbTest::init(context.clone(), config).await.unwrap();
+        executor.start(|context| async move {
+            let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_different_historical_sizes(
                 context,
                 db,
                 to_digest,
-                |db, n| Box::pin(async move { apply_fixed_ops(db, n).await }),
+                |db, n| Box::pin(async move { apply_fixed_test_ops(db, n).await }),
             )
             .await;
         });
@@ -489,12 +512,10 @@ pub(crate) mod test {
     #[test]
     fn test_ordered_any_fixed_db_historical_proof_invalid() {
         let executor = Runner::default();
-        executor.start(|mut context| async move {
-            let seed = context.next_u64();
-            let config = create_test_config(seed);
-            let db = DbTest::init(context.clone(), config).await.unwrap();
+        executor.start(|context| async move {
+            let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_invalid(context, db, to_digest, |db, n| {
-                Box::pin(async move { apply_fixed_ops(db, n).await })
+                Box::pin(async move { apply_fixed_test_ops(db, n).await })
             })
             .await;
         });

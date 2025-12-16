@@ -1573,10 +1573,11 @@ pub(super) mod test {
 
     /// Test historical proof - edge cases.
     pub(crate) async fn test_ordered_any_db_historical_proof_edge_cases<D, V>(
-        _context: Context,
+        context: Context,
         mut db: D,
         _make_value: impl Fn(u64) -> V,
         apply_ops: impl Fn(&mut D, usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+        create_new_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         D: CleanAny<
             Key = Digest,
@@ -1588,6 +1589,8 @@ pub(super) mod test {
     {
         apply_ops(&mut db, 50).await;
         db.commit(None).await.unwrap();
+
+        let mut hasher = StandardHasher::<Sha256>::new();
 
         // Test singleton historical proof
         let (single_proof, single_ops) = db
@@ -1603,6 +1606,21 @@ pub(super) mod test {
             Position::try_from(Location::new_unchecked(2)).unwrap()
         );
         assert_eq!(single_ops.len(), 1);
+
+        // Create historical database with single operation
+        let mut single_db = create_new_db(context.clone()).await;
+        apply_ops(&mut single_db, 1).await;
+        // Don't commit - this changes the root due to commit operations
+        single_db.sync().await.unwrap();
+        let single_root = single_db.root();
+
+        assert!(verify_proof(
+            &mut hasher,
+            &single_proof,
+            Location::new_unchecked(1),
+            &single_ops,
+            &single_root
+        ));
 
         // Test requesting more operations than available in historical position
         let (_limited_proof, limited_ops) = db
@@ -1630,6 +1648,7 @@ pub(super) mod test {
         );
         assert_eq!(min_ops.len(), 3);
 
+        single_db.destroy().await.unwrap();
         db.destroy().await.unwrap();
     }
 

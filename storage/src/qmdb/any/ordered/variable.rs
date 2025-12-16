@@ -234,21 +234,49 @@ pub(crate) mod test {
         });
     }
 
-    /// Helper to apply random operations to a database.
-    async fn apply_variable_ops(db: &mut DbTest, n: usize) {
+    type VariableOperation = OrderedOperation<Digest, VariableEncoding<Digest>>;
+
+    /// Create n random operations. Some portion of the updates are deletes.
+    /// create_variable_test_ops(n') is a suffix of create_variable_test_ops(n) for n' > n.
+    fn create_variable_test_ops(n: usize) -> Vec<VariableOperation> {
         use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
-        static mut COUNTER: u64 = 0;
-        // Use a counter to generate different keys each call
-        let seed = unsafe {
-            COUNTER += 1;
-            COUNTER
-        };
-        let mut rng = StdRng::seed_from_u64(seed);
-        for _ in 0..n {
-            let key = Digest::random(&mut rng);
-            let value = Digest::random(&mut rng);
-            db.update(key, value).await.unwrap();
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            if i % 10 == 0 && i > 0 {
+                ops.push(VariableOperation::Delete(prev_key));
+            } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                ops.push(VariableOperation::Update(OrderedUpdate {
+                    key,
+                    value,
+                    next_key,
+                }));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    /// Helper to apply test operations to a database.
+    async fn apply_variable_test_ops(db: &mut DbTest, n: usize) {
+        let ops = create_variable_test_ops(n);
+        for op in ops {
+            match op {
+                VariableOperation::Update(data) => {
+                    db.update(data.key, data.value).await.unwrap();
+                }
+                VariableOperation::Delete(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                VariableOperation::CommitFloor(metadata, _) => {
+                    db.commit(metadata).await.unwrap();
+                }
+            }
         }
     }
 
@@ -258,7 +286,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_basic(context, db, to_digest, |db, n| {
-                Box::pin(async move { apply_variable_ops(db, n).await })
+                Box::pin(async move { apply_variable_test_ops(db, n).await })
             })
             .await;
         });
@@ -273,7 +301,8 @@ pub(crate) mod test {
                 context.clone(),
                 db,
                 to_digest,
-                |db, n| Box::pin(async move { apply_variable_ops(db, n).await }),
+                |db, n| Box::pin(async move { apply_variable_test_ops(db, n).await }),
+                |ctx| Box::pin(create_db_test(ctx)),
             )
             .await;
         });
@@ -288,7 +317,7 @@ pub(crate) mod test {
                 context,
                 db,
                 to_digest,
-                |db, n| Box::pin(async move { apply_variable_ops(db, n).await }),
+                |db, n| Box::pin(async move { apply_variable_test_ops(db, n).await }),
             )
             .await;
         });
@@ -300,7 +329,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = create_db_test(context.clone()).await;
             test_ordered_any_db_historical_proof_invalid(context, db, to_digest, |db, n| {
-                Box::pin(async move { apply_variable_ops(db, n).await })
+                Box::pin(async move { apply_variable_test_ops(db, n).await })
             })
             .await;
         });
