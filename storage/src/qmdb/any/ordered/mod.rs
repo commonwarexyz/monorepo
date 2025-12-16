@@ -9,7 +9,7 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{operation::update::Ordered as Update, CleanAny, DirtyAny, ValueEncoding},
+        any::{CleanAny, DirtyAny, ValueEncoding},
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as _},
         store::{Batchable, LogStore},
@@ -32,7 +32,7 @@ use tracing::debug;
 pub mod fixed;
 pub mod variable;
 
-pub use crate::qmdb::any::operation::Ordered as Operation;
+pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
