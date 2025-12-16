@@ -68,6 +68,9 @@ where
             return self.fuzz_input.random_u64();
         }
         let width = hi.saturating_sub(lo).saturating_add(1);
+        if width == 0 {
+            return lo;
+        }
         lo.saturating_add(self.fuzz_input.random_u64() % width)
     }
 
@@ -97,9 +100,14 @@ where
             0 => random_proposal,
             // A mutated proposal based on the proposals from the past
             1 => {
-                let i = self.fuzz_input.random_u64() as usize % self.latest_proposals.len().max(1);
-                let p = self.latest_proposals.get(i).unwrap_or(&random_proposal);
-                self.proposal_with_view(p, v)
+                let len = self.latest_proposals.len();
+                if len == 0 {
+                    random_proposal
+                } else {
+                    let i = (self.fuzz_input.random_u64() % len as u64) as usize;
+                    let p = self.latest_proposals.get(i).unwrap_or(&random_proposal);
+                    self.proposal_with_view(p, v)
+                }
             }
             2 => {
                 let p = self.latest_proposals.back().unwrap_or(&random_proposal);
@@ -124,7 +132,9 @@ where
             .saturating_sub(self.last_finalized);
 
         // Remove oldest proposals to keep only active_range_size elements
-        let keep_count = active_range_size.max(LATEST_PROPOSALS_MIN_LEN) as usize;
+        let keep_count = active_range_size
+            .max(LATEST_PROPOSALS_MIN_LEN)
+            .min(usize::MAX as u64) as usize;
         while self.latest_proposals.len() > keep_count {
             self.latest_proposals.pop_front();
         }
@@ -173,10 +183,10 @@ where
                 self.sample_inclusive(last_finalized, hi)
             }
             1 => current_view,
-            2 => current_view + 1,
-            3 => last_notarized + 1,
-            4 => last_notarized + 2,
-            5 => last_nullified + 1,
+            2 => current_view.saturating_add(1),
+            3 => last_notarized.saturating_add(1),
+            4 => last_notarized.saturating_add(2),
+            5 => last_nullified.saturating_add(1),
             _ => self.fuzz_input.random_u64(),
         }
     }
@@ -209,7 +219,7 @@ where
                 self.sample_inclusive(last_finalized, hi)
             }
             // Near future: [current_view+1, current_view+4]
-            3 => current_view + 1 + (self.fuzz_input.random_byte() as u64 % 4),
+            3 => current_view.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 4)),
             // Moderate future: [current_view+5, current_view+10]
             4 => current_view.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
             // Nullification-based future: start after max(current_view, last_nullified)
