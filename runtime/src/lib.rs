@@ -568,7 +568,7 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
-        net::IpAddr,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -2722,8 +2722,14 @@ mod tests {
     fn test_tokio_resolver() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let addrs = context.resolve("commonware.xyz").await.unwrap();
+            let addrs = context.resolve("localhost").await.unwrap();
             assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
         });
     }
 }
