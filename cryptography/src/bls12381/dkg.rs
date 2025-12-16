@@ -297,6 +297,7 @@ use commonware_math::{
     poly::{Interpolator, Poly},
 };
 use commonware_utils::{
+    max_faults,
     ordered::{Map, Quorum, Set},
     TryCollect, NZU32,
 };
@@ -334,8 +335,8 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
-    players: Set<P>,
     public: Sharing<V>,
+    players: Set<P>,
     revealed: Set<P>,
 }
 
@@ -372,8 +373,8 @@ impl<V: Variant, P: Ord> Output<V, P> {
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
         self.summary.encode_size()
-            + self.players.encode_size()
             + self.public.encode_size()
+            + self.players.encode_size()
             + self.revealed.encode_size()
     }
 }
@@ -381,8 +382,8 @@ impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
 impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.summary.write(buf);
-        self.players.write(buf);
         self.public.write(buf);
+        self.players.write(buf);
         self.revealed.write(buf);
     }
 }
@@ -396,8 +397,8 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
             public: Read::read_cfg(buf, &max_players)?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
             revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players.get() as usize), ()))?,
         })
     }
@@ -412,19 +413,28 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let summary = u.arbitrary()?;
         let public: Sharing<V> = u.arbitrary()?;
-        let num_players = public.required();
+
+        let total = public.total().get() as usize;
         let players = Set::try_from(
             u.arbitrary_iter::<P>()?
-                .take(num_players as usize)
+                .take(total)
                 .collect::<Result<Vec<_>, _>>()?,
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let revealed = u.arbitrary()?;
+
+        let max_revealed = max_faults(total as u32) as usize;
+        let revealed = u.int_in_range(0..=max_revealed)?;
+        let revealed = Set::try_from(
+            u.arbitrary_iter::<P>()?
+                .take(revealed)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
         Ok(Self {
             summary,
-            players,
             public,
+            players,
             revealed,
         })
     }
@@ -436,12 +446,12 @@ where
 /// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
 pub struct Info<V: Variant, P: PublicKey> {
+    summary: Summary,
     round: u64,
     previous: Option<Output<V, P>>,
     mode: Mode,
     dealers: Set<P>,
     players: Set<P>,
-    summary: Summary,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for Info<V, P> {
@@ -584,12 +594,12 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             .commit(players.encode())
             .summarize();
         Ok(Self {
+            summary,
             round,
             previous,
             mode,
             dealers,
             players,
-            summary,
         })
     }
 

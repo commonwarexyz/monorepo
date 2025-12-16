@@ -32,7 +32,7 @@ hash = "06cd5f1dca291e1812e01a82474926520794c8844813d64882c9a1cd6106e771"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<Output<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
-hash = "380a1b1016cd5959dcac959b322ef6b9f2dc5e194d952bf7c41859592c1f29bf"
+hash = "e646af95148cbd3008b3d14203c9a1283817888b9cef5b867d3931e802b0a6da"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<PlayerAck<ed25519::PublicKey>>"]
 n_cases = 65536
