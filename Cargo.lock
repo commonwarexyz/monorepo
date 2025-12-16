@@ -1487,6 +1487,7 @@ dependencies = [
  "axum",
  "bytes",
  "cfg-if",
+ "commonware-codec",
  "commonware-macros",
  "commonware-utils",
  "console-subscriber",

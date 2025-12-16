@@ -32,7 +32,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -618,6 +618,20 @@ impl crate::Network for Context {
 
     async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
         self.network.dial(socket).await
+    }
+}
+
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
+        // registry on Windows). This delegates to the system's libc resolver.
+        //
+        // The `:0` port is required by lookup_host's API but is not used
+        // for DNS resolution.
+        let addrs = tokio::net::lookup_host(format!("{host}:0"))
+            .await
+            .map_err(|e| Error::ResolveFailed(e.to_string()))?;
+        Ok(addrs.map(|addr| addr.ip()).collect())
     }
 }
 
