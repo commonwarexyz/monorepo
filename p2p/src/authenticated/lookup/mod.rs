@@ -999,10 +999,12 @@ mod tests {
             );
 
             // Now register a peer set that DOES include self
-            let peer_set: Map<_, _> =
-                [(self_pk.clone(), self_addr.into()), (other_pk.clone(), other_addr.into())]
-                    .try_into()
-                    .unwrap();
+            let peer_set: Map<_, _> = [
+                (self_pk.clone(), self_addr.into()),
+                (other_pk.clone(), other_addr.into()),
+            ]
+            .try_into()
+            .unwrap();
             oracle.update(2, peer_set.clone()).await;
 
             // Receive subscription notification

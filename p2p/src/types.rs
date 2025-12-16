@@ -1,7 +1,9 @@
 //! Shared address types for p2p networking.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -26,7 +28,7 @@ pub enum Ingress {
 
 impl Ingress {
     /// Returns the port number for this ingress address.
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         match self {
             Self::Socket(addr) => addr.port(),
             Self::Dns { port, .. } => *port,
@@ -34,7 +36,7 @@ impl Ingress {
     }
 
     /// Returns the IP address if this is a Socket variant.
-    pub fn ip(&self) -> Option<IpAddr> {
+    pub const fn ip(&self) -> Option<IpAddr> {
         match self {
             Self::Socket(addr) => Some(addr.ip()),
             Self::Dns { .. } => None,
@@ -65,7 +67,9 @@ impl EncodeSize for Ingress {
         u8::SIZE
             + match self {
                 Self::Socket(addr) => addr.encode_size(),
-                Self::Dns { host, port } => host.len().encode_size() + host.len() + port.encode_size(),
+                Self::Dns { host, port } => {
+                    host.len().encode_size() + host.len() + port.encode_size()
+                }
             }
     }
 }
@@ -122,7 +126,7 @@ impl Address {
     }
 
     /// Returns the egress IP address for filtering.
-    pub fn egress_ip(&self) -> IpAddr {
+    pub const fn egress_ip(&self) -> IpAddr {
         match self {
             Self::Symmetric(addr) => addr.ip(),
             Self::Asymmetric { egress, .. } => egress.ip(),
@@ -130,7 +134,7 @@ impl Address {
     }
 
     /// Returns the egress socket address.
-    pub fn egress(&self) -> SocketAddr {
+    pub const fn egress(&self) -> SocketAddr {
         match self {
             Self::Symmetric(addr) => *addr,
             Self::Asymmetric { egress, .. } => *egress,
@@ -159,7 +163,9 @@ impl EncodeSize for Address {
         u8::SIZE
             + match self {
                 Self::Symmetric(addr) => addr.encode_size(),
-                Self::Asymmetric { ingress, egress } => ingress.encode_size() + egress.encode_size(),
+                Self::Asymmetric { ingress, egress } => {
+                    ingress.encode_size() + egress.encode_size()
+                }
             }
     }
 }
@@ -340,7 +346,10 @@ mod tests {
 
         let symmetric = Address::Symmetric(socket_addr);
         assert_eq!(symmetric.ingress(), Ingress::Socket(socket_addr));
-        assert_eq!(symmetric.egress_ip(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            symmetric.egress_ip(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
         assert_eq!(symmetric.egress(), socket_addr);
 
         let asymmetric = Address::Asymmetric {
@@ -357,7 +366,10 @@ mod tests {
                 port: 8080
             }
         );
-        assert_eq!(asymmetric.egress_ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(
+            asymmetric.egress_ip(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
+        );
         assert_eq!(asymmetric.egress(), egress_addr);
     }
 

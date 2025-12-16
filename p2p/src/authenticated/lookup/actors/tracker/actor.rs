@@ -396,9 +396,12 @@ mod tests {
             oracle
                 .update(
                     0,
-                    [(peer_pk.clone(), peer_addr.into()), (peer_pk2.clone(), peer_addr2.into())]
-                        .try_into()
-                        .unwrap(),
+                    [
+                        (peer_pk.clone(), peer_addr.into()),
+                        (peer_pk2.clone(), peer_addr2.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
@@ -580,9 +583,12 @@ mod tests {
             oracle
                 .update(
                     0,
-                    [(my_pk.clone(), my_addr.into()), (pk_1.clone(), addr_1.into())]
-                        .try_into()
-                        .unwrap(),
+                    [
+                        (my_pk.clone(), my_addr.into()),
+                        (pk_1.clone(), addr_1.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
                 )
                 .await;
             // let the register take effect

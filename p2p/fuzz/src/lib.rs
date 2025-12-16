@@ -228,7 +228,7 @@ impl NetworkScheme for Discovery {
         let bootstrappers = if peer.id > 0 {
             vec![(
                 peer.topo.peers[0].public_key.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port).into(),
             )]
         } else {
             Vec::new()
@@ -323,11 +323,11 @@ impl NetworkScheme for Lookup {
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
-        let peer_list: Vec<_> = peer
+        let peer_list: Vec<(_, commonware_p2p::Address)> = peer
             .topo
             .peers
             .iter()
-            .map(|p| (p.public_key.clone(), p.address))
+            .map(|p| (p.public_key.clone(), p.address.into()))
             .collect();
 
         // Register multiple peer sets to seed the network
@@ -377,11 +377,11 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Map<_, _> = peer_ids
+        let peer_list: Map<_, commonware_p2p::Address> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
-                (p.public_key.clone(), p.address)
+                (p.public_key.clone(), p.address.into())
             })
             .try_collect()
             .expect("public keys are unique");

@@ -52,7 +52,7 @@ impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub fn known(addr: PeerAddress) -> Self {
+    pub const fn known(addr: PeerAddress) -> Self {
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
@@ -158,8 +158,7 @@ impl Record {
     pub fn dialable(&self, allow_private_ips: bool) -> bool {
         match &self.address {
             Address::Known(addr) => {
-                self.status == Status::Inert
-                    && (allow_private_ips || addr.egress_ip().is_global())
+                self.status == Status::Inert && (allow_private_ips || addr.egress_ip().is_global())
             }
             _ => false,
         }
@@ -184,7 +183,7 @@ impl Record {
     }
 
     /// Return the egress IP for filtering, if known.
-    pub fn egress_ip(&self) -> Option<IpAddr> {
+    pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.egress_ip()),

@@ -236,7 +236,7 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Return the ingress address of the peer, if known.
-    pub fn ingress(&self) -> Option<&Ingress> {
+    pub const fn ingress(&self) -> Option<&Ingress> {
         match &self.address {
             Address::Unknown => None,
             Address::Myself(info) => Some(&info.ingress),
@@ -310,7 +310,11 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     // Helper function to create signed peer info for testing
-    fn create_peer_info<S>(signer_seed: u64, socket: SocketAddr, timestamp: u64) -> Info<S::PublicKey>
+    fn create_peer_info<S>(
+        signer_seed: u64,
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> Info<S::PublicKey>
     where
         S: commonware_cryptography::PrivateKey,
     {
