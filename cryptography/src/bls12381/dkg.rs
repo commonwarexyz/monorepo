@@ -2085,15 +2085,11 @@ mod test_plan {
                 }
 
                 // Verify each player's revealed status
-                let threshold = max_faults(round.players.len() as u32);
+                let max_faults = selected_players.max_faults();
                 for player in player_set.iter() {
-                    let expected = expected_reveals.get(player).copied().unwrap_or(0);
-                    let is_revealed = observer_output.revealed().position(player).is_some();
-                    assert_eq!(
-                        expected > threshold,
-                        is_revealed,
-                        "Unexpected reveal for player {player:?}"
-                    );
+                    let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
+                    let actual = observer_output.revealed().position(player).is_some();
+                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
                 }
 
                 // Finalize each player
