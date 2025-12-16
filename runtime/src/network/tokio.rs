@@ -1,7 +1,7 @@
 use crate::Error;
 use bytes::Buf;
 use commonware_utils::StableBuf;
-use std::{io::IoSlice, net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{
@@ -12,18 +12,6 @@ use tokio::{
 };
 use tracing::warn;
 
-const IOV_MAX: usize = libc::IOV_MAX as usize;
-
-/// Converts a slice of byte slices to a slice of [`IoSlice`]s on the stack.
-///
-/// If the number of buffers exceeds [MAX_IOV], an error is returned.
-#[inline(always)]
-fn io_slices<'a>(bufs: &'a (impl Buf + Send)) -> Result<(usize, [IoSlice<'a>; IOV_MAX]), Error> {
-    let mut io_slices: [IoSlice<'_>; IOV_MAX] = [IoSlice::new(&[]); IOV_MAX];
-    let n = bufs.chunks_vectored(&mut io_slices);
-    Ok((n, io_slices))
-}
-
 /// Implementation of [crate::Sink] for the [tokio] runtime.
 pub struct Sink {
     write_timeout: Duration,
@@ -31,17 +19,12 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), Error> {
-        let (n, io_slices) = io_slices(&buf)?;
-
+    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(
-            self.write_timeout,
-            self.sink.write_vectored(&io_slices[..n]),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
+        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }

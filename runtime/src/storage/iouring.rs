@@ -270,12 +270,14 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(buf),
+                    buf: None,
+                    keepalive: None,
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            let (result, got_buf, _) = receiver.await.map_err(|_| Error::ReadFailed)?;
             buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
@@ -326,12 +328,14 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(buf),
+                    buf: None,
+                    keepalive: None,
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            let (return_value, got_buf, _) = receiver.await.map_err(|_| Error::WriteFailed)?;
             buf = got_buf.unwrap();
             if should_retry(return_value) {
                 continue;
@@ -366,6 +370,8 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: None,
+                    buf: None,
+                    keepalive: None,
                 })
                 .await
                 .map_err(|_| {
@@ -377,7 +383,7 @@ impl crate::Blob for Blob {
                 })?;
 
             // Wait for the result
-            let (return_value, _) = receiver.await.map_err(|_| {
+            let (return_value, _, _) = receiver.await.map_err(|_| {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),

@@ -23,7 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::iouring::{self, should_retry};
-use bytes::BytesMut;
+use bytes::Buf;
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -33,12 +33,15 @@ use futures::{
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
+    io::IoSlice,
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
+
+const IOV_MAX: usize = 16;
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -211,6 +214,15 @@ impl crate::Listener for Listener {
     }
 }
 
+/// Wrapper to make iovec array Send.
+///
+/// SAFETY: The iovecs point into a buffer that is kept alive in `Op.buf`,
+/// so the pointers remain valid for the duration of the operation. The iovecs
+/// are only used by the kernel during the io_uring operation and are not
+/// accessed from multiple threads.
+struct SendIovecs([libc::iovec; IOV_MAX]);
+unsafe impl Send for SendIovecs {}
+
 /// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
     fd: Arc<OwnedFd>,
@@ -225,60 +237,50 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, bufs: impl Buf + Send) -> Result<(), crate::Error> {
-        // In-order to keep the memory stable for the duration of the kernel's
-        // use of the data, we must re-allocate into a stable buffer that
-        // is owned by the `io_uring` thread. Even if the caller cancels
-        // this future, the memory will be kept alive until the kernel
-        // yields a result.
-        let mut msg: StableBuf = {
-            let len = bufs.iter().map(|b| b.len()).sum::<usize>();
-            let mut buf = BytesMut::with_capacity(len);
-            for b in bufs {
-                buf.extend_from_slice(b);
-            }
-            buf.into()
-        };
+    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), crate::Error> {
+        // Box the buf upfront so we can work with a consistent type throughout.
+        let mut buf: Box<dyn Buf + Send> = Box::new(buf);
 
-        let mut bytes_sent = 0;
-        let msg_len = msg.len();
+        while buf.has_remaining() {
+            // Collect chunks from the buffer into IoSlices.
+            let mut io_slices: [IoSlice<'_>; IOV_MAX] = std::array::from_fn(|_| IoSlice::new(&[]));
+            let n = buf.chunks_vectored(&mut io_slices);
 
-        while bytes_sent < msg_len {
-            // Figure out how much is left to send and where to send from.
-            //
-            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `msg_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
-            // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts(
-                    msg.as_mut_ptr().add(bytes_sent) as *const u8,
-                    msg_len - bytes_sent,
-                )
+            // SAFETY: `libc::iovec` and `IoSlice` have the same memory layout on Unix,
+            // as guaranteed by `IoSlice`'s documentation.
+            let iovecs: [libc::iovec; IOV_MAX] = unsafe {
+                std::mem::transmute::<[IoSlice<'_>; IOV_MAX], [libc::iovec; IOV_MAX]>(io_slices)
             };
 
-            // Create the io_uring send operation
-            let op = io_uring::opcode::Send::new(
-                self.as_raw_fd(),
-                remaining.as_ptr(),
-                remaining.len() as u32,
-            )
-            .build();
+            // Box the iovecs FIRST to get a stable heap address, then take the pointer.
+            // This ensures the pointer remains valid after we move the box into keepalive.
+            let iovecs_box: Box<SendIovecs> = Box::new(SendIovecs(iovecs));
+            let iovecs_ptr = iovecs_box.0.as_ptr();
 
-            // Submit the operation to the io_uring event loop
+            // Create the io_uring writev operation.
+            let op = io_uring::opcode::Writev::new(self.as_raw_fd(), iovecs_ptr, n as u32).build();
+
+            // Submit the operation to the io_uring event loop.
+            // The buf is stored in `buf` and will be returned to us.
+            // The iovecs are stored in `keepalive` to keep them alive during the operation.
             let (tx, rx) = oneshot::channel();
             self.submitter
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg),
+                    buffer: None,
+                    buf: Some(buf),
+                    keepalive: Some(iovecs_box),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
             // Wait for the operation to complete
-            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            msg = got_msg.unwrap();
+            let (result, _, got_buf) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+
+            // Get the buf back from the result
+            buf = got_buf.expect("buf should be returned");
+
             if should_retry(result) {
                 continue;
             }
@@ -288,8 +290,8 @@ impl crate::Sink for Sink {
                 return Err(crate::Error::SendFailed);
             }
 
-            // Mark bytes as sent.
-            bytes_sent += result as usize;
+            // Advance the buffer by the number of bytes written.
+            buf.advance(result as usize);
         }
         Ok(())
     }
@@ -342,12 +344,14 @@ impl crate::Stream for Stream {
                     work: op,
                     sender: tx,
                     buffer: Some(buf),
+                    buf: None,
+                    keepalive: None,
                 })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
             // Wait for the operation to complete
-            let (result, got_buf) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            let (result, got_buf, _) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
             buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;

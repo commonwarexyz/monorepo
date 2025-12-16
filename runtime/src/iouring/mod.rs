@@ -57,6 +57,7 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
+use bytes::Buf;
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -78,13 +79,17 @@ const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Active operations keyed by their work id.
 ///
 /// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
-/// alive until the kernel finishes touching it, and when op_timeout is enabled,
-/// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
+/// alive until the kernel finishes touching it, an optional boxed `Buf` that must
+/// remain valid and is returned to the caller, an optional keepalive that must
+/// stay alive but is not returned, and when op_timeout is enabled, the boxed
+/// `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
-        oneshot::Sender<(i32, Option<StableBuf>)>,
+        oneshot::Sender<(i32, Option<StableBuf>, Option<Box<dyn Buf + Send>>)>,
         Option<StableBuf>,
+        Option<Box<dyn Buf + Send>>,
+        Option<Box<dyn Send>>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -205,14 +210,22 @@ pub struct Op {
     /// The submission queue entry to be submitted to the ring.
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
-    /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
+    /// Sends the result of the operation, the `buffer`, and the `buf`.
+    pub sender: oneshot::Sender<(i32, Option<StableBuf>, Option<Box<dyn Buf + Send>>)>,
     /// The buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
     /// We hold the buffer here so it's guaranteed to live until the operation
     /// completes, preventing write-after-free issues.
     pub buffer: Option<StableBuf>,
+    /// A boxed `Buf` to keep alive for the duration of the operation and return
+    /// to the caller. This is useful for vectored I/O where the original buffer
+    /// must remain valid and the caller needs it back to call `advance()`.
+    pub buf: Option<Box<dyn Buf + Send>>,
+    /// Additional data to keep alive for the duration of the operation but not
+    /// returned to the caller. Useful for things like iovec arrays that the kernel
+    /// references during the operation.
+    pub keepalive: Option<Box<dyn Send>>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -235,8 +248,9 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
                 result
             };
 
-            let (result_sender, buffer, _) = waiters.remove(&work_id).expect("missing sender");
-            let _ = result_sender.send((result, buffer));
+            let (result_sender, buffer, buf, _keepalive, _timespec) =
+                waiters.remove(&work_id).expect("missing sender");
+            let _ = result_sender.send((result, buffer, buf));
         }
     }
 }
@@ -296,6 +310,8 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                 mut work,
                 sender,
                 buffer,
+                buf,
+                keepalive,
             } = op;
 
             // Assign a unique id
@@ -357,7 +373,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             };
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buffer, timespec));
+            waiters.insert(work_id, (sender, buffer, buf, keepalive, timespec));
         }
 
         // Submit and wait for at least 1 item to be in the completion queue.
@@ -480,6 +496,8 @@ mod tests {
                 work: recv,
                 sender: recv_tx,
                 buffer: Some(buf.into()),
+                buf: None,
+                keepalive: None,
             })
             .await
             .expect("failed to send work");
@@ -498,15 +516,17 @@ mod tests {
                 work: write,
                 sender: write_tx,
                 buffer: Some(msg.into()),
+                buf: None,
+                keepalive: None,
             })
             .await
             .expect("failed to send work");
 
         // Wait for the read and write operations to complete.
         if should_succeed {
-            let (result, _) = recv_rx.await.expect("failed to receive result");
+            let (result, _, _) = recv_rx.await.expect("failed to receive result");
             assert!(result > 0, "recv failed: {result}");
-            let (result, _) = write_rx.await.expect("failed to receive result");
+            let (result, _, _) = write_rx.await.expect("failed to receive result");
             assert!(result > 0, "write failed: {result}");
         } else {
             let _ = recv_rx.await;
@@ -567,11 +587,13 @@ mod tests {
                 work,
                 sender: tx,
                 buffer: Some(buf.into()),
+                buf: None,
+                keepalive: None,
             })
             .await
             .expect("failed to send work");
         // Wait for the timeout
-        let (result, _) = rx.await.expect("failed to receive result");
+        let (result, _, _) = rx.await.expect("failed to receive result");
         assert_eq!(result, -libc::ETIMEDOUT);
         drop(submitter);
         handle.await.unwrap();
@@ -597,6 +619,8 @@ mod tests {
                 work: timeout,
                 sender: tx,
                 buffer: None,
+                buf: None,
+                keepalive: None,
             })
             .await
             .unwrap();
@@ -605,7 +629,7 @@ mod tests {
         drop(submitter);
 
         // Wait for the operation `timeout` to fire.
-        let (result, _) = rx.await.unwrap();
+        let (result, _, _) = rx.await.unwrap();
         assert_eq!(result, -libc::ETIME);
         handle.await.unwrap();
     }
@@ -630,6 +654,8 @@ mod tests {
                 work: timeout,
                 sender: tx,
                 buffer: None,
+                buf: None,
+                keepalive: None,
             })
             .await
             .unwrap();
@@ -642,8 +668,7 @@ mod tests {
 
         // The event loop should shut down before the `timeout` fires,
         // dropping `tx` and causing `rx` to return Canceled.
-        let err = rx.await.unwrap_err();
-        assert!(matches!(err, Canceled { .. }));
+        assert!(matches!(rx.await, Err(Canceled { .. })));
         handle.await.unwrap();
     }
 
@@ -673,6 +698,8 @@ mod tests {
                     work: nop,
                     sender: tx,
                     buffer: None,
+                    buf: None,
+                    keepalive: None,
                 })
                 .await
                 .unwrap();
@@ -681,7 +708,7 @@ mod tests {
 
         // All NOPs should complete successfully
         for rx in rxs {
-            let (res, _) = rx.await.unwrap();
+            let (res, _, _) = rx.await.unwrap();
             assert_eq!(res, 0, "NOP op failed: {res}");
         }
 
@@ -711,12 +738,14 @@ mod tests {
                 work: opcode::Nop::new().build(),
                 sender: tx,
                 buffer: None,
+                buf: None,
+                keepalive: None,
             })
             .await
             .unwrap();
 
         // Verify it completes successfully
-        let (result, _) = rx.await.unwrap();
+        let (result, _, _) = rx.await.unwrap();
         assert_eq!(result, 0);
 
         // Clean shutdown
