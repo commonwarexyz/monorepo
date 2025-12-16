@@ -138,7 +138,7 @@ pub struct Config<T: Translator, C> {
 
 /// A trait for any key-value store based on an append-only log of operations.
 pub trait LogStore {
-    type Value: Codec;
+    type Value: Codec + Clone;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
