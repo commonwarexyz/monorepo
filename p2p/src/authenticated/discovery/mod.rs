@@ -1119,4 +1119,366 @@ mod tests {
             );
         });
     }
+
+    #[test_traced]
+    fn test_dns_bootstrapper_resolution() {
+        let base_port = 3000;
+        let n: usize = 3;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create peers
+            let mut peers = Vec::new();
+            for i in 0..n {
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
+            }
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
+
+            // Register DNS mapping for the bootstrapper (peer 0)
+            let bootstrapper_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            context.resolver_register("boot.local", Some(vec![bootstrapper_ip]));
+
+            // Create networks
+            let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            for (i, peer) in peers.iter().enumerate() {
+                let context = context.with_label(&format!("peer-{i}"));
+                let port = base_port + i as u16;
+
+                // Create bootstrappers - use DNS for non-zero peers
+                let bootstrappers = if i > 0 {
+                    vec![(
+                        addresses[0].clone(),
+                        crate::Ingress::Dns {
+                            host: "boot.local".to_string(),
+                            port: base_port,
+                        },
+                    )]
+                } else {
+                    vec![]
+                };
+
+                // Create network
+                let signer = peer.clone();
+                let config = Config::test(
+                    signer.clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    bootstrappers,
+                    1_024 * 1_024,
+                );
+                let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
+
+                // Register peers
+                oracle
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+
+                // Register channel
+                let (mut sender, mut receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+
+                network.start();
+
+                // Send/Receive messages
+                context.with_label("agent").spawn({
+                    let mut complete_sender = complete_sender.clone();
+                    let addresses = addresses.clone();
+                    move |context| async move {
+                        // Wait for messages from other peers
+                        let receiver = context.with_label("receiver").spawn(move |_| async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender.as_ref(), message.as_ref());
+                                received.insert(sender);
+                            }
+                            complete_sender.send(()).await.unwrap();
+
+                            loop {
+                                receiver.recv().await.unwrap();
+                            }
+                        });
+
+                        // Send identity to all peers
+                        let msg = signer.public_key();
+                        let sender =
+                            context
+                                .with_label("sender")
+                                .spawn(move |context| async move {
+                                    loop {
+                                        let mut recipients = addresses.clone();
+                                        recipients.remove(i);
+                                        recipients.sort();
+
+                                        loop {
+                                            let mut sent = sender
+                                                .send(Recipients::All, msg.to_vec().into(), true)
+                                                .await
+                                                .unwrap();
+                                            if sent.len() != n - 1 {
+                                                context.sleep(Duration::from_millis(100)).await;
+                                                continue;
+                                            }
+                                            sent.sort();
+                                            assert_eq!(sent, recipients);
+                                            break;
+                                        }
+
+                                        context.sleep(Duration::from_secs(10)).await;
+                                    }
+                                });
+
+                        select! {
+                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
+                            sender = sender => { panic!("sender exited: {sender:?}") },
+                        }
+                    }
+                });
+            }
+
+            // Wait for all peers to exchange messages
+            for _ in 0..n {
+                complete_receiver.next().await.unwrap();
+            }
+
+            assert_no_rate_limiting(&context);
+        });
+    }
+
+    #[test_traced]
+    fn test_dns_resolution_failure_then_success() {
+        let base_port = 3100;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create 2 peers
+            let peer0 = ed25519::PrivateKey::from_seed(0);
+            let peer1 = ed25519::PrivateKey::from_seed(1);
+            let addresses = vec![peer0.public_key(), peer1.public_key()];
+
+            let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+            let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+
+            // Do NOT register DNS mapping initially - peer 1 will fail to resolve
+
+            // Create network for peer 0 (bootstrapper, no DNS)
+            let config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            oracle0
+                .update(0, addresses.clone().try_into().unwrap())
+                .await;
+            let (mut sender0, mut receiver0) =
+                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network0.start();
+
+            // Create network for peer 1 with DNS bootstrapper
+            let config1 = Config::test(
+                peer1.clone(),
+                socket1,
+                vec![(
+                    peer0.public_key(),
+                    crate::Ingress::Dns {
+                        host: "boot.local".to_string(),
+                        port: base_port,
+                    },
+                )],
+                1_024 * 1_024,
+            );
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            oracle1
+                .update(0, addresses.clone().try_into().unwrap())
+                .await;
+            let (mut sender1, mut receiver1) =
+                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network1.start();
+
+            // Wait a bit - peer 1 should fail to connect (DNS not registered)
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Verify peer 0 cannot send to peer 1 yet
+            let sent = sender0
+                .send(
+                    Recipients::One(peer1.public_key()),
+                    b"test".to_vec().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+            assert!(sent.is_empty(), "should not be connected yet");
+
+            // Now register the DNS mapping
+            context.resolver_register("boot.local", Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
+
+            // Wait for peer 1 to connect via DNS resolution
+            let pk0 = peer0.public_key();
+            let pk1 = peer1.public_key();
+            let msg0 = pk0.to_vec();
+            let msg1 = pk1.to_vec();
+
+            // Spawn receiver tasks
+            let (done_sender, mut done_receiver) = mpsc::channel::<()>(2);
+            let mut done0 = done_sender.clone();
+            let pk1_clone = pk1.clone();
+            context.with_label("recv0").spawn(move |_| async move {
+                let (sender, message) = receiver0.recv().await.unwrap();
+                assert_eq!(sender, pk1_clone);
+                assert_eq!(message.as_ref(), msg1.as_slice());
+                done0.send(()).await.unwrap();
+            });
+            let mut done1 = done_sender.clone();
+            let pk0_clone = pk0.clone();
+            context.with_label("recv1").spawn(move |_| async move {
+                let (sender, message) = receiver1.recv().await.unwrap();
+                assert_eq!(sender, pk0_clone);
+                assert_eq!(message.as_ref(), msg0.as_slice());
+                done1.send(()).await.unwrap();
+            });
+
+            // Send messages until both peers connected
+            context.with_label("sender").spawn({
+                let pk0 = pk0.clone();
+                let pk1 = pk1.clone();
+                move |context| async move {
+                    loop {
+                        let sent0 = sender0
+                            .send(Recipients::One(pk1.clone()), pk0.to_vec().into(), true)
+                            .await
+                            .unwrap();
+                        let sent1 = sender1
+                            .send(Recipients::One(pk0.clone()), pk1.to_vec().into(), true)
+                            .await
+                            .unwrap();
+                        if !sent0.is_empty() && !sent1.is_empty() {
+                            break;
+                        }
+                        context.sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            });
+
+            // Wait for both receivers to get messages
+            done_receiver.next().await.unwrap();
+            done_receiver.next().await.unwrap();
+        });
+    }
+
+    /// Helper to run DNS connectivity test with a specific seed and return auditor state.
+    fn run_dns_connectivity(seed: u64) -> String {
+        let base_port = 3400;
+        let n: usize = 3;
+
+        let executor = deterministic::Runner::seeded(seed);
+        executor.start(|context| async move {
+            // Create peers
+            let mut peers = Vec::new();
+            for i in 0..n {
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
+            }
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
+
+            // Register DNS mappings
+            let bootstrapper_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            context.resolver_register("boot.local", Some(vec![bootstrapper_ip]));
+
+            // Create networks
+            let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            for (i, peer) in peers.iter().enumerate() {
+                let context = context.with_label(&format!("peer-{i}"));
+                let port = base_port + i as u16;
+
+                // Use DNS for bootstrapper
+                let bootstrappers = if i > 0 {
+                    vec![(
+                        addresses[0].clone(),
+                        crate::Ingress::Dns {
+                            host: "boot.local".to_string(),
+                            port: base_port,
+                        },
+                    )]
+                } else {
+                    vec![]
+                };
+
+                let signer = peer.clone();
+                let config = Config::test(
+                    signer.clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    bootstrappers,
+                    1_024 * 1_024,
+                );
+                let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
+                oracle
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+                let (mut sender, mut receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network.start();
+
+                context.with_label("agent").spawn({
+                    let mut complete_sender = complete_sender.clone();
+                    let addresses = addresses.clone();
+                    move |context| async move {
+                        let receiver = context.with_label("receiver").spawn(move |_| async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender.as_ref(), message.as_ref());
+                                received.insert(sender);
+                            }
+                            complete_sender.send(()).await.unwrap();
+                            loop {
+                                receiver.recv().await.unwrap();
+                            }
+                        });
+
+                        let msg = signer.public_key();
+                        let sender =
+                            context
+                                .with_label("sender")
+                                .spawn(move |context| async move {
+                                    loop {
+                                        let mut recipients = addresses.clone();
+                                        recipients.remove(i);
+                                        recipients.sort();
+
+                                        loop {
+                                            let mut sent = sender
+                                                .send(Recipients::All, msg.to_vec().into(), true)
+                                                .await
+                                                .unwrap();
+                                            if sent.len() != n - 1 {
+                                                context.sleep(Duration::from_millis(100)).await;
+                                                continue;
+                                            }
+                                            sent.sort();
+                                            assert_eq!(sent, recipients);
+                                            break;
+                                        }
+
+                                        context.sleep(Duration::from_secs(10)).await;
+                                    }
+                                });
+
+                        select! {
+                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
+                            sender = sender => { panic!("sender exited: {sender:?}") },
+                        }
+                    }
+                });
+            }
+
+            for _ in 0..n {
+                complete_receiver.next().await.unwrap();
+            }
+
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced]
+    fn test_dns_resolution_determinism() {
+        // Run same test twice with same seed
+        let state1 = run_dns_connectivity(42);
+        let state2 = run_dns_connectivity(42);
+        assert_eq!(state1, state2, "DNS resolution should be deterministic");
+    }
 }
