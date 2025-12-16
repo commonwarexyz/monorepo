@@ -118,7 +118,7 @@ pub struct Network<N: crate::Network> {
 
 impl<N: crate::Network> Network<N> {
     /// Creates a new audited network that wraps the provided network implementation.
-    pub fn new(inner: N, auditor: Arc<Auditor>) -> Self {
+    pub const fn new(inner: N, auditor: Arc<Auditor>) -> Self {
         Self { auditor, inner }
     }
 }
@@ -190,6 +190,7 @@ mod tests {
         },
         Listener as _, Network as _, Sink as _, Stream as _,
     };
+    use commonware_macros::test_group;
     use std::{net::SocketAddr, sync::Arc};
 
     #[tokio::test]
@@ -203,9 +204,9 @@ mod tests {
         .await;
     }
 
+    #[test_group("slow")]
     #[tokio::test]
-    #[ignore]
-    async fn stress_test_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             AuditedNetwork::new(
                 DeterministicNetwork::default(),

@@ -23,15 +23,15 @@ pub enum Outbound<D: Digest> {
 impl<D: Digest> Write for Outbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Outbound::Success(success) => {
+            Self::Success(success) => {
                 buf.put_u8(0);
                 success.write(buf);
             }
-            Outbound::Block(data) => {
+            Self::Block(data) => {
                 buf.put_u8(1);
                 data.write(buf);
             }
-            Outbound::Finalization(data) => {
+            Self::Finalization(data) => {
                 buf.put_u8(2);
                 data.write(buf);
             }
@@ -47,15 +47,15 @@ impl<D: Digest> Read for Outbound<D> {
         match tag {
             0 => {
                 let success = bool::read(buf)?;
-                Ok(Outbound::Success(success))
+                Ok(Self::Success(success))
             }
             1 => {
                 let block = BlockFormat::<D>::read(buf)?;
-                Ok(Outbound::Block(block))
+                Ok(Self::Block(block))
             }
             2 => {
                 let finalization = Finalization::read(buf)?;
-                Ok(Outbound::Finalization(finalization))
+                Ok(Self::Finalization(finalization))
             }
             _ => Err(Error::InvalidEnum(tag)),
         }
@@ -65,9 +65,9 @@ impl<D: Digest> Read for Outbound<D> {
 impl<D: Digest> EncodeSize for Outbound<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Outbound::Success(success) => success.encode_size(),
-            Outbound::Block(data) => data.encode_size(),
-            Outbound::Finalization(finalization) => finalization.encode_size(),
+            Self::Success(success) => success.encode_size(),
+            Self::Block(data) => data.encode_size(),
+            Self::Finalization(finalization) => finalization.encode_size(),
         }
     }
 }
@@ -77,16 +77,17 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
-        types::Round,
+        simplex::{scheme::bls12381_threshold, types::Proposal},
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self, Element},
+            group,
             variant::{MinSig, Variant},
         },
         sha256::Digest as Sha256Digest,
     };
+    use commonware_math::algebra::{CryptoGroup, Random as _};
     use rand::thread_rng;
 
     fn new_block() -> BlockFormat<Sha256Digest> {
@@ -98,15 +99,15 @@ mod tests {
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::one();
-        proposal_signature.mul(&scalar);
-        let mut seed_signature = <MinSig as Variant>::Signature::one();
-        seed_signature.mul(&scalar);
+        let scalar = group::Scalar::random(&mut thread_rng());
+        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
+        proposal_signature *= &scalar;
+        let mut seed_signature = <MinSig as Variant>::Signature::generator();
+        seed_signature *= &scalar;
         Finalization {
             proposal: Proposal {
-                round: Round::new(333, 12345),
-                parent: 54321,
+                round: Round::new(Epoch::new(333), View::new(12345)),
+                parent: View::new(54321),
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {

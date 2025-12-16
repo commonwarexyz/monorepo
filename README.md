@@ -16,9 +16,11 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
 * [collector](./collector/README.md): Collect responses to committable requests.
+* [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
+* [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -38,7 +40,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 * [sync](./examples/sync/README.md): Synchronize state between a server and client.
-* [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous
 

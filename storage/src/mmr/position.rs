@@ -14,6 +14,14 @@ pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 6
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Position(u64);
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Position {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = u.int_in_range(0..=MAX_POSITION.0)?;
+        Ok(Self(value))
+    }
+}
+
 impl Position {
     /// Return a new [Position] from a raw `u64`.
     #[inline]
@@ -163,7 +171,7 @@ impl From<Position> for u64 {
 /// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
 ///
-/// // Invalid locations return error  
+/// // Invalid locations return error
 /// assert!(Location::new(MAX_LOCATION + 1).is_none());
 /// ```
 impl TryFrom<Location> for Position {
@@ -297,7 +305,7 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use crate::mmr::{mem::CleanMmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
     use commonware_cryptography::Sha256;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
@@ -467,9 +475,9 @@ mod tests {
     fn test_is_mmr_size() {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
-        let mut mmr = Mmr::new();
         let mut size_to_check = Position::new(0);
         let mut hasher = Standard::<Sha256>::new();
+        let mut mmr = CleanMmr::new(&mut hasher);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {

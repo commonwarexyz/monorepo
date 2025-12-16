@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::Rng;
-use std::collections::HashMap;
+use std::{collections::HashMap, hint::black_box};
 
 #[cfg(not(full_bench))]
 const N_ITEMS: [usize; 1] = [100_000];
@@ -11,7 +11,7 @@ struct MockIndex {
     section: u64,
     _offset: u32,
     _len: u32,
-    _next: Option<Box<MockIndex>>,
+    _next: Option<Box<Self>>,
 }
 
 fn benchmark_hashmap_iteration(c: &mut Criterion) {

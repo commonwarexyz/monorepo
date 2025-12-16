@@ -50,6 +50,14 @@ pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Location {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = u.int_in_range(0..=MAX_LOCATION)?;
+        Ok(Self(value))
+    }
+}
+
 impl Location {
     /// Create a new [Location] from a raw `u64` without validation.
     ///

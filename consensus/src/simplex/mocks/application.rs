@@ -10,7 +10,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -23,6 +23,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
@@ -49,7 +50,7 @@ pub struct Mailbox<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Mailbox<D, P> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
+    pub(super) const fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
@@ -136,6 +137,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    fail_verification: bool,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -166,6 +168,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 propose_latency,
                 verify_latency,
+                fail_verification: false,
 
                 pending: HashMap::new(),
 
@@ -173,6 +176,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             },
             Mailbox::new(sender),
         )
+    }
+
+    pub const fn set_fail_verification(&mut self, fail: bool) {
+        self.fail_verification = fail;
     }
 
     fn panic(&self, msg: &str) -> ! {
@@ -222,6 +229,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
+        // Check if we should fail verification
+        if self.fail_verification {
+            return false;
+        }
+
         // Verify contents
         let (parsed_round, parent, _) =
             <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
@@ -261,50 +273,52 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
-        loop {
-            select! {
-                message = self.mailbox.next() => {
-                    let message =match message {
-                        Some(message) => message,
-                        None => break,
-                    };
-                    match message {
-                        Message::Genesis { epoch, response } => {
-                            let digest = self.genesis(epoch);
-                            let _ = response.send(digest);
-                        }
-                        Message::Propose { context, response } => {
-                            let digest = self.propose(context).await;
-                            let _ = response.send(digest);
-                        }
-                        Message::Verify { context, payload, response } => {
-                            if let Some(contents) = seen.get(&payload) {
-                                let verified = self.verify(context, payload, contents.clone()).await;
-                                let _ = response.send(verified);
-                            } else {
-                                waiters
-                                    .entry(payload)
-                                    .or_default()
-                                    .push((context, response));
-                                continue;
-                            }
-                        }
-                        Message::Broadcast { payload } => {
-                            self.broadcast(payload).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping application");
+            },
+            message = self.mailbox.next() => {
+                let message =match message {
+                    Some(message) => message,
+                    None => break,
+                };
+                match message {
+                    Message::Genesis { epoch, response } => {
+                        let digest = self.genesis(epoch);
+                        let _ = response.send(digest);
+                    }
+                    Message::Propose { context, response } => {
+                        let digest = self.propose(context).await;
+                        let _ = response.send(digest);
+                    }
+                    Message::Verify { context, payload, response } => {
+                        if let Some(contents) = seen.get(&payload) {
+                            let verified = self.verify(context, payload, contents.clone()).await;
+                            let _ = response.send(verified);
+                        } else {
+                            waiters
+                                .entry(payload)
+                                .or_default()
+                                .push((context, response));
+                            continue;
                         }
                     }
-                },
-                broadcast = self.broadcast.next() => {
-                    // Record digest for future use
-                    let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest, contents.clone());
+                    Message::Broadcast { payload } => {
+                        self.broadcast(payload).await;
+                    }
+                }
+            },
+            broadcast = self.broadcast.next() => {
+                // Record digest for future use
+                let (digest, contents) = broadcast.expect("broadcast closed");
+                seen.insert(digest, contents.clone());
 
-                    // Check if we have a waiter
-                    if let Some(waiters) = waiters.remove(&digest) {
-                        for (context, sender) in waiters {
-                            let verified = self.verify(context, digest, contents.clone()).await;
-                            sender.send(verified).expect("Failed to send verification");
-                        }
+                // Check if we have a waiter
+                if let Some(waiters) = waiters.remove(&digest) {
+                    for (context, sender) in waiters {
+                        let verified = self.verify(context, digest, contents.clone()).await;
+                        sender.send(verified).expect("Failed to send verification");
                     }
                 }
             }

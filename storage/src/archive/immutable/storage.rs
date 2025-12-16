@@ -20,6 +20,7 @@ const FREEZER_PREFIX: u8 = 0;
 const ORDINAL_PREFIX: u8 = 1;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 enum Record {
     Freezer(Checkpoint),
     Ordinal(Option<BitMap>),
@@ -142,7 +143,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Collect sections
-        let sections = metadata.keys(Some(&[ORDINAL_PREFIX])).collect::<Vec<_>>();
+        let sections = metadata
+            .keys()
+            .filter(|k| k.prefix() == ORDINAL_PREFIX)
+            .collect::<Vec<_>>();
         let mut section_bits = BTreeMap::new();
         for section in sections {
             // Get record
@@ -305,6 +309,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.next_gap(index)
     }
 
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.ordinal.missing_items(index, max)
+    }
+
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         self.ordinal.ranges()
     }
@@ -345,5 +353,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.metadata.destroy().await?;
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record>
     }
 }

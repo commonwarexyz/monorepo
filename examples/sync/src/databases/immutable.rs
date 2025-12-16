@@ -4,12 +4,11 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    mmr::{Location, Proof},
+    qmdb::{
         self,
         immutable::{self, Config},
-        operation,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::variable::Operation<Key, Value>;
+pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
@@ -82,7 +81,7 @@ where
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
@@ -91,18 +90,17 @@ where
                 Operation::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
-                _ => {}
             }
         }
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
         self.commit(None).await
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self) -> Key {
+        self.root()
     }
 
     fn op_count(&self) -> Location {
@@ -119,7 +117,7 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 

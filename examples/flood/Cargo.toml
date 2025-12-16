@@ -10,11 +10,15 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/flood"
 documentation = "https://docs.rs/commonware-flood"
 
+[lints]
+workspace = true
+
 [dependencies]
 clap.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-deployer.workspace = true
+commonware-math.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true

@@ -1,14 +1,12 @@
-use crate::{Array, PrivateKeyExt};
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use crate::BatchVerifier;
-        use std::borrow::{Cow, ToOwned};
-    } else {
-        use alloc::borrow::ToOwned;
-    }
-}
+use crate::{Array, BatchVerifier};
+#[cfg(not(feature = "std"))]
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Span};
 use core::{
     fmt::{Debug, Display},
@@ -17,6 +15,8 @@ use core::{
 };
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::{Cow, ToOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -37,12 +37,8 @@ impl crate::Signer for PrivateKey {
     type Signature = Signature;
     type PublicKey = PublicKey;
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
-        let sig = match namespace {
-            Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
-            None => self.key.sign(msg),
-        };
-        Signature::from(sig)
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+        self.sign_inner(Some(namespace), msg)
     }
 
     fn public_key(&self) -> Self::PublicKey {
@@ -54,8 +50,19 @@ impl crate::Signer for PrivateKey {
     }
 }
 
-impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl PrivateKey {
+    #[inline(always)]
+    fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
+        let payload = namespace
+            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+            .unwrap_or_else(|| Cow::Borrowed(msg));
+        let sig = self.key.sign(&payload);
+        Signature::from(sig)
+    }
+}
+
+impl Random for PrivateKey {
+    fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
         let raw = key.to_bytes();
         Self { raw, key }
@@ -144,6 +151,16 @@ impl Display for PrivateKey {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PrivateKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        Ok(Self::random(&mut rand))
+    }
+}
+
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
@@ -166,14 +183,18 @@ impl crate::PublicKey for PublicKey {}
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
-        match namespace {
-            Some(namespace) => {
-                let payload = union_unique(namespace, msg);
-                self.key.verify(&sig.signature, &payload).is_ok()
-            }
-            None => self.key.verify(&sig.signature, msg).is_ok(),
-        }
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
+        self.verify_inner(Some(namespace), msg, sig)
+    }
+}
+
+impl PublicKey {
+    #[inline(always)]
+    fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+        let payload = namespace
+            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+            .unwrap_or_else(|| Cow::Borrowed(msg));
+        self.key.verify(&sig.signature, &payload).is_ok()
     }
 }
 
@@ -236,6 +257,19 @@ impl Debug for PublicKey {
 impl Display for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        Ok(private_key.public_key())
     }
 }
 
@@ -325,6 +359,25 @@ impl Display for Signature {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        use crate::Signer;
+        use commonware_math::algebra::Random;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
+        let private_key = PrivateKey::random(&mut rand);
+        let len = u.arbitrary::<usize>()? % 256;
+        let message = u
+            .arbitrary_iter()?
+            .take(len)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(private_key.sign(&[], &message))
+    }
+}
+
 /// Ed25519 Batch Verifier.
 #[cfg(feature = "std")]
 pub struct Batch {
@@ -334,22 +387,39 @@ pub struct Batch {
 #[cfg(feature = "std")]
 impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
-        Batch {
+        Self {
             verifier: ed25519_consensus::batch::Verifier::new(),
         }
     }
 
     fn add(
         &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.add_inner(Some(namespace), message, public_key, signature)
+    }
+
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
+        self.verifier.verify(rng).is_ok()
+    }
+}
+
+#[cfg(feature = "std")]
+impl Batch {
+    #[inline(always)]
+    fn add_inner(
+        &mut self,
         namespace: Option<&[u8]>,
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
+        let payload = namespace
+            .map(|ns| Cow::Owned(union_unique(ns, message)))
+            .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
             signature.signature,
@@ -358,18 +428,15 @@ impl BatchVerifier<PublicKey> for Batch {
         self.verifier.queue(item);
         true
     }
-
-    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
-        self.verifier.verify(rng).is_ok()
-    }
 }
 
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, Signer as _, Verifier as _};
+    use crate::ed25519;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
     use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
@@ -378,9 +445,9 @@ mod tests {
         message: &[u8],
         signature: Signature,
     ) {
-        let computed_signature = private_key.sign(None, message);
+        let computed_signature = private_key.sign_inner(None, message);
         assert_eq!(computed_signature, signature);
-        assert!(public_key.verify(None, message, &computed_signature));
+        assert!(public_key.verify_inner(None, message, &computed_signature));
     }
 
     fn parse_private_key(private_key: &str) -> PrivateKey {
@@ -525,8 +592,8 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::from_rng(&mut OsRng);
-        let bad_signature = private_key_2.sign(None, message.as_ref());
+        let private_key_2 = PrivateKey::random(&mut OsRng);
+        let bad_signature = private_key_2.sign_inner(None, message.as_ref());
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
 
@@ -712,8 +779,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = ed25519::Batch::new();
-        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add(None, &v2.2, &v2.1, &v2.3));
+        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut rand::thread_rng()));
     }
 
@@ -725,8 +792,8 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Batch::new();
-        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add(
+        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add_inner(
             None,
             &v2.2,
             &v2.1,
@@ -739,7 +806,7 @@ mod tests {
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
         let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
-        assert!(!public_key.verify(None, &message, &zero_sig));
+        assert!(!public_key.verify_inner(None, &message, &zero_sig));
     }
 
     #[test]
@@ -748,7 +815,7 @@ mod tests {
         let mut bad_signature = signature.to_vec();
         bad_signature[63] |= 0x80; // make S non-canonical
         let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
-        assert!(!public_key.verify(None, &message, &bad_signature));
+        assert!(!public_key.verify_inner(None, &message, &bad_signature));
     }
 
     #[test]
@@ -759,6 +826,18 @@ mod tests {
             *b = 0xff; // invalid R component
         }
         let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
-        assert!(!public_key.verify(None, &message, &bad_signature));
+        assert!(!public_key.verify_inner(None, &message, &bad_signature));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PrivateKey>,
+            CodecConformance<PublicKey>,
+            CodecConformance<Signature>,
+        }
     }
 }

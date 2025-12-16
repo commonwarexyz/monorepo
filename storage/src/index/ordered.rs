@@ -12,7 +12,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{
@@ -26,7 +25,7 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K, Record<V>> {
+impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -39,26 +38,26 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K,
 }
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, T: Translator, V: Eq> {
-    inner: CursorImpl<'a, T::Key, V, BTreeOccupiedEntry<'a, T::Key, Record<V>>>,
+pub struct Cursor<'a, K: Ord, V: Eq> {
+    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
-    fn new(
-        entry: BTreeOccupiedEntry<'a, T::Key, Record<V>>,
+impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
+    const fn new(
+        entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, T::Key, V, BTreeOccupiedEntry<'a, T::Key, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }
     }
 }
 
-impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
+impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -95,7 +94,7 @@ pub struct Index<T: Translator, V: Eq> {
 
 impl<T: Translator, V: Eq> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<T::Key, Record<V>>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(Record {
@@ -103,84 +102,12 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
-}
 
-impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
-    /// Get the values associated with the translated key that lexicographically precedes the result
-    /// of translating `key`.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
-        let k = self.translator.transform(key);
-        self.map
-            .range(..k)
-            .next_back()
-            .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
-    }
-
-    /// Get the values associated with the translated key that lexicographically follows the result
-    /// of translating `key`.
-    ///
-    /// For example, if the translator is looking only at the first byte of a key, and the index
-    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
-    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
-    /// associated with 2d, and `get_next([2d])` would return `None`. Because values associated with
-    /// the same translated key can appear in any order, keys with the same first byte in this
-    /// example would need to be ordered by the caller if a full ordering over the untranslated
-    /// keyspace is desired.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
-        let k = self.translator.transform(key);
-        self.map
-            .range((Excluded(k), Unbounded))
-            .next()
-            .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
-    }
-
-    /// Get the values associated with the lexicographically first translated key.
-    fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
-        self.map
-            .first_key_value()
-            .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
-    }
-
-    /// Get the values associated with the lexicographically last translated key.
-    fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
-        self.map
-            .last_key_value()
-            .map(|(_, record)| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
-    }
-}
-
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T, V>
-    where
-        Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
+    /// Create a new [Index] with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator,
             map: BTreeMap::new(),
-
             keys: Gauge::default(),
             items: Gauge::default(),
             pruned: Counter::default(),
@@ -194,6 +121,101 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         s
     }
+
+    /// Like [Ordered::next_translated_key] but without cycling around to the first key if there is
+    /// no next key.
+    pub(super) fn next_translated_key_no_cycle<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<ImmutableCursor<'a, V>> {
+        let k = self.translator.transform(key);
+        self.map
+            .range((Excluded(k), Unbounded))
+            .next()
+            .map(|(_, record)| ImmutableCursor::new(record))
+    }
+
+    /// Like [Ordered::prev_translated_key] but without cycling around to the last key if there is
+    /// no previous key.
+    pub(super) fn prev_translated_key_no_cycle<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<ImmutableCursor<'a, V>> {
+        let k = self.translator.transform(key);
+        self.map
+            .range(..k)
+            .next_back()
+            .map(|(_, record)| ImmutableCursor::new(record))
+    }
+}
+
+impl<T: Translator, V: Eq> Ordered for Index<T, V> {
+    type Iterator<'a>
+        = ImmutableCursor<'a, V>
+    where
+        Self: 'a;
+
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    where
+        Self::Value: 'a,
+    {
+        let res = self.prev_translated_key_no_cycle(key);
+        if res.is_some() {
+            return res;
+        }
+
+        self.last_translated_key()
+    }
+
+    /// Get the values associated with the translated key that lexicographically follows the result
+    /// of translating `key`.
+    ///
+    /// For example, if the translator is looking only at the first byte of a key, and the index
+    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
+    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
+    /// associated with 2d, and `get_next([2d])` would return `None`. Because values associated with
+    /// the same translated key can appear in any order, keys with the same first byte in this
+    /// example would need to be ordered by the caller if a full ordering over the untranslated
+    /// keyspace is desired.
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    where
+        Self::Value: 'a,
+    {
+        let res = self.next_translated_key_no_cycle(key);
+        if res.is_some() {
+            return res;
+        }
+
+        self.first_translated_key()
+    }
+
+    /// Get the values associated with the lexicographically first translated key.
+    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    where
+        Self::Value: 'a,
+    {
+        self.map
+            .first_key_value()
+            .map(|(_, record)| ImmutableCursor::new(record))
+    }
+
+    /// Get the values associated with the lexicographically last translated key.
+    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    where
+        Self::Value: 'a,
+    {
+        self.map
+            .last_key_value()
+            .map(|(_, record)| ImmutableCursor::new(record))
+    }
+}
+
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where
@@ -210,7 +232,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -223,7 +245,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -241,7 +263,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
                 cursor.next();
                 cursor.insert(value);
             }
@@ -257,7 +279,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             BTreeEntry::Occupied(entry) => {
                 // Get entry
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 cursor.prune(&predicate);
@@ -279,7 +301,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             BTreeEntry::Occupied(entry) => {
                 // Get cursor
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 cursor.prune(&predicate);
@@ -332,10 +354,23 @@ mod tests {
     use commonware_utils::hex;
 
     #[test_traced]
+    fn test_ordered_empty_index() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let index = Index::<_, u64>::new(context, OneCap);
+
+            assert!(index.first_translated_key().is_none());
+            assert!(index.last_translated_key().is_none());
+            assert!(index.prev_translated_key(b"key").is_none());
+            assert!(index.next_translated_key(b"key").is_none());
+        });
+    }
+
+    #[test_traced]
     fn test_ordered_index_ordering() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::<_, u64>::init(context, OneCap);
+            let mut index = Index::<_, u64>::new(context, OneCap);
             assert_eq!(index.keys(), 0);
 
             let k1 = &hex!("0x0b02AA"); // translated key 0b
@@ -349,61 +384,65 @@ mod tests {
             assert_eq!(index.keys(), 3);
 
             // First translated key is 0b.
-            let mut next = index.first_translated_key();
+            let mut next = index.first_translated_key().unwrap();
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x00 is 0b.
-            let mut next = index.next_translated_key(&[0x00]);
+            let mut next = index.next_translated_key(&[0x00]).unwrap();
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x0b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x0b0102"));
+            let mut next = index.next_translated_key(&hex!("0x0b0102")).unwrap();
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x1b010203"));
+            let mut next = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key(&hex!("0x2a01020304"));
+            let mut next = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
             assert_eq!(next.next().unwrap(), &3);
             assert_eq!(next.next(), None);
 
-            // Next translated key to 0x2d is None.
-            let mut next = index.next_translated_key(k3);
+            // Next translated key to 0x2d cycles around to 0x0b.
+            let mut next = index.next_translated_key(k3).unwrap();
+            assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
-            let mut next = index.next_translated_key(&hex!("0x2eFF"));
+            // Another cycle-around case.
+            let mut next = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
-            // Previous translated key is None.
-            let mut prev = index.prev_translated_key(k1);
+            // Previous translated key of first key is the last key.
+            let mut prev = index.prev_translated_key(k1).unwrap();
+            assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key(&hex!("0x0c0102"));
+            let mut prev = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key(&hex!("0x1d0102"));
+            let mut prev = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key(&hex!("0xCC0102"));
+            let mut prev = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Last translated key is 2d.
-            let mut last = index.last_translated_key();
+            let mut last = index.last_translated_key().unwrap();
             assert_eq!(last.next().unwrap(), &3);
             assert_eq!(last.next(), None);
         });

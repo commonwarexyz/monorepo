@@ -1,12 +1,9 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Finalization, Notarization},
-    },
+    simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
@@ -97,8 +94,10 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<B>,
     },
-    /// A request to broadcast a block to all peers.
-    Broadcast {
+    /// A request to broadcast a proposed block to all peers.
+    Proposed {
+        /// The round in which the block was proposed.
+        round: Round,
         /// The block to broadcast.
         block: B,
     },
@@ -108,6 +107,20 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         round: Round,
         /// The verified block.
         block: B,
+    },
+    /// A request to set the sync floor.
+    ///
+    /// The sync floor is the latest block that the application has processed. Marshal
+    /// will not attempt to sync blocks below this height nor deliver blocks below
+    /// this height to the application.
+    ///
+    /// This sets the sync floor only if the provided height is higher than the
+    /// previously recorded floor.
+    ///
+    /// The default sync floor is height 0.
+    SetFloor {
+        /// The candidate sync floor height.
+        height: u64,
     },
 
     // -------------------- Consensus Engine Messages --------------------
@@ -131,7 +144,7 @@ pub struct Mailbox<S: Scheme, B: Block> {
 
 impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
     }
 
@@ -152,13 +165,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get info message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get info: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block info: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -179,13 +189,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get block message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get block: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
@@ -206,13 +213,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get finalization message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get finalization: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get finalization: receiver dropped");
+            None
+        })
     }
 
     /// A request to retrieve a block by its commitment.
@@ -259,15 +263,15 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .map(|block| AncestorStream::new(self.clone(), [block]))
     }
 
-    /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
+    /// Proposed requests that a proposed block is sent to all peers.
+    pub async fn proposed(&mut self, round: Round, block: B) {
         if self
             .sender
-            .send(Message::Broadcast { block })
+            .send(Message::Proposed { round, block })
             .await
             .is_err()
         {
-            error!("failed to send broadcast message to actor: receiver dropped");
+            error!("failed to send proposed message to actor: receiver dropped");
         }
     }
 
@@ -280,6 +284,39 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .is_err()
         {
             error!("failed to send verified message to actor: receiver dropped");
+        }
+    }
+
+    /// A request to set the sync floor (conditionally advances if higher).
+    ///
+    /// The sync floor is the latest block that the application has processed. Marshal
+    /// will not attempt to sync blocks below this height nor deliver blocks below
+    /// this height to the application.
+    ///
+    /// The default sync floor is height 0.
+    pub async fn set_floor(&mut self, height: u64) {
+        if self
+            .sender
+            .send(Message::SetFloor { height })
+            .await
+            .is_err()
+        {
+            error!("failed to send set sync floor message to actor: receiver dropped");
+        }
+    }
+
+    /// Notifies the actor of a verified [`Finalization`].
+    ///
+    /// This is a trusted call that injects a finalization directly into marshal. The
+    /// finalization is expected to have already been verified by the caller.
+    pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
+        if self
+            .sender
+            .send(Message::Finalization { finalization })
+            .await
+            .is_err()
+        {
+            error!("failed to send finalization message to actor: receiver dropped");
         }
     }
 }

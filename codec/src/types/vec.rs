@@ -45,7 +45,7 @@ impl<T: Read> Read for Vec<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        let mut vec = Vec::with_capacity(len);
+        let mut vec = Self::with_capacity(len);
         for _ in 0..len {
             vec.push(T::read_cfg(buf, cfg)?);
         }
@@ -135,5 +135,16 @@ mod tests {
         let mut expected_long_u8 = vec![0xC8, 0x01];
         expected_long_u8.extend_from_slice(&[0xCC; 200]);
         assert_eq!(v_long_u8.encode(), expected_long_u8.as_slice());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Vec<u8>>,
+            CodecConformance<Vec<u16>>,
+            CodecConformance<Vec<u32>>,
+        }
     }
 }

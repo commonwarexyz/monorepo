@@ -29,6 +29,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        additional-cache-key: part-${{ matrix.partition }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
@@ -50,7 +52,7 @@ jobs:
       with:
         tool: cargo-llvm-cov@0.6.19,cargo-nextest@0.9.104
     - name: Generate coverage report
-      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --run-ignored all
+      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:

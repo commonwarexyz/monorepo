@@ -87,12 +87,12 @@
 //!    - the size of the data, in bytes,
 //!    - the vector commitment, V,
 //!    - the checksum Z,
-//!    - rows i..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
+//!    - rows i * S..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
 //!
 //! ## Re-Sharding
 //!
 //! When re-transmitting a shard to other people, only the following are transmitted:
-//! - rows i..(i + 1) * S of Y, along with the inclusion proofs.
+//! - rows i * S..(i + 1) * S of Y, along with the inclusion proofs.
 //!
 //! ## Checking
 //!
@@ -113,32 +113,25 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
-use crate::{
-    field::F,
-    poly::{EvaluationVector, Matrix},
-    Config, Scheme, ValidatingScheme,
-};
+use crate::{Config, Scheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
 };
-use commonware_storage::mmr::{
-    mem::Mmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
+use commonware_math::{
+    fields::goldilocks::F,
+    ntt::{EvaluationVector, Matrix},
 };
-use commonware_utils::BigRationalExt as _;
+use commonware_storage::mmr::{
+    mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
+};
 use futures::executor::block_on;
-use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
+use rayon::{iter::ParallelIterator, prelude::IntoParallelIterator, ThreadPoolBuilder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
-
-const SECURITY_BITS: usize = 126;
-// Fractional precision for log2 calculations when computing required samples.
-// We use the next power of 2 above SECURITY_BITS (128 = 2^7), which provides
-// 1/128 fractional precision, sufficient for these security calculations.
-const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
@@ -189,111 +182,149 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
-fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
-    assert!(m >= n);
-    let k = BigRational::from_usize(m - n);
-    let m = BigRational::from_usize(m);
-    let skew = BigRational::from_u64(if upper_bound { 0u64 } else { 1u64 });
-    let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
+fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
+    let mut h = H::new();
+    for x in row {
+        h.update(&x.to_le_bytes());
+    }
+    h.finalize()
+}
 
-    // Compute log2(one_minus). When m is close to n, one_minus is close to 1, making log2(one_minus)
-    // a small negative value that requires sufficient precision to correctly capture the sign.
-    let one_minus = BigRational::from_usize(1) - fraction;
-    let log_term = one_minus.log2_ceil(LOG2_PRECISION);
-    if log_term >= BigRational::from_u64(0) {
-        return usize::MAX;
+mod topology {
+    use super::Error;
+    use crate::Config;
+    use commonware_math::fields::goldilocks::F;
+    use commonware_utils::BigRationalExt as _;
+    use num_rational::BigRational;
+
+    const SECURITY_BITS: usize = 126;
+    // Fractional precision for log2 calculations when computing required samples.
+    // We use the next power of 2 above SECURITY_BITS (128 = 2^7), which provides
+    // 1/128 fractional precision, sufficient for these security calculations.
+    const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
+
+    /// Contains the sizes of various objects in the protocol.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Topology {
+        /// How many bytes the data has.
+        pub data_bytes: usize,
+        /// How many columns the data has.
+        pub data_cols: usize,
+        /// How many rows the data has.
+        pub data_rows: usize,
+        /// How many rows the encoded data has.
+        pub encoded_rows: usize,
+        /// How many samples each shard has.
+        pub samples: usize,
+        /// How many column samples we need.
+        pub column_samples: usize,
+        /// How many shards we need to recover.
+        pub min_shards: usize,
+        /// How many shards there are in total (each shard containing multiple rows).
+        pub total_shards: usize,
     }
 
-    let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
-    required.ceil_to_u128().unwrap_or(u128::MAX) as usize
-}
-
-fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
-    required_samples_impl(min_rows, encoded_rows, false)
-}
-
-/// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
-///
-/// The actual number of required samples for a given n * samples and m * samples
-/// will be less.
-fn required_samples_upper_bound(n: usize, m: usize) -> usize {
-    required_samples_impl(n, m, true)
-}
-
-fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
-    let min_rows = n * samples;
-    let encoded_rows = ((n + k) * samples).next_power_of_two();
-    let required = required_samples(min_rows, encoded_rows);
-    samples >= required
-}
-
-/// Contains the sizes of various objects in the protocol.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Topology {
-    /// How many bytes the data has.
-    data_bytes: usize,
-    /// How many columns the data has.
-    data_cols: usize,
-    /// How many rows the data has.
-    data_rows: usize,
-    /// How many rows the encoded data has.
-    encoded_rows: usize,
-    /// How many samples each shard has.
-    samples: usize,
-    /// How many column samples we need.
-    column_samples: usize,
-    /// How many shards we need to recover.
-    min_shards: usize,
-    /// How many shards there are in total (each shard containing multiple rows).
-    total_shards: usize,
-}
-
-impl Topology {
-    /// Figure out what size different values will have, based on the config and the data.
-    fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
-        let data_bits = 8 * data_bytes;
-        let data_els = F::bits_to_elements(data_bits);
-        let n = config.minimum_shards as usize;
-        if n == 0 {
-            return Err(Error::InvalidMinShards(n));
+    impl Topology {
+        const fn with_cols(data_bytes: usize, n: usize, k: usize, cols: usize) -> Self {
+            let data_els = F::bits_to_elements(8 * data_bytes);
+            let data_rows = data_els.div_ceil(cols);
+            let samples = data_rows.div_ceil(n);
+            Self {
+                data_bytes,
+                data_cols: cols,
+                data_rows,
+                encoded_rows: ((n + k) * samples).next_power_of_two(),
+                samples,
+                column_samples: 0,
+                min_shards: n,
+                total_shards: n + k,
+            }
         }
-        let k = config.extra_shards as usize;
-        let samples_upper_bound = required_samples_upper_bound(n, n + k);
-        let max_samples = (data_els / n).max(1);
-        let mut samples = max_samples.min(samples_upper_bound);
-        while samples > 1 && enough_samples(n, k, samples - 1) {
-            samples -= 1;
+
+        pub(crate) fn required_samples(&self) -> usize {
+            let k = BigRational::from_usize(self.encoded_rows - self.data_rows);
+            let m = BigRational::from_usize(self.encoded_rows);
+            let fraction = (&k + BigRational::from_u64(1)) / (BigRational::from_usize(2) * &m);
+
+            // Compute log2(one_minus). When m is close to n, one_minus is close to 1, making log2(one_minus)
+            // a small negative value that requires sufficient precision to correctly capture the sign.
+            let one_minus = BigRational::from_usize(1) - &fraction;
+            let log_term = one_minus.log2_ceil(LOG2_PRECISION);
+            if log_term >= BigRational::from_u64(0) {
+                return usize::MAX;
+            }
+
+            let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
+            required.ceil_to_u128().unwrap_or(u128::MAX) as usize
         }
-        let data_rows = n * samples;
-        let data_cols = data_els.div_ceil(data_rows).max(1);
-        let encoded_rows = (data_rows + k * samples).next_power_of_two();
-        // We make sure we have enough column samples to get 126 bits of security.
-        //
-        // This effectively does two elements per column. To get strictly greater
-        // than 128 bits, we would need to add another column per column_sample.
-        // We also have less than 128 bits in other places because of the bounds
-        // on the messages encoded size.
-        let column_samples = F::bits_to_elements(SECURITY_BITS)
-            * required_samples(data_rows, encoded_rows).div_ceil(samples);
-        Ok(Self {
-            data_bytes,
-            data_cols,
-            data_rows,
-            encoded_rows,
-            samples,
-            column_samples,
-            min_shards: n,
-            total_shards: n + k,
-        })
+
+        fn correct_column_samples(&mut self) {
+            // We make sure we have enough column samples to get 126 bits of security.
+            //
+            // This effectively does two elements per column. To get strictly greater
+            // than 128 bits, we would need to add another column per column_sample.
+            // We also have less than 128 bits in other places because of the bounds
+            // on the messages encoded size.
+            self.column_samples =
+                F::bits_to_elements(SECURITY_BITS) * self.required_samples().div_ceil(self.samples);
+        }
+
+        /// Figure out what size different values will have, based on the config and the data.
+        pub fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
+            let n = config.minimum_shards as usize;
+            if n == 0 {
+                return Err(Error::InvalidMinShards(n));
+            }
+            let k = config.extra_shards as usize;
+            // The following calculations don't tolerate data_bytes = 0, so we
+            // temporarily correct that to be at least 1, then make sure to adjust
+            // it back again to 0.
+            let corrected_data_bytes = data_bytes.max(1);
+            // The goal here is to try and maximize the number of columns in the
+            // data. ZODA is more efficient the more columns there are. However,
+            // we need to make sure that every shard has enough samples to guarantee
+            // correct encoding, and that the number of encoded rows can contain
+            // all of the samples in each shard, without overlap.
+            //
+            // To determine if a column configuration is good, we need to choose
+            // the number of encoded rows. To do this, we pick a number of samples
+            // `S` such that `S * n >= data_rows`. Then, our encoded rows will
+            // equal `((n + k) * S).next_power_of_two()`. If the number of required
+            // samples `R` for this configuration satisfies `(n + k) * R <= encoded_rows`,
+            // then this configuration is valid, using `R` as the necessary number
+            // of samples.
+            //
+            // We try increasing column counts, picking the configuration that's good.
+            // It's possible that the first configuration, with one column, is not good.
+            // To correct for that, we need to add extra checksum columns to guarantee
+            // security.
+            let mut out = Self::with_cols(corrected_data_bytes, n, k, 1);
+            loop {
+                let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
+                let required_samples = attempt.required_samples();
+                if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
+                    out = Self {
+                        samples: required_samples.max(attempt.samples),
+                        ..attempt
+                    };
+                } else {
+                    break;
+                }
+            }
+            out.correct_column_samples();
+            out.data_bytes = data_bytes;
+            Ok(out)
+        }
+
+        pub fn check_index(&self, i: u16) -> Result<(), Error> {
+            if (0..self.total_shards).contains(&(i as usize)) {
+                return Ok(());
+            }
+            Err(Error::InvalidIndex(i))
+        }
     }
-
-    fn check_index(&self, i: u16) -> Result<(), Error> {
-        if (0..self.total_shards).contains(&(i as usize)) {
-            return Ok(());
-        }
-        Err(Error::InvalidIndex(i))
-    }
 }
+use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone)]
@@ -356,6 +387,22 @@ impl<H: Hasher> Read for Shard<H> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Shard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            data_bytes: u.arbitrary::<u32>()? as usize,
+            root: u.arbitrary()?,
+            inclusion_proof: u.arbitrary()?,
+            rows: u.arbitrary()?,
+            checksum: Arc::new(u.arbitrary()?),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
     inclusion_proof: Proof<H::Digest>,
@@ -394,8 +441,22 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
+            // TODO (#2506): use correct bounds on inclusion proof size
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<H: Hasher> arbitrary::Arbitrary<'_> for ReShard<H>
+where
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            inclusion_proof: u.arbitrary()?,
+            shard: u.arbitrary()?,
         })
     }
 }
@@ -495,7 +556,7 @@ impl<H: Hasher> CheckingData<H> {
             these_shuffled_indices
                 .iter()
                 .zip(reshard.shard.iter())
-                .map(|(&i, row)| (F::slice_digest::<H>(row), i))
+                .map(|(&i, row)| (row_digest::<H>(row), i))
                 .collect::<Vec<_>>()
         };
         if !reshard.inclusion_proof.verify_multi_inclusion(
@@ -537,6 +598,7 @@ pub enum Error {
     FailedToCreateInclusionProof(MmrError),
 }
 
+// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
 const NAMESPACE: &[u8] = b"commonware-zoda";
 
 #[derive(Clone, Copy)]
@@ -566,6 +628,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
+        concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -585,12 +648,28 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::new();
-        for row in encoded_data.iter() {
-            mmr.add_batched(&mut hasher, &F::slice_digest::<H>(row));
+        let mut mmr = DirtyMmr::new();
+        if concurrency > 1 {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("failed to build thread pool");
+            let row_hashes = pool.install(|| {
+                (0..encoded_data.rows())
+                    .into_par_iter()
+                    .map(|i| row_digest::<H>(&encoded_data[i]))
+                    .collect::<Vec<_>>()
+            });
+            for hash in &row_hashes {
+                mmr.add(&mut hasher, hash);
+            }
+        } else {
+            for row in encoded_data.iter() {
+                mmr.add(&mut hasher, &row_digest::<H>(row));
+            }
         }
-        let mmr = mmr.merkleize(&mut hasher);
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher, None);
+        let root = *mmr.root();
 
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
@@ -607,9 +686,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checksum = Arc::new(data.mul(&checking_matrix));
 
         // Step 7: Produce the shards.
-        let shards = shuffled_indices
-            .chunks_exact(topology.samples)
-            .take(topology.total_shards)
+        // We can't use "chunks" because we need to handle a sample size of 0
+        let index_chunks = (0..topology.total_shards)
+            .map(|i| &shuffled_indices[i * topology.samples..(i + 1) * topology.samples]);
+        let shards = index_chunks
             .map(|indices| {
                 let rows = Matrix::init(
                     indices.len(),
@@ -668,6 +748,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
+        _concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
@@ -716,15 +797,7 @@ mod tests {
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
 
-    #[test]
-    fn required_samples_handles_minimal_padding() {
-        assert_eq!(required_samples(3, 4), 305);
-    }
-
-    #[test]
-    fn required_samples_handles_equal_rows() {
-        assert_eq!(required_samples_upper_bound(512, 512), usize::MAX);
-    }
+    const CONCURRENCY: usize = 1;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
@@ -735,6 +808,17 @@ mod tests {
         let topology = Topology::reckon(&config, 16).unwrap();
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
+
+        // Verify we hit the 1-column fallback and the security invariant holds.
+        // When the loop in reckon() exits without finding a multi-column config,
+        // correct_column_samples() must compensate by adding column samples.
+        assert_eq!(topology.data_cols, 1);
+        let required = topology.required_samples();
+        let provided = topology.samples * (topology.column_samples / 2);
+        assert!(
+            provided >= required,
+            "security invariant violated: provided {provided} < required {required}"
+        );
     }
 
     #[test]
@@ -758,7 +842,8 @@ mod tests {
         };
         let data = vec![0xAA; 64];
 
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, data.as_slice()).unwrap();
+        let (commitment, shards) =
+            Zoda::<Sha256>::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
         let shard = shards.into_iter().next().unwrap();
 
         let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
@@ -784,7 +869,7 @@ mod tests {
             extra_shards: 0,
         };
         let data = b"duplicate shard coverage";
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..]).unwrap();
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], CONCURRENCY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _reshard0) =
             Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
@@ -793,12 +878,24 @@ mod tests {
             shard: checked_shard0.shard.clone(),
         };
         let shards = vec![checked_shard0, duplicate];
-        let result = Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards);
+        let result =
+            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, CONCURRENCY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Shard<Sha256>>,
+            CodecConformance<ReShard<Sha256>>,
         }
     }
 }

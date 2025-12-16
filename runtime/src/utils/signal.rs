@@ -61,15 +61,15 @@ use std::{
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
 ///     context.with_label("waiter").spawn(|context| async move {
+///         // Wait for signal or sleep
 ///         loop {
-///             // Wait for signal or sleep
 ///             select! {
-///                  sig = &mut signal => {
-///                      println!("Received signal: {}", sig.unwrap());
-///                      break;
-///                  },
-///                  _ = context.sleep(Duration::from_secs(1)) => {},
-///             };
+///                 sig = &mut signal => {
+///                     println!("Received signal: {}", sig.unwrap());
+///                     break;
+///                 },
+///                 _ = context.sleep(Duration::from_secs(1)) => {},
+///             }
 ///         }
 ///         let _ = tx.send(());
 ///     });
@@ -94,8 +94,8 @@ impl Future for Signal {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
-            Signal::Open(live) => Pin::new(&mut live.inner).poll(cx),
-            Signal::Closed(value) => Poll::Ready(Ok(*value)),
+            Self::Open(live) => Pin::new(&mut live.inner).poll(cx),
+            Self::Closed(value) => Poll::Ready(Ok(*value)),
         }
     }
 }
@@ -114,7 +114,7 @@ struct Guard {
 
 impl Guard {
     /// Create a new [Guard] that will resolve when the [Signaler] marks it as resolved.
-    pub fn new(completion_tx: oneshot::Sender<()>) -> Self {
+    pub const fn new(completion_tx: oneshot::Sender<()>) -> Self {
         Self {
             tx: Some(completion_tx),
         }

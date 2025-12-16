@@ -77,6 +77,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+    PartitionNameInvalid(String),
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
@@ -254,6 +256,19 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Encode all metrics into a buffer.
     fn encode(&self) -> String;
 }
+
+/// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
+///
+/// This is a convenience type alias for creating per-peer rate limiters
+/// using governor's [HashMapStateStore].
+///
+/// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+pub type RateLimiter<K, C> = governor::RateLimiter<
+    K,
+    governor::state::keyed::HashMapStateStore<K>,
+    C,
+    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+>;
 
 /// Interface that any task scheduler must implement to provide
 /// time-based operations.
@@ -441,11 +456,16 @@ pub trait Stream: Sync + Send + 'static {
 
 /// Interface to interact with storage.
 ///
-///
 /// To support storage implementations that enable concurrent reads and
 /// writes, blobs are responsible for maintaining synchronization.
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
+///
+/// # Partition Names
+///
+/// Partition names must be non-empty and contain only ASCII alphanumeric
+/// characters, dashes (`-`), or underscores (`_`). Names containing other
+/// characters (e.g., `/`, `.`, spaces) will return an error.
 pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;

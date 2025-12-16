@@ -5,12 +5,11 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ingress::mailbox::AncestorStream,
-    simplex::{signing_scheme::Scheme, types::Context},
-    Block as _, VerifyingApplication,
+    marshal::ingress::mailbox::AncestorStream, simplex::types::Context, Block as _,
+    VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Hasher, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
@@ -38,7 +37,7 @@ where
     C: Signer,
     V: Variant,
 {
-    pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
+    pub const fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
             dkg,
             _marker: PhantomData,
@@ -98,14 +97,17 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        _: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
-        let Some(block) = ancestry.next().await else {
-            return false;
-        };
-        let Some(parent) = ancestry.next().await else {
-            return false;
-        };
-        block.height() == parent.height() + 1 && block.parent() == parent.digest()
+        // We wrap this application with `Marshaled`, which handles ancestry
+        // verification (parent commitment and height contiguity).
+        //
+        // You could opt to verify the deal_outcome in the block here (both that it is valid
+        // and that the dealer is the proposer) but we opt to only process deal data after the
+        // block has been finalized to keep verification as fast as possible. The downside
+        // of this approach is that invalid data can be included in the canonical chain (which
+        // makes certificates over finalized blocks less useful because the verifier must still
+        // check the block contents).
+        true
     }
 }

@@ -35,6 +35,7 @@ _For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD
 - **codec**: Serialize structured data.
 - **coding**: Encode data to enable recovery from a subset of fragments.
 - **collector**: Collect responses to committable requests.
+- **conformance**: Automatically assert the stability of encoding and mechanisms over time.
 - **consensus**: Order opaque messages in a Byzantine environment.
 - **cryptography**: Generate keys, sign arbitrary messages, and deterministically verify signatures.
 - **deployer**: Deploy infrastructure across cloud providers.
@@ -54,7 +55,6 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **flood** (`examples/flood`): Spam peers deployed to AWS EC2 with random messages.
 - **log** (`examples/log`): Commit to a secret log and agree to its hash.
 - **sync** (`examples/sync`): Synchronize state between a server and client.
-- **vrf** (`examples/vrf`): Generate bias-resistant randomness with untrusted contributors.
 
 ### Key Design Principles
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
@@ -115,11 +115,16 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 just miri <module>::
 ```
 
+_Always use `just` commands for testing (uses `nextest` for parallel execution)._
+
 ### Extended Checks (before PR)
 
 ```bash
-# Long-running tests
-just test --workspace -- --ignored
+# Long-running tests only
+just test --workspace --profile slow
+
+# All tests
+just test --workspace --profile all
 
 # Fuzz testing (60 seconds per target)
 just fuzz <primitive>/fuzz
@@ -143,10 +148,12 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Development Workflow
 1. Make changes in relevant primitive directory
-2. Run `just test -p <crate-name>` for quick iteration
-3. Run CI fast checks before committing (see CI section above)
-4. Use `just fix-fmt` for formatting
-5. Run full CI checks locally before creating PR
+2. Run `just test -p <crate-name> <test_name>` for quick iteration
+3. Run `just test -p <crate-name>` to verify all crate tests pass
+4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
+5. Run `just pre-pr` before creating a PR
+
+_Avoid running tests for the entire workspace unless absolutely necessary. This can take a LONG time to run._
 
 ## Reviewing PRs
 When reviewing PRs, focus the majority of your effort on correctness and performance (not style). Pay special attention to bugs
@@ -218,8 +225,8 @@ let (network, mut oracle) = Network::new(
 network.start();
 
 // Register multiple channels per peer for different message types
-let (pending_sender, pending_receiver) = oracle.register(pk, 0).await.unwrap();
-let (recovered_sender, recovered_receiver) = oracle.register(pk, 1).await.unwrap();
+let (vote_sender, vote_receiver) = oracle.register(pk, 0).await.unwrap();
+let (certificate_sender, certificate_receiver) = oracle.register(pk, 1).await.unwrap();
 let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap();
 
 // Configure network links with realistic conditions
@@ -462,6 +469,87 @@ fn test_storage_conformance() {
 - **Cleanup After Tests**: Use `destroy()` to remove test data
 - **Test Pruning**: Verify old data can be safely removed
 - **Test Concurrent Access**: Multiple readers/writers on same storage
+- **Failures Are Fatal**: Errors returned by mutable methods (e.g. `put`,
+`delete`, `sync`) are treated as unrecoverable. The database may be in an inconsistent state after
+such an error. Callers must not use a database after a mutable method returns an error. Reviews
+need not comment the database being in an inconsistent state after such an error.
+
+## Conformance Testing
+
+Conformance tests verify that implementations maintain backward compatibility by comparing output against known-good hash values stored in TOML files. The `conformance` crate provides a unified infrastructure that can be used across different domains (codec, storage, network, etc.).
+
+### Running Conformance Tests
+
+```bash
+# Run all conformance tests
+just test-conformance
+
+# Run conformance tests for specific crates
+just test-conformance -p commonware-codec -p commonware-cryptography
+
+# Regenerate fixtures (use only for INTENTIONAL format changes)
+just regenerate-conformance
+
+# Regenerate fixtures for specific crates only
+just regenerate-conformance -p commonware-codec -p commonware-storage
+```
+
+**WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking change. Only use this when you have intentionally changed the format and have verified that the change is correct. This will update the hash values in `conformance.toml` files throughout the repository.
+
+### Adding Codec Conformance Tests for New Types
+
+When creating a new type that implements `Encode` (the codec trait), add conformance tests:
+
+#### Step 1: Add `Arbitrary` Implementation
+
+Add an `arbitrary::Arbitrary` impl gated by the `arbitrary` feature flag. Place this near the other trait impls for the type:
+
+```rust
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for MyType {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // ... construct your type using the unstructured data ...
+        Ok(my_instance)
+    }
+}
+```
+
+#### Step 2: Add Conformance Test Module
+
+Inside the `#[cfg(test)] mod tests` block, add a `conformance` submodule gated by the `arbitrary` feature:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ... other tests ...
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<MyType>, // default # of cases
+            CodecConformance<MyType2> => 1024, // custom # of cases
+        }
+    }
+}
+```
+
+The number (1024) is the number of test cases to generate and hash together. The `CodecConformance<T>` wrapper bridges types that implement `Encode + Arbitrary` with the `Conformance` trait.
+
+#### Step 3: Run Tests to Generate Fixtures
+
+Run `just test-conformance` to generate the initial hash values. The test framework will automatically add new types to the appropriate `conformance.toml` file.
+
+### How It Works
+
+1. Tests generate deterministic values using seeded RNG + `arbitrary`
+2. Each value is committed (e.g., encoded for codec) and all bytes are hashed together with SHA-256
+3. The hash is compared against the stored value in `conformance.toml`
+4. Hash mismatches cause test failures (format changed)
+5. Missing types are automatically added to the TOML file
 
 ## Code Style Guide
 
@@ -503,6 +591,19 @@ pub enum Error {
 
 _Generally, we try to minimize the length of functions and variables._
 
+### Namespace Conventions
+Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
+```
+_COMMONWARE_<CRATE>_<OPERATION>
+```
+
+Examples:
+- `_COMMONWARE_CODING_ZODA` - ZODA encoding in the coding crate
+- `_COMMONWARE_STREAM_HANDSHAKE` - Handshake protocol in the stream crate
+- `_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG` - BLS12-381 DKG in the cryptography crate
+
+This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
+
 ### Trait Patterns
 ```rust
 // Comprehensive trait bounds
@@ -541,6 +642,7 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
+- Always place imports at the top of a module (never inline)
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations

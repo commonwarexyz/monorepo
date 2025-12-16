@@ -45,7 +45,7 @@ pub struct BitMap<const N: usize> {
 
 impl<const N: usize> BitMap<N> {
     /// Create a new empty historical bitmap.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             current: Prunable::new(),
             commits: BTreeMap::new(),
@@ -299,19 +299,19 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Get a reference to the current bitmap state.
-    pub fn current(&self) -> &Prunable<N> {
+    pub const fn current(&self) -> &Prunable<N> {
         &self.current
     }
 
     /// Number of bits in the current bitmap.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.current.len()
     }
 
     /// Returns true if the current bitmap is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.current.is_empty()
     }
 
@@ -329,7 +329,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Number of pruned chunks in the current bitmap.
     #[inline]
-    pub fn pruned_chunks(&self) -> usize {
+    pub const fn pruned_chunks(&self) -> usize {
         self.current.pruned_chunks()
     }
 
@@ -436,13 +436,12 @@ impl<const N: usize> BitMap<N> {
             // Use or_insert_with so we don't overwrite chunks already captured
             // by capture_modified_chunks (which runs first and takes precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
-                if let Some(old_chunk) = self.get_chunk(chunk_idx) {
-                    // Chunk existed before: store its old data
-                    ChunkDiff::Modified(old_chunk)
-                } else {
+                self.get_chunk(chunk_idx).map_or(
                     // Chunk is brand new: mark as Added
-                    ChunkDiff::Added
-                }
+                    ChunkDiff::Added,
+                    // Chunk existed before: store its old data
+                    ChunkDiff::Modified,
+                )
             });
         }
     }

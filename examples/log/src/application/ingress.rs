@@ -25,7 +25,7 @@ pub struct Mailbox<D: Digest> {
 }
 
 impl<D: Digest> Mailbox<D> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub(super) const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }

@@ -25,7 +25,7 @@ struct Record<V: Codec> {
 
 impl<V: Codec> Record<V> {
     /// Create a new `Record`.
-    fn new(index: u64, value: V) -> Self {
+    const fn new(index: u64, value: V) -> Self {
         Self { index, value }
     }
 }
@@ -53,6 +53,16 @@ impl<V: Codec> EncodeSize for Record<V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Codec> arbitrary::Arbitrary<'_> for Record<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary()?, u.arbitrary()?))
+    }
+}
+
 /// Implementation of `Cache` storage.
 pub struct Cache<E: Storage + Metrics, V: Codec> {
     items_per_blob: u64,
@@ -72,7 +82,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
 
 impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Calculate the section for a given index.
-    fn section(&self, index: u64) -> u64 {
+    const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
     }
 
@@ -174,7 +184,10 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.intervals.iter().next().map(|(&start, _)| start)
     }
 
-    /// Get up to the next `max` missing items after `start`.
+    /// Returns up to `max` missing items starting from `start`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
     }
@@ -303,5 +316,25 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
+    type Key = u64;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(*key).await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<u64>>,
     }
 }

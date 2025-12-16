@@ -35,10 +35,11 @@
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
-    simplex::{signing_scheme::Scheme, types::Context},
+    simplex::types::Context,
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{
@@ -52,11 +53,25 @@ use rand::Rng;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
-/// An [Application] adapter that handles epoch transitions.
+/// An [Application] adapter that handles epoch transitions and validates block ancestry.
 ///
-/// This wrapper intercepts consensus operations to enforce epoch boundaries. It prevents
-/// blocks from being produced outside their valid epoch and handles the special case of
-/// re-proposing boundary blocks during epoch transitions.
+/// This wrapper intercepts consensus operations to enforce epoch boundaries and validate
+/// block ancestry. It prevents blocks from being produced outside their valid epoch,
+/// handles the special case of re-proposing boundary blocks during epoch transitions,
+/// and ensures all blocks have valid parent linkage and contiguous heights.
+///
+/// # Ancestry Validation
+///
+/// Applications wrapped by [Marshaled] can rely on the following ancestry checks being
+/// performed automatically during verification:
+/// - Parent commitment matches the consensus context's expected parent
+/// - Block height is exactly one greater than the parent's height
+///
+/// Verifying only the immediate parent is sufficient since the parent itself must have
+/// been notarized by consensus, which guarantees it was verified and accepted by a quorum.
+/// This means the entire ancestry chain back to genesis is transitively validated.
+///
+/// Applications do not need to re-implement these checks in their own verification logic.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B>
 where
@@ -134,11 +149,14 @@ where
     /// available in storage. This indicates a critical error in the consensus engine startup
     /// sequence, as engines must always have the genesis block before starting.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch == 0 {
+        if epoch.is_zero() {
             return self.application.genesis().await.commitment();
         }
 
-        let height = utils::last_block_in_epoch(self.epoch_length, epoch - 1);
+        let height = utils::last_block_in_epoch(
+            self.epoch_length,
+            epoch.previous().expect("checked to be non-zero above"),
+        );
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
@@ -275,7 +293,9 @@ where
     /// This method validates that:
     /// 1. The block is within the current epoch (unless it's a boundary block re-proposal)
     /// 2. Re-proposals are only allowed for the last block in an epoch
-    /// 3. The underlying application's verification logic passes
+    /// 3. The block's parent commitment matches the consensus context's expected parent
+    /// 4. The block's height is exactly one greater than the parent's height
+    /// 5. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
@@ -347,6 +367,28 @@ where
                     return;
                 }
 
+                // Validate that the block's parent commitment matches what consensus expects.
+                if block.parent() != parent.commitment() {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %parent.commitment(),
+                        "block parent commitment does not match expected parent"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
+                // Validate that heights are contiguous.
+                if parent.height().checked_add(1) != Some(block.height()) {
+                    debug!(
+                        parent_height = parent.height(),
+                        block_height = block.height(),
+                        "block height is not contiguous with parent height"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
                 let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (runtime_context.with_label("app_verify"), context.clone()),
@@ -410,7 +452,7 @@ where
             height = block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.broadcast(block).await;
+        self.marshal.proposed(round, block).await;
     }
 }
 

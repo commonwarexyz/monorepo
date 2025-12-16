@@ -79,7 +79,7 @@ impl Storage {
     pub fn start(mut cfg: Config, registry: &mut Registry) -> Self {
         let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
 
-        let storage = Storage {
+        let storage = Self {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
@@ -100,6 +100,8 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
+        super::validate_partition_name(partition)?;
+
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
@@ -146,6 +148,8 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        super::validate_partition_name(partition)?;
+
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -164,6 +168,8 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        super::validate_partition_name(partition)?;
+
         let path = self.storage_directory.join(partition);
 
         let entries =
@@ -238,7 +244,12 @@ impl crate::Blob for Blob {
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
         while bytes_read < buf_len {
-            // Figure out how much is left to read and where to read into
+            // Figure out how much is left to read and where to read into.
+            //
+            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // `bytes_read` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
+            // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
                     buf.as_mut_ptr().add(bytes_read),
@@ -289,7 +300,12 @@ impl crate::Blob for Blob {
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
         while bytes_written < buf_len {
-            // Figure out how much is left to write and where to write from
+            // Figure out how much is left to write and where to write from.
+            //
+            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // `bytes_written` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
+            // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts(
                     buf.as_mut_ptr().add(bytes_written) as *const u8,

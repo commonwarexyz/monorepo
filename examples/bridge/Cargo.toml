@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/bridge"
 documentation = "https://docs.rs/commonware-bridge"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
@@ -28,6 +31,9 @@ prometheus-client.workspace = true
 rand.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+
+[dev-dependencies]
+commonware-math.workspace = true
 
 [[bin]]
 name = "validator"

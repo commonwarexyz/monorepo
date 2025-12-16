@@ -1,13 +1,10 @@
 use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops,
-        primitives::{poly, variant::MinSig},
-    },
-    ed25519, PrivateKeyExt as _, Signer as _,
+    bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
+    ed25519, Signer as _,
 };
-use commonware_utils::{hex, quorum};
+use commonware_utils::{hex, NZU32};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -46,15 +43,14 @@ fn main() {
     }
     validators.sort_by(|(_, a), (_, b)| a.cmp(b));
     let n = validators.len() as u32;
-    let t = quorum(n);
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+    let (public, shares) = deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));
-    println!("public: {}", poly::public::<MinSig>(&public));
+    println!("public: {}", public.public());
     for share in shares {
         let validator = validators[share.index as usize].0;
         println!(

@@ -10,7 +10,11 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
 documentation = "https://docs.rs/commonware-p2p"
 
+[lints]
+workspace = true
+
 [dependencies]
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
@@ -32,7 +36,18 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-conformance.workspace = true
+commonware-math.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"num-bigint/arbitrary",
+]
 
 [lib]
 bench = false

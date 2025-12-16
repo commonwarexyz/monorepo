@@ -5,20 +5,26 @@ use super::{
         handler::{self, Request},
         mailbox::{Mailbox, Message},
     },
-    SchemeProvider,
 };
 use crate::{
-    marshal::{ingress::mailbox::Identifier as BlockID, Update},
+    marshal::{
+        ingress::mailbox::Identifier as BlockID,
+        store::{Blocks, Certificates},
+        Update,
+    },
     simplex::{
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::Round,
+    types::{Epoch, Round, ViewDelta},
     utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme as _},
+    PublicKey,
+};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
@@ -27,14 +33,14 @@ use commonware_runtime::{
     Storage,
 };
 use commonware_storage::{
-    archive::{immutable, Archive as _, Identifier as ArchiveID},
+    archive::Identifier as ArchiveID,
     metadata::{self, Metadata},
 };
 use commonware_utils::{
     acknowledgement::Exact,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement,
+    Acknowledgement, BoxedError,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -45,18 +51,15 @@ use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap},
     future::Future,
-    num::NonZeroU64,
-    time::Instant,
+    num::NonZeroUsize,
+    sync::Arc,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
-
-/// The first block height that is present in the [immutable::Archive] of finalized blocks.
-const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
@@ -98,31 +101,33 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<
+pub struct Actor<E, B, P, FC, FB, A = Exact>
+where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
-    A: Acknowledgement = Exact,
-> {
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
+    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
+    FB: Blocks<Block = B>,
+    A: Acknowledgement,
+{
     // ---------- Context ----------
     context: ContextCell<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<S, B>>,
+    mailbox: mpsc::Receiver<Message<P::Scheme, B>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
-    scheme_provider: P,
+    provider: P,
     // Epoch length (in blocks)
     epoch_length: u64,
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
-    view_retention_timeout: u64,
+    view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
-    max_repair: NonZeroU64,
+    max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
 
@@ -137,20 +142,16 @@ pub struct Actor<
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
-    // Outstanding requests for blocks
-    waiting_blocks: BTreeSet<B::Commitment>,
-    // Outstanding requests for finalized blocks
-    waiting_finalized: BTreeSet<u64>,
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, P, S>,
+    cache: cache::Manager<E, B, P::Scheme>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
+    finalizations_by_height: FC,
     // Finalized blocks stored by height
-    finalized_blocks: immutable::Archive<E, B::Commitment, B>,
+    finalized_blocks: FB,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -159,102 +160,36 @@ pub struct Actor<
     processed_height: Gauge,
 }
 
-impl<
-        E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
-        B: Block,
-        P: SchemeProvider<Scheme = S>,
-        S: Scheme,
-        A: Acknowledgement,
-    > Actor<E, B, P, S, A>
+impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
+where
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    B: Block,
+    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
+    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
+    FB: Blocks<Block = B>,
+    A: Acknowledgement,
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(
+        context: E,
+        finalizations_by_height: FC,
+        finalized_blocks: FB,
+        config: Config<B, P>,
+    ) -> (Self, Mailbox<P::Scheme, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
-            freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+            freezer_journal_buffer_pool: config.buffer_pool.clone(),
         };
         let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
             config.block_codec_config.clone(),
-            config.scheme_provider.clone(),
         )
         .await;
-
-        // Initialize finalizations by height
-        let start = Instant::now();
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: config.immutable_items_per_section,
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
-
-        // Initialize finalized blocks
-        let start = Instant::now();
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
-                codec_config: config.block_codec_config.clone(),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Initialize metadata tracking application progress
         let application_metadata = Metadata::init(
@@ -266,7 +201,7 @@ impl<
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = *application_metadata.get(&LATEST_KEY).unwrap_or(&0);
+        let last_processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -289,19 +224,17 @@ impl<
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                scheme_provider: config.scheme_provider,
+                provider: config.provider,
                 epoch_length: config.epoch_length,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                last_processed_round: Round::new(0, 0),
+                last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
-                waiting_blocks: BTreeSet::new(),
-                waiting_finalized: BTreeSet::new(),
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -422,7 +355,8 @@ impl<
                             };
                             let _ = response.send(info);
                         }
-                        Message::Broadcast { block } => {
+                        Message::Proposed { round, block } => {
+                            self.cache_verified(round, block.commitment(), block.clone()).await;
                             let _peers = buffer.broadcast(Recipients::All, block).await;
                         }
                         Message::Verified { round, block } => {
@@ -540,6 +474,45 @@ impl<
                                 }
                             }
                         }
+                        Message::SetFloor { height } => {
+                            if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
+                                if *stored_height >= height {
+                                    warn!(height, existing = stored_height, "sync floor not updated, lower than existing");
+                                    continue;
+                                }
+                            }
+
+                            // Update the processed height
+                            if let Err(err) = self.set_processed_height(height, &mut resolver).await {
+                                error!(?err, height, "failed to update sync floor");
+                                return;
+                            }
+
+                            // Drop the pending acknowledgement, if one exists. We must do this to prevent
+                            // an in-process block from being processed that is below the new sync floor
+                            // updating `last_processed_height`.
+                            self.pending_ack = None.into();
+
+                            // Prune the finalized block and finalization certificate archives in parallel.
+                            if let Err(err) = try_join!(
+                                // Prune the finalized blocks archive
+                                async {
+                                    self.finalized_blocks.prune(height).await.map_err(Box::new)?;
+                                    Ok::<_, BoxedError>(())
+                                },
+                                // Prune the finalization certificate archive
+                                async {
+                                    self.finalizations_by_height
+                                        .prune(height)
+                                        .await
+                                        .map_err(Box::new)?;
+                                    Ok::<_, BoxedError>(())
+                                }
+                            ) {
+                                error!(?err, height, "failed to prune finalized archives");
+                                return;
+                            }
+                        }
                     }
                 },
                 // Handle resolver messages last
@@ -625,14 +598,14 @@ impl<
                                 },
                                 Request::Finalized { height } => {
                                     let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.scheme_provider.scheme(epoch) else {
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Parse finalization
                                     let Ok((finalization, block)) =
-                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -665,14 +638,14 @@ impl<
                                     .await;
                                 },
                                 Request::Notarized { round } => {
-                                    let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Parse notarization
                                     let Ok((notarization, block)) =
-                                        <(Notarization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -727,6 +700,14 @@ impl<
         }
     }
 
+    /// Returns a scheme suitable for verifying certificates at the given epoch.
+    ///
+    /// Prefers a certificate verifier if available, otherwise falls back
+    /// to the scheme for the given epoch.
+    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
+        self.provider.all().or_else(|| self.provider.scoped(epoch))
+    }
+
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given commitment with the provided block.
@@ -776,14 +757,11 @@ impl<
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
-        let _ = self.processed_height.try_set(height);
-        self.last_processed_height = height;
-        self.application_metadata
-            .put_sync(LATEST_KEY.clone(), height)
-            .await?;
+        // Update the processed height
+        self.set_processed_height(height, resolver).await?;
 
+        // Cancel any useless requests
         resolver.cancel(Request::<B>::Block(commitment)).await;
-        self.waiting_blocks.remove(&commitment);
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -837,7 +815,7 @@ impl<
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<S, B::Commitment>> {
+    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height))
@@ -856,7 +834,7 @@ impl<
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<S, B::Commitment>>,
+        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
@@ -876,7 +854,7 @@ impl<
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<S, B::Commitment>>,
+        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block).await;
@@ -884,15 +862,19 @@ impl<
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
             // Update the finalized blocks archive
-            self.finalized_blocks.put_sync(height, commitment, block),
+            async {
+                self.finalized_blocks.put(block).await.map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
             // Update the finalizations archive (if provided)
             async {
                 if let Some(finalization) = finalization {
                     self.finalizations_by_height
-                        .put_sync(height, commitment, finalization)
-                        .await?;
+                        .put(height, commitment, finalization)
+                        .await
+                        .map_err(Box::new)?;
                 }
-                Ok::<_, _>(())
+                Ok::<_, BoxedError>(())
             }
         ) {
             panic!("failed to finalize: {e}");
@@ -961,31 +943,23 @@ impl<
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        let gaps = self.identify_gaps();
+        let start = self.last_processed_height.saturating_add(1);
+        'cache_repair: loop {
+            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
+                // No gaps detected
+                return;
+            };
 
-        // Cancel any outstanding requests by height that sit outside of identified gaps.
-        // These requests are no longer needed, and clog up the resolver.
-        let predicate = {
-            let gaps = gaps.clone();
-            move |height: &u64| {
-                gaps.iter()
-                    .any(|(gap_start, gap_end)| (gap_start..gap_end).contains(&height))
-            }
-        };
-        self.waiting_finalized.retain(&predicate);
-        resolver
-            .retain(move |key| match key {
-                Request::Finalized { height } => predicate(height),
-                _ => true,
-            })
-            .await;
-
-        for (gap_start, gap_end) in gaps {
             // Attempt to repair the gap backwards from the end of the gap, using
             // blocks from our local storage.
             let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
+
+            // Compute the lower bound of the recursive repair. `gap_start` is `Some`
+            // if `start` is not in a gap. We add one to it to ensure we don't
+            // re-persist it to the database in the repair loop below.
+            let gap_start = gap_start.map(|s| s.saturating_add(1)).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
@@ -1004,52 +978,47 @@ impl<
                     cursor = block;
                 } else {
                     // Request the next missing block digest
-                    if self.waiting_blocks.insert(commitment) {
-                        resolver.fetch(Request::<B>::Block(commitment)).await;
-                    }
-                    break;
+                    resolver.fetch(Request::<B>::Block(commitment)).await;
+                    break 'cache_repair;
                 }
             }
+        }
 
-            // If we haven't fully repaired the gap, then also request any possible
-            // finalizations for the blocks in the remaining gap. This may help
-            // shrink the size of the gap if finalizations for the requests heights
-            // exist. If not, we rely on the recursive digest fetch above.
-            let gap_end = std::cmp::max(cursor.height(), gap_start);
-            debug!(gap_start, gap_end, "requesting any finalized blocks");
-            for height in gap_start..gap_end {
-                if self.waiting_finalized.insert(height) {
-                    resolver.fetch(Request::<B>::Finalized { height }).await;
-                }
-            }
+        // Request any finalizations for missing items in the archive, up to
+        // the `max_repair` quota. This may help shrink the size of the gap
+        // closest to the application's processed height if finalizations
+        // for the requests' heights exist. If not, we rely on the recursive
+        // digest fetches above.
+        let missing_items = self
+            .finalized_blocks
+            .missing_items(start, self.max_repair.get());
+        let requests = missing_items
+            .into_iter()
+            .map(|height| Request::<B>::Finalized { height })
+            .collect::<Vec<_>>();
+        if !requests.is_empty() {
+            resolver.fetch_all(requests).await
         }
     }
 
-    /// Identifies one or more of the earliest gaps in the finalized blocks archive. The gaps
-    /// returned are half-open ranges, where `start` is inclusive and `end` is exclusive. The total
-    /// number of missing heights covered by the returned gaps is bounded by `self.max_repair`.
-    fn identify_gaps(&self) -> Vec<(u64, u64)> {
-        let mut remaining = self.max_repair.get();
-        let mut gaps = Vec::new();
-        let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
+    /// Sets the processed height in storage, metrics, and in-memory state. Also cancels any
+    /// outstanding requests below the new processed height.
+    async fn set_processed_height(
+        &mut self,
+        height: u64,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) -> Result<(), metadata::Error> {
+        self.application_metadata
+            .put_sync(LATEST_KEY.clone(), height)
+            .await?;
+        self.last_processed_height = height;
+        let _ = self.processed_height.try_set(self.last_processed_height);
 
-        for (range_start, range_end) in self.finalized_blocks.ranges() {
-            if remaining == 0 {
-                break;
-            }
+        // Cancel any existing requests below the new sync floor.
+        resolver
+            .retain(Request::<B>::Finalized { height }.predicate())
+            .await;
 
-            let next_expected = previous_end.saturating_add(1);
-            if range_start > next_expected {
-                let gap_size = range_start - next_expected;
-                let take = gap_size.min(remaining);
-                let gap_start = range_start.saturating_sub(take);
-                gaps.push((gap_start, range_start));
-                remaining -= take;
-            }
-
-            previous_end = range_end;
-        }
-
-        gaps
+        Ok(())
     }
 }

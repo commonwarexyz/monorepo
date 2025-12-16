@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
 documentation = "https://docs.rs/commonware-runtime"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-lock.workspace = true
 bytes.workspace = true
@@ -47,11 +50,11 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-external = ["pin-project"]
+external = [ "pin-project" ]
 test-utils = []
-iouring-storage = ["io-uring"]
-iouring-network = ["io-uring"]
-tokio-console = ["dep:console-subscriber", "tokio/tracing"]
+iouring-storage = [ "io-uring" ]
+iouring-network = [ "io-uring" ]
+tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false

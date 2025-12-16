@@ -10,10 +10,13 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
 documentation = "https://docs.rs/commonware-estimator"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
-colored = "3.0.0"
+colored.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true

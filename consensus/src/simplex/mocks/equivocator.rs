@@ -3,38 +3,38 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
+        scheme::Scheme,
         select_leader,
-        signing_scheme::Scheme,
-        types::{Notarize, Proposal, Voter},
+        types::{Certificate, Notarize, Proposal, Vote},
     },
-    types::Round,
+    types::{Epoch, Round, View},
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: Scheme, H: Hasher> {
+pub struct Config<S: certificate::Scheme, H: Hasher> {
     pub scheme: S,
     pub namespace: Vec<u8>,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
+pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
-    epoch: u64,
+    epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
     hasher: H,
-    sent: HashSet<u64>,
+    sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S, H> {
     pub fn new(context: E, cfg: Config<S, H>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -49,41 +49,41 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
 
     pub fn start(
         mut self,
-        pending_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
-        recovered_network: (impl Sender, impl Receiver),
+        vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending_network, recovered_network).await
+            self.run(vote_network, certificate_network).await
         )
     }
 
     async fn run(
         mut self,
-        pending_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
-        recovered_network: (impl Sender, impl Receiver),
+        vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
     ) {
-        let (mut pending_sender, _) = pending_network;
-        let (_, mut recovered_receiver) = recovered_network;
+        let (mut vote_sender, _) = vote_network;
+        let (_, mut certificate_receiver) = certificate_network;
 
         loop {
             // Listen to recovered certificates
-            let (_, certificate) = recovered_receiver.recv().await.unwrap();
+            let (_, certificate) = certificate_receiver.recv().await.unwrap();
 
             // Parse certificate
-            let (view, parent, seed) = match Voter::<S, H::Digest>::decode_cfg(
+            let (view, parent, seed) = match Certificate::<S, H::Digest>::decode_cfg(
                 certificate,
                 &self.scheme.certificate_codec_config(),
             )
             .unwrap()
             {
-                Voter::Notarization(notarization) => (
+                Certificate::Notarization(notarization) => (
                     notarization.proposal.round.view(),
                     notarization.proposal.payload,
                     self.scheme
                         .seed(notarization.proposal.round, &notarization.certificate),
                 ),
-                Voter::Finalization(finalization) => (
+                Certificate::Finalization(finalization) => (
                     finalization.proposal.round.view(),
                     finalization.proposal.payload,
                     self.scheme
@@ -98,12 +98,12 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             }
 
             // Notarization advances us to next view
-            let next_view = view + 1;
+            let next_view = view.next();
             let next_round = Round::new(self.epoch, next_view);
 
             // Check if we are the leader for the next view, otherwise move on
             let (_, leader) =
-                select_leader::<S, _>(self.scheme.participants().as_ref(), next_round, seed);
+                select_leader::<S>(self.scheme.participants().as_ref(), next_round, seed);
             if leader != self.scheme.me().unwrap() {
                 continue;
             }
@@ -139,10 +139,10 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_a)
                 .expect("sign failed");
-            pending_sender
+            vote_sender
                 .send(
                     Recipients::One(victim.clone()),
-                    Voter::Notarize(notarize_a).encode().into(),
+                    Vote::Notarize(notarize_a).encode().into(),
                     true,
                 )
                 .await
@@ -159,10 +159,10 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
                 .filter(|(index, key)| *index as u32 != self.scheme.me().unwrap() && *key != victim)
                 .map(|(_, key)| key.clone())
                 .collect();
-            pending_sender
+            vote_sender
                 .send(
                     Recipients::Some(non_victims),
-                    Voter::Notarize(notarize_b).encode().into(),
+                    Vote::Notarize(notarize_b).encode().into(),
                     true,
                 )
                 .await

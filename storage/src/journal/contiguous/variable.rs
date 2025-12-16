@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous, PersistableContiguous},
         segmented::variable,
         Error,
     },
@@ -233,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::adb::any::fixed::sync::init_journal_at_size(
+        let offsets = crate::qmdb::any::unordered::sync::init_journal_at_size(
             context,
             fixed::Config {
                 partition: cfg.offsets_partition(),
@@ -266,7 +266,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///   empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes to `range.start`
-    /// - Unexpected data beyond `range.end`: returns [crate::adb::Error::UnexpectedData].
+    /// - Unexpected data beyond `range.end`: returns [crate::qmdb::Error::UnexpectedData].
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -277,12 +277,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     /// # Errors
-    /// Returns [crate::adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
-    ) -> Result<Journal<E, V>, crate::adb::Error> {
+    ) -> Result<Self, crate::qmdb::Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -293,7 +293,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         );
 
         // Initialize contiguous journal
-        let mut journal = Journal::init(context.with_label("journal"), cfg.clone()).await?;
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
 
         let size = journal.size();
 
@@ -308,13 +308,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+                return Ok(Self::init_at_size(context, cfg, range.start).await?);
             }
         }
 
         // Check if data exceeds the sync range
         if size > range.end {
-            return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(
+            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
                 size,
             )));
         }
@@ -327,7 +327,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Journal::init_at_size(context, cfg, range.start).await?);
+            return Ok(Self::init_at_size(context, cfg, range.start).await?);
         }
 
         // Prune to lower bound if needed
@@ -347,15 +347,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
-    /// After rewinding to size N, the journal will contain exactly N items,
-    /// and the next append will receive position N.
+    /// After rewinding to size N, the journal will contain exactly N items, and the next append
+    /// will receive position N.
     ///
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     ///
-    /// Underlying storage operations may leave the journal in an inconsistent state.
-    /// The journal should be closed and reopened to trigger alignment in [Journal::init].
+    /// # Warning
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {
@@ -426,14 +427,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.size
     }
 
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
-    pub fn oldest_retained_pos(&self) -> Option<u64> {
+    pub const fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
             None
@@ -803,24 +804,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     type Item = V;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
-    }
-
     fn size(&self) -> u64 {
-        Journal::size(self)
+        Self::size(self)
     }
 
     fn oldest_retained_pos(&self) -> Option<u64> {
-        Journal::oldest_retained_pos(self)
+        Self::oldest_retained_pos(self)
     }
 
     fn pruning_boundary(&self) -> u64 {
-        Journal::pruning_boundary(self)
-    }
-
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
+        Self::pruning_boundary(self)
     }
 
     async fn replay(
@@ -828,34 +821,45 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Journal::replay(self, start_pos, buffer).await
+        Self::replay(self, start_pos, buffer).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Journal::read(self, position).await
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        Journal::commit(self).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        Journal::sync(self).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        Journal::close(self).await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        Journal::destroy(self).await
-    }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
+        Self::read(self, position).await
     }
 }
 
+impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Self::append(self, item).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Self::prune(self, min_position).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Self::rewind(self, size).await
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
+    async fn commit(&mut self) -> Result<(), Error> {
+        Self::commit(self).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        Self::sync(self).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        Self::close(self).await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        Self::destroy(self).await
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1604,7 +1608,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_a  t_size_boundary".to_string(),
+                partition: "init_at_size_boundary".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2036,7 +2040,7 @@ mod tests {
                 .await;
 
                 // Should return UnexpectedData error since data exists beyond upper_bound
-                assert!(matches!(result, Err(crate::adb::Error::UnexpectedData(_))));
+                assert!(matches!(result, Err(crate::qmdb::Error::UnexpectedData(_))));
             }
         });
     }

@@ -8,7 +8,7 @@ use commonware_bridge::{
     Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Finalization, Viewable};
+use commonware_consensus::{simplex::types::Finalization, types::View, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
@@ -16,11 +16,11 @@ use commonware_cryptography::{
     },
     ed25519::{self},
     sha256::Digest as Sha256Digest,
-    Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
+    Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, set::Ordered, union};
+use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -105,19 +105,20 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
+    let validators: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure networks
     let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Scheme, Sha256Digest>>> =
+    let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -197,7 +198,7 @@ fn main() {
                         let _ = response.send(true);
                         info!(
                             network = ?incoming.network,
-                            view = view,
+                            %view,
                             "stored finalization"
                         );
                     }

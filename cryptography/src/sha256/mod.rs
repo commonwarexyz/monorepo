@@ -25,6 +25,7 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -63,6 +64,10 @@ impl Sha256 {
 impl Hasher for Sha256 {
     type Digest = Digest;
 
+    const EMPTY: Self::Digest = Digest(hex!(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ));
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
@@ -78,14 +83,11 @@ impl Hasher for Sha256 {
         self.hasher = ISha256::new();
         self
     }
-
-    fn empty() -> Self::Digest {
-        Self::new().finalize()
-    }
 }
 
 /// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -143,8 +145,10 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Digest {}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -165,8 +169,6 @@ mod tests {
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
-    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
     #[test]
     fn test_sha256() {
@@ -196,17 +198,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Sha256::empty();
-        let digest2 = Sha256::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
     fn test_sha256_empty() {
-        let empty_digest = Sha256::empty();
-        let expected_digest = Digest::from(EMPTY_DIGEST);
+        let empty_digest = Sha256::EMPTY;
+        let expected_digest = Sha256::new().finalize();
 
         assert_eq!(empty_digest, expected_digest);
     }
@@ -224,5 +218,15 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

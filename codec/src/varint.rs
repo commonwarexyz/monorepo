@@ -198,6 +198,17 @@ impl<U: UPrim> EncodeSize for UInt<U> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<U: UPrim> arbitrary::Arbitrary<'_> for UInt<U>
+where
+    U: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = U::arbitrary(u)?;
+        Ok(Self(value))
+    }
+}
+
 /// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -234,6 +245,17 @@ impl<S: SPrim> Read for SInt<S> {
 impl<S: SPrim> EncodeSize for SInt<S> {
     fn encode_size(&self) -> usize {
         size_signed::<S>(self.0)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: SPrim> arbitrary::Arbitrary<'_> for SInt<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = S::arbitrary(u)?;
+        Ok(Self(value))
     }
 }
 
@@ -665,5 +687,22 @@ mod tests {
         test_single_bits::<u32>();
         test_single_bits::<u64>();
         test_single_bits::<u128>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<UInt<u16>>,
+            CodecConformance<UInt<u32>>,
+            CodecConformance<UInt<u64>>,
+            CodecConformance<UInt<u128>>,
+            CodecConformance<SInt<i16>>,
+            CodecConformance<SInt<i32>>,
+            CodecConformance<SInt<i64>>,
+            CodecConformance<SInt<i128>>,
+        }
     }
 }

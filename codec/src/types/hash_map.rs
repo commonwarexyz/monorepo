@@ -97,7 +97,7 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = HashMap::with_capacity(len);
+        let mut map = Self::with_capacity(len);
 
         // Read items in ascending order
         read_ordered_map(
@@ -394,5 +394,15 @@ mod tests {
         vec![20u8, 21u8].write(&mut expected4);
 
         assert_eq!(map4.encode(), expected4.freeze());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<HashMap<u32, u32>>,
+        }
     }
 }

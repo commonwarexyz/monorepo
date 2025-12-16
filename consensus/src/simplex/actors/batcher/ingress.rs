@@ -1,15 +1,14 @@
-use crate::{
-    simplex::{signing_scheme::Scheme, types::Voter},
-    types::View,
-};
-use commonware_cryptography::Digest;
+use crate::{simplex::types::Vote, types::View};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use tracing::error;
 
+/// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
+    /// View update with leader info.
     Update {
         current: View,
         leader: u32,
@@ -17,7 +16,8 @@ pub enum Message<S: Scheme, D: Digest> {
 
         active: oneshot::Sender<bool>,
     },
-    Constructed(Voter<S, D>),
+    /// A constructed vote (needed for quorum).
+    Constructed(Vote<S, D>),
 }
 
 #[derive(Clone)]
@@ -26,10 +26,12 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    /// Create a new mailbox.
+    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
+    /// Send an update message.
     pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
         let (active, active_receiver) = oneshot::channel();
         if let Err(err) = self
@@ -54,7 +56,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         }
     }
 
-    pub async fn constructed(&mut self, message: Voter<S, D>) {
+    /// Send a constructed vote.
+    pub async fn constructed(&mut self, message: Vote<S, D>) {
         if let Err(err) = self.sender.send(Message::Constructed(message)).await {
             error!(?err, "failed to send constructed message");
         }

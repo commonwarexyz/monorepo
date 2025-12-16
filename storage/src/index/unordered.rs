@@ -10,7 +10,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
@@ -23,7 +22,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for OccupiedEntry<'_, K, Record<V>> {
+impl<K, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -36,26 +35,26 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for OccupiedEntry<'_, K, Reco
 }
 
 /// A cursor for the unordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, T: Translator, V: Eq> {
-    inner: CursorImpl<'a, T::Key, V, OccupiedEntry<'a, T::Key, Record<V>>>,
+pub struct Cursor<'a, K, V: Eq> {
+    inner: CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
-    fn new(
-        entry: OccupiedEntry<'a, T::Key, Record<V>>,
+impl<'a, K, V: Eq> Cursor<'a, K, V> {
+    const fn new(
+        entry: OccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, T::Key, V, OccupiedEntry<'a, T::Key, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, OccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }
     }
 }
 
-impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
+impl<K, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
@@ -92,7 +91,7 @@ pub struct Index<T: Translator, V: Eq> {
 
 impl<T: Translator, V: Eq> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<T::Key, Record<V>>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(Record {
@@ -100,20 +99,12 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
-}
 
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T, V>
-    where
-        Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
+    /// Create a new index with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-
             keys: Gauge::default(),
             items: Gauge::default(),
             pruned: Counter::default(),
@@ -127,6 +118,14 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         s
     }
+}
+
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where
@@ -143,7 +142,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -156,7 +155,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -174,7 +173,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
                 cursor.next();
                 cursor.insert(v);
             }
@@ -190,7 +189,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             Entry::Occupied(entry) => {
                 // Get entry
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 cursor.prune(&predicate);
 
@@ -211,7 +210,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             Entry::Occupied(entry) => {
                 // Get cursor
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 cursor.prune(&predicate);
             }
