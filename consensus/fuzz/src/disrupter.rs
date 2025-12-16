@@ -19,6 +19,7 @@ use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
+const LATEST_PROPOSALS_MAX_LEN: usize = 100;
 
 /// Which fields to mutate when creating a malformed proposal.
 #[derive(Debug, Clone, Arbitrary)]
@@ -67,11 +68,8 @@ where
         if lo == 0 && hi == u64::MAX {
             return self.fuzz_input.random_u64();
         }
-        let width = hi.saturating_sub(lo).saturating_add(1);
-        if width == 0 {
-            return lo;
-        }
-        lo.saturating_add(self.fuzz_input.random_u64() % width)
+        let width = (hi - lo) + 1;
+        lo + (self.fuzz_input.random_u64() % width)
     }
 
     fn mutation(&mut self) -> Mutation {
@@ -92,13 +90,27 @@ where
         }
     }
 
+    fn prune_latest_proposals(&mut self) {
+        let active_range_size = self
+            .last_notarized
+            .max(self.last_vote)
+            .saturating_sub(self.last_finalized)
+            .saturating_add(1);
+
+        let keep_count = (active_range_size.max(LATEST_PROPOSALS_MIN_LEN))
+            .min(LATEST_PROPOSALS_MAX_LEN as u64) as usize;
+
+        while self.latest_proposals.len() > keep_count {
+            self.latest_proposals.pop_front();
+        }
+    }
+
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
         let random_proposal = self.random_proposal();
         let v = self.random_view_for_proposal(self.last_vote);
 
         let proposal = match self.fuzz_input.random_byte() % 5 {
             0 => random_proposal,
-            // A mutated proposal based on the proposals from the past
             1 => {
                 let len = self.latest_proposals.len();
                 if len == 0 {
@@ -115,7 +127,7 @@ where
             }
             3 => {
                 let p = self.latest_proposals.back().unwrap_or(&random_proposal);
-                self.proposal_with_parent(p, v)
+                self.proposal_with_parent_view(p, v)
             }
             _ => {
                 let Some(p) = self.latest_proposals.front() else {
@@ -125,20 +137,7 @@ where
             }
         };
 
-        // Keep only proposals in the active range [last_finalized, max(last_notarized, last_vote)]
-        let active_range_size = self
-            .last_notarized
-            .max(self.last_vote)
-            .saturating_sub(self.last_finalized);
-
-        // Remove oldest proposals to keep only active_range_size elements
-        let keep_count = active_range_size
-            .max(LATEST_PROPOSALS_MIN_LEN)
-            .min(usize::MAX as u64) as usize;
-        while self.latest_proposals.len() > keep_count {
-            self.latest_proposals.pop_front();
-        }
-
+        self.prune_latest_proposals();
         proposal
     }
 
@@ -154,7 +153,7 @@ where
         )
     }
 
-    fn proposal_with_parent(
+    fn proposal_with_parent_view(
         &self,
         old: &Proposal<Sha256Digest>,
         view: u64,
@@ -191,21 +190,24 @@ where
         }
     }
 
+    fn add_or_sample_at_or_above(&mut self, view: u64, delta: u64) -> u64 {
+        view.checked_add(delta)
+            .unwrap_or_else(|| self.sample_inclusive(view, u64::MAX))
+    }
+
     fn random_view(&mut self, current_view: u64) -> u64 {
         let last_finalized = self.last_finalized;
         let last_notarized = self.last_notarized;
         let last_nullified = self.last_nullified;
 
         match self.fuzz_input.random_byte() % 7 {
-            // Too old (pre-finalized) - should be filtered
             0 => {
                 if last_finalized == 0 {
                     last_finalized
                 } else {
-                    self.sample_inclusive(0, last_finalized.saturating_sub(1))
+                    self.sample_inclusive(0, last_finalized - 1)
                 }
             }
-            // Active past: [last_finalized, current_view]
             1 => {
                 if current_view <= last_finalized {
                     last_finalized
@@ -213,21 +215,23 @@ where
                     self.sample_inclusive(last_finalized, current_view)
                 }
             }
-            // Active band: [last_finalized, min(last_notarized, current_view)]
             2 => {
                 let hi = last_notarized.min(current_view).max(last_finalized);
                 self.sample_inclusive(last_finalized, hi)
             }
-            // Near future: [current_view+1, current_view+4]
-            3 => current_view.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 4)),
-            // Moderate future: [current_view+5, current_view+10]
-            4 => current_view.saturating_add(5 + (self.fuzz_input.random_byte() as u64 % 6)),
-            // Nullification-based future: start after max(current_view, last_nullified)
+            3 => {
+                let k = 1 + (self.fuzz_input.random_byte() as u64 % 4);
+                self.add_or_sample_at_or_above(current_view, k)
+            }
+            4 => {
+                let k = 5 + (self.fuzz_input.random_byte() as u64 % 6);
+                self.add_or_sample_at_or_above(current_view, k)
+            }
             5 => {
                 let base = current_view.max(last_nullified);
-                base.saturating_add(1 + (self.fuzz_input.random_byte() as u64 % 10))
+                let k = 1 + (self.fuzz_input.random_byte() as u64 % 10);
+                self.add_or_sample_at_or_above(base, k)
             }
-            // Pure random
             _ => self.fuzz_input.random_u64(),
         }
     }
@@ -468,46 +472,50 @@ where
     }
 
     fn mutate_proposal(&mut self, original: &Proposal<Sha256Digest>) -> Proposal<Sha256Digest> {
+        let epoch = original.epoch();
+        let base_view_u64 = original.view().get();
+
+        let mut view = original.view();
+        let mut parent = original.parent;
+        let mut payload = original.payload;
+
         match self.mutation() {
-            Mutation::Payload => Proposal::new(
-                Round::new(original.epoch(), original.view()),
-                original.parent,
-                self.random_payload(),
-            ),
-            Mutation::View => Proposal::new(
-                Round::new(
-                    original.epoch(),
-                    View::new(self.random_view(original.view().get())),
-                ),
-                original.parent,
-                original.payload,
-            ),
-            Mutation::Parent => Proposal::new(
-                Round::new(original.epoch(), original.view()),
-                View::new(self.random_parent_view(original.view().get())),
-                original.payload,
-            ),
-            Mutation::All => Proposal::new(
-                Round::new(
-                    original.epoch(),
-                    View::new(self.random_view(original.view().get())),
-                ),
-                View::new(self.random_parent_view(original.view().get())),
-                self.random_payload(),
-            ),
+            Mutation::Payload => {
+                payload = self.random_payload();
+            }
+            Mutation::View => {
+                view = View::new(self.random_view(base_view_u64));
+            }
+            Mutation::Parent => {
+                parent = View::new(self.random_parent_view(base_view_u64));
+            }
+            Mutation::All => {
+                view = View::new(self.random_view(base_view_u64));
+                parent = View::new(self.random_parent_view(base_view_u64));
+                payload = self.random_payload();
+            }
         }
+
+        Proposal::new(Round::new(epoch, view), parent, payload)
     }
 
     async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        let (_, victim) = self
+        let Some(me) = self.scheme.me() else {
+            return;
+        };
+
+        let victim = self
             .scheme
             .participants()
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index as u32 != self.scheme.me().unwrap())
-            .choose(&mut self.context)
-            .unwrap();
-        let victim = victim.clone();
+            .filter(|(idx, _)| u32::try_from(*idx).ok() != Some(me))
+            .map(|(_, pk)| pk.clone())
+            .choose(&mut self.context);
+
+        let Some(victim) = victim else {
+            return;
+        };
 
         // Send 10 messages to victim
         for _ in 0..10 {
