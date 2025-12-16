@@ -9,7 +9,10 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{CleanAny, DirtyAny, ValueEncoding},
+        any::{
+            value::{FixedEncoding, VariableEncoding},
+            CleanAny, DirtyAny, ValueEncoding,
+        },
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as _},
         store::{Batchable, LogStore},
@@ -29,12 +32,17 @@ use std::{
 };
 use tracing::debug;
 
-mod operation;
-use operation::Operation;
-pub use operation::{FixedOperation, Update, VariableOperation};
+// mod operation;
+// use operation::Operation;
+// pub use operation::{FixedOperation, Update, VariableOperation};
 
 pub mod fixed;
 pub mod variable;
+
+pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+
+pub type FixedOperation<K, V> = Operation<K, FixedEncoding<V>>;
+pub type VariableOperation<K, V> = Operation<K, VariableEncoding<V>>;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
