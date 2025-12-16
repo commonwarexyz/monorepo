@@ -340,16 +340,10 @@ impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
 }
 
 impl<T: Read> Read for NonEmptyVec<T> {
-    type Cfg = (RangeCfg<usize>, T::Cfg);
+    type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let items = Vec::read_cfg(buf, cfg)?;
-        if items.is_empty() {
-            return Err(commonware_codec::Error::Invalid(
-                "NonEmptyVec",
-                "cannot decode empty vector",
-            ));
-        }
+        let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
         Ok(Self(items))
     }
 }
@@ -432,6 +426,7 @@ macro_rules! non_empty_vec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NZUsize;
 
     #[test]
     fn test_new() {
@@ -739,22 +734,13 @@ mod tests {
         let mut buf = Vec::with_capacity(v.encode_size());
         v.write(&mut buf);
 
-        let decoded =
-            NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=10), ()))
-                .unwrap();
+        let decoded = NonEmptyVec::<u8>::read_cfg(
+            &mut buf.as_slice(),
+            &(RangeCfg::from(NZUsize!(1)..=NZUsize!(10)), ()),
+        )
+        .unwrap();
 
         assert_eq!(v, decoded);
-    }
-
-    #[test]
-    fn test_codec_rejects_empty() {
-        let empty: Vec<u8> = vec![];
-        let mut buf = Vec::new();
-        empty.write(&mut buf);
-
-        let result =
-            NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=10), ()));
-        assert!(result.is_err());
     }
 
     #[test]
