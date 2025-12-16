@@ -27,7 +27,18 @@ use commonware_cryptography::{
 use commonware_utils::ordered::Set;
 
 /// Selects leaders for consensus rounds.
-pub trait Elector<S: Scheme> {
+///
+/// # Determinism Requirement
+///
+/// Implementations **must** be deterministic: given the same inputs (`participants`, `round`,
+/// and `seed`), the [`elect`](Elector::elect) method must always return the same leader index.
+/// This is critical for consensus correctness - all honest participants must agree on the
+/// leader for each round.
+///
+/// Similarly, [`first`](Elector::first) must be deterministic given the same `participants`
+/// and `epoch`, and [`seed`](Elector::seed) must produce the same seed given the same
+/// `round` and `certificate`.
+pub trait Elector<S: Scheme>: Send + 'static {
     /// The seed type used for leader election.
     ///
     /// For deterministic electors like [`RoundRobin`], this is `()`.
@@ -35,6 +46,8 @@ pub trait Elector<S: Scheme> {
     type Seed;
 
     /// Selects the leader for the first view of an epoch (view 1, no previous certificate).
+    ///
+    /// This method **must** be a pure function.
     ///
     /// The default implementation selects `epoch % num_participants`.
     fn first(&self, participants: &Set<S::PublicKey>, epoch: Epoch) -> u32 {
@@ -50,6 +63,8 @@ pub trait Elector<S: Scheme> {
 
     /// Selects the leader for the given round using the provided seed.
     ///
+    /// This method **must** be a pure function.
+    ///
     /// Returns the index of the selected leader in the participants list.
     fn elect(&self, participants: &Set<S::PublicKey>, round: Round, seed: &Self::Seed) -> u32;
 }
@@ -57,7 +72,6 @@ pub trait Elector<S: Scheme> {
 /// Simple round-robin leader election.
 ///
 /// Rotates through participants based on `(epoch + view) % num_participants`.
-/// Fully deterministic - the seed is `()` and ignored.
 ///
 /// Works with any signing scheme.
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,8 +95,7 @@ impl<S: Scheme> Elector<S> for RoundRobin {
 /// Leader election using threshold signature randomness.
 ///
 /// Uses the seed signature from BLS threshold certificates to derive unpredictable
-/// leader selection. Falls back to round-robin via [`first`](Elector::first)
-/// when no certificate is available.
+/// leader selection.
 ///
 /// Only works with [`bls12381_threshold`] signing scheme.
 #[derive(Debug, Clone, Copy, Default)]
