@@ -5,12 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
-        any::{
-            unordered::{FixedDb, Operation as DbOperation},
-            FixedConfig as Config, FixedEncoding,
-        },
-        store::CleanStore as _,
-        sync,
+        any::FixedEncoding, store::CleanStore as _, sync, FixedConfig as Config, FixedUnordered,
+        UnorderedOperation,
     },
     translator::TwoCap,
 };
@@ -109,7 +105,7 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
 async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
-        Op = DbOperation<Key, FixedEncoding<Value>>,
+        Op = UnorderedOperation<Key, FixedEncoding<Value>>,
     >,
 >(
     context: deterministic::Context,
@@ -121,7 +117,7 @@ async fn test_sync<
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<FixedDb<_, Key, Value, Sha256, TwoCap>, R> =
+    let sync_config: sync::engine::Config<FixedUnordered<_, Key, Value, Sha256, TwoCap>, R> =
         sync::engine::Config {
             context,
             update_rx: None,
@@ -133,7 +129,9 @@ async fn test_sync<
             max_outstanding_requests: 10,
         };
 
-    if let Ok(synced) = sync::sync::<FixedDb<_, Key, Value, Sha256, TwoCap>, _>(sync_config).await {
+    if let Ok(synced) =
+        sync::sync::<FixedUnordered<_, Key, Value, Sha256, TwoCap>, _>(sync_config).await
+    {
         let actual_root = synced.root();
         assert_eq!(
             actual_root, expected_root,
@@ -152,10 +150,12 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db =
-            FixedDb::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
-                .await
-                .expect("Failed to init source db");
+        let mut db = FixedUnordered::<_, Key, Value, Sha256, TwoCap>::init(
+            context.clone(),
+            test_config(TEST_NAME),
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -233,7 +233,7 @@ fn fuzz(mut input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = FixedDb::<_, Key, Value, Sha256, TwoCap>::init(
+                    db = FixedUnordered::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config(TEST_NAME),
                     )

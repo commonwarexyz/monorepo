@@ -38,6 +38,12 @@ pub mod operation;
 pub mod store;
 pub mod sync;
 pub mod verify;
+
+pub use any::{
+    ordered::{FixedDb as FixedOrdered, VariableDb as VariableOrdered},
+    unordered::{FixedDb as FixedUnordered, VariableDb as VariableUnordered},
+    FixedConfig, OrderedOperation, UnorderedOperation, VariableConfig,
+};
 pub use verify::{
     create_multi_proof, create_proof, create_proof_store, create_proof_store_from_digests,
     digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,

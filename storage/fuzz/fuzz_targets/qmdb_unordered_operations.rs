@@ -5,11 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, StandardHasher as Standard},
-    qmdb::{
-        any::{unordered::FixedDb, FixedConfig as Config},
-        store::CleanStore as _,
-        verify_proof,
-    },
+    qmdb::{store::CleanStore as _, verify_proof, FixedConfig as Config, FixedUnordered},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -58,9 +54,10 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = FixedDb::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
-            .await
-            .expect("init qmdb");
+        let mut db =
+            FixedUnordered::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+                .await
+                .expect("init qmdb");
 
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
