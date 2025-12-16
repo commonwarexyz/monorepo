@@ -1,15 +1,12 @@
-use crate::authenticated::data::Data;
+use crate::{authenticated::data::Data, Ingress};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
+    config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
 use commonware_utils::{IpAddrExt, SystemTimeExt};
-use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{net::IpAddr, time::Duration};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with [crate::authenticated::discovery::types].
@@ -58,6 +55,9 @@ pub struct PayloadConfig {
 
     /// The maximum length of the data that can be sent in a `Data` message.
     pub max_data_length: usize,
+
+    /// The maximum length of a DNS hostname in an ingress address.
+    pub max_host_len: usize,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -112,6 +112,7 @@ impl<C: PublicKey> Read for Payload<C> {
             max_bit_vec,
             max_peers,
             max_data_length,
+            max_host_len,
         } = cfg;
 
         let payload_type = <u8>::read(buf)?;
@@ -121,7 +122,8 @@ impl<C: PublicKey> Read for Payload<C> {
                 Ok(Self::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
+                let peers =
+                    Vec::<Info<C>>::read_cfg(buf, &(RangeCfg::new(..=*max_peers), *max_host_len))?;
                 Ok(Self::Peers(peers))
             }
             DATA_PREFIX => {
@@ -189,22 +191,22 @@ impl Read for BitVec {
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
+/// A signed message from a peer attesting to its own ingress address and public key at a given time.
 ///
-/// This is used to share the peer's socket address and public key with other peers in a verified
+/// This is used to share the peer's ingress address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug)]
 pub struct Info<C: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
+    /// The ingress address of the peer (how to dial them).
+    pub ingress: Ingress,
 
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the ingress was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
     pub public_key: C,
 
-    /// The peer's signature over the socket and timestamp.
+    /// The peer's signature over the ingress and timestamp.
     pub signature: C::Signature,
 }
 
@@ -213,7 +215,7 @@ impl<C: PublicKey> Info<C> {
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
             namespace,
-            &(self.socket, self.timestamp).encode(),
+            &(self.ingress.clone(), self.timestamp).encode(),
             &self.signature,
         )
     }
@@ -239,12 +241,13 @@ impl<C: PublicKey> Info<C> {
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
-        socket: SocketAddr,
+        ingress: impl Into<Ingress>,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(namespace, &(socket, timestamp).encode());
+        let ingress = ingress.into();
+        let signature = signer.sign(namespace, &(ingress.clone(), timestamp).encode());
         Self {
-            socket,
+            ingress,
             timestamp,
             public_key: signer.public_key(),
             signature,
@@ -254,7 +257,7 @@ impl<C: PublicKey> Info<C> {
 
 impl<C: PublicKey> EncodeSize for Info<C> {
     fn encode_size(&self) -> usize {
-        self.socket.encode_size()
+        self.ingress.encode_size()
             + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
@@ -263,7 +266,7 @@ impl<C: PublicKey> EncodeSize for Info<C> {
 
 impl<C: PublicKey> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
+        self.ingress.write(buf);
         UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
@@ -271,15 +274,16 @@ impl<C: PublicKey> Write for Info<C> {
 }
 
 impl<C: PublicKey> Read for Info<C> {
-    type Cfg = ();
+    /// Maximum host length for DNS ingress addresses.
+    type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let socket = SocketAddr::read(buf)?;
+    fn read_cfg(buf: &mut impl Buf, max_host_len: &usize) -> Result<Self, CodecError> {
+        let ingress = Ingress::read_cfg(buf, max_host_len)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(Self {
-            socket,
+            ingress,
             timestamp,
             public_key,
             signature,
@@ -294,13 +298,13 @@ where
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let socket = u.arbitrary()?;
+        let ingress = u.arbitrary()?;
         let timestamp = u.arbitrary()?;
         let public_key = u.arbitrary()?;
         let signature = u.arbitrary()?;
 
         Ok(Self {
-            socket,
+            ingress,
             timestamp,
             public_key,
             signature,
@@ -359,10 +363,12 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
-            // Check if IP is allowed
+            // Check if IP is allowed (only applicable for Socket addresses, not DNS)
             #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            if let Some(ip) = info.ingress.ip() {
+                if !self.allow_private_ips && !ip.is_global() {
+                    return Err(Error::PrivateIPsNotAllowed(ip));
+                }
             }
 
             // Check if peer is us
@@ -391,11 +397,11 @@ impl<C: PublicKey> InfoVerifier<C> {
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{Decode, DecodeRangeExt};
+    use commonware_codec::Decode;
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -403,7 +409,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let c = PrivateKey::random(&mut rng);
         Info {
-            socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
             public_key: c.public_key(),
             signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
@@ -424,18 +430,21 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<Info<PublicKey>>::decode_range(encoded, 3..=3).unwrap();
+        let decoded =
+            Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), 256)).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
-            assert_eq!(original.socket, decoded.socket);
+            assert_eq!(original.ingress, decoded.ingress);
             assert_eq!(original.timestamp, decoded.timestamp);
             assert_eq!(original.public_key, decoded.public_key);
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<Info<PublicKey>>::decode_range(original.encode(), ..3);
+        let too_short =
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(..3), 256));
         assert!(matches!(too_short, Err(CodecError::InvalidLength(3))));
 
-        let too_long = Vec::<Info<PublicKey>>::decode_range(original.encode(), 4..);
+        let too_long =
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(4..), 256));
         assert!(matches!(too_long, Err(CodecError::InvalidLength(3))));
     }
 
@@ -446,6 +455,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 100,
+            max_host_len: 256,
         };
 
         // Test BitVec
@@ -468,7 +478,7 @@ mod tests {
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
-            assert_eq!(a.socket, b.socket);
+            assert_eq!(a.ingress, b.ingress);
             assert_eq!(a.timestamp, b.timestamp);
             assert_eq!(a.public_key, b.public_key);
             assert_eq!(a.signature, b.signature);
@@ -493,6 +503,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 100,
+            max_host_len: 256,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
@@ -505,6 +516,7 @@ mod tests {
             max_bit_vec: 8,
             max_peers: 10,
             max_data_length: 32,
+            max_host_len: 256,
         };
         let encoded = Payload::<PublicKey>::BitVec(BitVec {
             index: 5,
@@ -521,6 +533,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 1,
             max_data_length: 32,
+            max_host_len: 256,
         };
         let peers = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(peers).encode();
@@ -534,6 +547,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 4,
+            max_host_len: 256,
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,

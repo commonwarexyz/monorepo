@@ -223,7 +223,7 @@ impl arbitrary::Arbitrary<'_> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode, Encode};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]

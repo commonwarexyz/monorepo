@@ -580,7 +580,7 @@ mod tests {
             oracle
                 .update(
                     0,
-                    [(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]
+                    [(my_pk.clone(), my_addr.into()), (pk_1.clone(), addr_1.into())]
                         .try_into()
                         .unwrap(),
                 )
@@ -603,7 +603,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .update(1, [(pk_2.clone(), addr_2)].try_into().unwrap())
+                .update(1, [(pk_2.clone(), addr_2.into())].try_into().unwrap())
                 .await;
 
             // Wait for a listener update

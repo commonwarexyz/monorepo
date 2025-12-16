@@ -506,7 +506,7 @@ mod tests {
             }
             let peers = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect::<Vec<_>>();
 
             // Create networks
@@ -603,7 +603,7 @@ mod tests {
             }
             let peers: Map<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
 
@@ -656,7 +656,7 @@ mod tests {
             }
             let peers: Map<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
             let (sk0, _, addr0) = peers_and_sks[0].clone();
@@ -737,7 +737,7 @@ mod tests {
             let set10: Map<_, _> = peers_and_sks
                 .iter()
                 .take(2)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
             oracle.update(10, set10.clone()).await;
@@ -750,7 +750,7 @@ mod tests {
             let set9: Map<_, _> = peers_and_sks
                 .iter()
                 .skip(2)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
             oracle.update(9, set9.clone()).await;
@@ -759,7 +759,7 @@ mod tests {
             let set11: Map<_, _> = peers_and_sks
                 .iter()
                 .skip(4)
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
             oracle.update(11, set11.clone()).await;
@@ -793,7 +793,7 @@ mod tests {
             }
             let peers: Map<_, _> = peers_and_sks
                 .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
 
@@ -969,7 +969,7 @@ mod tests {
             let mut subscription = oracle.subscribe().await;
 
             // Register a peer set that does NOT include self
-            let peer_set: Map<_, _> = [(other_pk.clone(), other_addr)].try_into().unwrap();
+            let peer_set: Map<_, _> = [(other_pk.clone(), other_addr.into())].try_into().unwrap();
             oracle.update(1, peer_set.clone()).await;
 
             // Receive subscription notification
@@ -1000,7 +1000,7 @@ mod tests {
 
             // Now register a peer set that DOES include self
             let peer_set: Map<_, _> =
-                [(self_pk.clone(), self_addr), (other_pk.clone(), other_addr)]
+                [(self_pk.clone(), self_addr.into()), (other_pk.clone(), other_addr.into())]
                     .try_into()
                     .unwrap();
             oracle.update(2, peer_set.clone()).await;

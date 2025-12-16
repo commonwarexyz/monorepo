@@ -229,7 +229,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        deterministic, tokio, Clock, Metrics, Network as RNetwork, Resolver, Runner, Spawner,
     };
     use commonware_utils::{ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -271,7 +271,14 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner
+            + Clock
+            + ReasonablyRealtime
+            + Rng
+            + CryptoRng
+            + RNetwork
+            + Resolver
+            + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -298,7 +305,7 @@ mod tests {
             if i > 0 {
                 bootstrappers.push((
                     addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port).into(),
                 ));
             }
 

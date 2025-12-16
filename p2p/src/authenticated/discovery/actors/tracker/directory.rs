@@ -1,8 +1,11 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::discovery::{
-    actors::tracker::ingress::Releaser,
-    metrics,
-    types::{self, Info},
+use crate::{
+    authenticated::discovery::{
+        actors::tracker::ingress::Releaser,
+        metrics,
+        types::{self, Info},
+    },
+    Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -13,7 +16,6 @@ use governor::{clock::Clock as GClock, Quota};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
     ops::Deref,
 };
 use tracing::{debug, warn};
@@ -66,15 +68,15 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
-        bootstrappers: Vec<(C, SocketAddr)>,
+        bootstrappers: Vec<(C, Ingress)>,
         myself: Info<C>,
         cfg: Config,
         releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
-        for (peer, socket) in bootstrappers {
-            peers.insert(peer, Record::bootstrapper(socket));
+        for (peer, ingress) in bootstrappers {
+            peers.insert(peer, Record::bootstrapper(ingress));
         }
 
         // Add myself to the list of peers.
@@ -111,8 +113,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
-        if let Metadata::Dialer(_, socket) = metadata {
-            record.dial_failure(socket);
+        if let Metadata::Dialer(_, ingress) = &metadata {
+            record.dial_failure(ingress);
         }
 
         let want = record.want(self.dial_fail_limit);
@@ -230,8 +232,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
-        let socket = self.peers.get(peer)?.socket()?;
-        self.reserve(Metadata::Dialer(peer.clone(), socket))
+        let ingress = self.peers.get(peer)?.ingress()?.clone();
+        self.reserve(Metadata::Dialer(peer.clone(), ingress))
     }
 
     /// Attempt to reserve a peer for the listener.

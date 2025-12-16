@@ -1,10 +1,11 @@
+use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_utils::NZU32;
 use governor::Quota;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-/// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper<P> = (P, SocketAddr);
+/// Known peer and its accompanying ingress address that will be dialed on startup.
+pub type Bootstrapper<P> = (P, Ingress);
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -24,11 +25,14 @@ pub struct Config<C: Signer> {
     /// Address to listen on.
     pub listen: SocketAddr,
 
-    /// Dialable address of the peer.
-    pub dialable: SocketAddr,
+    /// Dialable ingress address of the peer.
+    pub dialable: Ingress,
 
     /// Peers dialed on startup.
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+
+    /// Maximum length of a DNS hostname in an ingress address.
+    pub max_host_len: usize,
 
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
@@ -125,7 +129,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        dialable: SocketAddr,
+        dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
@@ -133,8 +137,9 @@ impl<C: Signer> Config<C> {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
+            dialable: dialable.into(),
             bootstrappers,
+            max_host_len: 256,
 
             allow_private_ips: false,
             max_message_size,
@@ -168,7 +173,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        dialable: SocketAddr,
+        dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
@@ -176,8 +181,9 @@ impl<C: Signer> Config<C> {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
+            dialable: dialable.into(),
             bootstrappers,
+            max_host_len: 256,
 
             allow_private_ips: true,
             max_message_size,
@@ -212,8 +218,9 @@ impl<C: Signer> Config<C> {
             crypto,
             namespace: b"test_namespace".to_vec(),
             listen,
-            dialable: listen,
+            dialable: listen.into(),
             bootstrappers,
+            max_host_len: 256,
 
             allow_private_ips: true,
             max_message_size,

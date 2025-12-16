@@ -313,7 +313,7 @@ mod tests {
         Config {
             crypto,
             namespace: b"test_tracker_actor_namespace".to_vec(),
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).into(),
             bootstrappers,
             allow_private_ips: true,
             synchrony_bound: Duration::from_secs(10),
@@ -342,7 +342,8 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let mut signature = signer.sign(ip_namespace, &(socket, timestamp).encode());
+        let ingress = crate::Ingress::Socket(socket);
+        let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
             let mut sig_bytes = signature.encode();
@@ -351,7 +352,7 @@ mod tests {
         }
 
         Info {
-            socket,
+            ingress,
             timestamp,
             public_key: peer_info_pk,
             signature,
@@ -496,7 +497,7 @@ mod tests {
                     assert_eq!(infos.len(), 1);
                     let tracker_info = &infos[0];
                     assert_eq!(tracker_info.public_key, tracker_pk);
-                    assert_eq!(tracker_info.socket, cfg.address);
+                    assert_eq!(tracker_info.ingress, cfg.address);
                     assert!(tracker_info.verify(&ip_namespace));
                 }
                 _ => panic!("Expected Peers message with tracker info"),
@@ -511,7 +512,7 @@ mod tests {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9999);
             let cfg_with_boot =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr.into())]);
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
@@ -718,7 +719,7 @@ mod tests {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
                     assert_eq!(received_pk2_info.public_key, pk2);
-                    assert_eq!(received_pk2_info.socket, pk2_addr);
+                    assert_eq!(received_pk2_info.ingress, crate::Ingress::Socket(pk2_addr));
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
                 _ => panic!("pk1 did not receive expected Info for pk2",),
@@ -887,7 +888,7 @@ mod tests {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
             let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr.into())]);
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
@@ -903,7 +904,7 @@ mod tests {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
             let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr.into())]);
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
@@ -916,7 +917,7 @@ mod tests {
                         addr,
                     ) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, boot_addr);
+                        assert_eq!(*addr, crate::Ingress::Socket(boot_addr));
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }
@@ -1053,7 +1054,7 @@ mod tests {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
-                    assert_eq!(infos[0].socket, peer1_addr);
+                    assert_eq!(infos[0].ingress, crate::Ingress::Socket(peer1_addr));
                 }
                 _ => panic!("Expected Peers message from tracker"),
             }
