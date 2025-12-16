@@ -84,6 +84,7 @@
 //!
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
+//! - The list of dealers who distributed shares,
 //! - The list of players who received shares,
 //! - The set of players whose shares may have been revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
