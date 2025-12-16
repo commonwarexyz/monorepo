@@ -3,7 +3,7 @@ mod test {
     use crate::{
         index::{ordered::Index, Unordered as _},
         journal::contiguous::fixed::Journal,
-        mmr::{mem::Mmr, Location, Position, StandardHasher as Standard},
+        mmr::{Location, Position, StandardHasher as Standard},
         qmdb::{
             any::{
                 ordered::Any, FixedConfig as Config, FixedEncoding, OrderedOperation, OrderedUpdate,
@@ -136,15 +136,10 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = Standard::<Sha256>::new();
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert!(db.is_empty());
             assert!(db.get_metadata().await.unwrap().is_none());
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            assert_eq!(
-                &db.root(),
-                Mmr::default().merkleize(&mut hasher, None).root()
-            );
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.
@@ -154,21 +149,21 @@ mod test {
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
 
-            // Test calling commit on an empty db which should make it (durably) non-empty.
+            // Test calling commit on an empty db.
             let metadata = Sha256::fill(3u8);
             let range = db.commit(Some(metadata)).await.unwrap();
-            assert_eq!(range.start, 0);
-            assert_eq!(range.end, 1);
-            assert_eq!(db.op_count(), 1); // floor op added
+            assert_eq!(range.start, 1);
+            assert_eq!(range.end, 2);
+            assert_eq!(db.op_count(), 2); // floor op added
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let root = db.root();
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.op_count(), 2);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             assert_eq!(db.root(), root);
 
@@ -300,17 +295,17 @@ mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.op_count(), 2619);
+            assert_eq!(db.op_count(), 2620);
             assert_eq!(db.inactivity_floor_loc(), 0);
-            assert_eq!(db.op_count(), 2619);
+            assert_eq!(db.op_count(), 2620);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 4240);
-            assert_eq!(db.inactivity_floor_loc(), 3382);
+            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -318,8 +313,8 @@ mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 4240);
-            assert_eq!(db.inactivity_floor_loc(), 3382);
+            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -439,7 +434,7 @@ mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut AnyTest) {
@@ -454,14 +449,14 @@ mod test {
             apply_ops(&mut db).await;
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the log.
             apply_ops(&mut db).await;
             db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -469,14 +464,14 @@ mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_ops(&mut db).await;
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
-            assert!(db.op_count() > 0);
+            assert!(db.op_count() > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -629,15 +624,15 @@ mod test {
             // Test singleton database
             let (single_proof, single_ops) = db
                 .historical_proof(
+                    Location::new_unchecked(2),
                     Location::new_unchecked(1),
-                    Location::new_unchecked(0),
                     NZU64!(1),
                 )
                 .await
                 .unwrap();
             assert_eq!(
                 single_proof.size,
-                Position::try_from(Location::new_unchecked(1)).unwrap()
+                Position::try_from(Location::new_unchecked(2)).unwrap()
             );
             assert_eq!(single_ops.len(), 1);
 
@@ -651,7 +646,7 @@ mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
-                Location::new_unchecked(0),
+                Location::new_unchecked(1),
                 &single_ops,
                 &single_root
             ));
@@ -670,15 +665,15 @@ mod test {
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db
                 .historical_proof(
-                    Location::new_unchecked(3),
-                    Location::new_unchecked(0),
+                    Location::new_unchecked(4),
+                    Location::new_unchecked(1),
                     NZU64!(3),
                 )
                 .await
                 .unwrap();
             assert_eq!(
                 min_proof.size,
-                Position::try_from(Location::new_unchecked(3)).unwrap()
+                Position::try_from(Location::new_unchecked(4)).unwrap()
             );
             assert_eq!(min_ops.len(), 3);
 

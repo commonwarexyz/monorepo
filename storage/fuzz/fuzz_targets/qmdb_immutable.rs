@@ -171,10 +171,9 @@ fn fuzz(input: FuzzInput) {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
                         if let Ok(()) = db.prune(safe_loc).await {
-                            if let Some(oldest) = db.oldest_retained_loc() {
-                                set_locations.retain(|(_, l)| *l >= oldest);
-                                keys_set.retain(|(_, l)| *l >= oldest);
-                            }
+                            let oldest = db.oldest_retained_loc();
+                            set_locations.retain(|(_, l)| *l >= oldest);
+                            keys_set.retain(|(_, l)| *l >= oldest);
                         }
                     }
                 }
@@ -211,12 +210,10 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        if let Some(oldest) = db.oldest_retained_loc() {
-                            if safe_start >= oldest {
-                                let _ = db
-                                    .historical_proof(safe_size, safe_start, safe_max_ops)
-                                    .await;
-                            }
+                        if safe_start >= db.oldest_retained_loc() {
+                            let _ = db
+                                .historical_proof(safe_size, safe_start, safe_max_ops)
+                                .await;
                         }
                     }
                 }

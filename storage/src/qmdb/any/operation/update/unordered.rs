@@ -10,7 +10,7 @@ use commonware_codec::{
 use commonware_utils::{hex, Array};
 use std::fmt;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub struct UnorderedUpdate<K: Array, V: ValueEncoding>(pub K, pub V::Value);
 
 #[cfg(feature = "arbitrary")]

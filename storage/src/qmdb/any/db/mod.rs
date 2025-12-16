@@ -47,14 +47,15 @@ pub struct IndexedLog<
     /// # Invariants
     ///
     /// - The log is never pruned beyond the inactivity floor.
+    /// - There is always at least one commit operation in the log.
     pub(crate) log: authenticated::Journal<E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location,
 
-    /// The location of the last commit operation (if any exists).
-    pub(crate) last_commit: Option<Location>,
+    /// The location of the last commit operation.
+    pub(crate) last_commit_loc: Location,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -106,11 +107,6 @@ where
     pub fn oldest_retained_loc(&self) -> Option<Location> {
         self.log.oldest_retained_loc()
     }
-
-    /// Returns the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        self.log.pruning_boundary()
-    }
 }
 
 impl<
@@ -135,24 +131,19 @@ where
     pub(crate) async fn recover_inactivity_floor(
         log: &authenticated::Journal<E, C, H, S>,
     ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1);
-        if let Some(last_commit_loc) = last_commit_loc {
-            match log.read(last_commit_loc).await? {
-                Operation::CommitFloor(_, location) => Ok(location),
-                _ => unreachable!("last commit is not a CommitFloor operation"),
-            }
-        } else {
-            Ok(Location::new_unchecked(0))
-        }
-    }
-
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit = log.read(last_commit_loc).await?;
+        let inactivity_floor = match last_commit {
+            Operation::CommitFloor(_, loc) => loc,
+            _ => unreachable!("last commit is not a CommitFloor operation"),
         };
 
-        match self.log.read(last_commit).await? {
+        Ok(inactivity_floor)
+    }
+
+    /// Get the metadata associated with the last commit.
+    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+        match self.log.read(self.last_commit_loc).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
@@ -191,7 +182,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    /// Panics if the last operation is not a commit.
     pub async fn init_from_log<F>(
         mut index: I,
         log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
@@ -215,13 +206,13 @@ where
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
 
-        let last_commit = log.size().checked_sub(1);
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
 
         Ok(Self {
             log,
             inactivity_floor_loc,
             snapshot: index,
-            last_commit,
+            last_commit_loc,
             steps: 0,
             active_keys,
         })
@@ -229,8 +220,7 @@ where
 
     /// Returns an [IndexedLog] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
-    /// inactivity floor. The last commit location is set to None and it is the responsibility of the
-    /// caller to ensure it is set correctly.
+    /// inactivity floor. The last operation is assumed to be a commit.
     pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
         log: authenticated::Journal<E, C, H, Clean<H::Digest>>,
@@ -238,12 +228,17 @@ where
     ) -> Result<Self, Error> {
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        assert!(matches!(
+            log.read(last_commit_loc).await?,
+            Operation::CommitFloor(_, _)
+        ));
 
         Ok(Self {
             log,
             inactivity_floor_loc,
             snapshot,
-            last_commit: None,
+            last_commit_loc,
             steps: 0,
             active_keys,
         })
@@ -267,7 +262,7 @@ where
         IndexedLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
+            last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,
@@ -324,9 +319,7 @@ where
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations.
     pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        let start_loc = self
-            .last_commit
-            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+        let start_loc = self.last_commit_loc + 1;
 
         let inactivity_floor_loc = self.raise_floor().await?;
 
@@ -344,7 +337,7 @@ where
     ///
     /// Panics if the given operation is not a commit operation.
     pub(crate) async fn apply_commit_op(&mut self, op: C::Item) -> Result<(), Error> {
-        self.last_commit = Some(self.op_count());
+        self.last_commit_loc = self.op_count();
         self.log.append(op).await?;
 
         self.log.commit().await.map_err(Into::into)
@@ -461,7 +454,7 @@ where
         IndexedLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
+            last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,

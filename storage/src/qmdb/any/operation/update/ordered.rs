@@ -10,7 +10,7 @@ use commonware_codec::{
 use commonware_utils::{hex, Array};
 use std::fmt;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub struct OrderedUpdate<K: Array + Ord, V: ValueEncoding> {
     pub key: K,
     pub value: V::Value,

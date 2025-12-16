@@ -2,6 +2,7 @@ use commonware_codec::{Codec, CodecFixed, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use tracing::warn;
 
 use crate::{
     index::unordered::Index,
@@ -66,7 +67,7 @@ where
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = authenticated::Journal::<_, VariableJournal<_, _>, _, _>::new(
+        let mut log = authenticated::Journal::<_, VariableJournal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
@@ -75,6 +76,16 @@ where
             },
         )
         .await?;
+
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(UnorderedOperation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+            ))
+            .await?;
+            log.sync().await?;
+        }
 
         let log = Self::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
@@ -119,7 +130,16 @@ where
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
         let translator = cfg.translator.clone();
-        let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(UnorderedOperation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+            ))
+            .await?;
+            log.sync().await?;
+        }
         let index = Index::new(context.with_label("index"), translator);
         let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
 
@@ -133,7 +153,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         journal::contiguous::fixed::Journal,
-        mmr::{mem::Mmr as MemMmr, Location, Proof, StandardHasher},
+        mmr::{Location, StandardHasher},
         qmdb::{
             any::{
                 test::{fixed_db_config, variable_db_config},
@@ -196,15 +216,10 @@ pub(super) mod test {
     ) where
         D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
         let empty_root = db.root();
-        let mut hasher = StandardHasher::<Sha256>::new();
-        assert_eq!(
-            empty_root,
-            *MemMmr::default().merkleize(&mut hasher, None).root()
-        );
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
@@ -214,43 +229,24 @@ pub(super) mod test {
         let mut db = db.into_dirty();
         db.update(k1, v1).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), empty_root);
 
-        let empty_proof = Proof::default();
-        let empty_ops: Vec<u8> = vec![];
-        assert!(verify_proof(
-            &mut hasher,
-            &empty_proof,
-            Location::new_unchecked(0),
-            &empty_ops,
-            &empty_root
-        ));
-
-        // Test calling commit on an empty db which should make it (durably) non-empty.
+        // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let range = db.commit(Some(metadata)).await.unwrap();
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 1);
-        assert_eq!(db.op_count(), 1); // commit op added
+        assert_eq!(range.start, 1);
+        assert_eq!(range.end, 2);
+        assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
-
-        // Empty proof should no longer verify.
-        assert!(!verify_proof(
-            &mut hasher,
-            &empty_proof,
-            Location::new_unchecked(0),
-            &empty_ops,
-            &root
-        ));
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
@@ -335,7 +331,7 @@ pub(super) mod test {
             map.remove(&k);
         }
 
-        assert_eq!(db.op_count(), Location::new_unchecked(1477));
+        assert_eq!(db.op_count(), Location::new_unchecked(1478));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
@@ -343,16 +339,16 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
-        assert_eq!(db.op_count(), Location::new_unchecked(1956));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+        assert_eq!(db.op_count(), Location::new_unchecked(1957));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
         // Close & reopen and ensure state matches.
         let root = db.root();
         db.close().await.unwrap();
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
-        assert_eq!(db.op_count(), Location::new_unchecked(1956));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+        assert_eq!(db.op_count(), Location::new_unchecked(1957));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
@@ -415,7 +411,7 @@ pub(super) mod test {
         db.update(d2, v1).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
+        assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion + initial commit.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
@@ -425,40 +421,40 @@ pub(super) mod test {
         assert!(!db.create(d1, v1).await.unwrap());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        // Should have moved 3 active operations to tip, leading to floor of 6.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
-        assert_eq!(db.op_count(), 9); // floor of 6 + 2 active keys + 1 commit.
+        // Should have moved 3 active operations to tip, leading to floor of 7.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
+        assert_eq!(db.op_count(), 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
         assert!(db.delete(d1).await.unwrap());
         assert!(db.delete(d2).await.unwrap());
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
-        assert_eq!(db.op_count(), 11); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
+        assert_eq!(db.op_count(), 12); // 2 new delete ops.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
 
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let mut db = db.into_dirty();
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
-        assert_eq!(db.op_count(), 12); // only commit should remain.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
+        assert_eq!(db.op_count(), 13); // only commit should remain.
 
         // Multiple deletions of the same key should be a no-op.
         assert!(!db.delete(d1).await.unwrap());
-        assert_eq!(db.op_count(), 12);
+        assert_eq!(db.op_count(), 13);
 
         // Deletions of non-existent keys should be a no-op.
         let d3 = Sha256::fill(3u8);
         assert!(!db.delete(d3).await.unwrap());
-        assert_eq!(db.op_count(), 12);
+        assert_eq!(db.op_count(), 13);
 
         // Make sure closing/reopening gets us back to the same state.
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
-        assert_eq!(db.op_count(), 13);
+        assert_eq!(db.op_count(), 14);
         let root = db.root();
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 13);
+        assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
         let mut db = db.into_dirty();
 
@@ -474,12 +470,12 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        assert_eq!(db.op_count(), 22);
+        assert_eq!(db.op_count(), 23);
         let root = db.root();
         let mut db = reopen_db(context.clone()).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), 22);
+        assert_eq!(db.op_count(), 23);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
@@ -605,7 +601,7 @@ pub(super) mod test {
         let root = db.root();
 
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -615,7 +611,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -625,7 +621,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -637,7 +633,7 @@ pub(super) mod test {
             }
         }
         let db = reopen_db(context.clone()).await;
-        assert_eq!(db.op_count(), 0);
+        assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_dirty();
@@ -649,7 +645,7 @@ pub(super) mod test {
         let mut db = db.merkleize().await.unwrap();
         db.commit(None).await.unwrap();
         let db = reopen_db(context.clone()).await;
-        assert!(db.op_count() > 0);
+        assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();
