@@ -1610,12 +1610,9 @@ mod tests {
 
         // Check that DNS mappings persist after recovery
         let executor = Runner::from(checkpoint);
-        executor.start({
-            let addrs = addrs.clone();
-            move |context| async move {
-                let resolved = context.resolve(host).await.unwrap();
-                assert_eq!(resolved, addrs);
-            }
+        executor.start(move |context| async move {
+            let resolved = context.resolve(host).await.unwrap();
+            assert_eq!(resolved, addrs);
         });
     }
 
