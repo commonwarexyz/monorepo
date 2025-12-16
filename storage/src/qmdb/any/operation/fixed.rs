@@ -30,10 +30,18 @@ where
     V: FixedValue,
     S: Update<K, FixedEncoding<V>> + FixedSize,
 {
-    const SIZE: usize = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-        Self::UPDATE_OP_SIZE
-    } else {
-        Self::COMMIT_OP_SIZE
+    // Self::DELETE_OP_SIZE
+    const SIZE: usize = {
+        let size = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
+            Self::UPDATE_OP_SIZE
+        } else {
+            Self::COMMIT_OP_SIZE
+        };
+        if size > Self::DELETE_OP_SIZE {
+            size
+        } else {
+            Self::DELETE_OP_SIZE
+        }
     };
 }
 
@@ -103,7 +111,7 @@ where
                 let floor_loc = u64::read(buf)?;
                 let floor_loc = Location::new(floor_loc).ok_or_else(|| {
                     CodecError::Invalid(
-                        "storage::qmdb::any::todo::Operation2",
+                        "storage::qmdb::any::operation::fixed::Operation",
                         "commit floor location overflow",
                     )
                 })?;

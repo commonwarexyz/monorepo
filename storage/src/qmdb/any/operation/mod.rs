@@ -213,6 +213,9 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::qmdb::any::{
+            ordered::Operation as OrderedOperation, unordered::Operation as UnorderedOperation,
+        };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;
 
