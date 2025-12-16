@@ -392,6 +392,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
+
             tree: child,
             execution: Execution::default(),
             instrumented: false,
