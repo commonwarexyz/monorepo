@@ -7,8 +7,11 @@ required_labels=(
   breaking-api
 )
 
-# Check if any conformance.toml files changed
-changed=$(gh pr diff "$PR_NUMBER" --name-only | grep 'conformance\.toml$' || true)
+# Get changed files
+diff=$(gh pr diff "$PR_NUMBER" --name-only)
+
+# Filter for conformance.toml files
+changed=$(echo "$diff" | grep 'conformance\.toml$' || true)
 
 if [ -z "$changed" ]; then
   echo "No conformance.toml files changed"
