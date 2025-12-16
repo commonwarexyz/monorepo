@@ -568,6 +568,7 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
+        net::IpAddr,
         pin::Pin,
         str::FromStr,
         sync::{
@@ -2635,6 +2636,39 @@ mod tests {
 
             // Wait for the client task to complete
             client_handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_deterministic_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register DNS mappings
+            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+            context.register("example.com", Some(vec![ip1, ip2]));
+
+            // Resolve registered hostname
+            let addrs = context.resolve("example.com").await.unwrap();
+            assert_eq!(addrs, vec![ip1, ip2]);
+
+            // Resolve unregistered hostname
+            let result = context.resolve("unknown.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Remove mapping
+            context.register("example.com", None);
+            let result = context.resolve("example.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
+    #[test]
+    fn test_tokio_resolver() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let addrs = context.resolve("commonware.xyz").await.unwrap();
+            assert!(!addrs.is_empty());
         });
     }
 
