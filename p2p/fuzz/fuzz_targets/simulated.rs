@@ -136,7 +136,7 @@ fn fuzz(input: FuzzInput) {
         let mut channels: HashMap<
             (usize, u8),
             (
-                commonware_p2p::simulated::Sender<ed25519::PublicKey>,
+                commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();

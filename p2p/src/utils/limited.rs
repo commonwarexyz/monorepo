@@ -150,7 +150,7 @@ where
 
 /// Filters peers by rate limit, returning those that pass and the latest retry
 /// time among those that don't.
-fn filter_rate_limited<'a, K, C>(
+pub(crate) fn filter_rate_limited<'a, K, C>(
     peers: impl Iterator<Item = &'a K>,
     rate_limit: &RateLimiter<K, C>,
 ) -> (Vec<K>, Option<C::Instant>)

@@ -64,10 +64,10 @@ fn extract_id_from_message(message: &Message) -> u32 {
 }
 
 /// All state for a given peer
-type PeerIdentity = (
+type PeerIdentity<C> = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
@@ -335,10 +335,10 @@ async fn run_simulation_logic<
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
-) -> Vec<PeerIdentity> {
+) -> Vec<PeerIdentity<C>> {
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
@@ -372,9 +372,9 @@ async fn setup_network_identities(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    identities: &[PeerIdentity],
+async fn setup_network_links<C: GClock + Clone + Send + 'static>(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
+    identities: &[PeerIdentity<C>],
     latencies: &Latencies,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
@@ -397,11 +397,11 @@ async fn setup_network_links(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock + Clone + Send + 'static>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock + Clone + Send + GClock + 'static>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
-    identities: Vec<PeerIdentity>,
+    identities: Vec<PeerIdentity<C>>,
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<Handle<PeerResult>> {
@@ -556,12 +556,12 @@ async fn process_single_command_check<C: Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Clock>(
+async fn process_command<C: Clock + GClock + Clone + Send + 'static>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
