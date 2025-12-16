@@ -1293,4 +1293,86 @@ mod tests {
             assert_no_rate_limiting(&context);
         });
     }
+
+    #[test_traced]
+    fn test_dns_resolving_to_private_ip_not_dialed() {
+        // Test that when allow_private_ips=false, DNS addresses that resolve
+        // to private IPs are not dialed.
+        let base_port = 4400;
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let peer0 = ed25519::PrivateKey::from_seed(0);
+            let peer1 = ed25519::PrivateKey::from_seed(1);
+
+            let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+            let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+
+            // Register DNS mapping that resolves to localhost (private IP)
+            context.resolver_register("peer-0.local".to_string(), Some(vec![socket0.ip()]));
+
+            // Create peer 0 with allow_private_ips=true
+            let mut config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
+            config0.allow_private_ips = true;
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+
+            // Peer 0 knows about peer 1 with a socket address
+            let peers0: Vec<(_, crate::Address)> = vec![
+                (peer0.public_key(), crate::Address::Symmetric(socket0)),
+                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+            ];
+            oracle0.update(0, peers0.try_into().unwrap()).await;
+
+            let (_sender0, mut receiver0) =
+                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network0.start();
+
+            // Create peer 1 with allow_private_ips=false
+            let mut config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
+            config1.allow_private_ips = false; // This should prevent dialing the private IP
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+
+            // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
+            let peers1: Vec<(_, crate::Address)> = vec![
+                (
+                    peer0.public_key(),
+                    crate::Address::Asymmetric {
+                        ingress: crate::Ingress::Dns {
+                            host: "peer-0.local".to_string(),
+                            port: socket0.port(),
+                        },
+                        egress: socket0,
+                    },
+                ),
+                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+            ];
+            oracle1.update(0, peers1.try_into().unwrap()).await;
+
+            let (mut sender1, _receiver1) =
+                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network1.start();
+
+            // Wait for a period during which peer 1 would normally connect
+            context.sleep(Duration::from_secs(5)).await;
+
+            // Try to send from peer 1 - should not reach anyone since private IPs are blocked
+            let sent = sender1
+                .send(Recipients::All, peer1.public_key().to_vec().into(), true)
+                .await
+                .unwrap();
+            assert!(
+                sent.is_empty(),
+                "peer 1 should not have connected to peer 0 (private IP)"
+            );
+
+            // Verify peer 0 received nothing from peer 1
+            select! {
+                msg = receiver0.recv() => {
+                    panic!("peer 0 should not have received any message, got: {msg:?}");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    // Expected: timeout with no message
+                }
+            }
+        });
+    }
 }
