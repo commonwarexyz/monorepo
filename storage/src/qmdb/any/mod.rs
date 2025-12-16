@@ -25,6 +25,8 @@ use std::{
     ops::Range,
 };
 
+mod operation;
+
 // Context byte prefixes for Any operation types.
 const DELETE_CONTEXT: u8 = 0;
 const UPDATE_CONTEXT: u8 = 1;
