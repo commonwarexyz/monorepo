@@ -1,6 +1,91 @@
+use commonware_codec::{Codec, Read};
+use commonware_cryptography::{DigestOf, Hasher};
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
+
+use crate::{
+    index::unordered::Index,
+    journal::{
+        authenticated,
+        contiguous::variable::{Config as VariableJournalConfig, Journal as VariableJournal},
+    },
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    qmdb::{
+        any::{
+            db::IndexedLog, UnorderedOperation, UnorderedUpdate, VariableConfig, VariableEncoding,
+            VariableValue,
+        },
+        Error,
+    },
+    translator::Translator,
+};
+
 pub mod fixed;
 pub mod sync;
 pub mod variable;
+
+/// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
+/// value ever associated with a key.
+pub type Any<E, K, V, C, I, H, S = Clean<DigestOf<H>>> =
+    IndexedLog<E, K, V, UnorderedUpdate<K, V>, C, I, H, S>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+    Any<
+        E,
+        K,
+        VariableEncoding<V>,
+        VariableJournal<E, UnorderedOperation<K, VariableEncoding<V>>>,
+        Index<T, Location>,
+        H,
+    >
+where
+    UnorderedOperation<K, VariableEncoding<V>>: Codec,
+{
+    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(
+        context: E,
+        cfg: VariableConfig<T, <UnorderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        let mmr_config = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool.clone(),
+        };
+
+        let journal_config = VariableJournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_blob,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let log = authenticated::Journal::<_, VariableJournal<_, _>, _, _>::new(
+            context.with_label("log"),
+            mmr_config,
+            journal_config,
+            |op: &UnorderedOperation<K, VariableEncoding<V>>| {
+                matches!(op, UnorderedOperation::CommitFloor(_, _))
+            },
+        )
+        .await?;
+
+        let log = Self::init_from_log(
+            Index::new(context.with_label("index"), cfg.translator),
+            log,
+            None,
+            |_, _| {},
+        )
+        .await?;
+
+        Ok(log)
+    }
+}
 
 // pub(super) so helpers can be used by the sync module.
 #[cfg(test)]

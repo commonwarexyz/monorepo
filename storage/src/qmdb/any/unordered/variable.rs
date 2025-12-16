@@ -41,52 +41,52 @@ pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> = IndexedLog<
     S,
 >;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
-{
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        let mmr_config = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
-        };
+// impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+//     Any<E, K, V, H, T>
+// {
+//     /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+//     /// discarded and the state of the db will be as of the last committed operation.
+//     pub async fn init(
+//         context: E,
+//         cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
+//     ) -> Result<Self, Error> {
+//         let mmr_config = MmrConfig {
+//             journal_partition: cfg.mmr_journal_partition,
+//             metadata_partition: cfg.mmr_metadata_partition,
+//             items_per_blob: cfg.mmr_items_per_blob,
+//             write_buffer: cfg.mmr_write_buffer,
+//             thread_pool: cfg.thread_pool,
+//             buffer_pool: cfg.buffer_pool.clone(),
+//         };
 
-        let journal_config = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_blob,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool,
-            write_buffer: cfg.log_write_buffer,
-        };
+//         let journal_config = JournalConfig {
+//             partition: cfg.log_partition,
+//             items_per_section: cfg.log_items_per_blob,
+//             compression: cfg.log_compression,
+//             codec_config: cfg.log_codec_config,
+//             buffer_pool: cfg.buffer_pool,
+//             write_buffer: cfg.log_write_buffer,
+//         };
 
-        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
-            context.with_label("log"),
-            mmr_config,
-            journal_config,
-            Operation::<K, V>::is_commit,
-        )
-        .await?;
+//         let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+//             context.with_label("log"),
+//             mmr_config,
+//             journal_config,
+//             Operation::<K, V>::is_commit,
+//         )
+//         .await?;
 
-        let log = Self::init_from_log(
-            Index::new(context.with_label("index"), cfg.translator),
-            log,
-            None,
-            |_, _| {},
-        )
-        .await?;
+//         let log = Self::init_from_log(
+//             Index::new(context.with_label("index"), cfg.translator),
+//             log,
+//             None,
+//             |_, _| {},
+//         )
+//         .await?;
 
-        Ok(log)
-    }
-}
+//         Ok(log)
+//     }
+// }
 
 #[cfg(test)]
 pub(super) mod test {

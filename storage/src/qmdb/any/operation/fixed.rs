@@ -41,7 +41,7 @@ impl<K, V, S> Write for Operation<K, FixedEncoding<V>, S>
 where
     K: Array + Codec,
     V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + CodecFixed,
+    S: Update<K, FixedEncoding<V>> + CodecFixed<Cfg = ()>,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
