@@ -338,12 +338,19 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
+        // Initialize resolver (uses the host's DNS configuration,
+        // e.g. /etc/resolv.conf on Unix, registry on Windows)
+        let resolver = hickory_resolver::Resolver::builder_tokio()
+            .expect("failed to create DNS resolver")
+            .build();
+
         // Run the future
         let context = Context {
             storage,
             name: label.name(),
             executor: executor.clone(),
             network,
+            resolver,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -379,6 +386,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
+    resolver: hickory_resolver::TokioResolver,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -392,7 +400,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-
+            resolver: self.resolver.clone(),
             tree: child,
             execution: Execution::default(),
             instrumented: false,
@@ -623,12 +631,8 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g., /etc/resolv.conf on Unix,
-        // registry on Windows).
-        let resolver = hickory_resolver::Resolver::builder_tokio()
-            .map_err(|e| Error::ResolveFailed(e.to_string()))?
-            .build();
-        let response = resolver
+        let response = self
+            .resolver
             .lookup_ip(host)
             .await
             .map_err(|e| Error::ResolveFailed(e.to_string()))?;

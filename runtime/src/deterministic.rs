@@ -934,11 +934,28 @@ impl Context {
     /// If `addrs` is `None`, the mapping is removed.
     /// If `addrs` is `Some`, the mapping is added or updated.
     pub fn register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+        // Update the auditor
         let executor = self.executor();
         let host = host.into();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(host.as_bytes());
+            match &addrs {
+                Some(addrs) => {
+                    hasher.update(b"add");
+                    for addr in addrs {
+                        match addr {
+                            IpAddr::V4(v4) => hasher.update(v4.octets()),
+                            IpAddr::V6(v6) => hasher.update(v6.octets()),
+                        }
+                    }
+                }
+                None => {
+                    hasher.update(b"remove");
+                }
+            }
         });
+
+        // Update the DNS mapping
         let mut dns = executor.dns.lock().unwrap();
         match addrs {
             Some(addrs) => {
@@ -1317,14 +1334,25 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Get the record
         let executor = self.executor();
+        let dns = executor.dns.lock().unwrap();
+        let result = dns.get(host).cloned();
+        drop(dns);
+
+        // Update the auditor
         executor.auditor.event(b"resolve", |hasher| {
             hasher.update(host.as_bytes());
+            if let Some(addrs) = &result {
+                for addr in addrs {
+                    match addr {
+                        IpAddr::V4(v4) => hasher.update(v4.octets()),
+                        IpAddr::V6(v6) => hasher.update(v6.octets()),
+                    }
+                }
+            }
         });
-        let dns = executor.dns.lock().unwrap();
-        dns.get(host)
-            .cloned()
-            .ok_or_else(|| Error::ResolveFailed(host.to_string()))
+        result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
     }
 }
 
