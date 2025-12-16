@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         any::{
             ordered::{fixed::Any, FixedOperation as Operation, KeyData},
-            CleanAny, DirtyAny, FixedValue,
+            CleanAny, DirtyAny, FixedEncoding, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
         store::{Batchable, CleanStore, DirtyStore, LogStore},
@@ -71,7 +71,7 @@ pub enum ExclusionProof<K: Array, V: FixedValue, D: Digest, const N: usize> {
     /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
-    KeyValue(OperationProof<D, N>, KeyData<K, V>),
+    KeyValue(OperationProof<D, N>, KeyData<K, FixedEncoding<V>>),
 
     /// For the Commit variant, we're proving that there exists a Commit operation in the database
     /// that establishes an inactivity floor equal to its own location. This implies there are no
@@ -147,7 +147,10 @@ impl<
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+    pub async fn get_span(
+        &self,
+        key: &K,
+    ) -> Result<Option<(Location, KeyData<K, FixedEncoding<V>>)>, Error> {
         self.any.get_span(key).await
     }
 

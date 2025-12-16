@@ -8,7 +8,7 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            unordered::{fixed::Any, FixedOperation, Update},
             FixedConfig as Config,
         },
         store::CleanStore,
@@ -61,7 +61,7 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            operations.push(Operation::Update(Update(key, value)));
 
             if (i + 1) % 10 == 0 {
                 operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
@@ -79,7 +79,7 @@ where
     ) -> Result<(), commonware_storage::qmdb::Error> {
         for operation in operations {
             match operation {
-                Operation::Update(key, value) => {
+                Operation::Update(Update(key, value)) => {
                     database.update(key, value).await?;
                 }
                 Operation::Delete(key) => {

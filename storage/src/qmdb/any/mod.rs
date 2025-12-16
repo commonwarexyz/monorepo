@@ -27,13 +27,9 @@ use std::{
 
 mod operation;
 
-// Context byte prefixes for Any operation types.
-const DELETE_CONTEXT: u8 = 0;
-const UPDATE_CONTEXT: u8 = 1;
-const COMMIT_FLOOR_CONTEXT: u8 = 2;
-
 mod value;
-pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
+pub use value::{FixedEncoding, FixedValue, VariableEncoding};
+pub(crate) use value::{ValueEncoding, VariableValue};
 
 mod ext;
 pub mod ordered;

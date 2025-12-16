@@ -9,7 +9,7 @@ use crate::{
         Location, Proof,
     },
     qmdb::{
-        any::{CleanAny, DirtyAny, ValueEncoding, VariableValue},
+        any::{CleanAny, DirtyAny, ValueEncoding},
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as _},
         store::{Batchable, LogStore},
@@ -31,7 +31,7 @@ use tracing::debug;
 
 mod operation;
 use operation::Operation;
-pub use operation::{FixedOperation, VariableOperation};
+pub use operation::{FixedOperation, KeyData, VariableOperation};
 
 pub mod fixed;
 pub mod variable;
@@ -41,39 +41,8 @@ type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, KeyData<K, V>)>;
 
-/// Data about a key in an ordered database or an ordered database operation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyData<K: Array + Ord, V: Codec> {
-    /// The key that exists in the database or in the database operation.
-    pub key: K,
-    /// The value of `key` in the database or operation.
-    pub value: V,
-    /// The next-key of `key` in the database or operation.
-    ///
-    /// The next-key is the next active key that lexicographically follows it in the key space. If
-    /// the key is the lexicographically-last active key, then next-key is the
-    /// lexicographically-first of all active keys (in a DB with only one key, this means its
-    /// next-key is itself)
-    pub next_key: K,
-}
-
-#[cfg(feature = "arbitrary")]
-impl<K: Array + Ord, V: Codec> arbitrary::Arbitrary<'_> for KeyData<K, V>
-where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            key: u.arbitrary()?,
-            value: u.arbitrary()?,
-            next_key: u.arbitrary()?,
-        })
-    }
-}
-
 /// The return type of the `Any::update_loc` method.
-enum UpdateLocResult<K: Array, V: VariableValue> {
+enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
 
@@ -176,7 +145,7 @@ where
     async fn get_update_op(
         log: &AuthenticatedLog<E, C, H, S>,
         loc: Location,
-    ) -> Result<KeyData<K, V::Value>, Error> {
+    ) -> Result<KeyData<K, V>, Error> {
         match log.read(loc).await? {
             Operation::Update(key_data) => Ok(key_data),
             _ => unreachable!("expected update operation at location {}", loc),
@@ -188,8 +157,8 @@ where
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
-    ) -> Result<LocatedKey<K, V::Value>, Error> {
-        let mut last_key: LocatedKey<K, V::Value> = None;
+    ) -> Result<LocatedKey<K, V>, Error> {
+        let mut last_key: LocatedKey<K, V> = None;
         for &loc in iter {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
@@ -232,7 +201,7 @@ where
         &self,
         iter: impl Iterator<Item = &Location>,
         key: &K,
-    ) -> Result<LocatedKey<K, V::Value>, Error> {
+    ) -> Result<LocatedKey<K, V>, Error> {
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
@@ -246,7 +215,7 @@ where
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<K, V::Value>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<K, V>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -282,7 +251,7 @@ where
     pub(crate) async fn get_with_loc(
         &self,
         key: &K,
-    ) -> Result<Option<(KeyData<K, V::Value>, Location)>, Error> {
+    ) -> Result<Option<(KeyData<K, V>, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
             let op = self.log.read(loc).await?;
@@ -346,7 +315,7 @@ where
         key: &K,
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
-    ) -> Result<UpdateLocResult<K, V::Value>, Error> {
+    ) -> Result<UpdateLocResult<K, V>, Error> {
         let Some(iter) = self.snapshot.prev_translated_key(key) else {
             unreachable!("database should not be empty");
         };
@@ -371,8 +340,8 @@ where
         create_only: bool,
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
-    ) -> Result<UpdateLocResult<K, V::Value>, Error> {
-        let mut best_prev_key: LocatedKey<K, V::Value> = None;
+    ) -> Result<UpdateLocResult<K, V>, Error> {
+        let mut best_prev_key: LocatedKey<K, V> = None;
         {
             // If the translated key is not in the snapshot, insert the new location and return the
             // previous key info.
