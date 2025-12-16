@@ -353,6 +353,45 @@ impl EpochConfig {
         }
     }
 
+    /// Returns the epoch the given height belongs to using the provided configuration.
+    ///
+    /// Returns `None` if the height is not covered by any epoch range.
+    pub fn epoch_with_config(config: &Self, height: u64) -> Option<Epoch> {
+        let _epoch_length = config.epoch_length_at(height)?;
+
+        // Calculate cumulative epochs across ranges
+        let mut cumulative_epoch = 0;
+
+        for (range_start, range_epoch_length) in &config.ranges {
+            if height >= *range_start {
+                let next_range_start = config
+                    .ranges
+                    .iter()
+                    .find(|(start, _)| *start > *range_start)
+                    .map(|(start, _)| *start);
+
+                if let Some(next_start) = next_range_start {
+                    if height < next_start {
+                        let offset_in_range = height - range_start;
+                        let epoch_offset = offset_in_range / range_epoch_length;
+                        return Some(Epoch::new(cumulative_epoch + epoch_offset));
+                    } else {
+                        let range_size = next_start - range_start;
+                        let complete_epochs_in_range = range_size / range_epoch_length;
+                        cumulative_epoch += complete_epochs_in_range;
+                    }
+                } else {
+                    // This is the last range, height belongs here
+                    let offset_in_range = height - range_start;
+                    let epoch_offset = offset_in_range / range_epoch_length;
+                    return Some(Epoch::new(cumulative_epoch + epoch_offset));
+                }
+            }
+        }
+
+        None
+    }
+
     /// Creates a variable epoch length configuration.
     ///
     /// Ranges must cover all heights starting from 0 with no gaps.
@@ -893,20 +932,18 @@ mod tests {
 
     #[test]
     fn test_epoch_config_functionality() {
-        use crate::utils;
-
         // Fixed epoch configuration
         let fixed_config = EpochConfig::fixed(10);
         assert_eq!(
-            utils::epoch_with_config(&fixed_config, 0),
+            EpochConfig::epoch_with_config(&fixed_config, 0),
             Some(Epoch::new(0))
         );
         assert_eq!(
-            utils::epoch_with_config(&fixed_config, 9),
+            EpochConfig::epoch_with_config(&fixed_config, 9),
             Some(Epoch::new(0))
         );
         assert_eq!(
-            utils::epoch_with_config(&fixed_config, 10),
+            EpochConfig::epoch_with_config(&fixed_config, 10),
             Some(Epoch::new(1))
         );
 
@@ -918,23 +955,23 @@ mod tests {
         .expect("valid config");
 
         assert_eq!(
-            utils::epoch_with_config(&variable_config, 4),
+            EpochConfig::epoch_with_config(&variable_config, 4),
             Some(Epoch::new(0))
         );
         assert_eq!(
-            utils::epoch_with_config(&variable_config, 19),
+            EpochConfig::epoch_with_config(&variable_config, 19),
             Some(Epoch::new(3))
         );
         assert_eq!(
-            utils::epoch_with_config(&variable_config, 20),
+            EpochConfig::epoch_with_config(&variable_config, 20),
             Some(Epoch::new(4))
         );
         assert_eq!(
-            utils::epoch_with_config(&variable_config, 29),
+            EpochConfig::epoch_with_config(&variable_config, 29),
             Some(Epoch::new(4))
         );
         assert_eq!(
-            utils::epoch_with_config(&variable_config, 30),
+            EpochConfig::epoch_with_config(&variable_config, 30),
             Some(Epoch::new(5))
         );
 
@@ -959,28 +996,30 @@ mod tests {
         assert_eq!(config.epoch_length_at(200_000), Some(604_800));
 
         // Verify epoch progression across transitions
-        use crate::utils;
-        assert_eq!(utils::epoch_with_config(&config, 0), Some(Epoch::new(0)));
         assert_eq!(
-            utils::epoch_with_config(&config, 60_479),
+            EpochConfig::epoch_with_config(&config, 0),
             Some(Epoch::new(0))
         );
         assert_eq!(
-            utils::epoch_with_config(&config, 60_480),
+            EpochConfig::epoch_with_config(&config, 60_479),
+            Some(Epoch::new(0))
+        );
+        assert_eq!(
+            EpochConfig::epoch_with_config(&config, 60_480),
             Some(Epoch::new(1))
         );
         assert_eq!(
-            utils::epoch_with_config(&config, 100_000),
+            EpochConfig::epoch_with_config(&config, 100_000),
             Some(Epoch::new(1))
         );
         assert_eq!(
-            utils::epoch_with_config(&config, 704_800),
+            EpochConfig::epoch_with_config(&config, 704_800),
             Some(Epoch::new(2))
         );
 
         // Test edge case: u64::MAX height
         assert_eq!(
-            utils::epoch_with_config(&config, u64::MAX),
+            EpochConfig::epoch_with_config(&config, u64::MAX),
             Some(Epoch::new((u64::MAX - 100_000) / 604_800 + 1))
         );
     }

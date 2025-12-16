@@ -12,7 +12,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::{signing_scheme::Scheme, types::Finalization},
-    types::ViewDelta,
+    types::{EpochConfig, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
@@ -248,7 +248,7 @@ where
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
-            BLOCKS_PER_EPOCH,
+            EpochConfig::fixed(BLOCKS_PER_EPOCH),
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(

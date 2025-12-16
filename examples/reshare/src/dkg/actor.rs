@@ -12,7 +12,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
     types::{Epoch, EpochConfig},
-    utils::epoch_with_config,
     Reporter,
 };
 use commonware_cryptography::{
@@ -375,7 +374,7 @@ where
                         }
                         MailboxMessage::Finalized { block, response } => {
                             let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                            let block_epoch = epoch_with_config(&epoch_config, block.height).unwrap();
+                            let block_epoch = EpochConfig::epoch_with_config(&epoch_config, block.height).unwrap();
                             let first_height = epoch_config.first_height_in_epoch(block_epoch);
                             let relative_height = block.height - first_height;
                             let mid_point = BLOCKS_PER_EPOCH / 2;
@@ -435,7 +434,7 @@ where
 
                             // Continue if not the last block in the epoch
                             let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                            let block_epoch = epoch_with_config(&epoch_config, block.height).unwrap();
+                            let block_epoch = EpochConfig::epoch_with_config(&epoch_config, block.height).unwrap();
                             let last_height = epoch_config.last_height_in_epoch(block_epoch);
                             if block.height != last_height {
                                 // Acknowledge block processing

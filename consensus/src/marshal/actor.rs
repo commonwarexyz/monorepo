@@ -18,7 +18,7 @@ use crate::{
         types::{Finalization, Notarization},
     },
     types::{Epoch, EpochConfig, Round, ViewDelta},
-    utils, Block, Reporter,
+    Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
@@ -597,7 +597,7 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let Some(epoch) = utils::epoch_with_config(&self.epoch_config, height) else {
+                                    let Some(epoch) = EpochConfig::epoch_with_config(&self.epoch_config, height) else {
                                         error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;

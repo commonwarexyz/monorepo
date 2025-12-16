@@ -36,8 +36,8 @@
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::{signing_scheme::Scheme, types::Context},
-    types::{Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
+    types::{Epoch, EpochConfig, Round},
+    Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
@@ -82,7 +82,7 @@ where
     context: E,
     application: A,
     marshal: marshal::Mailbox<S, B>,
-    epoch_length: u64,
+    epoch_config: EpochConfig,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
 
     build_duration: Gauge,
@@ -100,7 +100,7 @@ where
         context: E,
         application: A,
         marshal: marshal::Mailbox<S, B>,
-        epoch_length: u64,
+        epoch_config: EpochConfig,
     ) -> Self {
         let build_duration = Gauge::default();
         context.register(
@@ -113,7 +113,7 @@ where
             context,
             application,
             marshal,
-            epoch_length,
+            epoch_config,
             last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
@@ -152,7 +152,7 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let epoch_config = crate::types::EpochConfig::fixed(self.epoch_length);
+        let epoch_config = &self.epoch_config;
         let height = epoch_config
             .last_height_in_epoch(epoch.previous().expect("checked to be non-zero above"));
         let Some(block) = self.marshal.get_block(height).await else {
@@ -179,7 +179,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
-        let epoch_length = self.epoch_length;
+        let epoch_config = self.epoch_config.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -222,7 +222,7 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
+                let epoch_config = &epoch_config;
                 let last_in_epoch = epoch_config.last_height_in_epoch(consensus_context.epoch());
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
@@ -304,7 +304,7 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epoch_length = self.epoch_length;
+        let epoch_config = self.epoch_config.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -348,7 +348,7 @@ where
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
-                    let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
+                    let epoch_config = &epoch_config;
                     let last_in_epoch = epoch_config.last_height_in_epoch(context.epoch());
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
@@ -361,8 +361,8 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                let epoch_config = crate::types::EpochConfig::fixed(epoch_length);
-                if utils::epoch_with_config(&epoch_config, block.height()).unwrap()
+                let epoch_config = &epoch_config;
+                if EpochConfig::epoch_with_config(epoch_config, block.height()).unwrap()
                     != context.epoch()
                 {
                     let _ = tx.send(false);

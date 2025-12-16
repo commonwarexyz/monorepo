@@ -138,8 +138,8 @@ mod tests {
             signing_scheme::{bls12381_threshold, Scheme},
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::{Epoch, Round, View, ViewDelta},
-        utils, Automaton, Block as _, Reporter, VerifyingApplication,
+        types::{Epoch, EpochConfig, Round, View, ViewDelta},
+        Automaton, Block as _, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -511,7 +511,7 @@ mod tests {
 
                 // Calculate the epoch and round for the block
                 let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                let epoch = EpochConfig::epoch_with_config(&epoch_config, height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
@@ -550,7 +550,8 @@ mod tests {
                     {
                         if (do_finalize && i < QUORUM as usize) || height == NUM_BLOCKS || {
                             let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                            let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                            let epoch =
+                                EpochConfig::epoch_with_config(&epoch_config, height).unwrap();
                             height == epoch_config.last_height_in_epoch(epoch)
                         } {
                             actor.report(Activity::Finalization(fin.clone())).await;
@@ -562,7 +563,8 @@ mod tests {
                     for actor in actors.iter_mut() {
                         if context.gen_bool(0.2) || height == NUM_BLOCKS || {
                             let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                            let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                            let epoch =
+                                EpochConfig::epoch_with_config(&epoch_config, height).unwrap();
                             height == epoch_config.last_height_in_epoch(epoch)
                         } {
                             actor.report(Activity::Finalization(fin.clone())).await;
@@ -660,7 +662,7 @@ mod tests {
 
                 // Calculate the epoch and round for the block
                 let epoch_config = crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH);
-                let epoch = utils::epoch_with_config(&epoch_config, height).unwrap();
+                let epoch = EpochConfig::epoch_with_config(&epoch_config, height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
@@ -1509,8 +1511,12 @@ mod tests {
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), BLOCKS_PER_EPOCH);
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                crate::types::EpochConfig::fixed(BLOCKS_PER_EPOCH),
+            );
 
             // Test case 1: Non-contiguous height
             //
