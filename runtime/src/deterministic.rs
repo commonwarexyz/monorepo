@@ -1401,7 +1401,9 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Resolver, Runner as _, Storage,
+    };
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
@@ -1586,8 +1588,6 @@ mod tests {
 
     #[test]
     fn test_recover_dns_mappings_persist() {
-        use crate::Resolver;
-
         // Initialize the first runtime
         let executor = deterministic::Runner::default();
         let host = "example.com";
