@@ -1,27 +1,19 @@
 use crate::{
-    index::{ordered::Index as OrderedIndex, Cursor as _, Ordered as OrderedIndexTrait},
-    journal::contiguous::{
-        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Contiguous,
-        MutableContiguous, PersistableContiguous,
-    },
+    index::{Cursor as _, Ordered as OrderedIndexTrait},
+    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     mmr::{
         mem::{Dirty, State},
         Location,
     },
     qmdb::{
-        any::{
-            init_fixed_authenticated_log, init_variable_authenticated_log, CleanAny, Db, DirtyAny,
-            FixedConfig, FixedEncoding, FixedValue, OrderedOperation, OrderedUpdate,
-            VariableConfig, VariableEncoding, VariableValue,
-        },
+        any::{value::ValueEncoding, CleanAny, Db, DirtyAny, OrderedOperation, OrderedUpdate},
         delete_known_loc,
         operation::Operation as OperationTrait,
         store::Batchable,
         update_known_loc, Error,
     },
-    translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixed, Read};
+use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -31,108 +23,18 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
 };
-use tracing::warn;
 
-/// Operation type for ordered databases.
-pub type Operation<K, V> = OrderedOperation<K, V>;
+mod fixed;
+pub use fixed::Fixed;
 
-/// A fixed-size ordered database with standard journal and index types.
-pub type Fixed<E, K, V, H, T> = Db<
-    E,
-    K,
-    FixedEncoding<V>,
-    OrderedUpdate<K, FixedEncoding<V>>,
-    FixedJournal<E, OrderedOperation<K, FixedEncoding<V>>>,
-    OrderedIndex<T, Location>,
-    H,
->;
-
-/// A variable-size ordered database with standard journal and index types.
-pub type Variable<E, K, V, H, T> = Db<
-    E,
-    K,
-    VariableEncoding<V>,
-    OrderedUpdate<K, VariableEncoding<V>>,
-    VariableJournal<E, OrderedOperation<K, VariableEncoding<V>>>,
-    OrderedIndex<T, Location>,
-    H,
->;
-
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Variable<E, K, V, H, T>
-where
-    OrderedOperation<K, VariableEncoding<V>>: Codec,
-{
-    /// Returns a [Variable] QMDB initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        cfg: VariableConfig<T, <OrderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-        let mut log = init_variable_authenticated_log(context.clone(), cfg).await?;
-
-        if log.size() == 0 {
-            warn!("Authenticated log is empty, initializing new db");
-            log.append(OrderedOperation::CommitFloor(
-                None,
-                Location::new_unchecked(0),
-            ))
-            .await?;
-            log.sync().await?;
-        }
-
-        let index = OrderedIndex::new(context.with_label("index"), translator);
-        Self::init_from_log(index, log, None, |_, _| {}).await
-    }
-}
-
-impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Fixed<E, K, V, H, T>
-where
-    OrderedOperation<K, FixedEncoding<V>>: CodecFixed<Cfg = ()>,
-{
-    /// Returns a [Fixed] qmdb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: FixedConfig<T>) -> Result<Self, Error> {
-        Self::init_with_callback(context, cfg, None, |_, _| {}).await
-    }
-
-    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
-    ///
-    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
-    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the snapshot
-    /// is built from the log, `callback` is invoked for each operation with its activity status and
-    /// previous location (if any).
-    pub(crate) async fn init_with_callback(
-        context: E,
-        cfg: FixedConfig<T>,
-        known_inactivity_floor: Option<Location>,
-        callback: impl FnMut(bool, Option<Location>),
-    ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-        let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
-        if log.size() == 0 {
-            warn!("Authenticated log is empty, initializing new db");
-            log.append(OrderedOperation::CommitFloor(
-                None,
-                Location::new_unchecked(0),
-            ))
-            .await?;
-            log.sync().await?;
-        }
-        let index = OrderedIndex::new(context.with_label("index"), translator);
-        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
-
-        Ok(log)
-    }
-}
+mod variable;
+pub use variable::Variable;
 
 /// Type alias for a location and its associated ordered update.
 type LocatedKey<K, V> = Option<(Location, OrderedUpdate<K, V>)>;
 
 /// The return type of the `update_loc` method.
-enum UpdateLocResult<K: Array, V: crate::qmdb::any::ValueEncoding> {
+enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
 
@@ -144,7 +46,7 @@ enum UpdateLocResult<K: Array, V: crate::qmdb::any::ValueEncoding> {
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -265,7 +167,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -807,7 +709,7 @@ impl<E, K, V, C, I, H> Batchable for Db<E, K, V, OrderedUpdate<K, V>, C, I, H>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: crate::qmdb::any::ValueEncoding,
+    V: ValueEncoding,
     C: MutableContiguous<Item = OrderedOperation<K, V>>,
     I: OrderedIndexTrait<Value = Location>,
     H: Hasher,
@@ -1012,7 +914,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1032,7 +934,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: Contiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1052,7 +954,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1068,7 +970,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1084,7 +986,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: PersistableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1122,7 +1024,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: crate::qmdb::any::ValueEncoding,
+        V: ValueEncoding,
         C: MutableContiguous<Item = OrderedOperation<K, V>>,
         I: OrderedIndexTrait<Value = Location>,
         H: Hasher,
@@ -1209,12 +1111,12 @@ mod test {
     use super::*;
     use crate::{
         index::{ordered::Index, Unordered as _},
-        journal::contiguous::fixed::Journal,
+        journal::contiguous::{fixed::Journal, variable::Journal as VariableJournal},
         mmr::{Location, Position, StandardHasher as Standard},
         qmdb::{
             any::{
                 test::{fixed_db_config, variable_db_config},
-                CleanAny,
+                CleanAny, FixedEncoding, VariableEncoding,
             },
             store::{batch_tests, CleanStore as _, DirtyStore as _, LogStore as _},
             verify_proof,

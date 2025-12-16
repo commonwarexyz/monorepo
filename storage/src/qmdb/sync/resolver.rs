@@ -4,9 +4,7 @@ use crate::{
     mmr::{mem::Clean, Location, Proof},
     qmdb::{
         self,
-        any::{
-            Db, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate, VariableValue,
-        },
+        any::{Db, FixedEncoding, FixedValue, UnorderedOperation, UnorderedUpdate, VariableValue},
         immutable::{Immutable, Operation as ImmutableOp},
         store::CleanStore as _,
     },

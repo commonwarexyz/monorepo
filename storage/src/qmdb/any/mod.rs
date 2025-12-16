@@ -269,7 +269,8 @@ pub(crate) async fn init_variable_authenticated_log<
     Ok(log)
 }
 
-/// A QMDB implementation that supports both ordered and unordered databases.
+/// A QMDB implementation generic over ordered/unordered operations
+/// and fixed/variable-length values.
 pub struct Db<
     E: Storage + Clock + Metrics,
     K: Array,

@@ -31,9 +31,6 @@ use tracing::warn;
 
 pub mod sync;
 
-/// Operation type for unordered databases.
-pub type Operation<K, V> = UnorderedOperation<K, V>;
-
 /// A fixed-size unordered database with standard journal and index types.
 pub type Fixed<E, K, V, H, T> = Db<
     E,
@@ -44,46 +41,6 @@ pub type Fixed<E, K, V, H, T> = Db<
     UnorderedIndex<T, Location>,
     H,
 >;
-
-/// A variable-size unordered database with standard journal and index types.
-pub type Variable<E, K, V, H, T> = Db<
-    E,
-    K,
-    VariableEncoding<V>,
-    UnorderedUpdate<K, VariableEncoding<V>>,
-    VariableJournal<E, UnorderedOperation<K, VariableEncoding<V>>>,
-    UnorderedIndex<T, Location>,
-    H,
->;
-
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Variable<E, K, V, H, T>
-where
-    UnorderedOperation<K, VariableEncoding<V>>: Codec,
-{
-    /// Returns a [Variable] QMDB initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        cfg: VariableConfig<T, <UnorderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-        let mut log = init_variable_authenticated_log(context.clone(), cfg).await?;
-
-        if log.size() == 0 {
-            warn!("Authenticated log is empty, initializing new db");
-            log.append(UnorderedOperation::CommitFloor(
-                None,
-                Location::new_unchecked(0),
-            ))
-            .await?;
-            log.sync().await?;
-        }
-
-        let index = UnorderedIndex::new(context.with_label("index"), translator);
-        Self::init_from_log(index, log, None, |_, _| {}).await
-    }
-}
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Fixed<E, K, V, H, T>
@@ -123,6 +80,46 @@ where
         let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
 
         Ok(log)
+    }
+}
+
+/// A variable-size unordered database with standard journal and index types.
+pub type Variable<E, K, V, H, T> = Db<
+    E,
+    K,
+    VariableEncoding<V>,
+    UnorderedUpdate<K, VariableEncoding<V>>,
+    VariableJournal<E, UnorderedOperation<K, VariableEncoding<V>>>,
+    UnorderedIndex<T, Location>,
+    H,
+>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+    Variable<E, K, V, H, T>
+where
+    UnorderedOperation<K, VariableEncoding<V>>: Codec,
+{
+    /// Returns a [Variable] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(
+        context: E,
+        cfg: VariableConfig<T, <UnorderedOperation<K, VariableEncoding<V>> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        let translator = cfg.translator.clone();
+        let mut log = init_variable_authenticated_log(context.clone(), cfg).await?;
+
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(UnorderedOperation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+            ))
+            .await?;
+            log.sync().await?;
+        }
+
+        let index = UnorderedIndex::new(context.with_label("index"), translator);
+        Self::init_from_log(index, log, None, |_, _| {}).await
     }
 }
 
