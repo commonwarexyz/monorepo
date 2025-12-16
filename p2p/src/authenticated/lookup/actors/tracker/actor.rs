@@ -9,10 +9,11 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -47,7 +48,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -74,10 +75,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let releaser = Releaser::new(mailbox.clone());
 
         // Create the directory
-        let myself = (cfg.crypto.public_key(), cfg.address);
         let directory = Directory::init(
             context.with_label("directory"),
-            myself,
+            cfg.crypto.public_key(),
             directory_cfg,
             releaser,
         );
@@ -102,10 +102,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        while let Some(msg) = self.receiver.next().await {
-            self.handle_msg(msg).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping tracker");
+            },
+            msg = self.receiver.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping tracker");
+                    break;
+                };
+                self.handle_msg(msg).await;
+            }
         }
-        debug!("tracker shutdown");
     }
 
     /// Handle a [`Message`].
@@ -113,8 +122,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         match msg {
             Message::Register { index, peers } => {
                 // If we are no longer interested in a peer, release them.
-                let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
-                for peer in self.directory.add_set(index, peers) {
+                let peer_keys: Set<C::PublicKey> = peers.keys().clone();
+                let Some(deleted) = self.directory.add_set(index, peers) else {
+                    return;
+                };
+                for peer in deleted {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
@@ -219,13 +231,13 @@ mod tests {
     };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer,
+        Signer,
     };
     use commonware_runtime::{
         deterministic::{self},
         Clock, Runner,
     };
-    use commonware_utils::{set::OrderedAssociated, NZU32};
+    use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -238,7 +250,6 @@ mod tests {
         (
             Config {
                 crypto,
-                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 tracked_peer_sets: 2,
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
@@ -305,7 +316,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, OrderedAssociated::from([(pk.clone(), addr)]))
+                .update(0, [(pk.clone(), addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -334,7 +345,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .update(0, OrderedAssociated::from([(pk1.clone(), addr)]))
+                .update(0, [(pk1.clone(), addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -390,10 +401,9 @@ mod tests {
             oracle
                 .update(
                     0,
-                    OrderedAssociated::from([
-                        (peer_pk.clone(), peer_addr),
-                        (peer_pk2.clone(), peer_addr2),
-                    ]),
+                    [(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)]
+                        .try_into()
+                        .unwrap(),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
@@ -425,7 +435,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -460,7 +470,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -484,7 +494,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, [(boot_pk.clone(), boot_addr)].try_into().unwrap())
                 .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
@@ -521,7 +531,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, [(peer_pk.clone(), peer_addr)].try_into().unwrap())
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -575,7 +585,9 @@ mod tests {
             oracle
                 .update(
                     0,
-                    OrderedAssociated::from([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]),
+                    [(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]
+                        .try_into()
+                        .unwrap(),
                 )
                 .await;
             // let the register take effect
@@ -596,7 +608,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .update(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]))
+                .update(1, [(pk_2.clone(), addr_2)].try_into().unwrap())
                 .await;
 
             // Wait for a listener update

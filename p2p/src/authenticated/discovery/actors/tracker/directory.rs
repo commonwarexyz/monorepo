@@ -5,19 +5,18 @@ use crate::authenticated::discovery::{
     types::{self, Info},
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{set::Ordered, SystemTimeExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
 };
+use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
     ops::Deref,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -52,8 +51,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
-    #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<C, E>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -82,12 +80,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
         peers.insert(myself.public_key.clone(), Record::myself(myself));
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         // Other initialization.
         // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(context.clone());
-        metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
+        let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
             context,
@@ -174,18 +172,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) {
+    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
-            debug!(index, "peer set already exists");
-            return;
+            warn!(index, "peer set already exists");
+            return false;
         }
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value() {
             if index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
-                return;
+                warn!(?index, ?last, "index must monotonically increase");
+                return false;
             }
         }
 
@@ -214,10 +212,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+
+        true
     }
 
     /// Gets a peer set by index.
-    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+    pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
         self.sets.get(index).map(Deref::deref)
     }
 
@@ -259,9 +259,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
-    /// Returns all tracked peers.
-    pub fn tracked(&self) -> Ordered<C> {
-        self.peers.keys().cloned().collect()
+    /// Returns all peers that are part of at least one peer set.
+    pub fn tracked(&self) -> OrderedSet<C> {
+        self.peers
+            .iter()
+            .filter(|(_, r)| r.sets() > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("HashMap keys are unique")
     }
 
     /// Returns the sharable information for a given peer.

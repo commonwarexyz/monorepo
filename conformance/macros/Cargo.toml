@@ -1,0 +1,21 @@
+[package]
+name = "commonware-conformance-macros"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Augment the development of commonware-conformance with procedural macros."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/conformance/macros"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full", "parsing"] }
+
+[lints]
+workspace = true

@@ -4,11 +4,11 @@ use commonware_cryptography::Sha256;
 use criterion::{criterion_group, Criterion};
 
 fn benchmark_encode(c: &mut Criterion) {
-    benchmark_encode_generic::<NoCoding<Sha256>>("no_coding_encode", c);
+    benchmark_encode_generic::<NoCoding<Sha256>>("no_coding::encode", c);
 }
 
 fn benchmark_decode(c: &mut Criterion) {
-    benchmark_decode_generic::<NoCoding<Sha256>>("no_coding_decode", c);
+    benchmark_decode_generic::<NoCoding<Sha256>>("no_coding::decode", c);
 }
 
 criterion_group! {

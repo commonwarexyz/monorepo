@@ -3,20 +3,18 @@
 use super::{Config, PeerLabel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::{CounterExt, Status},
-    Clock, Metrics,
+    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
+    Clock, Metrics, RateLimiter,
 };
 use commonware_utils::PrioritySet;
 use either::Either;
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
+use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
 
 /// Unique identifier for a request.
 ///
@@ -24,6 +22,17 @@ use std::{
 /// As long as there are less than u64 requests outstanding, this should not be
 /// an issue.
 pub type ID = u64;
+
+/// Error returned when a request cannot be made.
+#[derive(Error, Debug, PartialEq)]
+pub enum Error {
+    /// No eligible participants exist (all blocked, excluded, filtered out, or none registered).
+    #[error("no eligible participants")]
+    NoEligibleParticipants,
+    /// Participants exist but are rate-limited. Retry after this duration.
+    #[error("rate limited, retry after {0:?}")]
+    RateLimited(Duration),
+}
 
 /// Send rate-limited requests to peers prioritized by performance.
 ///
@@ -42,8 +51,7 @@ pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     excluded: HashSet<P>,
 
     // Rate limiter for participants
-    #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<P, HashMapStateStore<P>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<P, E>,
     // Participants and their performance (lower is better)
     participants: PrioritySet<P, u128>,
 
@@ -66,7 +74,7 @@ pub struct Request<P: PublicKey> {
     pub id: ID,
 
     /// Participant that handled the request.
-    participant: P,
+    pub participant: P,
 
     /// Time the request was issued.
     start: SystemTime,
@@ -75,7 +83,7 @@ pub struct Request<P: PublicKey> {
 impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, context.clone());
 
         // TODO(#1833): Metrics should use embedded context
         let metrics = super::Metrics::init(context.clone());
@@ -117,7 +125,37 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
-    pub fn request(&mut self, shuffle: bool) -> Option<(P, ID)> {
+    ///
+    /// Returns `Ok((participant, id))` if a request can be made, or an error if
+    /// no peers are eligible or all eligible peers are rate-limited.
+    pub fn request(&mut self, shuffle: bool) -> Result<(P, ID), Error> {
+        self.request_inner(shuffle, None::<fn(&P) -> bool>)
+    }
+
+    /// Ask for a participant to handle a request, filtered by a predicate.
+    ///
+    /// If `shuffle` is true, the order of participants is shuffled before
+    /// a request is made. This is typically used when a request to the preferred
+    /// participant fails.
+    ///
+    /// Only participants for which `filter` returns `true` will be considered.
+    /// This is useful when the caller knows which specific peers have the data.
+    ///
+    /// Returns `Ok((participant, id))` if a request can be made, or an error if
+    /// no peers are eligible or all eligible peers are rate-limited.
+    pub fn request_filtered(
+        &mut self,
+        shuffle: bool,
+        filter: impl Fn(&P) -> bool,
+    ) -> Result<(P, ID), Error> {
+        self.request_inner(shuffle, Some(filter))
+    }
+
+    fn request_inner(
+        &mut self,
+        shuffle: bool,
+        filter: Option<impl Fn(&P) -> bool>,
+    ) -> Result<(P, ID), Error> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
@@ -128,6 +166,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         };
 
         // Look for a participant that can handle request
+        let mut next = None;
         for (participant, _) in participant_iter {
             // Check if me
             if Some(participant) == self.me.as_ref() {
@@ -139,8 +178,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
                 continue;
             }
 
+            // Check if passes filter (if provided)
+            if let Some(ref filter) = filter {
+                if !filter(participant) {
+                    continue;
+                }
+            }
+
             // Check if rate limit is exceeded (and update rate limiter if not)
-            if self.rate_limiter.check_key(participant).is_err() {
+            if let Err(limit) = self.rate_limiter.check_key(participant) {
+                next = Some(limit.wait_time_from(self.context.now()));
                 continue;
             }
 
@@ -156,12 +203,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 
             // Increment metric if-and-only-if request is successful
             self.metrics.created.inc(Status::Success);
-            return Some((participant.clone(), id));
+            return Ok((participant.clone(), id));
         }
 
         // Increment failed metric if no participants are available
         self.metrics.created.inc(Status::Failure);
-        None
+
+        next.map_or_else(
+            || Err(Error::NoEligibleParticipants),
+            |wait| Err(Error::RateLimited(wait)),
+        )
     }
 
     /// Calculate a participant's new priority using exponential moving average.
@@ -170,10 +221,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
             return;
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
-        self.metrics
+        let _ = self
+            .metrics
             .performance
             .get_or_create(&PeerLabel::from(&participant))
-            .set(next as i64);
+            .try_set(next);
         self.participants.put(participant, next);
     }
 
@@ -259,7 +311,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
     use governor::Quota;
@@ -283,7 +335,7 @@ mod tests {
             let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Error::NoEligibleParticipants));
             assert_eq!(requester.len(), 0);
 
             // Ensure we aren't waiting
@@ -309,7 +361,10 @@ mod tests {
             assert_eq!(requester.len(), 1);
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(false), None);
+            assert_eq!(
+                requester.request(false),
+                Err(Error::RateLimited(Duration::from_secs(1)))
+            );
 
             // Simulate processing time
             context.sleep(Duration::from_millis(10)).await;
@@ -325,10 +380,16 @@ mod tests {
             requester.resolve(request);
 
             // Ensure no more requests
-            assert_eq!(requester.request(false), None);
+            assert_eq!(
+                requester.request(false),
+                Err(Error::RateLimited(Duration::from_millis(990)))
+            );
 
             // Ensure can't make another request
-            assert_eq!(requester.request(false), None);
+            assert_eq!(
+                requester.request(false),
+                Err(Error::RateLimited(Duration::from_millis(990)))
+            );
 
             // Wait for rate limit to reset
             context.sleep(Duration::from_secs(1)).await;
@@ -345,7 +406,10 @@ mod tests {
             requester.timeout(request);
 
             // Ensure no more requests
-            assert_eq!(requester.request(false), None);
+            assert_eq!(
+                requester.request(false),
+                Err(Error::RateLimited(Duration::from_secs(1)))
+            );
 
             // Sleep until reset
             context.sleep(Duration::from_secs(1)).await;
@@ -369,7 +433,7 @@ mod tests {
             requester.block(other);
 
             // Get request
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Error::NoEligibleParticipants));
         });
     }
 
@@ -391,7 +455,7 @@ mod tests {
             let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Error::NoEligibleParticipants));
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
@@ -427,7 +491,10 @@ mod tests {
             }
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(false), None);
+            assert_eq!(
+                requester.request(false),
+                Err(Error::RateLimited(Duration::from_millis(990)))
+            );
 
             // Wait for rate limit to reset
             context.sleep(Duration::from_secs(1)).await;
@@ -461,6 +528,105 @@ mod tests {
                 // Sleep until reset
                 context.sleep(Duration::from_secs(1)).await;
             }
+        });
+    }
+
+    #[test]
+    fn test_requester_filter() {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
+            // Create requester
+            let scheme = PrivateKey::from_seed(0);
+            let me = scheme.public_key();
+            let config = Config {
+                me: Some(me.clone()),
+                rate_limit: Quota::per_second(NZU32!(10)),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let mut requester = Requester::new(context.clone(), config);
+
+            // Add participants
+            let other1 = PrivateKey::from_seed(1).public_key();
+            let other2 = PrivateKey::from_seed(2).public_key();
+            let other3 = PrivateKey::from_seed(3).public_key();
+            requester.reconcile(&[me.clone(), other1.clone(), other2.clone(), other3.clone()]);
+
+            // Filter restricts to specified participants
+            let allowed = HashSet::from([other2.clone()]);
+            let (participant, _) = requester
+                .request_filtered(false, |p| allowed.contains(p))
+                .unwrap();
+            assert_eq!(participant, other2);
+
+            // Wait for rate limit reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Filter with multiple participants
+            let allowed = HashSet::from([other1.clone(), other3.clone()]);
+            let (participant, _) = requester
+                .request_filtered(false, |p| allowed.contains(p))
+                .unwrap();
+            assert!(participant != other2);
+
+            // Wait for rate limit reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Filter that rejects all returns error
+            assert_eq!(
+                requester.request_filtered(false, |_| false),
+                Err(Error::NoEligibleParticipants)
+            );
+
+            // Filter with non-existent participant returns error
+            let unknown = PrivateKey::from_seed(99).public_key();
+            assert_eq!(
+                requester.request_filtered(false, |p| *p == unknown),
+                Err(Error::NoEligibleParticipants)
+            );
+
+            // Filter combined with blocked (excluded) set
+            requester.block(other1.clone());
+            let allowed = HashSet::from([other1.clone(), other2.clone()]);
+            let (participant, _) = requester
+                .request_filtered(false, |p| allowed.contains(p))
+                .unwrap();
+            assert_eq!(participant, other2); // other1 is excluded
+
+            // Wait for rate limit reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Filter with self returns error (self is skipped)
+            assert_eq!(
+                requester.request_filtered(false, |p| *p == me),
+                Err(Error::NoEligibleParticipants)
+            );
+
+            // Rate-limited filtered participant returns RateLimited, not NoEligibleParticipants
+            // (this distinction is important for callers to decide wait vs fallback)
+            // Exhaust the rate limit (10 per second) for other2
+            for _ in 0..10 {
+                requester.request_filtered(false, |p| *p == other2).unwrap();
+            }
+            // Now other2 is rate-limited, should get RateLimited
+            let result = requester.request_filtered(false, |p| *p == other2);
+            assert!(matches!(result, Err(Error::RateLimited(_))));
+
+            // Wait for rate limit reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Shuffle with filter produces variety while respecting filter
+            let allowed = HashSet::from([other2.clone(), other3.clone()]);
+            let mut seen = HashSet::new();
+            for _ in 0..20 {
+                context.sleep(Duration::from_secs(1)).await;
+                let (participant, _) = requester
+                    .request_filtered(true, |p| allowed.contains(p))
+                    .unwrap();
+                assert!(allowed.contains(&participant));
+                seen.insert(participant);
+            }
+            assert_eq!(seen.len(), 2);
         });
     }
 }

@@ -5,8 +5,8 @@ use commonware_codec::{
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{
-    adb::sync::Target,
     mmr::{Location, Proof},
+    qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
 
@@ -66,13 +66,13 @@ impl<Op, D> Message<Op, D>
 where
     D: Digest,
 {
-    pub fn request_id(&self) -> RequestId {
+    pub const fn request_id(&self) -> RequestId {
         match self {
-            Message::GetOperationsRequest(r) => r.request_id,
-            Message::GetOperationsResponse(r) => r.request_id,
-            Message::GetSyncTargetRequest(r) => r.request_id,
-            Message::GetSyncTargetResponse(r) => r.request_id,
-            Message::Error(e) => e.request_id,
+            Self::GetOperationsRequest(r) => r.request_id,
+            Self::GetOperationsResponse(r) => r.request_id,
+            Self::GetSyncTargetRequest(r) => r.request_id,
+            Self::GetSyncTargetResponse(r) => r.request_id,
+            Self::Error(e) => e.request_id,
         }
     }
 }
@@ -94,23 +94,23 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Message::GetOperationsRequest(req) => {
+            Self::GetOperationsRequest(req) => {
                 0u8.write(buf);
                 req.write(buf);
             }
-            Message::GetOperationsResponse(resp) => {
+            Self::GetOperationsResponse(resp) => {
                 1u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetSyncTargetRequest(req) => {
+            Self::GetSyncTargetRequest(req) => {
                 2u8.write(buf);
                 req.write(buf);
             }
-            Message::GetSyncTargetResponse(resp) => {
+            Self::GetSyncTargetResponse(resp) => {
                 3u8.write(buf);
                 resp.write(buf);
             }
-            Message::Error(err) => {
+            Self::Error(err) => {
                 4u8.write(buf);
                 err.write(buf);
             }
@@ -125,11 +125,11 @@ where
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Message::GetOperationsRequest(req) => req.encode_size(),
-            Message::GetOperationsResponse(resp) => resp.encode_size(),
-            Message::GetSyncTargetRequest(req) => req.encode_size(),
-            Message::GetSyncTargetResponse(resp) => resp.encode_size(),
-            Message::Error(err) => err.encode_size(),
+            Self::GetOperationsRequest(req) => req.encode_size(),
+            Self::GetOperationsResponse(resp) => resp.encode_size(),
+            Self::GetSyncTargetRequest(req) => req.encode_size(),
+            Self::GetSyncTargetResponse(resp) => resp.encode_size(),
+            Self::Error(err) => err.encode_size(),
         }
     }
 }
@@ -143,19 +143,15 @@ where
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Message::GetOperationsRequest(GetOperationsRequest::read(
+            0 => Ok(Self::GetOperationsRequest(GetOperationsRequest::read(buf)?)),
+            1 => Ok(Self::GetOperationsResponse(GetOperationsResponse::read(
                 buf,
             )?)),
-            1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
+            2 => Ok(Self::GetSyncTargetRequest(GetSyncTargetRequest::read(buf)?)),
+            3 => Ok(Self::GetSyncTargetResponse(GetSyncTargetResponse::read(
                 buf,
             )?)),
-            2 => Ok(Message::GetSyncTargetRequest(GetSyncTargetRequest::read(
-                buf,
-            )?)),
-            3 => Ok(Message::GetSyncTargetResponse(GetSyncTargetResponse::read(
-                buf,
-            )?)),
-            4 => Ok(Message::Error(ErrorResponse::read(buf)?)),
+            4 => Ok(Self::Error(ErrorResponse::read(buf)?)),
             d => Err(CodecError::InvalidEnum(d)),
         }
     }

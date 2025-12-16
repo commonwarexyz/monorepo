@@ -10,8 +10,8 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
-use commonware_macros::select;
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -30,6 +30,12 @@ pub enum Error {
     Closed,
     #[error("recv failed")]
     RecvFailed,
+}
+
+/// Parse a muxed message into its subchannel and payload.
+pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
+    let subchannel: Channel = UInt::read(&mut bytes)?.into();
+    Ok((subchannel, bytes))
 }
 
 /// Control messages for the [Muxer].
@@ -104,75 +110,78 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Callers should run this in a background task for as long as the underlying `Receiver` is
     /// expected to receive traffic.
     pub async fn run(mut self) -> Result<(), R::Error> {
-        loop {
-            select! {
-                // Prefer control messages because network messages will
-                // already block when full (providing backpressure).
-                control = self.control_rx.next() => {
-                    match control {
-                        Some(Control::Register { subchannel, sender }) => {
-                            // If the subchannel is already registered, drop the sender.
-                            if self.routes.contains_key(&subchannel) {
-                                continue;
-                            }
-
-                            // Otherwise, create a new subchannel and send the receiver to the caller.
-                            let (tx, rx) = mpsc::channel(self.mailbox_size);
-                            self.routes.insert(subchannel, tx);
-                            let _ = sender.send(rx);
-                        },
-                        Some(Control::Deregister { subchannel }) => {
-                            // Remove the route.
-                            self.routes.remove(&subchannel);
-                        },
-                        None => {
-                            // If the control channel is closed, we can shut down since there must
-                            // be no more registrations, and all receivers must have been dropped.
-                            return Ok(());
-                        }
-                    }
-                },
-                // Process network messages.
-                message = self.receiver.recv() => {
-                    let (pk, mut bytes) = message?;
-
-                    // Decode message: varint(subchannel) || bytes
-                    let subchannel: Channel = match UInt::read(&mut bytes) {
-                        Ok(v) => v.into(),
-                        Err(_) => {
-                            debug!(?pk, "invalid message: missing subchannel");
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping muxer");
+            },
+            // Prefer control messages because network messages will
+            // already block when full (providing backpressure).
+            control = self.control_rx.next() => {
+                match control {
+                    Some(Control::Register { subchannel, sender }) => {
+                        // If the subchannel is already registered, drop the sender.
+                        if self.routes.contains_key(&subchannel) {
                             continue;
                         }
-                    };
 
-                    // Get the route for the subchannel.
-                    let Some(sender) = self.routes.get_mut(&subchannel) else {
-                        // Attempt to use the backup channel if available.
-                        if let Some(backup) = &mut self.backup {
-                            if let Err(e) = backup.send((subchannel, (pk, bytes))).await {
-                                debug!(?subchannel, ?e, "failed to send message to backup channel");
-                            }
-                        }
-
-                        // Drops the message if the subchannel is not found or the backup
-                        // channel was not used.
-                        continue;
-                    };
-
-                    // Send the message to the subchannel, blocking if the queue is full.
-                    if let Err(e) = sender.send((pk, bytes)).await {
-                        // Remove the route for the subchannel.
+                        // Otherwise, create a new subchannel and send the receiver to the caller.
+                        let (tx, rx) = mpsc::channel(self.mailbox_size);
+                        self.routes.insert(subchannel, tx);
+                        let _ = sender.send(rx);
+                    },
+                    Some(Control::Deregister { subchannel }) => {
+                        // Remove the route.
                         self.routes.remove(&subchannel);
-
-                        // Failure, drop the sender since the receiver is no longer interested.
-                        debug!(?subchannel, ?e, "failed to send message to subchannel");
-
-                        // NOTE: The channel is deregistered, but it wasn't when the message was received.
-                        // The backup channel is not used in this case.
+                    },
+                    None => {
+                        // If the control channel is closed, we can shut down since there must
+                        // be no more registrations, and all receivers must have been dropped.
+                        return Ok(());
                     }
+                }
+            },
+            // Process network messages.
+            message = self.receiver.recv() => {
+                // Decode the message.
+                let (pk, bytes) = message?;
+                let (subchannel, bytes) = match parse(bytes) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        debug!(?pk, "invalid message: missing subchannel");
+                        continue;
+                    }
+                };
+
+                // Get the route for the subchannel.
+                let Some(sender) = self.routes.get_mut(&subchannel) else {
+                    // Attempt to use the backup channel if available.
+                    if let Some(backup) = &mut self.backup {
+                        if let Err(e) = backup.send((subchannel, (pk, bytes))).await {
+                            debug!(?subchannel, ?e, "failed to send message to backup channel");
+                        }
+                    }
+
+                    // Drops the message if the subchannel is not found or the backup
+                    // channel was not used.
+                    continue;
+                };
+
+                // Send the message to the subchannel, blocking if the queue is full.
+                if let Err(e) = sender.send((pk, bytes)).await {
+                    // Remove the route for the subchannel.
+                    self.routes.remove(&subchannel);
+
+                    // Failure, drop the sender since the receiver is no longer interested.
+                    debug!(?subchannel, ?e, "failed to send message to subchannel");
+
+                    // NOTE: The channel is deregistered, but it wasn't when the message was received.
+                    // The backup channel is not used in this case.
                 }
             }
         }
+
+        Ok(())
     }
 }
 
@@ -284,7 +293,7 @@ pub struct GlobalSender<S: Sender> {
 
 impl<S: Sender> GlobalSender<S> {
     /// Create a new [GlobalSender] wrapping the given [Sender].
-    pub fn new(inner: S) -> Self {
+    pub const fn new(inner: S) -> Self {
         Self { inner }
     }
 
@@ -449,10 +458,11 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
-    use std::time::Duration;
+    use governor::Quota;
+    use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
@@ -462,6 +472,9 @@ mod tests {
         success_rate: 1.0,
     };
     const CAPACITY: usize = 5usize;
+
+    /// Default rate limit set high enough to not interfere with normal operation
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
@@ -489,8 +502,8 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -498,15 +511,19 @@ mod tests {
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer_with_backup_and_global_sender<E: Spawner + Metrics>(
-        context: &E,
+    async fn create_peer_with_backup_and_global_sender(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
@@ -516,7 +533,11 @@ mod tests {
         GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()

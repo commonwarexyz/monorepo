@@ -110,7 +110,7 @@ img {
     margin: 20px 0;
 }
 
-.image-caption {
+figcaption, .image-caption {
     font-size: 0.8em;
     color: gray;
     margin-top: 5px;
@@ -359,4 +359,8 @@ details.podcast-episode summary.podcast-title {
     .podcast-links a {
         font-size: 0.85em;
     }
+}
+
+.katex {
+    font-size: 1.0em !important;
 }

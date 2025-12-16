@@ -3,9 +3,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
-[![Benchmarks](https://img.shields.io/badge/570-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
+[![Benchmarks](https://img.shields.io/badge/1042-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
+[![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
 
 ## Primitives
 
@@ -15,9 +16,11 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
 * [collector](./collector/README.md): Collect responses to committable requests.
+* [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
+* [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -37,7 +40,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 * [sync](./examples/sync/README.md): Synchronize state between a server and client.
-* [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous
 

@@ -5,16 +5,17 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
-    parse_macro_input,
-    spanned::Spanned,
-    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
+
+mod nextest;
 
 /// Run a test function asynchronously.
 ///
@@ -136,6 +137,48 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+/// Prefix a test name with a nextest filter group.
+///
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
+/// it easy to filter tests by group postfixes in nextest.
+#[proc_macro_attribute]
+pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return Error::new(
+            Span::call_site(),
+            "test_group requires a string literal filter group name",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let mut input = parse_macro_input!(item as ItemFn);
+    let group_literal = parse_macro_input!(attr as LitStr);
+
+    let group = match nextest::sanitize_group_literal(&group_literal) {
+        Ok(group) => group,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let groups = match configured_test_groups() {
+        Ok(groups) => groups,
+        Err(_) => {
+            // Don't fail the compilation if the file isn't found; just return the original input.
+            return TokenStream::from(quote!(#input));
+        }
+    };
+
+    if let Err(err) = nextest::ensure_group_known(groups, &group, group_literal.span()) {
+        return err.to_compile_error().into();
+    }
+
+    let original_name = input.sig.ident.to_string();
+    let new_ident = Ident::new(&format!("{original_name}_{group}_"), input.sig.ident.span());
+
+    input.sig.ident = new_ident;
+
+    TokenStream::from(quote!(#input))
 }
 
 /// Capture logs from a test run into an in-memory store.
@@ -265,11 +308,11 @@ struct Branch {
 }
 
 impl Parse for SelectInput {
-    fn parse(input: ParseStream) -> Result<Self> {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
-            let pattern: Pat = input.parse()?;
+            let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
@@ -288,7 +331,21 @@ impl Parse for SelectInput {
             }
         }
 
-        Ok(SelectInput { branches })
+        Ok(Self { branches })
+    }
+}
+
+impl ToTokens for SelectInput {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for branch in &self.branches {
+            let pattern = &branch.pattern;
+            let future = &branch.future;
+            let block = &branch.block;
+
+            tokens.extend(quote! {
+                #pattern = #future => #block,
+            });
+        }
     }
 }
 
@@ -299,9 +356,8 @@ impl Parse for SelectInput {
 ///
 /// # Fusing
 ///
-/// This macro handles both the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
-/// and [pinning](https://docs.rs/futures/latest/futures/macro.pin_mut.html) of (fused) futures in
-/// a `select`-specific scope.
+/// This macro handles the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
+/// futures in a `select`-specific scope.
 ///
 /// # Example
 ///
@@ -332,30 +388,16 @@ pub fn select(input: TokenStream) -> TokenStream {
     let SelectInput { branches } = parse_macro_input!(input as SelectInput);
 
     // Generate code from provided statements
-    let mut stmts = Vec::new();
     let mut select_branches = Vec::new();
-    for (
-        index,
-        Branch {
-            pattern,
-            future,
-            block,
-        },
-    ) in branches.into_iter().enumerate()
+    for Branch {
+        pattern,
+        future,
+        block,
+    } in branches.into_iter()
     {
-        // Generate a unique identifier for each future
-        let future_ident = Ident::new(&format!("__select_future_{index}"), pattern.span());
-
-        // Fuse and pin each future
-        let stmt = quote! {
-            let #future_ident = (#future).fuse();
-            futures::pin_mut!(#future_ident);
-        };
-        stmts.push(stmt);
-
         // Generate branch for `select_biased!` macro
         let branch_code = quote! {
-            #pattern = #future_ident => #block,
+            #pattern = (#future).fuse() => #block,
         };
         select_branches.push(branch_code);
     }
@@ -364,10 +406,153 @@ pub fn select(input: TokenStream) -> TokenStream {
     quote! {
         {
             use futures::FutureExt as _;
-            #(#stmts)*
 
             futures::select_biased! {
                 #(#select_branches)*
+            }
+        }
+    }
+    .into()
+}
+
+/// Input for [select_loop!].
+///
+/// Parses: `context, on_stopped => { block }, { branches... }`
+struct SelectLoopInput {
+    context: Expr,
+    shutdown_block: Block,
+    branches: Vec<Branch>,
+}
+
+impl Parse for SelectLoopInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        // Parse context expression
+        let context: Expr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // Parse `on_stopped =>`
+        let on_stopped_ident: Ident = input.parse()?;
+        if on_stopped_ident != "on_stopped" {
+            return Err(Error::new(
+                on_stopped_ident.span(),
+                "expected `on_stopped` keyword",
+            ));
+        }
+        input.parse::<Token![=>]>()?;
+
+        // Parse shutdown block
+        let shutdown_block: Block = input.parse()?;
+
+        // Parse comma after shutdown block
+        input.parse::<Token![,]>()?;
+
+        // Parse branches directly (no surrounding braces)
+        let mut branches = Vec::new();
+        while !input.is_empty() {
+            let pattern = Pat::parse_single(input)?;
+            input.parse::<Token![=]>()?;
+            let future: Expr = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let block: Block = input.parse()?;
+
+            branches.push(Branch {
+                pattern,
+                future,
+                block,
+            });
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(Self {
+            context,
+            shutdown_block,
+            branches,
+        })
+    }
+}
+
+/// Convenience macro to continuously [select!] over a set of futures in biased order,
+/// with a required shutdown handler.
+///
+/// This macro automatically creates a shutdown future from the provided context and requires a
+/// shutdown handler block. The shutdown future is created outside the loop, allowing it to
+/// persist across iterations until shutdown is signaled. The shutdown branch is always checked
+/// first (biased).
+///
+/// After the shutdown block is executed, the loop breaks by default. If different control flow
+/// is desired (such as returning from the enclosing function), it must be handled explicitly.
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// select_loop! {
+///     context,
+///     on_stopped => { cleanup },
+///     pattern = future => block,
+///     // ...
+/// }
+/// ```
+///
+/// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
+/// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use commonware_macros::select_loop;
+///
+/// async fn run(context: impl commonware_runtime::Spawner) {
+///     select_loop! {
+///         context,
+///         on_stopped => {
+///             println!("shutting down");
+///             drop(shutdown);
+///         },
+///         msg = receiver.recv() => {
+///             println!("received: {:?}", msg);
+///         },
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn select_loop(input: TokenStream) -> TokenStream {
+    let SelectLoopInput {
+        context,
+        shutdown_block,
+        branches,
+    } = parse_macro_input!(input as SelectLoopInput);
+
+    // Convert branches to tokens for the inner select!
+    let branch_tokens: Vec<_> = branches
+        .iter()
+        .map(|b| {
+            let pattern = &b.pattern;
+            let future = &b.future;
+            let block = &b.block;
+            quote! { #pattern = #future => #block, }
+        })
+        .collect();
+
+    quote! {
+        {
+            let mut shutdown = #context.stopped();
+            loop {
+                commonware_macros::select! {
+                    _ = &mut shutdown => {
+                        #shutdown_block
+
+                        // Break the loop after handling shutdown. Some implementations
+                        // may divert control flow themselves, so this may be unused.
+                        #[allow(unreachable_code)]
+                        break;
+                    },
+                    #(#branch_tokens)*
+                }
             }
         }
     }

@@ -8,9 +8,11 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
@@ -125,129 +127,131 @@ where
 
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
-        loop {
-            select! {
-                // Command from the mailbox
-                command = self.mailbox.next() => {
-                    if let Some(command) = command {
-                        match command {
-                            Message::Send { request, recipients, responder } => {
-                                // Track commitment (if not already tracked)
-                                let commitment = request.commitment();
-                                let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                    self.outstanding.inc();
-                                    (HashSet::new(), HashSet::new())
-                                });
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping engine");
+            },
+            // Command from the mailbox
+            command = self.mailbox.next() => {
+                if let Some(command) = command {
+                    match command {
+                        Message::Send { request, recipients, responder } => {
+                            // Track commitment (if not already tracked)
+                            let commitment = request.commitment();
+                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                self.outstanding.inc();
+                                (HashSet::new(), HashSet::new())
+                            });
 
-                                // Send the request to recipients
-                                match req_tx.send(
-                                    recipients,
-                                    request,
-                                    self.priority_request
-                                ).await {
-                                    Ok(recipients) => {
-                                        entry.0.extend(recipients.iter().cloned());
-                                        let _ = responder.send(Ok(recipients));
-                                    }
-                                    Err(err) => {
-                                        error!(?err, ?commitment, "failed to send message");
-                                        let _ = responder.send(Err(Error::SendFailed(err.into())));
-                                    }
+                            // Send the request to recipients
+                            match req_tx.send(
+                                recipients,
+                                request,
+                                self.priority_request
+                            ).await {
+                                Ok(recipients) => {
+                                    entry.0.extend(recipients.iter().cloned());
+                                    let _ = responder.send(Ok(recipients));
                                 }
-                            },
-                            Message::Cancel { commitment } => {
-                                if self.tracked.remove(&commitment).is_none() {
-                                    debug!(?commitment, "ignoring removal of unknown commitment");
+                                Err(err) => {
+                                    error!(?err, ?commitment, "failed to send message");
+                                    let _ = responder.send(Err(Error::SendFailed(err.into())));
                                 }
-                                self.outstanding.set(self.tracked.len() as i64);
                             }
+                        },
+                        Message::Cancel { commitment } => {
+                            if self.tracked.remove(&commitment).is_none() {
+                                debug!(?commitment, "ignoring removal of unknown commitment");
+                            }
+                            let _ = self.outstanding.try_set(self.tracked.len());
                         }
                     }
-                },
+                }
+            },
 
-                // Response from a handler
-                ready = processed.next_completed() => {
-                    // Error handling
-                    let Ok((peer, reply)) = ready else {
-                        continue;
-                    };
-                    self.responses.inc();
+            // Response from a handler
+            ready = processed.next_completed() => {
+                // Error handling
+                let Ok((peer, reply)) = ready else {
+                    continue;
+                };
+                self.responses.inc();
 
-                    // Send the response
-                    let _ = res_tx.send(
-                        Recipients::One(peer),
-                        reply,
-                        self.priority_response
-                    ).await;
-                },
+                // Send the response
+                let _ = res_tx.send(
+                    Recipients::One(peer),
+                    reply,
+                    self.priority_response
+                ).await;
+            },
 
-                // Request from an originator
-                message = req_rx.recv() => {
-                    self.requests.inc();
+            // Request from an originator
+            message = req_rx.recv() => {
+                self.requests.inc();
 
-                    // Error handling
-                    let (peer, msg) = match message {
-                        Ok(r) => r,
-                        Err(err) => {
-                            error!(?err, "request receiver failed");
-                            break;
-                        }
-                    };
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
-                        }
-                    };
-
-                    // Handle the request
-                    let (tx, rx) = oneshot::channel();
-                    self.handler.process(peer.clone(), msg, tx).await;
-                    processed.push(async move {
-                        Ok((peer, rx.await?))
-                    });
-                },
-
-                // Response from a handler
-                response = res_rx.recv() => {
-                    // Error handling
-                    let (peer, msg) = match response {
-                        Ok(r) => r,
-                        Err(err) => {
-                            error!(?err, "response receiver failed");
-                            break;
-                        }
-                    };
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
-                        }
-                    };
-
-                    // Handle the response
-                    let commitment = msg.commitment();
-                    let Some(responses) = self.tracked.get_mut(&commitment) else {
-                        debug!(?commitment, ?peer, "response for unknown commitment");
-                        continue;
-                    };
-                    if !responses.0.contains(&peer) {
-                        debug!(?commitment, ?peer, "never sent request");
+                // Error handling
+                let (peer, msg) = match message {
+                    Ok(r) => r,
+                    Err(err) => {
+                        error!(?err, "request receiver failed");
+                        break;
+                    }
+                };
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        warn!(?err, ?peer, "blocking peer");
+                        self.blocker.block(peer).await;
                         continue;
                     }
-                    if !responses.1.insert(peer.clone()) {
-                        debug!(?commitment, ?peer, "duplicate response");
+                };
+
+                // Handle the request
+                let (tx, rx) = oneshot::channel();
+                self.handler.process(peer.clone(), msg, tx).await;
+                processed.push(async move {
+                    Ok((peer, rx.await?))
+                });
+            },
+
+            // Response from a handler
+            response = res_rx.recv() => {
+                // Error handling
+                let (peer, msg) = match response {
+                    Ok(r) => r,
+                    Err(err) => {
+                        error!(?err, "response receiver failed");
+                        break;
+                    }
+                };
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        warn!(?err, ?peer, "blocking peer");
+                        self.blocker.block(peer).await;
                         continue;
                     }
+                };
 
-                    // Send the response to the monitor
-                    self.monitor.collected(peer, msg, responses.1.len()).await;
-                },
-            }
+                // Handle the response
+                let commitment = msg.commitment();
+                let Some(responses) = self.tracked.get_mut(&commitment) else {
+                    debug!(?commitment, ?peer, "response for unknown commitment");
+                    continue;
+                };
+                if !responses.0.contains(&peer) {
+                    debug!(?commitment, ?peer, "never sent request");
+                    continue;
+                }
+                if !responses.1.insert(peer.clone()) {
+                    debug!(?commitment, ?peer, "duplicate response");
+                    continue;
+                }
+
+                // Send the response to the monitor
+                self.monitor.collected(peer, msg, responses.1.len()).await;
+            },
         }
     }
 }

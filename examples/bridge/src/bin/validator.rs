@@ -3,19 +3,22 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::simplex::{self, Engine};
+use commonware_consensus::{
+    simplex::{self, Engine},
+    types::{Epoch, ViewDelta},
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        poly::{Poly, Public},
+        sharing::Sharing,
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, quorum, set::Ordered, union, NZUsize, NZU32};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -79,14 +82,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
+    let validators: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -110,13 +114,13 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32) as usize;
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
+    let identity: Sharing<MinSig> =
+        Sharing::decode_cfg(identity.as_ref(), &NZU32!(validators.len() as u32))
+            .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
@@ -144,7 +148,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
@@ -158,7 +162,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer.clone(),
+        signer,
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -197,12 +201,12 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (pending_sender, pending_receiver) = network.register(
+        let (vote_sender, vote_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (recovered_sender, recovered_receiver) = network.register(
+        let (certificate_sender, certificate_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
@@ -240,7 +244,7 @@ fn main() {
                 reporter: mailbox.clone(),
                 partition: String::from("log"),
                 mailbox_size: 1024,
-                epoch: 0,
+                epoch: Epoch::zero(),
                 namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -248,10 +252,9 @@ fn main() {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
-                max_fetch_count: 32,
-                fetch_concurrent: 2,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                fetch_concurrent: 32,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
             },
@@ -260,8 +263,8 @@ fn main() {
         // Start consensus
         network.start();
         engine.start(
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
 

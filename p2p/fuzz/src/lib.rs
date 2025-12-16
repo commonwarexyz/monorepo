@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     authenticated::{
         discovery,
@@ -9,10 +9,13 @@ use commonware_p2p::{
     },
     Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
+use commonware_runtime::{
+    deterministic::{self, Context},
+    Clock, Handle, Metrics, Runner,
+};
 use commonware_utils::{
-    set::{Ordered, OrderedAssociated},
-    NZU32,
+    ordered::{Map, Set},
+    TryCollect, NZU32,
 };
 use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
@@ -56,7 +59,7 @@ const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
-const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Operations that can be performed on the p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -205,7 +208,7 @@ pub trait NetworkScheme: Send + 'static {
 pub struct Discovery;
 
 impl NetworkScheme for Discovery {
-    type Sender = discovery::Sender<ed25519::PublicKey>;
+    type Sender = discovery::Sender<ed25519::PublicKey, deterministic::Context>;
     type Receiver = discovery::Receiver<ed25519::PublicKey>;
     type Oracle = discovery::Oracle<ed25519::PublicKey>;
 
@@ -254,7 +257,11 @@ impl NetworkScheme for Discovery {
         for index in 0..peer.topo.tracked_peer_sets {
             let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
-            let subset = addrs[..3].to_vec().into();
+            let subset: Set<_> = addrs[..3]
+                .iter()
+                .cloned()
+                .try_collect()
+                .expect("public keys are unique");
             oracle.update(index as u64, subset).await;
         }
 
@@ -279,10 +286,11 @@ impl NetworkScheme for Discovery {
         peer_ids: &'a [PeerId],
     ) {
         // Discovery only needs public keys (addresses discovered via protocol)
-        let peer_pks: Ordered<_> = peer_ids
+        let peer_pks: Set<_> = peer_ids
             .iter()
             .map(|&id| topo.peers[id as usize].public_key.clone())
-            .collect();
+            .try_collect()
+            .expect("public keys are unique");
         let _ = oracle.update(index, peer_pks).await;
     }
 }
@@ -291,7 +299,7 @@ impl NetworkScheme for Discovery {
 pub struct Lookup;
 
 impl NetworkScheme for Lookup {
-    type Sender = lookup::Sender<ed25519::PublicKey>;
+    type Sender = lookup::Sender<ed25519::PublicKey, deterministic::Context>;
     type Receiver = lookup::Receiver<ed25519::PublicKey>;
     type Oracle = lookup::Oracle<ed25519::PublicKey>;
 
@@ -303,7 +311,6 @@ impl NetworkScheme for Lookup {
         let mut config = lookup::Config::recommended(
             peer.info.private_key.clone(),
             b"fuzz_namespace",
-            peer.info.address,
             peer.info.address,
             MAX_MSG_SIZE,
         );
@@ -326,15 +333,27 @@ impl NetworkScheme for Lookup {
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
-            oracle.update(index as u64, peer_list.clone().into()).await;
+            oracle
+                .update(
+                    index as u64,
+                    peer_list
+                        .clone()
+                        .try_into()
+                        .expect("public keys are unique"),
+                )
+                .await;
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS
         for index in peer.topo.tracked_peer_sets..(peer.topo.tracked_peer_sets * 2) {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
-            let subset = peers[..3].to_vec();
-            oracle.update(index as u64, subset.into()).await;
+            let subset: Map<_, _> = peers[..3]
+                .iter()
+                .cloned()
+                .try_collect()
+                .expect("public keys are unique");
+            oracle.update(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -358,13 +377,14 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: OrderedAssociated<_, _> = peer_ids
+        let peer_list: Map<_, _> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
                 (p.public_key.clone(), p.address)
             })
-            .collect();
+            .try_collect()
+            .expect("public keys are unique");
         let _ = oracle.update(index, peer_list).await;
     }
 }
@@ -577,7 +597,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

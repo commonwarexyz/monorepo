@@ -100,7 +100,7 @@ pub async fn run(
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
-                    .split(f.size());
+                    .split(f.area());
                 let horizontal_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
@@ -181,7 +181,7 @@ pub async fn run(
                 let logs_text = Text::from(
                     logs.iter()
                         .map(|log| Line::raw(log.clone()))
-                        .collect::<Vec<Line>>(),
+                        .collect::<Vec<Line<'_>>>(),
                 );
                 let logs_block = Paragraph::new(logs_text)
                     .block(

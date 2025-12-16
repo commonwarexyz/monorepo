@@ -1,7 +1,7 @@
 use super::{
     config::Config,
     fetcher::Fetcher,
-    ingress::{Mailbox, Message},
+    ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
 use crate::Consumer;
@@ -10,13 +10,13 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Manager, Receiver, Recipients, Sender,
+    Blocker, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -44,6 +44,7 @@ pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Manager<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -62,11 +63,14 @@ pub struct Engine<
     /// Manages the list of peers that can be used to fetch data
     manager: D,
 
+    /// The blocker that will be used to block peers that send invalid responses
+    blocker: B,
+
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key>>,
+    mailbox: mpsc::Receiver<Message<Key, P>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -95,17 +99,18 @@ impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Manager<PublicKey = P>,
+        B: Blocker<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
+    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         // TODO(#1833): Metrics should use the post-start context
@@ -122,6 +127,7 @@ impl<
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 manager: cfg.manager,
+                blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -155,16 +161,16 @@ impl<
 
         loop {
             // Update metrics
-            self.metrics
+            let _ = self
+                .metrics
                 .fetch_pending
-                .set(self.fetcher.len_pending() as i64);
-            self.metrics
-                .fetch_active
-                .set(self.fetcher.len_active() as i64);
-            self.metrics
+                .try_set(self.fetcher.len_pending());
+            let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
+            let _ = self
+                .metrics
                 .peers_blocked
-                .set(self.fetcher.len_blocked() as i64);
-            self.metrics.serve_processing.set(self.serves.len() as i64);
+                .try_set(self.fetcher.len_blocked());
+            let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
@@ -201,6 +207,20 @@ impl<
                     }
                 },
 
+                // Handle active deadline
+                _ = deadline_active => {
+                    if let Some(key) = self.fetcher.pop_active() {
+                        debug!(?key, "requester timeout");
+                        self.metrics.fetch.inc(Status::Failure);
+                        self.fetcher.add_retry(key);
+                    }
+                },
+
+                // Handle pending deadline
+                _ = deadline_pending => {
+                    self.fetcher.fetch(&mut sender).await;
+                },
+
                 // Handle mailbox messages
                 msg = self.mailbox.next() => {
                     let Some(msg) = msg else {
@@ -208,19 +228,27 @@ impl<
                         return;
                     };
                     match msg {
-                        Message::Fetch { key } => {
-                            trace!(?key, "mailbox: fetch");
+                        Message::Fetch(requests) => {
+                            for FetchRequest { key, targets } in requests {
+                                trace!(?key, "mailbox: fetch");
 
-                            // Check if the fetch is already in progress
-                            if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, "duplicate fetch");
-                                self.metrics.fetch.inc(Status::Dropped);
-                                continue;
+                                // Check if the fetch is already in progress
+                                let is_new = !self.fetch_timers.contains_key(&key);
+
+                                // Update targets (even for existing fetches)
+                                match targets {
+                                    Some(targets) => self.fetcher.add_targets(key.clone(), targets),
+                                    None => self.fetcher.clear_targets(&key),
+                                }
+
+                                // Only start new fetch if not already in progress
+                                if is_new {
+                                    self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
+                                    self.fetcher.add_ready(key);
+                                } else {
+                                    trace!(?key, "updated targets for existing fetch");
+                                }
                             }
-
-                            // Record fetch start time
-                            self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.fetch(&mut sender, key, true).await;
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -233,27 +261,48 @@ impl<
                         }
                         Message::Retain { predicate } => {
                             trace!("mailbox: retain");
-                            let before = self.fetcher.len();
-                            self.fetcher.retain(predicate);
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            // Remove from fetcher
+                            self.fetcher.retain(&predicate);
+
+                            // Clean up timers and notify consumer
+                            let before = self.fetch_timers.len();
+                            let removed = self.fetch_timers.extract_if(|k, _| !predicate(k)).collect::<Vec<_>>();
+                            for (key, timer) in removed {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
+                            }
+
+                            // Metrics
+                            let removed = (before - self.fetch_timers.len()) as u64;
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                         Message::Clear => {
                             trace!("mailbox: clear");
-                            let before = self.fetcher.len();
+
+                            // Clear fetcher
                             self.fetcher.clear();
-                            let after = self.fetcher.len();
-                            if before == after {
+
+                            // Drain timers and notify consumer
+                            let removed = self.fetch_timers.len() as u64;
+                            for (key, timer) in self.fetch_timers.drain() {
+                                timer.cancel();
+                                self.consumer.failed(key, ()).await;
+                            }
+
+                            // Metrics
+                            if removed == 0 {
                                 self.metrics.cancel.inc(Status::Dropped);
                             } else {
-                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                                self.metrics.cancel.inc_by(Status::Success, removed);
                             }
                         }
                     }
+                    assert_eq!(self.fetcher.len(), self.fetch_timers.len());
                 },
 
                 // Handle completed server requests
@@ -297,26 +346,9 @@ impl<
                     };
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
                     };
-                },
-
-                // Handle pending deadline
-                _ = deadline_pending => {
-                    let key = self.fetcher.pop_pending();
-                    debug!(?key, "retrying");
-                    self.metrics.fetch.inc(Status::Failure);
-                    self.fetcher.fetch(&mut sender, key, false).await;
-                },
-
-                // Handle active deadline
-                _ = deadline_active => {
-                    if let Some(key) = self.fetcher.pop_active() {
-                        debug!(?key, "requester timeout");
-                        self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.fetch(&mut sender, key, false).await;
-                    }
                 },
             }
         }
@@ -332,10 +364,10 @@ impl<
         priority: bool,
     ) {
         // Encode message
-        let payload: wire::Payload<Key> = match response {
-            Ok(data) => wire::Payload::Response(data),
-            Err(_) => wire::Payload::ErrorResponse,
-        };
+        let payload: wire::Payload<Key> = response.map_or_else(
+            |_| wire::Payload::Error,
+            |data| wire::Payload::Response(data),
+        );
         let msg = wire::Message { id, payload };
 
         // Send message to peer
@@ -370,13 +402,7 @@ impl<
     }
 
     /// Handle a network response from a peer.
-    async fn handle_network_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-        response: Bytes,
-    ) {
+    async fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
@@ -390,22 +416,22 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
+
+            // Clear all targets for this key
+            self.fetcher.clear_targets(&key);
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
+        // (blocking the peer also removes any targets associated with it)
+        self.blocker.block(peer.clone()).await;
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_retry(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-    ) {
+    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
@@ -416,7 +442,6 @@ impl<
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
-        // Don't reset start time for retries, keep the original
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_retry(key);
     }
 }

@@ -1,13 +1,13 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered},
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -29,7 +29,7 @@ struct Record<K: Array, V: Codec> {
 
 impl<K: Array, V: Codec> Record<K, V> {
     /// Create a new `Record`.
-    fn new(index: u64, key: K, value: V) -> Self {
+    const fn new(index: u64, key: K, value: V) -> Self {
         Self { index, key, value }
     }
 }
@@ -59,6 +59,21 @@ impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a>,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(
+            u.arbitrary::<u64>()?,
+            u.arbitrary::<K>()?,
+            u.arbitrary::<V>()?,
+        ))
+    }
+}
+
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
@@ -85,7 +100,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
 
 impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
     /// Calculate the section for a given index.
-    fn section(&self, index: u64) -> u64 {
+    const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
     }
 
@@ -109,7 +124,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
-        let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
+        let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
             debug!("initializing archive");
@@ -128,7 +143,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Store index in intervals
                 intervals.insert(data.index);
             }
-            debug!(keys = keys.keys(), "archive initialized");
+            debug!("archive initialized");
         }
 
         // Initialize metrics
@@ -156,7 +171,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         context.register("gets", "Number of gets performed", gets.clone());
         context.register("has", "Number of has performed", has.clone());
         context.register("syncs", "Number of syncs called", syncs.clone());
-        items_tracked.set(indices.len() as i64);
+        let _ = items_tracked.try_set(indices.len());
 
         // Return populated archive
         Ok(Self {
@@ -280,7 +295,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 }
@@ -322,7 +337,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.pending.insert(section);
 
         // Update metrics
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 
@@ -356,6 +371,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.intervals.next_gap(index)
     }
 
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(index, max)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
     }
@@ -370,5 +393,16 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_utils::sequence::U64;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<U64, Vec<u8>>>
     }
 }

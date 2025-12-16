@@ -7,10 +7,11 @@
 
 use thiserror::Error;
 
+pub mod authenticated;
 pub mod contiguous;
 pub mod segmented;
 
-impl<E, Op> crate::adb::sync::Journal for contiguous::fixed::Journal<E, Op>
+impl<E, Op> crate::qmdb::sync::Journal for contiguous::fixed::Journal<E, Op>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize,
@@ -19,19 +20,21 @@ where
     type Error = Error;
 
     async fn size(&self) -> u64 {
-        contiguous::fixed::Journal::size(self).await
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        contiguous::fixed::Journal::append(self, op)
-            .await
-            .map(|_| ())
+        Self::append(self, op).await.map(|_| ())
     }
 }
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("mmr error: {0}")]
+    Mmr(anyhow::Error),
+    #[error("journal error: {0}")]
+    Journal(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]

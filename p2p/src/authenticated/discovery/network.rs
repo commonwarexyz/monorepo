@@ -19,7 +19,7 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
@@ -110,16 +110,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
+    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
         backlog: usize,
     ) -> (
-        channels::Sender<C::PublicKey>,
+        channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        self.channels.register(channel, rate, backlog)
+        let clock = self
+            .context
+            .with_label(&format!("channel_{channel}"))
+            .take();
+        self.channels.register(channel, rate, backlog, clock)
     }
 
     /// Starts the network.
@@ -185,40 +190,29 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
 
+        let mut shutdown = self.context.stopped();
+
         // Wait for first actor to exit
         info!("network started");
-        let err = select! {
+        select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping network");
+            },
             tracker = &mut tracker_task => {
-                debug!("tracker exited");
-                tracker
+                panic!("tracker exited unexpectedly: {tracker:?}");
             },
             router = &mut router_task => {
-                debug!("router exited");
-                router
+                panic!("router exited unexpectedly: {router:?}");
             },
             spawner = &mut spawner_task => {
-                debug!("spawner exited");
-                spawner
+                panic!("spawner exited unexpectedly: {spawner:?}");
             },
             listener = &mut listener_task => {
-                debug!("listener exited");
-                listener
+                panic!("listener exited unexpectedly: {listener:?}");
             },
             dialer = &mut dialer_task => {
-                debug!("dialer exited");
-                dialer
+                panic!("dialer exited unexpectedly: {dialer:?}");
             },
         }
-        .unwrap_err();
-
-        // Ensure all tasks close
-        tracker_task.abort();
-        router_task.abort();
-        spawner_task.abort();
-        listener_task.abort();
-        dialer_task.abort();
-
-        // Log error
-        warn!(error=?err, "network shutdown")
     }
 }

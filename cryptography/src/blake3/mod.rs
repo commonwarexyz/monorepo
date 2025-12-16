@@ -24,6 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -57,6 +58,10 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
+    const EMPTY: Self::Digest = Digest(hex!(
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    ));
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
@@ -88,14 +93,11 @@ impl Hasher for Blake3 {
         self.hasher = CoreBlake3::new();
         self
     }
-
-    fn empty() -> Self::Digest {
-        Self::default().finalize()
-    }
 }
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -159,8 +161,10 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+impl crate::Digest for Digest {}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -181,8 +185,6 @@ mod tests {
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24");
-    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");
 
     #[test]
     fn test_blake3() {
@@ -212,17 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Blake3::empty();
-        let digest2 = Blake3::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
     fn test_blake3_empty() {
-        let empty_digest = Blake3::empty();
-        let expected_digest = Digest::from(EMPTY_DIGEST);
+        let empty_digest = Blake3::EMPTY;
+        let expected_digest = Blake3::new().finalize();
 
         assert_eq!(empty_digest, expected_digest);
     }
@@ -240,5 +234,15 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

@@ -9,19 +9,19 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
-commonware-codec = { workspace = true, features = ["std"] }
-commonware-cryptography = { workspace = true, features = ["std"] }
 arbitrary = { workspace = true, features = ["derive"] }
+blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
-libfuzzer-sys = { workspace = true }
+commonware-codec = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
+commonware-math.workspace = true
+ed25519-zebra.workspace = true
+libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
-sha2 = { workspace = true }
-ed25519-zebra = "4.0.3"
-rand = { workspace = true }
-blake3 = { workspace = true }
-zeroize = { workspace = true }
-bytes = { workspace = true }
-rand_chacha = { workspace = true }
+rand.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+bytes.workspace = true
 
 [[bin]]
 name = "bls12381_decode"
@@ -38,8 +38,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "secp256r1_decode"
-path = "fuzz_targets/secp256r1_decode.rs"
+name = "secp256r1_standard_decode"
+path = "fuzz_targets/secp256r1_standard_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secp256r1_recoverable_decode"
+path = "fuzz_targets/secp256r1_recoverable_decode.rs"
 test = false
 doc = false
 bench = false
@@ -117,6 +124,13 @@ bench = false
 [[bin]]
 name = "metamorph_lthash"
 path = "fuzz_targets/metamorph_lthash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_dkg"
+path = "fuzz_targets/bls12381_dkg.rs"
 test = false
 doc = false
 bench = false

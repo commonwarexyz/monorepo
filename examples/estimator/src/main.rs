@@ -2,8 +2,8 @@
 
 use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-use commonware_macros::select;
+use commonware_cryptography::{ed25519, Signer};
+use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
@@ -20,12 +20,17 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
+use governor::{clock::Clock as GClock, Quota};
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
+
+/// Default rate limit set high enough to not interfere with normal operation
+const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;
@@ -39,17 +44,17 @@ type Message = Vec<u8>;
 /// Create a message containing the ID encoded as a big-endian u32,
 /// padded to the given size.
 fn create_message(id: u32, target_size: Option<usize>) -> Message {
-    match target_size {
-        Some(size) => {
+    target_size.map_or_else(
+        || id.to_be_bytes().to_vec(),
+        |size| {
             let mut message = Vec::with_capacity(size);
             message.extend_from_slice(&id.to_be_bytes());
             if size > 4 {
                 message.resize(size, 0);
             }
             message
-        }
-        None => id.to_be_bytes().to_vec(),
-    }
+        },
+    )
 }
 
 /// Extract the ID from a message.
@@ -184,6 +189,7 @@ fn parse_arguments() -> Arguments {
                 .parse::<usize>()
                 .expect("invalid count");
 
+            #[allow(clippy::option_if_let_else)]
             let (egress_cap, ingress_cap) = match parts.next() {
                 Some(bandwidth) => {
                     if bandwidth.contains('/') {
@@ -284,7 +290,9 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<
+    C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore + GClock,
+>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -341,7 +349,7 @@ async fn setup_network_identities(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL)
+                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
@@ -389,7 +397,7 @@ async fn setup_network_links(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock + Clone + Send + 'static>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
@@ -463,14 +471,14 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
             tx.send(shutter).await.unwrap();
 
             // Process remaining messages until shutdown
-            loop {
-                select! {
-                    _ = receiver.recv() => {
-                        // Discard message
-                    },
-                    _ = &mut listener => {
-                        break;
-                    }
+            select_loop! {
+                ctx,
+                on_stopped => {},
+                _ = receiver.recv() => {
+                    // Discard message
+                },
+                _ = &mut listener => {
+                    break;
                 }
             }
 
@@ -482,7 +490,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 }
 
 /// Check if a single command would succeed without executing side effects
-async fn process_single_command_check<C: Spawner + Clock>(
+async fn process_single_command_check<C: Clock>(
     ctx: &C,
     command_ctx: &CommandContext,
     command: &(usize, Command),
@@ -548,7 +556,7 @@ async fn process_single_command_check<C: Spawner + Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Spawner + Clock>(
+async fn process_command<C: Clock>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,

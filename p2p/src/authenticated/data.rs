@@ -32,7 +32,20 @@ impl Read for Data {
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
-        Ok(Data { channel, message })
+        Ok(Self { channel, message })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Data {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let channel = u.arbitrary::<u64>()?;
+        let message = {
+            let size = u.int_in_range(0..=1024)?;
+            let bytes = u.bytes(size)?;
+            Bytes::from(bytes.to_vec())
+        };
+        Ok(Self { channel, message })
     }
 }
 
@@ -64,5 +77,15 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Data>,
+        }
     }
 }

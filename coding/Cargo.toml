@@ -10,22 +10,44 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
 documentation = "https://docs.rs/commonware-coding"
 
+[lints]
+workspace = true
+
 [dependencies]
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
+bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-math.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
-bytes = { workspace = true }
-thiserror = { workspace = true }
-reed-solomon-simd = "3.0.1"
-rand_core = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
+futures.workspace = true
+num-rational.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+rayon.workspace = true
+reed-solomon-simd.workspace = true
+thiserror.workspace = true
 
 [lib]
 bench = false
 
 [dev-dependencies]
-criterion = { workspace = true }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
+commonware-conformance.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-storage/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+]
 
 [[bench]]
 name = "coding_scheme_times"

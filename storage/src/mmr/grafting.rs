@@ -9,7 +9,7 @@
 //! allows for shorter inclusion proofs over the combined trees compared to treating them as
 //! independent.
 //!
-//! One example use case is the [crate::adb::current] authenticated database, where a MMR is built
+//! One example use case is the [crate::qmdb::current] authenticated database, where a MMR is built
 //! over a log of operations, and a merkle tree over a bitmap indicating the activity state of each
 //! operation. If we were to treat the two trees as independent, then an inclusion proof for an
 //! operation and its activity state would involve a full branch from each structure. When using
@@ -94,7 +94,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
 
     /// Access the underlying [StandardHasher] for non-grafted hashing.
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         self.hasher
     }
 
@@ -225,7 +225,9 @@ pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Positio
     Some(Position::new(peak_pos))
 }
 
-impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
+impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
+    type Inner = H;
+
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
     /// # Panics
@@ -245,8 +247,8 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl HasherTrait<H> {
-        HasherFork {
+    fn fork(&self) -> impl HasherTrait<H::Digest> {
+        HasherFork::<H> {
             hasher: StandardHasher::new(),
             height: self.height,
             grafted_digests: &self.grafted_digests,
@@ -281,7 +283,9 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
+impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
+    type Inner = H;
+
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
     /// # Panics
@@ -301,9 +305,9 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl HasherTrait<H> {
-        HasherFork {
-            hasher: StandardHasher::new(),
+    fn fork(&self) -> impl HasherTrait<H::Digest> {
+        HasherFork::<H> {
+            hasher: StandardHasher::<H>::new(),
             height: self.height,
             grafted_digests: self.grafted_digests,
         }
@@ -365,18 +369,20 @@ impl<'a, H: CHasher> Verifier<'a, H> {
         }
     }
 
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
 }
 
-impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
+impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
+    type Inner = H;
+
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
     }
 
-    fn fork(&self) -> impl HasherTrait<H> {
-        Verifier {
+    fn fork(&self) -> impl HasherTrait<H::Digest> {
+        Verifier::<H> {
             hasher: StandardHasher::new(),
             height: self.height,
             elements: self.elements.clone(),
@@ -466,7 +472,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Storage<'a, H, S1, S2>
 {
     /// Creates a new grafted [Storage] instance.
-    pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
+    pub const fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
         Self {
             peak_tree,
             base_mmr,
@@ -515,7 +521,7 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        mem::Mmr,
+        mem::CleanMmr,
         stability::{build_test_mmr, ROOTS},
         verification, Position, StandardHasher,
     };
@@ -679,13 +685,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mut base_mmr = Mmr::new();
-            build_test_mmr(&mut standard, &mut base_mmr);
-            let root = base_mmr.root(&mut standard);
+            let mmr = CleanMmr::new(&mut standard);
+            let base_mmr = build_test_mmr(&mut standard, mmr);
+            let root = *base_mmr.root();
             let expected_root = ROOTS[199];
             assert_eq!(&hex(&root), expected_root);
 
-            let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 0);
+            let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 0);
             hasher
                 .load_grafted_digests(
                     &(0..199).map(Location::new_unchecked).collect::<Vec<_>>(),
@@ -704,18 +710,18 @@ mod tests {
                 let rand_leaf_pos = Position::new(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
-                let mut peak_mmr = Mmr::new();
-                build_test_mmr(&mut hasher, &mut peak_mmr);
-                let root = peak_mmr.root(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);
             }
 
             // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves
             // in the base tree to maintain the corresponding # of segments.
-            build_test_mmr(&mut standard, &mut base_mmr);
+            let base_mmr = build_test_mmr(&mut standard, base_mmr);
             {
-                let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 1);
+                let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 1);
                 hasher
                     .load_grafted_digests(
                         &(0..199).map(Location::new_unchecked).collect::<Vec<_>>(),
@@ -747,15 +753,15 @@ mod tests {
                     Position::new(17)
                 );
 
-                let mut peak_mmr = Mmr::new();
-                build_test_mmr(&mut hasher, &mut peak_mmr);
-                let root = peak_mmr.root(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);
             }
 
             // Height 2 grafting destination computation check.
-            let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 2);
+            let hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 2);
             assert_eq!(
                 hasher.destination_pos(Position::try_from(Location::new_unchecked(0)).unwrap()),
                 Position::new(6)
@@ -766,7 +772,7 @@ mod tests {
             );
 
             // Height 3 grafting destination computation check.
-            let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 3);
+            let hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 3);
             assert_eq!(
                 hasher.destination_pos(Position::try_from(Location::new_unchecked(0)).unwrap()),
                 Position::new(14)
@@ -787,7 +793,7 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Make a base MMR with 4 leaves.
-            let mut base_mmr = Mmr::new();
+            let mut base_mmr = CleanMmr::new(&mut standard);
             base_mmr.add(&mut standard, &b1);
             base_mmr.add(&mut standard, &b2);
             base_mmr.add(&mut standard, &b3);
@@ -798,7 +804,7 @@ mod tests {
 
             // Since we are using grafting height of 1, peak tree must have half the leaves of the
             // base (2).
-            let mut peak_tree: Mmr<Sha256> = Mmr::new();
+            let mut peak_tree = CleanMmr::new(&mut standard);
             {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter
@@ -812,8 +818,8 @@ mod tests {
                 peak_tree.add(&mut grafter, &p2);
             }
 
-            let peak_root = peak_tree.root(&mut standard);
-            let base_root = base_mmr.root(&mut standard);
+            let peak_root = *peak_tree.root();
+            let base_root = *base_mmr.root();
             assert_ne!(peak_root, base_root);
 
             {

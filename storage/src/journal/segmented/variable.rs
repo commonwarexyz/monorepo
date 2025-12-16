@@ -105,6 +105,7 @@ use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
+    telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
@@ -206,7 +207,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         context.register("tracked", "Number of blobs", tracked.clone());
         context.register("synced", "Number of syncs", synced.clone());
         context.register("pruned", "Number of blobs pruned", pruned.clone());
-        tracked.set(blobs.len() as i64);
+        let _ = tracked.try_set(blobs.len());
 
         // Create journal instance
         Ok(Self {
@@ -223,7 +224,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Ensures that a section pruned during the current execution is not accessed.
-    fn prune_guard(&self, section: u64) -> Result<(), Error> {
+    const fn prune_guard(&self, section: u64) -> Result<(), Error> {
         if section < self.oldest_retained_section {
             Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
         } else {
