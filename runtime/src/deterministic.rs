@@ -363,6 +363,7 @@ pub struct Checkpoint {
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
 
@@ -603,6 +604,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            dns: executor.dns,
             catch_panics: executor.panicker.catch(),
         };
 
@@ -890,6 +892,7 @@ impl Context {
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
+            dns: checkpoint.dns,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -898,7 +901,6 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
-            dns: Mutex::new(HashMap::new()),
         });
         (
             Self {
@@ -1579,6 +1581,41 @@ mod tests {
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_dns_mappings_persist() {
+        use crate::Resolver;
+
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let host = "example.com";
+        let addrs = vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
+        ];
+
+        // Register DNS mapping and recover the runtime
+        let (state, checkpoint) = executor.start_and_recover({
+            let addrs = addrs.clone();
+            |context| async move {
+                context.resolver_register(host, Some(addrs));
+                context.auditor().state()
+            }
+        });
+
+        // Verify auditor state is the same
+        assert_eq!(state, checkpoint.auditor.state());
+
+        // Check that DNS mappings persist after recovery
+        let executor = Runner::from(checkpoint);
+        executor.start({
+            let addrs = addrs.clone();
+            move |context| async move {
+                let resolved = context.resolve(host).await.unwrap();
+                assert_eq!(resolved, addrs);
+            }
         });
     }
 
