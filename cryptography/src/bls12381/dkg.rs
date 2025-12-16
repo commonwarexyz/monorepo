@@ -422,9 +422,9 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let summary = u.arbitrary()?;
         let public: Sharing<V> = u.arbitrary()?;
-
         let total = public.total().get() as usize;
-        let num_dealers = u.int_in_range(1..=total)?;
+
+        let num_dealers = u.int_in_range(1..=total * 2)?;
         let dealers = Set::try_from(
             u.arbitrary_iter::<P>()?
                 .take(num_dealers)
@@ -440,17 +440,12 @@ where
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
         let max_revealed = commonware_utils::max_faults(total as u32) as usize;
-        let num_revealed = u.int_in_range(0..=max_revealed)?;
-        let mut revealed_indices: Vec<usize> = (0..players.len()).collect();
-        for i in 0..revealed_indices.len() {
-            let j = u.int_in_range(i..=revealed_indices.len() - 1)?;
-            revealed_indices.swap(i, j);
-        }
         let revealed = Set::from_iter_dedup(
-            revealed_indices
-                .into_iter()
-                .take(num_revealed)
-                .map(|i| players.get(i).unwrap().clone()),
+            players
+                .iter()
+                .filter(|_| u.arbitrary::<bool>().unwrap_or(false))
+                .take(max_revealed)
+                .cloned(),
         );
 
         Ok(Self {
