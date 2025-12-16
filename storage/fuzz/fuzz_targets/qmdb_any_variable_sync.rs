@@ -4,13 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    index::unordered::Index,
-    journal::contiguous::variable::Journal,
     mmr::{hasher::Standard, Location, MAX_LOCATION},
     qmdb::{
-        any::{unordered::Any, UnorderedOperation, VariableConfig as Config, VariableEncoding},
-        store::CleanStore as _,
-        verify_proof,
+        any::VariableConfig as Config, store::CleanStore as _, verify_proof, VariableUnordered,
     },
     translator::TwoCap,
 };
@@ -155,14 +151,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
     }
 }
 
-type AnyDb = Any<
-    deterministic::Context,
-    Key,
-    VariableEncoding<Vec<u8>>,
-    Journal<deterministic::Context, UnorderedOperation<Key, VariableEncoding<Vec<u8>>>>,
-    Index<TwoCap, Location>,
-    Sha256,
->;
+type AnyDb = VariableUnordered<deterministic::Context, Key, Vec<u8>, Sha256, TwoCap>;
 
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();

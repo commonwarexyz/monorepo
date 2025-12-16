@@ -12,7 +12,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            db::Db, CleanAny, DirtyAny, FixedEncoding, FixedValue, UnorderedOperation,
+            CleanAny, Db, DirtyAny, FixedEncoding, FixedValue, UnorderedOperation,
             UnorderedUpdate,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},

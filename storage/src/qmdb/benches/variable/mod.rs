@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::Location,
     qmdb::{
         any::{
-            ordered::Any as OAny, unordered::Any as UAny, OrderedOperation, UnorderedOperation,
+            Db, OrderedOperation, OrderedUpdate, UnorderedOperation, UnorderedUpdate,
             VariableConfig as AConfig, VariableEncoding,
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
@@ -62,18 +62,20 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
-type UAnyDb = UAny<
+type UAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     VariableEncoding<Vec<u8>>,
+    UnorderedUpdate<<Sha256 as Hasher>::Digest, VariableEncoding<Vec<u8>>>,
     Journal<Context, UnorderedOperation<<Sha256 as Hasher>::Digest, VariableEncoding<Vec<u8>>>>,
     UIndex<EightCap, Location>,
     Sha256,
 >;
-type OAnyDb = OAny<
+type OAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     VariableEncoding<Vec<u8>>,
+    OrderedUpdate<<Sha256 as Hasher>::Digest, VariableEncoding<Vec<u8>>>,
     Journal<Context, OrderedOperation<<Sha256 as Hasher>::Digest, VariableEncoding<Vec<u8>>>>,
     OIndex<EightCap, Location>,
     Sha256,

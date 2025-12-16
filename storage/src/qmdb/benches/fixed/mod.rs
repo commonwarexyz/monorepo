@@ -12,8 +12,8 @@ use commonware_storage::{
     mmr::Location,
     qmdb::{
         any::{
-            ordered::Any, unordered::Any as UAny, FixedConfig as AConfig, FixedEncoding,
-            OrderedOperation, UnorderedOperation, VariableConfig as VariableAnyConfig,
+            Db, FixedConfig as AConfig, FixedEncoding, OrderedOperation, OrderedUpdate,
+            UnorderedOperation, UnorderedUpdate, VariableConfig as VariableAnyConfig,
             VariableEncoding,
         },
         current::{
@@ -90,10 +90,11 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type UAnyDb = UAny<
+type UAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     FixedEncoding<<Sha256 as Hasher>::Digest>,
+    UnorderedUpdate<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
     FixedJournal<
         Context,
         UnorderedOperation<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
@@ -101,10 +102,11 @@ type UAnyDb = UAny<
     UIndex<EightCap, Location>,
     Sha256,
 >;
-type OAnyDb = Any<
+type OAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     FixedEncoding<<Sha256 as Hasher>::Digest>,
+    OrderedUpdate<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
     FixedJournal<
         Context,
         OrderedOperation<<Sha256 as Hasher>::Digest, FixedEncoding<<Sha256 as Hasher>::Digest>>,
@@ -129,10 +131,11 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-type UVAnyDb = UAny<
+type UVAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     VariableEncoding<<Sha256 as Hasher>::Digest>,
+    UnorderedUpdate<<Sha256 as Hasher>::Digest, VariableEncoding<<Sha256 as Hasher>::Digest>>,
     VariableJournal<
         Context,
         UnorderedOperation<
@@ -143,10 +146,11 @@ type UVAnyDb = UAny<
     UIndex<EightCap, Location>,
     Sha256,
 >;
-type OVAnyDb = Any<
+type OVAnyDb = Db<
     Context,
     <Sha256 as Hasher>::Digest,
     VariableEncoding<<Sha256 as Hasher>::Digest>,
+    OrderedUpdate<<Sha256 as Hasher>::Digest, VariableEncoding<<Sha256 as Hasher>::Digest>>,
     VariableJournal<
         Context,
         OrderedOperation<<Sha256 as Hasher>::Digest, VariableEncoding<<Sha256 as Hasher>::Digest>>,

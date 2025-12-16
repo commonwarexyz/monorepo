@@ -40,8 +40,8 @@ pub mod sync;
 pub mod verify;
 
 pub use any::{
-    ordered::{FixedDb as FixedOrdered, VariableDb as VariableOrdered},
-    unordered::{FixedDb as FixedUnordered, VariableDb as VariableUnordered},
+    ordered::{Fixed as FixedOrdered, Variable as VariableOrdered},
+    unordered::{Fixed as FixedUnordered, Variable as VariableUnordered},
     FixedConfig, OrderedOperation, UnorderedOperation, VariableConfig,
 };
 pub use verify::{
