@@ -4,7 +4,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
-use super::operation::VariableOperation as Operation;
 use crate::{
     index::unordered::Index,
     journal::{
@@ -13,7 +12,10 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{unordered::IndexedLog, VariableConfig, VariableValue},
+        any::{
+            unordered::{IndexedLog, VariableOperation as Operation},
+            VariableConfig, VariableValue,
+        },
         operation::Committable as _,
         Error,
     },

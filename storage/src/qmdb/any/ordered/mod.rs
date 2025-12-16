@@ -32,10 +32,6 @@ use std::{
 };
 use tracing::debug;
 
-// mod operation;
-// use operation::Operation;
-// pub use operation::{FixedOperation, Update, VariableOperation};
-
 pub mod fixed;
 pub mod variable;
 

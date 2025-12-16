@@ -25,13 +25,15 @@ use futures::future::try_join_all;
 use std::collections::BTreeMap;
 use tracing::debug;
 
-mod operation;
-use operation::Operation;
-pub use operation::{FixedOperation, Update, VariableOperation};
-
 pub mod fixed;
 pub mod sync;
 pub mod variable;
+
+pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
+use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
+
+pub type FixedOperation<K, V> = Operation<K, FixedEncoding<V>>;
+pub type VariableOperation<K, V> = Operation<K, VariableEncoding<V>>;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
