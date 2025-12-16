@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 chacha20poly1305 = { workspace = true, default-features = false, features = ["std", "getrandom"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true

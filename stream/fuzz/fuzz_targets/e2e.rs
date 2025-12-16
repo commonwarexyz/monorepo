@@ -1,5 +1,6 @@
 #![no_main]
 
+use bytes::Bytes;
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
@@ -136,7 +137,7 @@ fn fuzz(input: FuzzInput) {
                 let mut corruption_i = 0;
 
                 let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
-                send_frame(&mut adversary_d_sink, &announce, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, announce, MAX_MESSAGE_SIZE).await?;
 
                 let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
@@ -147,7 +148,7 @@ fn fuzz(input: FuzzInput) {
                         corruption_i += 1;
                     }
                 }
-                send_frame(&mut adversary_d_sink, &m1, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, Bytes::from(m1), MAX_MESSAGE_SIZE).await?;
 
                 let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
                     .await?
@@ -158,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                         corruption_i += 1;
                     }
                 }
-                send_frame(&mut adversary_l_sink, &m2, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_l_sink, Bytes::from(m2), MAX_MESSAGE_SIZE).await?;
 
                 let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
@@ -171,7 +172,7 @@ fn fuzz(input: FuzzInput) {
                 }
                 let sent_corrupted_data =
                     setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
-                send_frame(&mut adversary_d_sink, &m3, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, Bytes::from(m3), MAX_MESSAGE_SIZE).await?;
                 Ok((
                     sent_corrupted_data,
                     adversary_d_stream,
@@ -238,7 +239,7 @@ fn fuzz(input: FuzzInput) {
                     };
                     sender.send(&data).await.unwrap();
                     let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, &frame, MAX_MESSAGE_SIZE).await.unwrap();
+                    send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data, data2, "expected data to match");
                 }
@@ -264,7 +265,9 @@ fn fuzz(input: FuzzInput) {
                     };
                     sender.send(&[]).await.unwrap();
                     let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, &data, MAX_MESSAGE_SIZE).await.unwrap();
+                    send_frame(a_out, Bytes::from(data), MAX_MESSAGE_SIZE)
+                        .await
+                        .unwrap();
                     let res = receiver.recv().await;
                     assert!(res.is_err());
                 }

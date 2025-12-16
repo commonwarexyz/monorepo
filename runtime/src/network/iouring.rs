@@ -225,7 +225,7 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, bufs: &[&[u8]]) -> Result<(), crate::Error> {
+    async fn send(&mut self, bufs: impl Buf + Send) -> Result<(), crate::Error> {
         // In-order to keep the memory stable for the duration of the kernel's
         // use of the data, we must re-allocate into a stable buffer that
         // is owned by the `io_uring` thread. Even if the caller cancels

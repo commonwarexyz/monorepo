@@ -1,6 +1,7 @@
 use crate::Error;
+use bytes::Buf;
 use commonware_utils::StableBuf;
-use std::{io::IoSlice, mem::MaybeUninit, net::SocketAddr, time::Duration};
+use std::{io::IoSlice, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{
@@ -11,24 +12,16 @@ use tokio::{
 };
 use tracing::warn;
 
-const MAX_IOV: usize = 16;
+const IOV_MAX: usize = libc::IOV_MAX as usize;
 
 /// Converts a slice of byte slices to a slice of [`IoSlice`]s on the stack.
 ///
 /// If the number of buffers exceeds [MAX_IOV], an error is returned.
 #[inline(always)]
-fn io_slices<'a>(bufs: &'a [&'a [u8]]) -> Result<[MaybeUninit<IoSlice<'a>>; MAX_IOV], Error> {
-    if bufs.len() > MAX_IOV {
-        return Err(Error::SendFailed);
-    }
-
-    let mut io_slices: [MaybeUninit<IoSlice<'_>>; MAX_IOV] = [MaybeUninit::uninit(); MAX_IOV];
-
-    for (i, buf) in bufs.iter().enumerate() {
-        io_slices[i].write(IoSlice::new(buf));
-    }
-
-    Ok(io_slices)
+fn io_slices<'a>(bufs: &'a (impl Buf + Send)) -> Result<(usize, [IoSlice<'a>; IOV_MAX]), Error> {
+    let mut io_slices: [IoSlice<'_>; IOV_MAX] = [IoSlice::new(&[]); IOV_MAX];
+    let n = bufs.chunks_vectored(&mut io_slices);
+    Ok((n, io_slices))
 }
 
 /// Implementation of [crate::Sink] for the [tokio] runtime.
@@ -38,22 +31,17 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, bufs: &[&[u8]]) -> Result<(), Error> {
-        // Convert the buffers to IoSlices, required for cross-platform ABI compatibility.
-        let io_slices = io_slices(bufs)?;
-
-        // Transmute &[MaybeUninit<IoSlice<'_>>] to &[IoSlice<'_>]
-        //
-        // SAFETY: io_slices is fully initialized up to bufs.len() and `MaybeUninit<T>` is guaranteed to
-        // have the same size, alignment, and ABI as `T`
-        let io_slices: &[IoSlice<'_>] =
-            unsafe { std::mem::transmute(&io_slices[..bufs.len()] as &[MaybeUninit<IoSlice<'_>>]) };
+    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), Error> {
+        let (n, io_slices) = io_slices(&buf)?;
 
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_vectored(io_slices))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
+        timeout(
+            self.write_timeout,
+            self.sink.write_vectored(&io_slices[..n]),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }

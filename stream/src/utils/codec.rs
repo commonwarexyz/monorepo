@@ -1,22 +1,23 @@
 use crate::Error;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a 4-byte length prefix.
 /// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    buf: &[u8],
+    buf: impl Buf + Send,
     max_message_size: usize,
 ) -> Result<(), Error> {
     // Validate frame size
-    let n = buf.len();
+    let n = buf.remaining();
     if n > max_message_size {
         return Err(Error::SendTooLarge(n));
     }
 
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
-    sink.send(&[len.to_be_bytes().as_slice(), buf])
+    let len_bytes = len.to_be_bytes();
+    sink.send(Bytes::from_owner(len_bytes).chain(buf))
         .await
         .map_err(Error::SendFailed)
 }
@@ -59,7 +60,7 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, Bytes::from_owner(buf), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
@@ -80,9 +81,9 @@ mod tests {
             context.fill(&mut buf2);
 
             // Send two messages of different sizes
-            let result = send_frame(&mut sink, &buf1, MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, Bytes::from_owner(buf1), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
-            let result = send_frame(&mut sink, &buf2, MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, Bytes::from_owner(buf2), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             // Read both messages in order
@@ -104,7 +105,7 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, Bytes::from_owner(buf), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
@@ -125,7 +126,7 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE - 1).await;
+            let result = send_frame(&mut sink, Bytes::from_owner(buf), MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
         });
     }
@@ -140,12 +141,9 @@ mod tests {
             let mut msg = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut msg);
 
-            sink.send(&[
-                (MAX_MESSAGE_SIZE as u32).to_be_bytes().as_slice(),
-                msg.as_slice(),
-            ])
-            .await
-            .unwrap();
+            let buf = Bytes::from_owner((MAX_MESSAGE_SIZE as u32).to_be_bytes())
+                .chain(Bytes::from_owner(msg));
+            sink.send(buf).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE);
@@ -160,9 +158,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            sink.send(&[(MAX_MESSAGE_SIZE as u32).to_be_bytes().as_slice()])
-                .await
-                .unwrap();
+            let buf = Bytes::from_owner((MAX_MESSAGE_SIZE as u32).to_be_bytes());
+            sink.send(buf).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -181,7 +178,7 @@ mod tests {
             buf.put_u8(0x00);
             buf.put_u8(0x00);
 
-            sink.send(&[buf.as_ref()]).await.unwrap();
+            sink.send(buf).await.unwrap();
             drop(sink); // Close the sink to simulate a closed stream
 
             // Expect an error rather than a panic
