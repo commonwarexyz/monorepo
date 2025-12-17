@@ -2960,11 +2960,10 @@ mod tests {
                         elector: elector.clone(),
                     };
 
-                    let engine: mocks::equivocator::Equivocator<_, _, L, Sha256> =
-                        mocks::equivocator::Equivocator::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
+                    let engine = mocks::equivocator::Equivocator::new(
+                        context.with_label("byzantine_engine"),
+                        cfg,
+                    );
                     engines.push(engine.start(pending, recovered));
                 } else {
                     let application_cfg = mocks::application::Config {
