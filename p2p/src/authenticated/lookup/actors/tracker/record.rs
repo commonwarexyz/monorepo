@@ -151,14 +151,18 @@ impl Record {
     /// Returns `true` if the record is dialable.
     ///
     /// A record is dialable if:
-    /// - We have the address of the peer
-    /// - It is not ourselves
-    /// - We are not already connected
+    /// - We have a known address of the peer
+    /// - It is not ourselves or blocked
+    /// - We are not already connected or reserved
+    /// - The ingress address is valid (not DNS when disabled, hostname not too long)
+    /// - The egress IP is global (or private IPs are allowed)
     #[allow(unstable_name_collisions)]
-    pub fn dialable(&self, allow_private_ips: bool) -> bool {
+    pub fn dialable(&self, allow_private_ips: bool, max_host_len: Option<usize>) -> bool {
         match &self.address {
             Address::Known(addr) => {
-                self.status == Status::Inert && (allow_private_ips || addr.egress_ip().is_global())
+                self.status == Status::Inert
+                    && addr.ingress().is_valid(max_host_len)
+                    && (allow_private_ips || addr.egress_ip().is_global())
             }
             _ => false,
         }

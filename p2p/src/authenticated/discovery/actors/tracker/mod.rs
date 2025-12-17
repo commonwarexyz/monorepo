@@ -26,6 +26,7 @@ pub struct Config<C: Signer> {
     pub address: Ingress,
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub allow_private_ips: bool,
+    pub max_host_len: Option<usize>,
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: u64,

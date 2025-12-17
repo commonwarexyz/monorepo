@@ -10,7 +10,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    IpAddrExt, TryCollect,
+    TryCollect,
 };
 use governor::{clock::Clock as GClock, Quota};
 use rand::Rng;
@@ -135,22 +135,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             }
         }
 
-        // Create and store new peer set, filtering out invalid addresses
-        let mut valid_peers = Vec::new();
+        // Create and store new peer set (all peers are tracked regardless of address validity)
+        let mut set_peers = Vec::new();
         for (peer, addr) in peers {
-            // Skip peers with invalid ingress addresses (e.g., DNS when disabled)
-            if !addr.ingress().is_valid(self.max_host_len) {
-                warn!(?peer, "skipping peer with invalid ingress address");
-                continue;
-            }
-
-            // Skip peers with private egress IPs when not allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !addr.egress_ip().is_global() {
-                warn!(?peer, "skipping peer with private egress IP");
-                continue;
-            }
-
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
@@ -163,11 +150,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
                 }
             };
             record.increment();
-            valid_peers.push(peer);
+            set_peers.push(peer);
         }
         self.sets.insert(
             index,
-            valid_peers
+            set_peers
                 .into_iter()
                 .try_collect()
                 .expect("peers are unique"),
@@ -251,7 +238,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips))
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.max_host_len))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -637,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dns_addresses_rejected_when_disabled() {
+    fn test_dns_addresses_tracked_but_not_dialable_when_disabled() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -683,19 +670,17 @@ mod tests {
                 .unwrap();
             assert!(deleted.is_empty());
 
-            // Socket peer should be tracked
+            // Both peers should be tracked (for peer set consistency)
             assert!(
                 directory.peers.contains_key(&pk_socket),
                 "Socket peer should be tracked"
             );
-
-            // DNS peer should NOT be tracked (filtered out)
             assert!(
-                !directory.peers.contains_key(&pk_dns),
-                "DNS peer should not be tracked when DNS is disabled"
+                directory.peers.contains_key(&pk_dns),
+                "DNS peer should be tracked for peer set consistency"
             );
 
-            // Verify dialable only returns socket peer
+            // Only socket peer should be dialable (DNS ingress invalid when disabled)
             let dialable = directory.dialable();
             assert_eq!(dialable.len(), 1);
             assert_eq!(dialable[0], pk_socket);
@@ -703,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_private_egress_ip_rejected_when_not_allowed() {
+    fn test_private_egress_ip_tracked_but_not_dialable_or_registered() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -746,19 +731,22 @@ mod tests {
                 .unwrap();
             assert!(deleted.is_empty());
 
-            // Public peer should be tracked
+            // Both peers should be tracked (for peer set consistency)
             assert!(
                 directory.peers.contains_key(&pk_public),
                 "Public peer should be tracked"
             );
-
-            // Private peer should NOT be tracked (filtered out)
             assert!(
-                !directory.peers.contains_key(&pk_private),
-                "Private peer should not be tracked when private IPs are not allowed"
+                directory.peers.contains_key(&pk_private),
+                "Private peer should be tracked for peer set consistency"
             );
 
-            // Verify registered() only returns public IP
+            // Only public peer should be dialable (private egress IP not allowed)
+            let dialable = directory.dialable();
+            assert_eq!(dialable.len(), 1);
+            assert_eq!(dialable[0], pk_public);
+
+            // Verify registered() only returns public IP (private IP excluded from filter)
             let registered = directory.registered();
             assert!(registered.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
             assert!(!registered.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));

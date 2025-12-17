@@ -22,6 +22,15 @@ use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
+    /// Whether private IPs are connectable.
+    pub allow_private_ips: bool,
+
+    /// Maximum length of a DNS hostname in an ingress address.
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    pub max_host_len: Option<usize>,
+
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
@@ -38,6 +47,13 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
+    /// Whether private IPs are connectable.
+    allow_private_ips: bool,
+
+    /// Maximum length of a DNS hostname in an ingress address.
+    /// `None` means DNS is disabled.
+    max_host_len: Option<usize>,
+
     /// The maximum number of peer sets to track.
     max_sets: usize,
 
@@ -91,6 +107,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         Self {
             context,
+            allow_private_ips: cfg.allow_private_ips,
+            max_host_len: cfg.max_host_len,
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             peers,
@@ -327,7 +345,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable())
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.max_host_len))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();

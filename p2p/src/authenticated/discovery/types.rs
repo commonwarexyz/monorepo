@@ -5,8 +5,8 @@ use commonware_codec::{
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
-use commonware_utils::{IpAddrExt, SystemTimeExt};
-use std::{net::IpAddr, time::Duration};
+use commonware_utils::SystemTimeExt;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with [crate::authenticated::discovery::types].
@@ -14,8 +14,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("too many peers: {0}")]
     TooManyPeers(usize),
-    #[error("private IPs not allowed: {0}")]
-    PrivateIPsNotAllowed(IpAddr),
     #[error("received self")]
     ReceivedSelf,
     #[error("invalid signature")]
@@ -226,18 +224,11 @@ impl<C: PublicKey> Info<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
     pub const fn verifier(
         me: C,
-        allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> InfoVerifier<C> {
-        InfoVerifier::new(
-            me,
-            allow_private_ips,
-            peer_gossip_max_count,
-            synchrony_bound,
-            ip_namespace,
-        )
+        InfoVerifier::new(me, peer_gossip_max_count, synchrony_bound, ip_namespace)
     }
 
     /// Sign the [Info] message.
@@ -324,9 +315,6 @@ pub struct InfoVerifier<C: PublicKey> {
     /// The [PublicKey] of the verifier.
     me: C,
 
-    /// Whether to allow private IPs.
-    allow_private_ips: bool,
-
     /// The maximum number of [Info] allowable in a single message.
     peer_gossip_max_count: usize,
 
@@ -342,14 +330,12 @@ impl<C: PublicKey> InfoVerifier<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
     const fn new(
         me: C,
-        allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> Self {
         Self {
             me,
-            allow_private_ips,
             peer_gossip_max_count,
             synchrony_bound,
             ip_namespace,
@@ -369,14 +355,6 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
-            // Check if IP is allowed (only applicable for Socket addresses, not DNS)
-            #[allow(unstable_name_collisions)]
-            if let Some(ip) = info.ingress.ip() {
-                if !self.allow_private_ips && !ip.is_global() {
-                    return Err(Error::PrivateIPsNotAllowed(ip));
-                }
-            }
-
             // Check if peer is us
             if info.public_key == self.me {
                 return Err(Error::ReceivedSelf);
@@ -587,7 +565,6 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                false,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -629,7 +606,6 @@ mod tests {
             };
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 1,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -640,38 +616,12 @@ mod tests {
     }
 
     #[test]
-    fn info_verifier_rejects_private_ips_when_disallowed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
-            let validator = Info::verifier(
-                validator_key.public_key(),
-                false,
-                4,
-                Duration::from_secs(30),
-                NAMESPACE.to_vec(),
-            );
-            let timestamp = context.current().epoch().as_millis() as u64;
-            let peer = Info::sign(
-                &peer_key,
-                NAMESPACE,
-                SocketAddr::from(([192, 168, 1, 1], 8080)),
-                timestamp,
-            );
-            let err = validator.validate(&context, &[peer]).unwrap_err();
-            assert!(matches!(err, Error::PrivateIPsNotAllowed(_)));
-        });
-    }
-
-    #[test]
     fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -697,7 +647,6 @@ mod tests {
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -725,7 +674,6 @@ mod tests {
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -756,7 +704,6 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -822,7 +769,6 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                false,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -838,14 +784,13 @@ mod tests {
     }
 
     #[test]
-    fn info_verifier_dns_bypasses_private_ip_check() {
+    fn info_verifier_accepts_dns_ingress_with_internal_hostname() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = PrivateKey::random(&mut context);
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                false,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -858,7 +803,7 @@ mod tests {
             let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
             assert!(
                 validator.validate(&context, &[peer]).is_ok(),
-                "DNS ingress should bypass private IP check"
+                "DNS ingress should be accepted"
             );
         });
     }
