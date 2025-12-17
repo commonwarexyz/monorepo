@@ -46,7 +46,7 @@ impl Conformance for FixedJournal {
             let mut contents: Vec<u8> = Vec::with_capacity(data_to_write.len() * size_of::<u64>());
 
             // Read all blobs and the tail into a single buffer.
-            for (_, blob) in journal.blobs.iter_mut() {
+            for (_, blob) in journal.blobs.iter() {
                 let buf = vec![0u8; blob.size().await as usize];
                 contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
             }
@@ -100,13 +100,13 @@ impl Conformance for VariableJournal {
             let mut contents: Vec<u8> = Vec::with_capacity(data_flat_len);
 
             // Read all of the data journal's blobs into the buffer.
-            for (_, blob) in journal.data.blobs.iter_mut() {
+            for (_, blob) in journal.data.blobs.iter() {
                 let buf = vec![0u8; blob.size().await as usize];
                 contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
             }
 
             // Read all of the offsets journal's blobs into the buffer.
-            for (_, blob) in journal.offsets.blobs.iter_mut() {
+            for (_, blob) in journal.offsets.blobs.iter() {
                 let buf = vec![0u8; blob.size().await as usize];
                 contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
             }
