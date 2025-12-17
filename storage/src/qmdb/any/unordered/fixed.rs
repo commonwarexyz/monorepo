@@ -1,4 +1,4 @@
-//! An _unordered_ variant of an authenticated database with fixed-size values.
+//! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
     index::unordered::Index,

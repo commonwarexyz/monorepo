@@ -1,5 +1,6 @@
-//! An _ordered_ variant of an authenticated database with variable-size values which additionally
-//! maintains the lexicographic-next active key of each active key.
+//! An authenticated database that provides succinct proofs of _any_ value ever associated
+//! with a key, maintains a next-key ordering for each active key, and allows values to have
+//! variable sizes.
 //!
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::ordered::fixed]
 //! instead for better performance._
@@ -39,7 +40,7 @@ pub type Variable<E, K, V, H, T, S = Clean<DigestOf<H>>> =
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Variable<E, K, V, H, T>
 {
-    /// Returns a [Variable] QMDB initialized from `cfg`. Uncommitted log operations will be
+    /// Returns a [Variable] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,

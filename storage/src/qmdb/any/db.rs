@@ -1,5 +1,6 @@
 //! A shared, generic implementation of the "Any" QMDB.
-/// The impl block in this file defines shared functionality across all "Any" QMDB variants.
+//! The impl block in this file defines shared functionality across all "Any" QMDB variants.
+
 use super::operation::{update::Update, Operation};
 use crate::{
     index::Unordered as UnorderedIndex,

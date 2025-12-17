@@ -1,8 +1,3 @@
-//! Unordered variant of the indexed log database.
-//!
-//! This module provides the unordered-specific implementation of `Db`, which is a simpler
-//! key-value store without the span maintenance logic of the ordered variant.
-
 use crate::{
     journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     mmr::{
@@ -249,8 +244,6 @@ where
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
-    ///
-    /// This is unordered-specific and used by the sync module.
     pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,

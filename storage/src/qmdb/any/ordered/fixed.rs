@@ -1,4 +1,4 @@
-//! An _ordered_ variant of an authenticated database with fixed-size values which additionally
+//! An _ordered_ variant of an "Any" authenticated database with fixed-size values which additionally
 //! maintains the lexicographic-next active key of each active key. For example, if the active key
 //! set is `{bar, baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for
 //! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
@@ -35,7 +35,7 @@ pub type Fixed<E, K, V, H, T, S = Clean<DigestOf<H>>> =
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Fixed<E, K, V, H, T>
 {
-    /// Returns a [Fixed] qmdb initialized from `cfg`. Uncommitted log operations will be
+    /// Returns a [Fixed] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await

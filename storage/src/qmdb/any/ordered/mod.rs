@@ -1,8 +1,3 @@
-//! Ordered variant of the indexed log database.
-//!
-//! This module provides the ordered-specific implementation of `Db`, which maintains
-//! a circular linked list of active keys via their `next_key` fields.
-
 use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
