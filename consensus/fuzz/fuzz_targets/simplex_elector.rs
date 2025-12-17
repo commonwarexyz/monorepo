@@ -70,19 +70,13 @@ where
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, RoundRobin<_>>(&input, None);
+            fuzz::<ed25519::Scheme, RoundRobin>(&input, None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinPk>, Random<_, MinPk>>(
-                &input,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold::Scheme<_, MinPk>, Random>(&input, Some(certificate));
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinSig>, Random<_, MinSig>>(
-                &input,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold::Scheme<_, MinSig>, Random>(&input, Some(certificate));
         }
     }
 });

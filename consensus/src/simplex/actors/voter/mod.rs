@@ -344,11 +344,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
-        stale_backfill::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
-        stale_backfill::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
-        stale_backfill::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
-        stale_backfill::<_, _, RoundRobin<_>>(ed25519::fixture);
+        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        stale_backfill::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -631,11 +631,11 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
-        append_old_interesting_view::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
-        append_old_interesting_view::<_, _, RoundRobin<_>>(ed25519::fixture);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
@@ -806,19 +806,19 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate::<_, _, Random<_, _>>(
+        finalization_without_notarization_certificate::<_, _, Random>(
             bls12381_threshold::fixture::<MinPk, _>,
         );
-        finalization_without_notarization_certificate::<_, _, Random<_, _>>(
+        finalization_without_notarization_certificate::<_, _, Random>(
             bls12381_threshold::fixture::<MinSig, _>,
         );
-        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(ed25519::fixture);
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
@@ -1009,19 +1009,11 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinPk, _>,
-        );
-        certificate_conflicts_proposal::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinSig, _>,
-        );
-        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(ed25519::fixture);
+        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
@@ -1195,19 +1187,11 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinPk, _>,
-        );
-        proposal_conflicts_certificate::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinSig, _>,
-        );
-        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(ed25519::fixture);
+        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
@@ -1373,19 +1357,11 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinPk, _>,
-        );
-        certificate_verifies_proposal::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinSig, _>,
-        );
-        certificate_verifies_proposal::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        certificate_verifies_proposal::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        certificate_verifies_proposal::<_, _, RoundRobin<_>>(ed25519::fixture);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1427,9 +1403,9 @@ mod tests {
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let mut elector = <RoundRobin<S>>::default();
-            elector.initialize(schemes[0].participants());
-            let leader_idx = elector.elect(view2_round, None);
+            let mut elector = <RoundRobin>::default();
+            Elector::<S>::initialize(&mut elector, schemes[0].participants());
+            let leader_idx = Elector::<S>::elect(&elector, view2_round, None);
             let leader = participants[leader_idx as usize].clone();
 
             // Create a voter with the leader's identity
@@ -1833,15 +1809,11 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, Random<_, _>>(
-            bls12381_threshold::fixture::<MinSig, _>,
-        );
-        populate_resolver_on_restart::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, RoundRobin<_>>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        populate_resolver_on_restart::<_, _, RoundRobin<_>>(ed25519::fixture);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -1994,11 +1966,11 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
-        finalization_from_resolver::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_from_resolver::<_, _, RoundRobin<_>>(ed25519::fixture);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -2170,11 +2142,11 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
-        no_resolver_boomerang::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
-        no_resolver_boomerang::<_, _, RoundRobin<_>>(ed25519::fixture);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
@@ -2382,18 +2354,18 @@ mod tests {
 
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
-        verification_failure_emits_nullify_immediately::<_, _, Random<_, _>>(
+        verification_failure_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold::fixture::<MinPk, _>,
         );
-        verification_failure_emits_nullify_immediately::<_, _, Random<_, _>>(
+        verification_failure_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold::fixture::<MinSig, _>,
         );
-        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(ed25519::fixture);
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
     }
 }

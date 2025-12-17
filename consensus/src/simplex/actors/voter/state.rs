@@ -564,7 +564,7 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin<_>>::default(),
+                    elector: <RoundRobin>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -647,7 +647,7 @@ mod tests {
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
                 scheme: local_scheme,
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -733,7 +733,7 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -791,7 +791,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
@@ -848,7 +848,7 @@ mod tests {
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
                 scheme: local_scheme,
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -901,7 +901,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -948,7 +948,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -996,7 +996,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -1047,7 +1047,7 @@ mod tests {
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
-                    elector: <RoundRobin<_>>::default(),
+                    elector: <RoundRobin>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1085,7 +1085,7 @@ mod tests {
                 context,
                 Config {
                     scheme: local_scheme,
-                    elector: <RoundRobin<_>>::default(),
+                    elector: <RoundRobin>::default(),
                     namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1112,7 +1112,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin<_>>::default(),
+                elector: <RoundRobin>::default(),
                 namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),

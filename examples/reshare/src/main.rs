@@ -172,7 +172,7 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => {
                 let config_path = args.config_path.clone();
-                validator::run::<EdScheme, RoundRobin<_>>(
+                validator::run::<EdScheme, RoundRobin>(
                     context,
                     args,
                     SaveFileOnUpdate::boxed(config_path),
@@ -180,7 +180,7 @@ fn main() {
                 .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>, Random<_, _>>(
+                validator::run::<ThresholdScheme<MinSig>, Random>(
                     context,
                     args,
                     ContinueOnUpdate::boxed(),

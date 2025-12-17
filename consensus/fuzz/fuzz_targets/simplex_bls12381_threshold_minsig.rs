@@ -13,7 +13,7 @@ struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
-    type Elector = Random<Ed25519PublicKey, MinSig>;
+    type Elector = Random;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_threshold::fixture::<MinSig, _>(context, n)

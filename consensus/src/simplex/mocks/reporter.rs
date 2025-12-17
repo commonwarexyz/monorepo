@@ -67,7 +67,9 @@ where
     L: Elector<S>,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+    pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
+        cfg.elector.initialize(&cfg.participants);
+
         Self {
             context,
             namespace: cfg.namespace,

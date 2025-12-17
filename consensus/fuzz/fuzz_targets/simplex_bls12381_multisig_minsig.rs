@@ -13,7 +13,7 @@ struct SimplexBls12381MultisigMinSig;
 
 impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
-    type Elector = RoundRobin<Self::Scheme>;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_multisig::fixture::<MinSig, _>(context, n)
