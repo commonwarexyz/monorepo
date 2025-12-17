@@ -46,6 +46,38 @@ hash = "e3e6735a810f1002164333013fbff442c91a690483e75fe7a78618a96d5afd62"
 n_cases = 65536
 hash = "07a88b442e9f86b5395a73584211cb6abbb58e51c6f3954b29095c56d77d370c"
 
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "f07e12cc9db44b417c1e936e0f36f06d93ec8390b59c4394811d422d11b32a7d"
+
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,VariableEncoding<Vec<u8>>>>"]
+n_cases = 65536
+hash = "1be8a11f1e27adb03ad60b57af16993cc571a4b8c2bdd1c086b1762f6a92f70e"
+
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "92d97caa778f4825bb78af31114456bd2fadee745387914ca4754407638b518a"
+
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,VariableEncoding<Vec<u8>>>\n>"]
+n_cases = 65536
+hash = "36910b6b06e883c255d8e6f4ae688630c2bae894dd440e7a93985663119be574"
+
+["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<U64,FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "457f73ee7d5f80f0d4a274509b374edddecfc881a9cbd0864691bf1a14f304a1"
+
+["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<U64,VariableEncoding<Vec<u8>>>>"]
+n_cases = 65536
+hash = "2f8ebe2f7bc78454ba8d232c80c4f7d55797f26ba4cbcc0a4abcb33ca83c2b1c"
+
+["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<UnorderedUpdate<U64,FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
+
+["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<UnorderedUpdate<U64,VariableEncoding<Vec<u8>>>>"]
+n_cases = 65536
+hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
+
 ["commonware_storage::qmdb::any::ordered::operation::tests::conformance::CodecConformance<FixedOperation<U64,U64>>"]
 n_cases = 65536
 hash = "3256e6553b9d4f0eb7230b8a70c8c9d6366cd01fe1c284e355445c9a26cb3210"

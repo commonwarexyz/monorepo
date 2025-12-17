@@ -5,7 +5,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::ordered::fixed]
 //! instead for better performance._
 
-use super::operation::VariableOperation as Operation;
 use crate::{
     index::ordered::Index,
     journal::{
@@ -14,7 +13,11 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{ordered::IndexedLog, VariableConfig, VariableValue},
+        any::{
+            ordered::{self, IndexedLog},
+            value::VariableEncoding,
+            VariableConfig, VariableValue,
+        },
         operation::Committable as _,
         Error,
     },
@@ -25,6 +28,9 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
+
+pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::{fixed::Any, FixedOperation as Operation, KeyData},
+            ordered::fixed::{Any, Operation, Update},
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
@@ -71,7 +71,7 @@ pub enum ExclusionProof<K: Array, V: FixedValue, D: Digest, const N: usize> {
     /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
-    KeyValue(OperationProof<D, N>, KeyData<K, V>),
+    KeyValue(OperationProof<D, N>, Update<K, V>),
 
     /// For the Commit variant, we're proving that there exists a Commit operation in the database
     /// that establishes an inactivity floor equal to its own location. This implies there are no
@@ -134,7 +134,7 @@ impl<
         proof: &KeyValueProof<K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(KeyData {
+        let op = Operation::Update(Update {
             key,
             value,
             next_key: proof.next_key.clone(),
@@ -147,7 +147,7 @@ impl<
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, Update<K, V>)>, Error> {
         self.any.get_span(key).await
     }
 
@@ -156,7 +156,7 @@ impl<
     pub fn verify_exclusion_proof(
         hasher: &mut H,
         key: &K,
-        proof: ExclusionProof<K, V, H::Digest, N>,
+        proof: &ExclusionProof<K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let (op_proof, op) = match proof {
@@ -171,14 +171,17 @@ impl<
                     return false;
                 }
 
-                (op_proof, Operation::Update(data))
+                (op_proof, Operation::Update(data.clone()))
             }
             ExclusionProof::Commit(op_proof, metadata) => {
                 // Handle the case where the proof shows the db is empty, hence any key is proven
                 // excluded. For the db to be empty, the floor must equal the commit operation's
                 // location.
                 let floor_loc = op_proof.loc;
-                (op_proof, Operation::CommitFloor(metadata, floor_loc))
+                (
+                    op_proof,
+                    Operation::CommitFloor(metadata.clone(), floor_loc),
+                )
             }
         };
 
@@ -1120,7 +1123,7 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(KeyData {
+            let op = Operation::Update(Update {
                 key: k,
                 value: v1,
                 next_key: k,
@@ -1602,7 +1605,7 @@ pub mod test {
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                empty_proof.clone(),
+                &empty_proof,
                 &empty_root,
             ));
 
@@ -1637,20 +1640,20 @@ pub mod test {
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1678,19 +1681,19 @@ pub mod test {
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &middle_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1710,20 +1713,20 @@ pub mod test {
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &middle_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_2,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1731,7 +1734,7 @@ pub mod test {
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &conflicting_middle_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1739,13 +1742,13 @@ pub mod test {
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1771,13 +1774,13 @@ pub mod test {
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                proof.clone(),
+                &proof,
                 &root,
             ));
             assert!(CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_2,
-                proof.clone(),
+                &proof,
                 &root,
             ));
 
@@ -1785,13 +1788,13 @@ pub mod test {
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                empty_proof, // wrong proof
+                &empty_proof, // wrong proof
                 &root,
             ));
             assert!(!CleanCurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
-                proof,
+                &proof,
                 &empty_root, // wrong root
             ));
         });
