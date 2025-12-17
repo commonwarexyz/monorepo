@@ -1,6 +1,6 @@
 use crate::{
     authenticated::{data::Data, lookup::channels::Channels, relay::Relay, Mailbox},
-    utils::limited::Peers,
+    utils::limited::Connected,
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -92,7 +92,7 @@ impl<P: PublicKey> Messenger<P> {
     }
 }
 
-impl<P: PublicKey> Peers for Messenger<P> {
+impl<P: PublicKey> Connected for Messenger<P> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<P>> {

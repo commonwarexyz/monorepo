@@ -32,7 +32,7 @@ pub enum Message<P: PublicKey, E: Clock> {
     Subscribe {
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
     },
-    SubscribePeers {
+    SubscribeConnected {
         response: oneshot::Sender<ring::Receiver<Vec<P>>>,
     },
     LimitBandwidth {

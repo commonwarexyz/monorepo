@@ -7,7 +7,7 @@ use super::{
     Error,
 };
 use crate::{
-    utils::limited::{LimitedSender, Peers},
+    utils::limited::{Connected, LimitedSender},
     Channel, CheckedSender as _, Message, Recipients,
 };
 use bytes::Bytes;
@@ -379,7 +379,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
                 self.subscribers.push(sender);
             }
-            ingress::Message::SubscribePeers { response } => {
+            ingress::Message::SubscribeConnected { response } => {
                 // Create a ring channel for the subscriber
                 let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
@@ -716,15 +716,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-/// Provides peer subscriptions for the simulated network.
+/// Provides online peers from the simulated network.
 ///
-/// Implements [`crate::utils::limited::Peers`] to provide peer list updates
+/// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
-pub struct PeerSource<P: PublicKey, E: Clock> {
+pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
 }
 
-impl<P: PublicKey, E: Clock> Clone for PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -732,20 +732,20 @@ impl<P: PublicKey, E: Clock> Clone for PeerSource<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
     const fn new(sender: mpsc::UnboundedSender<ingress::Message<P, E>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: PublicKey, E: Clock> Peers for PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self
             .sender
-            .unbounded_send(ingress::Message::SubscribePeers {
+            .unbounded_send(ingress::Message::SubscribeConnected {
                 response: response_tx,
             });
         // If the network is closed, return an empty receiver
@@ -808,7 +808,7 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
-    limited_sender: LimitedSender<E, UnlimitedSender<P>, PeerSource<P, E>>,
+    limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
@@ -873,7 +873,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = PeerSource::new(oracle_sender);
+        let peer_source = ConnectedPeerProvider::new(oracle_sender);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)

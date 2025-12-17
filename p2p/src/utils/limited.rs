@@ -12,13 +12,15 @@ use std::{cmp, fmt, sync::Arc, time::SystemTime};
 ///
 /// Implementations must be clonable so that each clone of [`LimitedSender`]
 /// can establish its own peer subscription.
-pub trait Peers: Clone + Send + Sync + 'static {
+pub trait Connected: Clone + Send + Sync + 'static {
     type PublicKey: PublicKey;
 
     /// Subscribe to peer updates.
     ///
-    /// Returns a receiver that yields the current set of known peers
-    /// whenever it changes.
+    /// Returns a receiver that yields the current set of known peers whenever it changes.
+    ///
+    /// It is assumed that when a new subscription is created, the current set of known peers
+    /// is sent immediately.
     fn subscribe(&mut self) -> impl Future<Output = ring::Receiver<Vec<Self::PublicKey>>> + Send;
 }
 
@@ -27,7 +29,7 @@ pub struct LimitedSender<E, S, P>
 where
     E: Clock,
     S: Sender,
-    P: Peers<PublicKey = S::PublicKey>,
+    P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
     rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
@@ -40,7 +42,7 @@ impl<E, S, P> Clone for LimitedSender<E, S, P>
 where
     E: Clock,
     S: Sender,
-    P: Peers<PublicKey = S::PublicKey>,
+    P: Connected<PublicKey = S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -57,7 +59,7 @@ impl<E, S, P> fmt::Debug for LimitedSender<E, S, P>
 where
     E: Clock,
     S: Sender,
-    P: Peers<PublicKey = S::PublicKey>,
+    P: Connected<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LimitedSender")
@@ -70,7 +72,7 @@ impl<E, S, P> LimitedSender<E, S, P>
 where
     E: Clock,
     S: Sender,
-    P: Peers<PublicKey = S::PublicKey>,
+    P: Connected<PublicKey = S::PublicKey>,
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
@@ -265,7 +267,7 @@ mod tests {
         }
     }
 
-    impl Peers for MockPeers {
+    impl Connected for MockPeers {
         type PublicKey = PublicKey;
 
         async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
