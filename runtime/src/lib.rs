@@ -262,13 +262,24 @@ pub trait Metrics: Clone + Send + Sync + 'static {
 /// Re-export of [governor::Quota] for rate limiting configuration.
 pub use governor::Quota;
 
+/// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
+///
+/// This is a convenience type alias for creating single-entity rate limiters.
+/// For per-key rate limiting, use [KeyedRateLimiter].
+pub type RateLimiter<C> = governor::RateLimiter<
+    governor::state::NotKeyed,
+    governor::state::InMemoryState,
+    C,
+    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+>;
+
 /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
 ///
 /// This is a convenience type alias for creating per-peer rate limiters
 /// using governor's [HashMapStateStore].
 ///
 /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
-pub type RateLimiter<K, C> = governor::RateLimiter<
+pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     K,
     governor::state::keyed::HashMapStateStore<K>,
     C,

@@ -8,10 +8,9 @@ use crate::authenticated::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, Handle, Metrics, Quota, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::RateLimiter;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};

@@ -3,7 +3,7 @@
 use crate::{Recipients, Sender};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Quota, RateLimiter};
+use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
@@ -30,7 +30,7 @@ where
     P: Peers<PublicKey = S::PublicKey>,
 {
     sender: S,
-    rate_limit: Arc<Mutex<RateLimiter<S::PublicKey, E>>>,
+    rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
     peers: P,
     peer_subscription: Option<ring::Receiver<Vec<S::PublicKey>>>,
     known_peers: Vec<S::PublicKey>,
@@ -74,7 +74,9 @@ where
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
-        let rate_limit = Arc::new(Mutex::new(RateLimiter::hashmap_with_clock(quota, clock)));
+        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
+            quota, clock,
+        )));
         Self {
             sender,
             rate_limit,
@@ -149,7 +151,7 @@ where
 /// time among those that don't.
 pub(crate) fn filter_rate_limited<'a, K, C>(
     peers: impl Iterator<Item = &'a K>,
-    rate_limit: &RateLimiter<K, C>,
+    rate_limit: &KeyedRateLimiter<K, C>,
 ) -> (Vec<K>, Option<SystemTime>)
 where
     K: PublicKey,

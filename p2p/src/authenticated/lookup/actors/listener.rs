@@ -8,13 +8,12 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, Quota, SinkOf, Spawner,
-    StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::RateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -158,11 +157,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Setup the rate limiters
-        let ip_rate_limiter = RateLimiter::hashmap_with_clock(
+        let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_ip,
             self.context.clone(),
         );
-        let subnet_rate_limiter = RateLimiter::hashmap_with_clock(
+        let subnet_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_subnet,
             self.context.clone(),
         );
