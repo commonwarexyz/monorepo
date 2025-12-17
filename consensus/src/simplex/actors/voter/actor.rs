@@ -60,7 +60,7 @@ pub struct Actor<
     L: Elector<S>,
 > {
     context: ContextCell<E>,
-    state: State<E, S, D, L>,
+    state: State<E, S, L, D>,
     blocker: B,
     automaton: A,
     relay: R,

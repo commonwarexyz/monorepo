@@ -43,7 +43,7 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S>> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> {
     context: E,
     scheme: S,
     elector: L,
@@ -63,8 +63,8 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, 
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S>>
-    State<E, S, D, L>
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest>
+    State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
@@ -536,10 +536,14 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S
 mod tests {
     use super::*;
     use crate::simplex::{
+        elector::RoundRobin,
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
-    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, Scheme},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_runtime::{deterministic, Runner};
     use std::time::Duration;
 
@@ -555,10 +559,11 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
-            let mut state: State<_, _, Sha256Digest> = State::new(
+            let mut state = State::new(
                 context,
                 Config {
                     scheme: verifier.clone(),
+                    elector: RoundRobin::new(verifier.participants()),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -640,7 +645,8 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
-                scheme: local_scheme,
+                scheme: local_scheme.clone(),
+                elector: RoundRobin::new(local_scheme.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -648,7 +654,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Start proposal with missing parent
@@ -726,6 +732,7 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
+                elector: RoundRobin::new(local_scheme.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -733,7 +740,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: retry,
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context.clone(), cfg);
+            let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
 
             // Should return same deadline until something done
@@ -783,6 +790,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: RoundRobin::new(schemes[0].participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
@@ -790,7 +798,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add initial rounds
@@ -838,7 +846,8 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
-                scheme: local_scheme,
+                scheme: local_scheme.clone(),
+                elector: RoundRobin::new(local_scheme.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -846,7 +855,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Create proposal
@@ -891,6 +900,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: RoundRobin::new(verifier.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -898,7 +908,7 @@ mod tests {
                 nullify_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Create parent proposal and certificate
@@ -937,6 +947,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: RoundRobin::new(verifier.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -944,7 +955,7 @@ mod tests {
                 nullify_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add nullification certificate for view 1
@@ -984,6 +995,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: RoundRobin::new(verifier.participants()),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -991,7 +1003,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add finalization
@@ -1030,10 +1042,11 @@ mod tests {
             let local_scheme = scheme_iter.next().unwrap();
             let other_schemes: Vec<_> = scheme_iter.collect();
             let epoch: Epoch = Epoch::new(3);
-            let mut state: State<_, _, Sha256Digest> = State::new(
+            let mut state = State::new(
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
+                    elector: RoundRobin::new(local_scheme.participants()),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1067,10 +1080,11 @@ mod tests {
             assert!(state.construct_finalize(view).is_none());
 
             // Restart state and replay
-            let mut restarted: State<_, _, Sha256Digest> = State::new(
+            let mut restarted = State::new(
                 context,
                 Config {
-                    scheme: local_scheme,
+                    scheme: local_scheme.clone(),
+                    elector: RoundRobin::new(local_scheme.participants()),
                     namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1097,6 +1111,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: RoundRobin::new(schemes[0].participants()),
                 namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -1104,7 +1119,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
             let view = state.current_view();
 
