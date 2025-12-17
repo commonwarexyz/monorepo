@@ -25,8 +25,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Quota, Spawner,
-    Storage,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{channel::mpsc, StreamExt};

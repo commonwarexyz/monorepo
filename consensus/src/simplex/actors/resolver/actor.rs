@@ -15,9 +15,9 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
+use commonware_p2p::{utils::StaticManager, Blocker, LimitedSender, Receiver};
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
@@ -76,7 +76,7 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey>,
+        sender: impl LimitedSender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver).await)
@@ -85,7 +85,7 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey>,
+        sender: impl LimitedSender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         let participants = self.scheme.participants().clone();

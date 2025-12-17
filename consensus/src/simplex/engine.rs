@@ -6,7 +6,7 @@ use super::{
 use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, LimitedSender, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -163,7 +163,7 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         resolver_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl LimitedSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -185,7 +185,7 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
         resolver_network: (
-            impl Sender<PublicKey = S::PublicKey>,
+            impl LimitedSender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) {

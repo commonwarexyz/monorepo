@@ -76,10 +76,7 @@ pub trait Sender: Debug + Clone + Send + Sync + 'static {
 
 /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
 /// filtering out any that are currently rate-limited.
-pub trait LimitedSender: Clone + Send + Sync + 'static {
-    /// Public key type used to identify recipients.
-    type PublicKey: PublicKey;
-
+pub trait LimitedSender: Sender + Clone + Send + Sync + 'static {
     /// The type of [`CheckedSender`] returned after checking recipients.
     type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
     where

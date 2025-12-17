@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Blocker, Manager, Receiver, Recipients, Sender,
+    Blocker, LimitedSender, Manager, Receiver, Recipients,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -47,7 +47,7 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
+    NetS: LimitedSender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
@@ -102,7 +102,7 @@ impl<
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
+        NetS: LimitedSender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {

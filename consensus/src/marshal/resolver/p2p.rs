@@ -5,7 +5,7 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, LimitedSender, Manager, Receiver};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
@@ -56,7 +56,7 @@ where
     C: Manager<PublicKey = P>,
     Bl: Blocker<PublicKey = P>,
     B: Block,
-    S: Sender<PublicKey = P>,
+    S: LimitedSender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {

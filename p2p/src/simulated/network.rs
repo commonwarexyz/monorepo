@@ -918,7 +918,6 @@ impl<P: PublicKey, E: Clock> crate::Sender for Sender<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
-    type PublicKey = P;
     type Checked<'a>
         = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
     where

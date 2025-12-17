@@ -1,7 +1,6 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Receiver, Recipients, Sender};
-use bytes::Bytes;
 use commonware_codec::{Codec, Error};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
@@ -27,6 +26,17 @@ pub struct WrappedSender<S: Sender, V: Codec> {
     _phantom_v: std::marker::PhantomData<V>,
 }
 
+impl<S: Sender, V: Codec> std::fmt::Debug for WrappedSender<S, V>
+where
+    S: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WrappedSender")
+            .field("sender", &self.sender)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender].
     pub const fn new(sender: S) -> Self {
@@ -45,7 +55,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     ) -> Result<Vec<S::PublicKey>, S::Error> {
         let encoded = message.encode();
         self.sender
-            .send(recipients, Bytes::from(encoded), priority)
+            .send(recipients, encoded.freeze(), priority)
             .await
     }
 }

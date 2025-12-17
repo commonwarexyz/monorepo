@@ -1,6 +1,6 @@
 use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
+use commonware_p2p::{utils::codec::WrappedSender, LimitedSender, Recipients};
 use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt, Status},
     Clock, Metrics,
@@ -75,7 +75,13 @@ pub struct Config<P: PublicKey> {
 /// the peer might be slow or might receive the data later. Targets are only removed when:
 /// - A peer is blocked (sent invalid data)
 /// - The fetch succeeds (all targets for that key are cleared)
-pub struct Fetcher<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>> {
+pub struct Fetcher<E, P, Key, NetS>
+where
+    E: Clock + Rng + Metrics,
+    P: PublicKey,
+    Key: Span,
+    NetS: LimitedSender<PublicKey = P>,
+{
     context: E,
 
     // Peer management
@@ -138,8 +144,12 @@ pub struct Fetcher<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Send
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
-    Fetcher<E, P, Key, NetS>
+impl<E, P, Key, NetS> Fetcher<E, P, Key, NetS>
+where
+    E: Clock + Rng + Metrics,
+    P: PublicKey,
+    Key: Span,
+    NetS: LimitedSender<PublicKey = P>,
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
@@ -555,10 +565,10 @@ mod tests {
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Signer};
-    use commonware_p2p::{Recipients, Sender};
+    use commonware_p2p::{CheckedSender as _, Recipients, Sender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
-        Quota, Runner as _,
+        Runner as _,
     };
     use std::{fmt, time::Duration};
 
@@ -574,11 +584,29 @@ mod tests {
 
     impl std::error::Error for MockError {}
 
-    // Mock sender that fails
-    #[derive(Clone, Debug)]
-    struct FailMockSender;
+    #[derive(Debug)]
+    struct CheckedSender<'a, S: Sender> {
+        sender: &'a mut S,
+        recipients: Recipients<S::PublicKey>,
+    }
 
-    impl Sender for FailMockSender {
+    impl<'a, S: Sender> commonware_p2p::CheckedSender for CheckedSender<'a, S> {
+        type PublicKey = S::PublicKey;
+        type Error = S::Error;
+
+        async fn send(
+            self,
+            message: Bytes,
+            priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            self.sender.send(self.recipients, message, priority).await
+        }
+    }
+
+    #[derive(Default, Clone, Debug)]
+    struct FailMockSenderInner;
+
+    impl Sender for FailMockSenderInner {
         type PublicKey = Ed25519PublicKey;
         type Error = MockError;
 
@@ -592,11 +620,46 @@ mod tests {
         }
     }
 
-    // Mock sender that succeeds
-    #[derive(Clone, Debug)]
-    struct SuccessMockSender;
+    // Mock sender that fails
+    #[derive(Default, Clone, Debug)]
+    struct FailMockSender(FailMockSenderInner);
 
-    impl Sender for SuccessMockSender {
+    impl Sender for FailMockSender {
+        type PublicKey = Ed25519PublicKey;
+        type Error = MockError;
+
+        async fn send(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+            message: Bytes,
+            priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            match self.check(recipients).await {
+                Ok(checked) => checked.send(message, priority).await,
+                Err(_) => Ok(vec![]),
+            }
+        }
+    }
+
+    impl LimitedSender for FailMockSender {
+        type Checked<'a> = CheckedSender<'a, FailMockSenderInner>;
+
+        async fn check<'a>(
+            &'a mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'a>, SystemTime> {
+            Ok(CheckedSender {
+                sender: &mut self.0,
+                recipients,
+            })
+        }
+    }
+
+    // Mock sender that succeeds
+    #[derive(Default, Clone, Debug)]
+    struct SuccessMockSenderInner;
+
+    impl Sender for SuccessMockSenderInner {
         type PublicKey = Ed25519PublicKey;
         type Error = MockError;
 
@@ -613,7 +676,42 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher<S: Sender<PublicKey = Ed25519PublicKey>>(
+    // Mock sender that succeeds
+    #[derive(Default, Clone, Debug)]
+    struct SuccessMockSender(SuccessMockSenderInner);
+
+    impl Sender for SuccessMockSender {
+        type PublicKey = Ed25519PublicKey;
+        type Error = MockError;
+
+        async fn send(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+            message: Bytes,
+            priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            match self.check(recipients).await {
+                Ok(checked) => checked.send(message, priority).await,
+                Err(_) => Ok(vec![]),
+            }
+        }
+    }
+
+    impl LimitedSender for SuccessMockSender {
+        type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
+
+        async fn check<'a>(
+            &'a mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'a>, SystemTime> {
+            Ok(CheckedSender {
+                sender: &mut self.0,
+                recipients,
+            })
+        }
+    }
+
+    fn create_test_fetcher<S: LimitedSender<PublicKey = Ed25519PublicKey>>(
         context: Context,
     ) -> Fetcher<Context, Ed25519PublicKey, MockKey, S> {
         let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
@@ -629,7 +727,7 @@ mod tests {
     }
 
     /// Helper to add an active request directly for testing
-    fn add_test_active<S: Sender<PublicKey = Ed25519PublicKey>>(
+    fn add_test_active<S: LimitedSender<PublicKey = Ed25519PublicKey>>(
         fetcher: &mut Fetcher<Context, Ed25519PublicKey, MockKey, S>,
         id: ID,
         key: MockKey,
@@ -1319,7 +1417,7 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
             let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
-            let mut sender = WrappedSender::new(FailMockSender {});
+            let mut sender = WrappedSender::new(FailMockSender::default());
 
             // Add targets and attempt fetch
             fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
@@ -1342,7 +1440,7 @@ mod tests {
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let mut sender = WrappedSender::new(SuccessMockSender {});
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             // Timeout does not remove target
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
@@ -1398,7 +1496,7 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait indefinitely
-            let mut sender = WrappedSender::new(SuccessMockSender {});
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender).await;
 
             // Targets should still exist (no fallback cleared them)

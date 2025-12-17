@@ -125,10 +125,13 @@ mod tests {
         peer_seeds: &[u64],
         rate_limit: Quota,
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
+        Vec<(
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        )>,
     ) {
         let (network, oracle) = Network::new(
             context.with_label("network"),

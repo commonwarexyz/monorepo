@@ -76,7 +76,6 @@ where
     P: PublicKey,
     C: Clock + Clone + Send + 'static,
 {
-    type PublicKey = P;
     type Checked<'a>
         = CheckedSender<'a, UnlimitedSender<P>>
     where

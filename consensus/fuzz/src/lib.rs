@@ -26,7 +26,7 @@ use commonware_cryptography::{
     Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
-use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
