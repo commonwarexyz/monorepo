@@ -271,7 +271,9 @@ impl<
 
             // Propose a new digest if we are processing less than the window
             let next = self.next();
-            if next < self.tip + self.window {
+
+            // Underflow safe: next >= self.tip is guaranteed by next()
+            if next - self.tip < self.window {
                 trace!(next, "requesting new digest");
                 assert!(self
                     .pending
@@ -631,7 +633,7 @@ impl<
         }
 
         // If the index is above the tip (and the window), ignore for now
-        if ack.item.index >= self.tip + self.window {
+        if ack.item.index.saturating_sub(self.tip) >= self.window {
             return Err(Error::AckIndex(ack.item.index));
         }
 
