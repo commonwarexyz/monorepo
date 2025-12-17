@@ -369,10 +369,11 @@ impl<C: PublicKey> InfoVerifier<C> {
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{hostname, Decode, DecodeExt};
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_utils::hostname;
     use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";

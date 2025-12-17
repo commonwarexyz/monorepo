@@ -313,10 +313,9 @@ mod tests {
         types::Address as PeerAddress,
         Ingress,
     };
-    use commonware_codec::hostname;
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Quota, Runner};
-    use commonware_utils::NZU32;
+    use commonware_utils::{hostname, NZU32};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn addr(socket: SocketAddr) -> PeerAddress {

@@ -212,9 +212,6 @@ pub use codec::*;
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
-// Re-export Hostname for the hostname! macro
-#[cfg(feature = "std")]
-pub use types::net::Hostname;
 
 #[cfg(feature = "arbitrary")]
 pub mod conformance;

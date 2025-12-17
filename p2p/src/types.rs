@@ -1,11 +1,9 @@
 //! Shared address types for p2p networking.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, Hostname, Read, ReadExt, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Error as RuntimeError, Resolver};
-use commonware_utils::IpAddrExt;
+use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -268,7 +266,8 @@ impl arbitrary::Arbitrary<'_> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{hostname, DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_utils::hostname;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]

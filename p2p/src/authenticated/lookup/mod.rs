@@ -170,15 +170,15 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
-    use commonware_codec::{hostname, Hostname};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
     use commonware_utils::{
+        hostname,
         ordered::{Map, Set},
-        TryCollect, NZU32,
+        Hostname, TryCollect, NZU32,
     };
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::{CryptoRng, Rng};

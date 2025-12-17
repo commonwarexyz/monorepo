@@ -188,14 +188,13 @@ mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_codec::hostname;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
-    use commonware_utils::{ordered::Map, NZU32};
+    use commonware_utils::{hostname, ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
