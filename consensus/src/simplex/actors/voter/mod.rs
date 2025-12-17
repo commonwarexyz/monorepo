@@ -156,7 +156,7 @@ mod tests {
 
             // Initialize voter actor
             let me = participants[0].clone();
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -393,7 +393,7 @@ mod tests {
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
             let me = participants[0].clone();
-            let elector = L::new(signing.participants());
+            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -669,7 +669,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -851,7 +851,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -1051,7 +1051,7 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
 
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -1237,7 +1237,7 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
 
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -1427,7 +1427,8 @@ mod tests {
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let elector = RoundRobin::new(schemes[0].participants());
+            let mut elector = <RoundRobin<S>>::default();
+            elector.initialize(schemes[0].participants());
             let leader_idx = elector.elect(view2_round, None);
             let leader = participants[leader_idx as usize].clone();
 
@@ -1641,7 +1642,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -1875,7 +1876,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -2036,7 +2037,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -2211,7 +2212,7 @@ mod tests {
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
             let me = participants[0].clone();
-            let elector = L::new(signing.participants());
+            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),

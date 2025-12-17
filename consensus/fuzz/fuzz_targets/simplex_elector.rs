@@ -54,7 +54,8 @@ where
         return;
     }
 
-    let elector = E::new(&participants);
+    let mut elector = E::default();
+    elector.initialize(&participants);
 
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {

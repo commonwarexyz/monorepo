@@ -444,7 +444,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -704,7 +704,7 @@ mod tests {
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
 
@@ -874,7 +874,7 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
-                let elector = L::new(schemes[0].participants());
+                let elector = L::default();
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
@@ -1057,7 +1057,7 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1317,7 +1317,7 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1571,7 +1571,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1757,7 +1757,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1968,7 +1968,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2178,7 +2178,7 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2401,7 +2401,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2588,7 +2588,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2758,7 +2758,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2929,7 +2929,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let mut engines = Vec::new();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -3207,7 +3207,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3377,7 +3377,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3557,7 +3557,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3718,7 +3718,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3885,7 +3885,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engine
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
@@ -4053,7 +4053,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines with `AttributableReporter` wrapper
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4285,7 +4285,7 @@ mod tests {
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
             // Create engines: 7 honest engines, 3 byzantine
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4633,7 +4633,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines and reporters
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -4789,7 +4789,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
@@ -5179,7 +5179,7 @@ mod tests {
 
             // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest
             // after receiving a vote (implicitly respecting the partitioning)
-            let elector = L::new(schemes[0].participants());
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();

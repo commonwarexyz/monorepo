@@ -21,7 +21,7 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{
-    certificate::{self, mocks::Fixture, Scheme as _},
+    certificate::{self, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     Sha256,
@@ -207,7 +207,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
-            let elector = P::Elector::new(schemes[i].participants());
+            let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants

@@ -73,10 +73,14 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Diges
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
+
+        let mut elector = cfg.elector;
+        elector.initialize(cfg.scheme.participants());
+
         Self {
             context,
             scheme: cfg.scheme,
-            elector: cfg.elector,
+            elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
@@ -540,10 +544,7 @@ mod tests {
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
-    use commonware_cryptography::{
-        certificate::{mocks::Fixture, Scheme},
-        sha256::Digest as Sha256Digest,
-    };
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_runtime::{deterministic, Runner};
     use std::time::Duration;
 
@@ -563,7 +564,7 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier.clone(),
-                    elector: RoundRobin::new(verifier.participants()),
+                    elector: <RoundRobin<_>>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -645,8 +646,8 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
-                scheme: local_scheme.clone(),
-                elector: RoundRobin::new(local_scheme.participants()),
+                scheme: local_scheme,
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -732,7 +733,7 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
-                elector: RoundRobin::new(local_scheme.participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -790,7 +791,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: RoundRobin::new(schemes[0].participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
@@ -846,8 +847,8 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
-                scheme: local_scheme.clone(),
-                elector: RoundRobin::new(local_scheme.participants()),
+                scheme: local_scheme,
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -900,7 +901,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: RoundRobin::new(verifier.participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -947,7 +948,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: RoundRobin::new(verifier.participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -995,7 +996,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: RoundRobin::new(verifier.participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -1046,7 +1047,7 @@ mod tests {
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
-                    elector: RoundRobin::new(local_scheme.participants()),
+                    elector: <RoundRobin<_>>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1083,8 +1084,8 @@ mod tests {
             let mut restarted = State::new(
                 context,
                 Config {
-                    scheme: local_scheme.clone(),
-                    elector: RoundRobin::new(local_scheme.participants()),
+                    scheme: local_scheme,
+                    elector: <RoundRobin<_>>::default(),
                     namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1111,7 +1112,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: RoundRobin::new(schemes[0].participants()),
+                elector: <RoundRobin<_>>::default(),
                 namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),

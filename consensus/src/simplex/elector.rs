@@ -23,16 +23,22 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Blake3, Hasher, PublicKey,
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
 /// Selects leaders for consensus rounds.
 ///
-/// Electors are constructed with a participant set and then used to elect leaders
-/// for rounds within that epoch. A new elector should be created for each epoch
-/// (when participants may change).
+/// Electors are created externally (with optional configuration like a seed), then
+/// initialized by consensus with the participant set.
+///
+/// # Lifecycle
+///
+/// 1. Create elector externally via `Default::default()` or a custom constructor
+/// 2. Pass to simplex configuration
+/// 3. Consensus calls [`initialize`](Elector::initialize) with participants
+/// 4. Consensus calls [`elect`](Elector::elect) for each round
 ///
 /// # Determinism Requirement
 ///
@@ -47,18 +53,27 @@ use std::marker::PhantomData;
 /// For all subsequent views, a certificate from the previous view is provided. Implementations
 /// can use the certificate to derive randomness (like [`Random`]) or ignore it entirely
 /// (like [`RoundRobin`]).
-pub trait Elector<S: Scheme>: Clone + Send + 'static {
-    /// Creates a new elector for the given set of participants.
+pub trait Elector<S: Scheme>: Clone + Default + Send + 'static {
+    /// Initializes the elector with the participant set.
+    ///
+    /// Called by consensus before any [`elect`](Elector::elect) calls.
     ///
     /// # Panics
     ///
     /// Implementations should panic if `participants` is empty.
-    fn new(participants: &Set<S::PublicKey>) -> Self;
+    fn initialize(&mut self, participants: &Set<S::PublicKey>);
 
     /// Selects the leader for the given round.
     ///
+    /// Must be called after [`initialize`](Elector::initialize). This method
+    /// **must** be a pure function given the elector's construction and
+    /// initialization state.
+    ///
     /// The `certificate` is expected to be `None` only for view 1.
-    /// This method **must** be a pure function given the elector's construction state.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if called before [`initialize`](Elector::initialize).
     ///
     /// Returns the index of the selected leader in the participants list.
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> u32;
@@ -71,45 +86,55 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 ///
 /// Works with any signing scheme.
 #[derive(Clone, Debug)]
-pub struct RoundRobin<S: Scheme> {
+pub struct RoundRobin<S: Scheme, H: Hasher = Blake3> {
+    seed: Option<Vec<u8>>,
     permutation: Vec<u32>,
-    _phantom: PhantomData<S>,
+    _phantom: PhantomData<(S, H)>,
 }
 
-impl<S: Scheme> RoundRobin<S> {
-    /// Creates a new round-robin elector with shuffled order based on seed.
-    ///
-    /// The seed determines the permutation of leader indices, so different seeds
-    /// produce different rotation orders.
-    pub fn shuffled<H: Hasher>(participants: &Set<S::PublicKey>, seed: &[u8]) -> Self {
-        assert!(!participants.is_empty(), "no participants");
-
-        let mut permutation = (0..participants.len() as u32).collect::<Vec<_>>();
-        let mut hasher = H::new();
-        permutation.sort_by_key(|&index| {
-            hasher.update(seed);
-            hasher.update(&index.encode());
-            hasher.finalize()
-        });
-
+impl<S: Scheme, H: Hasher> Default for RoundRobin<S, H> {
+    fn default() -> Self {
         Self {
-            permutation,
+            seed: None,
+            permutation: Vec::new(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<S: Scheme> Elector<S> for RoundRobin<S> {
-    fn new(participants: &Set<S::PublicKey>) -> Self {
+impl<S: Scheme, H: Hasher> RoundRobin<S, H> {
+    /// Creates a round-robin elector that will shuffle the rotation order based on seed.
+    ///
+    /// The seed is stored and used during [`initialize`](Elector::initialize) to
+    /// deterministically shuffle the permutation.
+    pub fn shuffled(seed: &[u8]) -> Self {
+        Self {
+            seed: Some(seed.to_vec()),
+            permutation: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: Scheme, H: Hasher> Elector<S> for RoundRobin<S, H> {
+    fn initialize(&mut self, participants: &Set<S::PublicKey>) {
         assert!(!participants.is_empty(), "no participants");
 
-        Self {
-            permutation: (0..participants.len() as u32).collect(),
-            _phantom: PhantomData,
+        self.permutation = (0..participants.len() as u32).collect();
+
+        if let Some(seed) = &self.seed {
+            let mut hasher = H::new();
+            self.permutation.sort_by_key(|&index| {
+                hasher.update(seed);
+                hasher.update(&index.encode());
+                hasher.finalize()
+            });
         }
     }
 
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> u32 {
+        assert!(!self.permutation.is_empty(), "elector not initialized");
+
         let n = self.permutation.len();
         let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
         self.permutation[idx]
@@ -129,21 +154,27 @@ pub struct Random<P: PublicKey, V: Variant> {
     _phantom: PhantomData<(P, V)>,
 }
 
+impl<P: PublicKey, V: Variant> Default for Random<P, V> {
+    fn default() -> Self {
+        Self {
+            n: 0,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random<P, V>
 where
     P: PublicKey,
     V: Variant + Send + Sync + 'static,
 {
-    fn new(participants: &Set<P>) -> Self {
+    fn initialize(&mut self, participants: &Set<P>) {
         assert!(!participants.is_empty(), "no participants");
-
-        Self {
-            n: participants.len(),
-            _phantom: PhantomData,
-        }
+        self.n = participants.len();
     }
 
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
+        assert!(self.n > 0, "elector not initialized");
         assert!(certificate.is_some() || round.view() == View::new(1));
 
         let Some(certificate) = certificate else {
@@ -180,7 +211,8 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = RoundRobin::<ed25519::Scheme>::new(&participants);
+        let mut elector = RoundRobin::<ed25519::Scheme>::default();
+        elector.initialize(&participants);
         let epoch = Epoch::new(0);
 
         // Run through 3 * n views, record the sequence of leaders
@@ -202,7 +234,8 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = RoundRobin::<ed25519::Scheme>::new(&participants);
+        let mut elector = RoundRobin::<ed25519::Scheme>::default();
+        elector.initialize(&participants);
 
         // Record leader for view 1 of epochs 0..n
         let leaders: Vec<_> = (0..n as u64)
@@ -227,11 +260,12 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
-        let elector_no_seed = RoundRobin::<ed25519::Scheme>::new(&participants);
-        let elector_seed_1 =
-            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed1");
-        let elector_seed_2 =
-            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed2");
+        let mut elector_no_seed = RoundRobin::<ed25519::Scheme>::default();
+        elector_no_seed.initialize(&participants);
+        let mut elector_seed_1 = RoundRobin::<ed25519::Scheme, Blake3>::shuffled(b"seed1");
+        elector_seed_1.initialize(&participants);
+        let mut elector_seed_2 = RoundRobin::<ed25519::Scheme, Blake3>::shuffled(b"seed2");
+        elector_seed_2.initialize(&participants);
 
         // Collect first 5 leaders from each
         let epoch = Epoch::new(0);
@@ -267,10 +301,10 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
-        let elector1 =
-            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"same_seed");
-        let elector2 =
-            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"same_seed");
+        let mut elector1 = RoundRobin::<ed25519::Scheme, Blake3>::shuffled(b"same_seed");
+        elector1.initialize(&participants);
+        let mut elector2 = RoundRobin::<ed25519::Scheme, Blake3>::shuffled(b"same_seed");
+        elector2.initialize(&participants);
 
         let epoch = Epoch::new(0);
         for view in 1..=10 {
@@ -281,16 +315,18 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "no participants")]
-    fn round_robin_new_panics_on_empty_participants() {
+    fn round_robin_initialize_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        RoundRobin::<ed25519::Scheme>::new(&participants);
+        let mut elector = RoundRobin::<ed25519::Scheme>::default();
+        elector.initialize(&participants);
     }
 
     #[test]
-    #[should_panic(expected = "no participants")]
-    fn round_robin_shuffled_panics_on_empty_participants() {
-        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed");
+    #[should_panic(expected = "elector not initialized")]
+    fn round_robin_elect_panics_when_not_initialized() {
+        let elector = RoundRobin::<ed25519::Scheme>::default();
+        let round = Round::new(Epoch::new(0), View::new(1));
+        elector.elect(round, None);
     }
 
     #[test]
@@ -299,7 +335,8 @@ mod tests {
         let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = Random::<_, MinPk>::new(&participants);
+        let mut elector = Random::<_, MinPk>::default();
+        elector.initialize(&participants);
 
         // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
@@ -327,7 +364,8 @@ mod tests {
             ..
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector = Random::<_, MinPk>::new(&participants);
+        let mut elector = Random::<_, MinPk>::default();
+        elector.initialize(&participants);
         let quorum = quorum_from_slice(&schemes) as usize;
 
         // Create certificate for round (1, 2)
@@ -370,9 +408,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "no participants")]
-    fn random_panics_on_empty_participants() {
+    fn random_initialize_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        Random::<_, MinPk>::new(&participants);
+        let mut elector = Random::<_, MinPk>::default();
+        elector.initialize(&participants);
     }
 
     #[test]
@@ -381,10 +420,19 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector = Random::<_, MinPk>::new(&participants);
+        let mut elector = Random::<_, MinPk>::default();
+        elector.initialize(&participants);
 
         // View 2 requires a certificate
         let round = Round::new(Epoch::new(1), View::new(2));
+        elector.elect(round, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "elector not initialized")]
+    fn random_elect_panics_when_not_initialized() {
+        let elector = Random::<commonware_cryptography::ed25519::PublicKey, MinPk>::default();
+        let round = Round::new(Epoch::new(0), View::new(1));
         elector.elect(round, None);
     }
 }

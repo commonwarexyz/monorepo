@@ -361,7 +361,7 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let elector = L::new(scheme.participants());
+        let elector = L::default();
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {

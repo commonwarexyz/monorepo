@@ -4,11 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{
-        self,
-        elector::{Elector, Random},
-        Engine,
-    },
+    simplex::{self, elector::Random, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -238,12 +234,11 @@ fn main() {
         );
 
         // Initialize consensus
-        let elector = Random::new(scheme.participants());
         let engine = Engine::new(
             context.with_label("engine"),
             simplex::Config {
                 scheme,
-                elector,
+                elector: Random::default(),
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
