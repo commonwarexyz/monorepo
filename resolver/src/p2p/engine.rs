@@ -9,8 +9,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Blocker, LimitedSender, Manager, Receiver, Recipients,
+    Blocker, LimitedSender, Manager, Receiver, Recipients, utils::codec::{WrappedLimitedSender, WrappedSender, wrap, wrap_limited}
 };
 use commonware_runtime::{
     spawn_cell,
@@ -160,7 +159,7 @@ impl<
         let peer_set_subscription = &mut self.manager.subscribe().await;
 
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let (mut sender, mut receiver) = wrap_limited((), network.0, network.1);
 
         loop {
             // Update metrics
@@ -360,7 +359,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut WrappedLimitedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,

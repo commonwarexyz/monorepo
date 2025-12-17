@@ -1,6 +1,8 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use crate::{Receiver, Recipients, Sender};
+use std::time::SystemTime;
+
+use crate::{CheckedSender, LimitedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
@@ -11,6 +13,18 @@ pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
 ) -> (WrappedSender<S, V>, WrappedReceiver<R, V>) {
     (
         WrappedSender::new(sender),
+        WrappedReceiver::new(config, receiver),
+    )
+}
+
+/// Wrap a [LimitedSender] and [Receiver] with some [Codec].
+pub const fn wrap_limited<S: LimitedSender, R: Receiver, V: Codec>(
+    config: V::Cfg,
+    sender: S,
+    receiver: R,
+) -> (WrappedLimitedSender<S, V>, WrappedReceiver<R, V>) {
+    (
+        WrappedLimitedSender::new(sender),
         WrappedReceiver::new(config, receiver),
     )
 }
@@ -57,6 +71,69 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         self.sender
             .send(recipients, encoded.freeze(), priority)
             .await
+    }
+}
+
+/// Wrapper around a [LimitedSender] that encodes messages using a [Codec].
+#[derive(Clone)]
+pub struct WrappedLimitedSender<S: LimitedSender, V: Codec> {
+    sender: S,
+
+    _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<S: LimitedSender, V: Codec> WrappedLimitedSender<S, V> {
+    /// Create a new [WrappedLimitedSender] with the given [LimitedSender].
+    pub const fn new(sender: S) -> Self {
+        Self {
+            sender,
+            _phantom_v: std::marker::PhantomData,
+        }
+    }
+
+    /// Send a message to a set of recipients.
+    pub async fn send(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+        message: V,
+        priority: bool,
+    ) -> Result<Vec<S::PublicKey>, <<S as LimitedSender>::Checked<'_> as CheckedSender>::Error>
+    {
+        match self.check(recipients).await {
+            Ok(checked) => checked.send(message, priority).await,
+            Err(_) => Ok(vec![]),
+        }
+    }
+
+    /// Create a [CheckedWrappedSender] by checking the given recipients.
+    pub async fn check(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Result<CheckedWrappedSender<'_, S, V>, SystemTime> {
+        let checked = self.sender.check(recipients).await?;
+        Ok(CheckedWrappedSender {
+            sender: checked,
+            _phantom_v: std::marker::PhantomData,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct CheckedWrappedSender<'a, S: LimitedSender, V: Codec> {
+    sender: S::Checked<'a>,
+
+    _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<'a, S: LimitedSender, V: Codec> CheckedWrappedSender<'a, S, V> {
+    pub async fn send(
+        self,
+        message: V,
+        priority: bool,
+    ) -> Result<Vec<S::PublicKey>, <<S as LimitedSender>::Checked<'a> as CheckedSender>::Error>
+    {
+        let encoded = message.encode();
+        self.sender.send(encoded.freeze(), priority).await
     }
 }
 

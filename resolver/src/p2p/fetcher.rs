@@ -1,6 +1,9 @@
 use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::codec::WrappedSender, LimitedSender, Recipients};
+use commonware_p2p::{
+    utils::codec::{WrappedLimitedSender, WrappedSender},
+    LimitedSender, Recipients,
+};
 use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt, Status},
     Clock, Metrics,
@@ -251,7 +254,7 @@ where
     /// tries the next peer. If all peers fail, tries the next key.
     ///
     /// On send failure, the key is retried. Targets are not removed on send failure.
-    pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+    pub async fn fetch(&mut self, sender: &mut WrappedLimitedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
 
