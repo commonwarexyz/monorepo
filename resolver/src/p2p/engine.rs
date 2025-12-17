@@ -26,7 +26,6 @@ use futures::{
     future::{self, Either},
     StreamExt,
 };
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
@@ -41,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + GClock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Manager<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -96,7 +95,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Spawner + Rng + Metrics,
+        E: Clock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Manager<PublicKey = P>,
         B: Blocker<PublicKey = P>,

@@ -9,10 +9,10 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
+    Quota, Spawner,
 };
 use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -40,7 +40,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -65,7 +65,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
-    rate_limiter: RateLimiter<C, E>,
+    rate_limiter: KeyedRateLimiter<C, E>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -76,7 +76,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
@@ -94,7 +94,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
         peers.insert(myself.public_key.clone(), Record::myself(myself));
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
+        let rate_limiter = KeyedRateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         // Other initialization.
         // TODO(#1833): Metrics should use the post-start context

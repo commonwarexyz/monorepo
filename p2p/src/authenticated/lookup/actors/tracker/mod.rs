@@ -2,7 +2,7 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{collections::HashSet, net::IpAddr};
 
 pub mod actor;

@@ -10,7 +10,10 @@ use crate::{
     },
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
+            unordered::{
+                fixed::{Db, Operation},
+                Update,
+            },
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
@@ -45,11 +48,11 @@ pub struct Current<
     const N: usize,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
-    /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
+    /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T, S>,
+    any: Db<E, K, V, H, T, S>,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
+    /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     status: BitMap<H::Digest, N, S>,
 
@@ -110,7 +113,7 @@ impl<
         proof: &KeyValueProof<H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(key, value);
+        let op = Operation::Update(Update(key, value));
 
         proof.verify(hasher, Self::grafting_height(), op, root)
     }
@@ -172,7 +175,7 @@ impl<
 
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
-        let any = Any::init_with_callback(
+        let any = Db::init_with_callback(
             context.with_label("any"),
             config.to_any_config(),
             Some(last_known_inactivity_floor),
@@ -979,7 +982,7 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(k, v1);
+            let op = Operation::Update(Update(k, v1));
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof_inactive.range_proof,
@@ -1153,7 +1156,7 @@ pub mod test {
                 // it's a key-updating operation.
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
-                    Operation::Update(key, value) => (key, value),
+                    Operation::Update(Update(key, value)) => (key, value),
                     Operation::CommitFloor(_, _) => continue,
                     Operation::Delete(_) => {
                         unreachable!("location does not reference update/commit operation")

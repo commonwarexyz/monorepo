@@ -20,17 +20,16 @@ use commonware_p2p::{
     Blocker, Receiver, Sender,
 };
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+    E: Clock + Rng + CryptoRng + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -51,7 +50,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+        E: Clock + Rng + CryptoRng + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,

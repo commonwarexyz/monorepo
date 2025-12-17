@@ -2,7 +2,7 @@
 
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
-use governor::Quota;
+use commonware_runtime::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use thiserror::Error;
 

@@ -5,7 +5,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::ordered::fixed]
 //! instead for better performance._
 
-use super::operation::VariableOperation as Operation;
 use crate::{
     index::ordered::Index,
     journal::{
@@ -14,7 +13,7 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{ordered::IndexedLog, VariableConfig, VariableValue},
+        any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
         Error,
     },
@@ -26,15 +25,18 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
+
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,

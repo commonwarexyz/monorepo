@@ -1,4 +1,4 @@
-//! An _ordered_ variant of a Any authenticated database with fixed-size values which additionally
+//! An _ordered_ variant of an "Any" authenticated database with fixed-size values which additionally
 //! maintains the lexicographic-next active key of each active key. For example, if the active key
 //! set is `{bar, baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for
 //! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
@@ -10,9 +10,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            ordered::{FixedOperation as Operation, IndexedLog},
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, ordered, value::FixedEncoding, FixedConfig as Config,
+            FixedValue,
         },
         Error,
     },
@@ -23,15 +22,18 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
+
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] qmdb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
@@ -72,7 +74,7 @@ mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher as Standard},
         qmdb::{
-            any::ordered::KeyData,
+            any::ordered::Update,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -109,8 +111,8 @@ mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -158,7 +160,7 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(KeyData {
+                ops.push(Operation::Update(Update {
                     key,
                     value,
                     next_key,
@@ -241,7 +243,7 @@ mod test {
             let seed = context.next_u64();
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
             let mut db =
-                Any::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
+                Db::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
                     .await
                     .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
@@ -824,7 +826,7 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(KeyData {
+            let changed_op = Operation::Update(Update {
                 key: Sha256::hash(b"key1"),
                 value: Sha256::hash(b"value1"),
                 next_key: Sha256::hash(b"key2"),
@@ -900,7 +902,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                db: &mut Any<Context, Digest, i32, Sha256, T>,
+                db: &mut Db<Context, Digest, i32, Sha256, T>,
                 rng: &mut StdRng,
             ) {
                 let mut keys = BTreeMap::new();
@@ -960,7 +962,7 @@ mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
-            let mut db = Any::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
+            let mut db = Db::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
                 .await
                 .unwrap();
             insert_random(&mut db, &mut rng).await;
@@ -968,7 +970,7 @@ mod test {
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
-            let mut db = Any::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
+            let mut db = Db::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
                 .await
                 .unwrap();
             insert_random(&mut db, &mut rng).await;

@@ -2,7 +2,7 @@
 
 use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
 use commonware_cryptography::Signer;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::time::Duration;
 
 mod actor;

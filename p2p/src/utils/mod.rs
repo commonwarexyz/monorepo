@@ -6,6 +6,7 @@ use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
 pub mod codec;
+pub mod limited;
 pub mod mux;
 pub mod requester;
 

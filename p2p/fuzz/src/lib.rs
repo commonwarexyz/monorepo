@@ -11,13 +11,12 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     deterministic::{self, Context},
-    Clock, Handle, Metrics, Runner,
+    Clock, Handle, Metrics, Quota, Runner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
     TryCollect, NZU32,
 };
-use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},

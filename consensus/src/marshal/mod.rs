@@ -129,11 +129,10 @@ mod tests {
         utils::requester,
         Manager,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,
@@ -173,7 +172,7 @@ mod tests {
 
     async fn setup_validator(
         context: deterministic::Context,
-        oracle: &mut Oracle<K>,
+        oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
     ) -> (
@@ -340,7 +339,7 @@ mod tests {
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,
-    ) -> Oracle<K> {
+    ) -> Oracle<K, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -353,7 +352,11 @@ mod tests {
         oracle
     }
 
-    async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
+    async fn setup_network_links(
+        oracle: &mut Oracle<K, deterministic::Context>,
+        peers: &[K],
+        link: Link,
+    ) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
                 if p2 == p1 {

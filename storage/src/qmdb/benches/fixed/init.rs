@@ -4,8 +4,8 @@
 use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, get_store, store_cfg, variable_any_cfg, OAnyDb, OCurrentDb,
-    OVAnyDb, StoreDb, UAnyDb, UCurrentDb, UVAnyDb, Variant, THREADS, VARIANTS,
+    get_current_unordered_fixed, get_store, store_cfg, variable_any_cfg, OCurrentDb, OFixedDb,
+    OVAnyDb, StoreDb, UCurrentDb, UFixedDb, UVAnyDb, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -132,14 +132,14 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         db.close().await.unwrap();
                                     }
                                     Variant::AnyUnorderedFixed => {
-                                        let db = UAnyDb::init(ctx.clone(), any_cfg.clone())
+                                        let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
                                     Variant::AnyOrderedFixed => {
-                                        let db = OAnyDb::init(ctx.clone(), any_cfg.clone())
+                                        let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
