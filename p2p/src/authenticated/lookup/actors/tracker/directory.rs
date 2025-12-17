@@ -534,7 +534,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         // Create asymmetric address where ingress differs from egress
@@ -632,7 +632,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: false,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         // Create peers with different address types
@@ -696,7 +696,7 @@ mod tests {
             allow_private_ips: false,
             allow_dns: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         // Create peer with public egress IP
