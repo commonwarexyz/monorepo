@@ -23,6 +23,7 @@ use rand::{rngs::StdRng, SeedableRng};
 #[derive(Arbitrary, Debug)]
 enum FuzzElector {
     RoundRobin,
+    RoundRobinShuffled([u8; 32]),
     RandomMinPk(bls12381_threshold::Signature<MinPk>),
     RandomMinSig(bls12381_threshold::Signature<MinSig>),
 }
@@ -34,7 +35,7 @@ struct FuzzInput {
     elector: FuzzElector,
 }
 
-fn fuzz<S, E>(input: &FuzzInput, certificate: Option<&S::Certificate>)
+fn fuzz<S, E>(input: &FuzzInput, mut elector: E, certificate: Option<&S::Certificate>)
 where
     S: Scheme<PublicKey = PublicKey>,
     E: Elector<S>,
@@ -54,7 +55,6 @@ where
         return;
     }
 
-    let mut elector = E::default();
     elector.initialize(&participants);
 
     // For view 1 certificate should be None, for other views use provided certificate
@@ -70,13 +70,24 @@ where
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, RoundRobin>(&input, None);
+            fuzz::<ed25519::Scheme, _>(&input, <RoundRobin>::default(), None);
+        }
+        FuzzElector::RoundRobinShuffled(seed) => {
+            fuzz::<ed25519::Scheme, _>(&input, <RoundRobin>::shuffled(seed), None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinPk>, Random>(&input, Some(certificate));
+            fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(
+                &input,
+                Random::default(),
+                Some(certificate),
+            );
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinSig>, Random>(&input, Some(certificate));
+            fuzz::<bls12381_threshold::Scheme<_, MinSig>, _>(
+                &input,
+                Random::default(),
+                Some(certificate),
+            );
         }
     }
 });
