@@ -432,8 +432,8 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Ingress> => 1024,
-            CodecConformance<Address> => 1024,
+            CodecConformance<Ingress>,
+            CodecConformance<Address>,
         }
     }
 }
