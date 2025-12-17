@@ -7,7 +7,7 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Blocker, Channel, Manager, Receiver, Recipients, Sender,
+    Address, Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     deterministic::{self, Context},
@@ -322,7 +322,7 @@ impl NetworkScheme for Lookup {
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
-        let peer_list: Vec<(_, commonware_p2p::Address)> = peer
+        let peer_list: Vec<(_, Address)> = peer
             .topo
             .peers
             .iter()
@@ -376,7 +376,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Map<_, commonware_p2p::Address> = peer_ids
+        let peer_list: Map<_, Address> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
