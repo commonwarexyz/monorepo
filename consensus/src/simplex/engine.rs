@@ -1,7 +1,7 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
-    elector::Elector,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};

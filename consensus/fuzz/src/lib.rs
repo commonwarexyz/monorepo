@@ -12,7 +12,7 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        elector::Elector,
+        elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
         Engine,

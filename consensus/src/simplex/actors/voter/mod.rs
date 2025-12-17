@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Elector, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity},
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
@@ -53,7 +53,7 @@ mod tests {
     use crate::{
         simplex::{
             actors::{batcher, resolver},
-            elector::{Elector, Random, RoundRobin},
+            elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
             mocks,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
@@ -129,7 +129,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -364,7 +364,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -643,7 +643,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -825,7 +825,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1020,7 +1020,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1198,7 +1198,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1403,9 +1403,10 @@ mod tests {
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let mut elector = <RoundRobin>::default();
-            Elector::<S>::initialize(&mut elector, schemes[0].participants());
-            let leader_idx = Elector::<S>::elect(&elector, view2_round, None);
+            let elector_config = RoundRobin::<Sha256>::default();
+            let temp_elector: RoundRobinElector<S> =
+                elector_config.clone().build(schemes[0].participants());
+            let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[leader_idx as usize].clone();
 
             // Create a voter with the leader's identity
@@ -1429,7 +1430,7 @@ mod tests {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: leader_scheme.clone(),
-                elector: elector.clone(),
+                elector: elector_config.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1437,7 +1438,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
-                elector,
+                elector: elector_config,
                 blocker: oracle.control(leader.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1592,7 +1593,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1820,7 +1821,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
@@ -1983,7 +1984,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2155,7 +2156,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);

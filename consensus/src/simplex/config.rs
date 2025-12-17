@@ -1,5 +1,5 @@
 use super::{
-    elector::Elector,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{
@@ -33,7 +33,7 @@ pub struct Config<
     /// the wrong validator.
     pub scheme: S,
 
-    /// Leader election strategy.
+    /// Leader election configuration.
     ///
     /// Determines how leaders are selected for each view. Built-in options include
     /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and

@@ -238,7 +238,7 @@ fn main() {
             context.with_label("engine"),
             simplex::Config {
                 scheme,
-                elector: Random::default(),
+                elector: Random,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),

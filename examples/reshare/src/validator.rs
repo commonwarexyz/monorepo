@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver,
-    simplex::{elector::Elector, scheme::Scheme},
+    simplex::{elector::Config as Elector, scheme::Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,

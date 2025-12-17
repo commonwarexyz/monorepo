@@ -206,7 +206,7 @@ fn main() {
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
-            elector: <RoundRobin>::default(),
+            elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),

@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Elector, Random, RoundRobin},
+            elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,

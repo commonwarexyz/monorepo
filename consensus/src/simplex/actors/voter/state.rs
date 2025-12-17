@@ -1,7 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
-        elector::Elector,
+        elector::{Config as ElectorConfig, Elector},
         interesting, min_active,
         scheme::Scheme,
         types::{
@@ -28,7 +28,7 @@ use tracing::{debug, warn};
 const GENESIS_VIEW: View = View::zero();
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme, L: Elector<S>> {
+pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
     pub elector: L,
     pub namespace: Vec<u8>,
@@ -43,10 +43,11 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+{
     context: E,
     scheme: S,
-    elector: L,
+    elector: L::Elector,
     namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
@@ -63,10 +64,10 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest>
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
-    pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -74,13 +75,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Diges
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
 
-        // Initialize elector with participants
-        cfg.elector.initialize(cfg.scheme.participants());
+        // Build elector with participants
+        let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {
             context,
             scheme: cfg.scheme,
-            elector: cfg.elector,
+            elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,

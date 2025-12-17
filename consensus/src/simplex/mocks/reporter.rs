@@ -2,7 +2,7 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        elector::Elector,
+        elector::{Config as ElectorConfig, Elector},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -29,7 +29,7 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme, L: Elector<S>> {
+pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
@@ -37,11 +37,11 @@ pub struct Config<S: Scheme, L: Elector<S>> {
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: Elector<S>, D: Digest> {
+pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
-    elector: L,
+    elector: L::Elector,
 
     namespace: Vec<u8>,
 
@@ -64,19 +64,19 @@ impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: Rng + CryptoRng,
     S: Scheme,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
-        // Initialize elector with participants
-        cfg.elector.initialize(&cfg.participants);
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+        // Build elector with participants
+        let elector = cfg.elector.build(&cfg.participants);
 
         Self {
             context,
             namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
-            elector: cfg.elector,
+            elector,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -110,7 +110,7 @@ impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -317,7 +317,7 @@ impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     S: Scheme,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;
