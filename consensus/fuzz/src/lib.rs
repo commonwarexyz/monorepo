@@ -12,7 +12,7 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        elector::Config as ElectorConfig,
+        elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
         Engine,
@@ -55,7 +55,7 @@ where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
-    type Elector: ElectorConfig<Self::Scheme>;
+    type Elector: Elector<Self::Scheme>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 

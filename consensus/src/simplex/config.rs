@@ -1,5 +1,5 @@
 use super::{
-    elector::Config as ElectorConfig,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{
@@ -15,7 +15,7 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the consensus engine.
 pub struct Config<
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>>,
@@ -121,7 +121,7 @@ pub struct Config<
 
 impl<
         S: Scheme,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>>,

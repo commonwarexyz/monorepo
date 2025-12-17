@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as ElectorConfig, Random, RoundRobin},
+            elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
@@ -403,7 +403,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -654,7 +654,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n_active = 5;
@@ -818,7 +818,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1011,7 +1011,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -1269,7 +1269,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1531,7 +1531,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1717,7 +1717,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1928,7 +1928,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 10;
@@ -2129,7 +2129,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -2354,7 +2354,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2541,7 +2541,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2711,7 +2711,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2882,7 +2882,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 7;
@@ -3160,7 +3160,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3330,7 +3330,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3510,7 +3510,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3673,7 +3673,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 10;
@@ -3844,7 +3844,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 1;
@@ -4012,7 +4012,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         let n = 3;
         let required_containers = View::new(10);
@@ -4212,7 +4212,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -4584,7 +4584,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: ElectorConfig<bls12381_threshold::Scheme<PublicKey, V>>,
+        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -4739,7 +4739,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -5136,7 +5136,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         let faults = max_faults(n);
         let required_containers = View::new(100);
@@ -5453,7 +5453,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
     {
         for strategy in [
             Strategy::View,

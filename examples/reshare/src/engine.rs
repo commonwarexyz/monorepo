@@ -11,7 +11,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{elector::Config as ElectorConfig, scheme::Scheme, types::Finalization},
+    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
@@ -76,7 +76,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -116,7 +116,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {

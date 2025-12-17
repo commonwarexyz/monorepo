@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as ElectorConfig, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity},
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
@@ -20,7 +20,7 @@ use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     B: Blocker,
     D: Digest,
     A: Automaton,

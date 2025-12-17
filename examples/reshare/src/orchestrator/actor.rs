@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
-        elector::Config as ElectorConfig,
+        elector::Config as Elector,
         scheme,
         types::{Certificate, Context},
     },
@@ -46,7 +46,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
 {
     pub oracle: B,
     pub application: A,
@@ -73,7 +73,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -101,7 +101,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(

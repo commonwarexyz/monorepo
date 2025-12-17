@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver,
-    simplex::{elector::Config as ElectorConfig, scheme::Scheme},
+    simplex::{elector::Config as Elector, scheme::Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
@@ -43,7 +43,7 @@ pub async fn run<S, L>(
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -333,7 +333,7 @@ mod test {
             pk: PublicKey,
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
-            L: ElectorConfig<S>,
+            L: Elector<S>,
             Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {

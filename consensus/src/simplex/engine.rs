@@ -1,7 +1,7 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
-    elector::Config as ElectorConfig,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
@@ -17,7 +17,7 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: ElectorConfig<S>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -39,7 +39,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
-        L: ElectorConfig<S>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
