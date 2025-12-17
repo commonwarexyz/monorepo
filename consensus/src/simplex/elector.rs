@@ -18,14 +18,14 @@
 //! stake-weighted selection or other application-specific strategies.
 
 use crate::{
-    simplex::scheme::bls12381_threshold::{self, Seed},
+    simplex::scheme::bls12381_threshold,
     types::{Round, View},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Blake3, Hasher, PublicKey,
 };
-use commonware_utils::ordered::Set;
+use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
 /// Selects leaders for consensus rounds.
@@ -148,14 +148,12 @@ where
 
         let Some(certificate) = certificate else {
             // Standard round-robin for view 1
-            return ((round.epoch().get().wrapping_add(round.view().get())) as usize % self.n)
-                as u32;
+            return (round.epoch().get().wrapping_add(round.view().get()) as usize % self.n) as u32;
         };
 
-        // Use certificate randomness
-        let seed = Seed::<V>::new(round, certificate.seed_signature);
-        let encoded = seed.encode();
-        commonware_utils::modulo(encoded.as_ref(), self.n as u64) as u32
+        // Use the seed signature as a source of randomness
+        let seed = certificate.seed_signature.encode();
+        modulo(seed.as_ref(), self.n as u64) as u32
     }
 }
 
