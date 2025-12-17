@@ -13,6 +13,9 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/revm_
 workspace = true
 
 [dependencies]
+
+# EVM execution
+alloy-evm = { version = "=0.25.1", default-features = false, features = ["std"] }
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
@@ -25,9 +28,6 @@ commonware-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 rand.workspace = true
-
-# EVM execution
-alloy-evm = { version = "=0.25.1", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "commonware-revm-chain"
