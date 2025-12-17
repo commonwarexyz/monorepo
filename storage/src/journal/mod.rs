@@ -11,6 +11,9 @@ pub mod authenticated;
 pub mod contiguous;
 pub mod segmented;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 impl<E, Op> crate::qmdb::sync::Journal for contiguous::fixed::Journal<E, Op>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
