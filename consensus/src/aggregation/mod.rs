@@ -98,11 +98,10 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Clock, Metrics, Runner, Spawner,
+        Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::BTreeMap,
@@ -111,7 +110,7 @@ mod tests {
     };
     use tracing::debug;
 
-    type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
+    type Registrations<P> = BTreeMap<P, (Sender<P, deterministic::Context>, Receiver<P>)>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -126,7 +125,7 @@ mod tests {
 
     /// Register all participants with the network oracle.
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
@@ -143,7 +142,7 @@ mod tests {
 
     /// Establish network links between all participants.
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         participants: &[PublicKey],
         link: Link,
     ) {
@@ -165,7 +164,10 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
-    ) -> (Oracle<PublicKey>, Registrations<PublicKey>) {
+    ) -> (
+        Oracle<PublicKey, deterministic::Context>,
+        Registrations<PublicKey>,
+    ) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -188,7 +190,7 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         namespace: &[u8],
         epoch: Epoch,
         rebroadcast_timeout: Duration,

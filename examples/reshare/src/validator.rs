@@ -11,10 +11,9 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{authenticated::discovery, utils::requester};
-use commonware_runtime::{tokio, Metrics};
+use commonware_runtime::{tokio, Metrics, Quota};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -175,14 +174,13 @@ mod test {
     };
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Runner as _, Spawner,
+        Clock, Handle, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{union, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
     };
-    use governor::Quota;
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{
@@ -321,7 +319,7 @@ mod test {
         async fn start_one<S>(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
@@ -415,7 +413,7 @@ mod test {
         async fn start_participant(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) {
@@ -430,7 +428,7 @@ mod test {
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
             delayed: &HashSet<PublicKey>,

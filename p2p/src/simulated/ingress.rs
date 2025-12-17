@@ -1,22 +1,25 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::{Map, Set};
+use commonware_runtime::{Clock, Quota};
+use commonware_utils::{
+    channels::ring,
+    ordered::{Map, Set},
+};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use governor::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
-pub enum Message<P: PublicKey> {
+pub enum Message<P: PublicKey, E: Clock> {
     Register {
         channel: Channel,
         public_key: P,
         quota: Quota,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+        result: oneshot::Sender<Result<(Sender<P, E>, Receiver<P>), Error>>,
     },
     Update {
         id: u64,
@@ -28,6 +31,9 @@ pub enum Message<P: PublicKey> {
     },
     Subscribe {
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+    },
+    SubscribeConnected {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -78,19 +84,27 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Debug, Clone)]
-pub struct Oracle<P: PublicKey> {
-    sender: mpsc::UnboundedSender<Message<P>>,
+#[derive(Debug)]
+pub struct Oracle<P: PublicKey, E: Clock> {
+    sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
-impl<P: PublicKey> Oracle<P> {
+impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P, E>>) -> Self {
         Self { sender }
     }
 
     /// Create a new [Control] interface for some peer.
-    pub fn control(&self, me: P) -> Control<P> {
+    pub fn control(&self, me: P) -> Control<P, E> {
         Control {
             me,
             sender: self.sender.clone(),
@@ -100,7 +114,7 @@ impl<P: PublicKey> Oracle<P> {
     /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    pub fn manager(&self) -> Manager<P> {
+    pub fn manager(&self) -> Manager<P, E> {
         Manager {
             oracle: self.clone(),
         }
@@ -109,7 +123,7 @@ impl<P: PublicKey> Oracle<P> {
     /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    pub fn socket_manager(&self) -> SocketManager<P> {
+    pub fn socket_manager(&self) -> SocketManager<P, E> {
         SocketManager {
             oracle: self.clone(),
         }
@@ -238,13 +252,26 @@ impl<P: PublicKey> Oracle<P> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-#[derive(Clone, Debug)]
-pub struct Manager<P: PublicKey> {
+pub struct Manager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
-    oracle: Oracle<P>,
+    oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey> crate::Manager for Manager<P> {
+impl<P: PublicKey, E: Clock> std::fmt::Debug for Manager<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Manager").finish_non_exhaustive()
+    }
+}
+
+impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            oracle: self.oracle.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     type PublicKey = P;
     type Peers = Set<Self::PublicKey>;
 
@@ -272,13 +299,26 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
 /// Because [SocketAddr]s are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all [SocketAddr]s to be valid.
-#[derive(Clone, Debug)]
-pub struct SocketManager<P: PublicKey> {
+pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
-    oracle: Oracle<P>,
+    oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey> crate::Manager for SocketManager<P> {
+impl<P: PublicKey, E: Clock> std::fmt::Debug for SocketManager<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SocketManager").finish_non_exhaustive()
+    }
+}
+
+impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            oracle: self.oracle.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
     type PublicKey = P;
     type Peers = Map<Self::PublicKey, SocketAddr>;
 
@@ -299,16 +339,25 @@ impl<P: PublicKey> crate::Manager for SocketManager<P> {
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[derive(Debug, Clone)]
-pub struct Control<P: PublicKey> {
+#[derive(Debug)]
+pub struct Control<P: PublicKey, E: Clock> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
-    sender: mpsc::UnboundedSender<Message<P>>,
+    sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
-impl<P: PublicKey> Control<P> {
+impl<P: PublicKey, E: Clock> Clone for Control<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            me: self.me.clone(),
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> Control<P, E> {
     /// Register the communication interfaces for the peer over a given [Channel].
     ///
     /// # Rate Limiting
@@ -319,7 +368,7 @@ impl<P: PublicKey> Control<P> {
         &mut self,
         channel: Channel,
         quota: Quota,
-    ) -> Result<(Sender<P>, Receiver<P>), Error> {
+    ) -> Result<(Sender<P, E>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Register {
@@ -334,7 +383,7 @@ impl<P: PublicKey> Control<P> {
     }
 }
 
-impl<P: PublicKey> crate::Blocker for Control<P> {
+impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {

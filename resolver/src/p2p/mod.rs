@@ -84,10 +84,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -110,10 +109,13 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
+        Vec<(
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        )>,
     ) {
         let (network, oracle) = Network::new(
             context.with_label("network"),
@@ -147,7 +149,7 @@ mod tests {
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -168,7 +170,10 @@ mod tests {
         manager: impl Manager<PublicKey = PublicKey>,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (Sender<PublicKey>, Receiver<PublicKey>),
+        connection: (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey> {

@@ -56,10 +56,9 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender as _,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use governor::Quota;
     use std::{num::NonZeroU32, time::Duration};
 
     /// Default rate limit set high enough to not interfere with normal operation

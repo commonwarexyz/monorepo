@@ -61,9 +61,8 @@
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -180,8 +179,8 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter, SplitSender,
-    SplitTarget,
+    Config, ConnectedPeerProvider, Network, Receiver, Sender, SplitForwarder, SplitOrigin,
+    SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
@@ -194,10 +193,9 @@ mod tests {
         Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
     use commonware_utils::{ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -1012,7 +1010,7 @@ mod tests {
 
     async fn test_bandwidth_between_peers(
         context: &mut deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         sender_bps: Option<usize>,
         receiver_bps: Option<usize>,
         message_size: usize,

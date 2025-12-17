@@ -6,7 +6,7 @@ use crate::authenticated::discovery::{
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use governor::Quota;
+use commonware_runtime::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;

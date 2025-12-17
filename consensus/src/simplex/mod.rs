@@ -316,11 +316,12 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+    };
     use commonware_utils::{max_faults, quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
-    use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -337,12 +338,21 @@ mod tests {
 
     /// Register a validator with the oracle.
     async fn register_validator(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validator: PublicKey,
     ) -> (
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
     ) {
         let mut control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
@@ -358,14 +368,23 @@ mod tests {
 
     /// Registers all validators using the oracle.
     async fn register_validators(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
     ) -> HashMap<
         PublicKey,
         (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         ),
     > {
         let mut registrations = HashMap::new();
@@ -389,7 +408,7 @@ mod tests {
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
     async fn link_validators(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,

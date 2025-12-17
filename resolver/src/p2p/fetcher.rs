@@ -10,7 +10,6 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
@@ -49,12 +48,7 @@ enum SendError<S: Sender> {
 /// the peer might be slow or might receive the data later. Targets are only removed when:
 /// - A peer is blocked (sent invalid data)
 /// - The fetch succeeds (all targets for that key are cleared)
-pub struct Fetcher<
-    E: Clock + GClock + Rng + Metrics,
-    P: PublicKey,
-    Key: Span,
-    NetS: Sender<PublicKey = P>,
-> {
+pub struct Fetcher<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>> {
     context: E,
 
     /// Helps find peers to fetch from and tracks which peers are assigned to which request ids.
@@ -90,7 +84,7 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
+impl<E: Clock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
     Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
@@ -411,9 +405,8 @@ mod tests {
     use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
-        Runner as _,
+        Quota, Runner as _,
     };
-    use governor::Quota;
     use std::{fmt, time::Duration};
 
     // Mock error type for testing

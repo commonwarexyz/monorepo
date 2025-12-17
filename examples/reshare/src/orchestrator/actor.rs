@@ -25,11 +25,11 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Quota, Spawner,
+    Storage,
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -60,7 +60,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -86,7 +86,7 @@ where
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
