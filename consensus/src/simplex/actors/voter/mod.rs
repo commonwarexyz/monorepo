@@ -53,7 +53,7 @@ mod tests {
     use crate::{
         simplex::{
             actors::{batcher, resolver},
-            elector::{Elector, ElectorConfig, RandomConfig, RoundRobinConfig},
+            elector::{Elector, ElectorConfig, RandomConfig, RoundRobin, RoundRobinConfig},
             mocks,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
@@ -633,8 +633,12 @@ mod tests {
     fn test_append_old_interesting_view() {
         append_old_interesting_view::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
         append_old_interesting_view::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        append_old_interesting_view::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        append_old_interesting_view::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         append_old_interesting_view::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
@@ -1009,10 +1013,18 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_conflicts_proposal::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        certificate_conflicts_proposal::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_conflicts_proposal::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_conflicts_proposal::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         certificate_conflicts_proposal::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
@@ -1187,10 +1199,18 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
-        proposal_conflicts_certificate::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        proposal_conflicts_certificate::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        proposal_conflicts_certificate::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        proposal_conflicts_certificate::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         proposal_conflicts_certificate::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
@@ -1357,10 +1377,18 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        certificate_verifies_proposal::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        certificate_verifies_proposal::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certificate_verifies_proposal::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certificate_verifies_proposal::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certificate_verifies_proposal::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         certificate_verifies_proposal::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
@@ -1404,9 +1432,9 @@ mod tests {
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
             let elector_config = RoundRobinConfig::<Sha256>::default();
-            let temp_elector =
-                <RoundRobinConfig<Sha256> as ElectorConfig<S>>::build(elector_config.clone(), schemes[0].participants());
-            let leader_idx = Elector::<S>::elect(&temp_elector, view2_round, None);
+            let temp_elector: RoundRobin<S> =
+                elector_config.clone().build(schemes[0].participants());
+            let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[leader_idx as usize].clone();
 
             // Create a voter with the leader's identity
@@ -1811,9 +1839,15 @@ mod tests {
     #[test_traced]
     fn test_populate_resolver_on_restart() {
         populate_resolver_on_restart::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        populate_resolver_on_restart::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        populate_resolver_on_restart::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        populate_resolver_on_restart::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        populate_resolver_on_restart::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         populate_resolver_on_restart::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
@@ -1969,8 +2003,12 @@ mod tests {
     fn test_finalization_from_resolver() {
         finalization_from_resolver::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
         finalization_from_resolver::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        finalization_from_resolver::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        finalization_from_resolver::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         finalization_from_resolver::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 

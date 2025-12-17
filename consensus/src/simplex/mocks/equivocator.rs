@@ -25,8 +25,12 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
-{
+pub struct Equivocator<
+    E: Clock + Rng + Spawner,
+    S: Scheme<H::Digest>,
+    L: ElectorConfig<S>,
+    H: Hasher,
+> {
     context: ContextCell<E>,
     scheme: S,
     elector: L::Elector,

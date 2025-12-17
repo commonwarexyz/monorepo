@@ -2291,10 +2291,14 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ts_pk_state_1 =
-                slow_and_lossy_links::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            let ts_pk_state_2 =
-                slow_and_lossy_links::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            let ts_pk_state_1 = slow_and_lossy_links::<_, _, RandomConfig>(
+                seed,
+                bls12381_threshold::fixture::<MinPk, _>,
+            );
+            let ts_pk_state_2 = slow_and_lossy_links::<_, _, RandomConfig>(
+                seed,
+                bls12381_threshold::fixture::<MinPk, _>,
+            );
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
             let ts_sig_state_1 = slow_and_lossy_links::<_, _, RandomConfig>(
@@ -4199,9 +4203,15 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
-        attributable_reporter_filtering::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
-        attributable_reporter_filtering::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        attributable_reporter_filtering::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        attributable_reporter_filtering::<_, _, RandomConfig>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        attributable_reporter_filtering::<_, _, RoundRobinConfig>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
         attributable_reporter_filtering::<_, _, RoundRobinConfig>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
