@@ -17,7 +17,7 @@
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
 //!
-//! # Type-State Pattern
+//! # Usage
 //!
 //! This module uses a type-state pattern to ensure correct usage:
 //! 1. Users create an elector [`Config`] (e.g., [`RoundRobin`])
@@ -36,17 +36,11 @@ use commonware_cryptography::{
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
-/// Configuration for creating an elector.
+/// Configuration for creating an [`Elector`].
 ///
 /// Users create and configure this type, then pass it to the consensus configuration.
 /// Consensus will call [`build`](Config::build) internally with the correct
 /// participant set to create the initialized [`Elector`].
-///
-/// # Type-State Guarantee
-///
-/// This pattern ensures that users cannot create an [`Elector`] with incorrect
-/// participants - only consensus can initialize the elector with the participants
-/// from the scheme.
 ///
 /// # Determinism Requirement
 ///
