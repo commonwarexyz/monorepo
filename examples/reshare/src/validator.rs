@@ -14,7 +14,7 @@ use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -182,7 +182,7 @@ mod test {
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
     };
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{

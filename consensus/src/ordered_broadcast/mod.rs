@@ -90,7 +90,7 @@ mod tests {
     };
     use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU32, NonZeroUsize},

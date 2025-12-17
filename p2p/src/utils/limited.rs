@@ -6,7 +6,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, RateLimiter};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
@@ -203,7 +203,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic::Runner, Runner as _};
     use commonware_utils::{channels::ring, NZUsize, NZU32};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;

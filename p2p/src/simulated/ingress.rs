@@ -10,7 +10,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 

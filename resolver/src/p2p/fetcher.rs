@@ -407,7 +407,7 @@ mod tests {
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::{fmt, time::Duration};
 
     // Mock error type for testing

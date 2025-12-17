@@ -126,7 +126,7 @@
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
+//! use commonware_runtime::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -233,7 +233,7 @@ mod tests {
     };
     use commonware_utils::{ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,

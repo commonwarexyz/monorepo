@@ -2,7 +2,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::Clock;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation

@@ -63,7 +63,7 @@
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
+//! use commonware_runtime::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -197,7 +197,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},

@@ -320,7 +320,7 @@ mod tests {
     use commonware_utils::{max_faults, quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},

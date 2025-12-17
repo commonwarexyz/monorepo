@@ -63,7 +63,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)

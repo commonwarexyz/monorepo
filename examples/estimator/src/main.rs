@@ -20,7 +20,7 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},

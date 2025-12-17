@@ -9,7 +9,7 @@ use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
 };
 use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},

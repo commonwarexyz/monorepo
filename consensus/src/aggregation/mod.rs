@@ -102,7 +102,7 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::BTreeMap,

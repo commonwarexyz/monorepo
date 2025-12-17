@@ -259,6 +259,9 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     fn encode(&self) -> String;
 }
 
+/// Re-export of [governor::Quota] for rate limiting configuration.
+pub use governor::Quota;
+
 /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
 ///
 /// This is a convenience type alias for creating per-peer rate limiters

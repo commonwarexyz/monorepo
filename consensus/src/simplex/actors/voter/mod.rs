@@ -72,7 +72,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);

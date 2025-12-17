@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info};
 

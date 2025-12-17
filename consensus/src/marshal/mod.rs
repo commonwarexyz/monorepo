@@ -133,7 +133,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,

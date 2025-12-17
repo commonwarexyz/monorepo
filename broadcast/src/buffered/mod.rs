@@ -46,7 +46,7 @@ mod tests {
         Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender

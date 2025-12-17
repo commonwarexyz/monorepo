@@ -1,6 +1,6 @@
 use crate::authenticated::discovery::types::InfoVerifier;
 use commonware_cryptography::PublicKey;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::time::Duration;
 
 mod actor;

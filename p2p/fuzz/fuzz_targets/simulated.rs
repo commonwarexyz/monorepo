@@ -8,7 +8,7 @@ use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota;
+use commonware_runtime::Quota;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{

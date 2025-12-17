@@ -60,7 +60,7 @@ use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::{ordered::Set, TryCollect, NZU32};
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,

@@ -17,7 +17,7 @@ use commonware_utils::{
     ordered::{Map, Set},
     TryCollect, NZU32,
 };
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},

@@ -19,7 +19,7 @@ use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,

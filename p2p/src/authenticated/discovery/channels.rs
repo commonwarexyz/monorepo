@@ -7,7 +7,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
 use futures::{channel::mpsc, StreamExt};
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
@@ -159,7 +159,7 @@ impl<P: PublicKey> Channels<P> {
     pub fn register<C: Clock>(
         &mut self,
         channel: Channel,
-        rate: governor::Quota,
+        rate: Quota,
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {

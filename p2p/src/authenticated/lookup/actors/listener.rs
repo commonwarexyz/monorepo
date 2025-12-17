@@ -13,7 +13,8 @@ use commonware_runtime::{
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::{Quota, RateLimiter};
+use commonware_runtime::Quota;
+use governor::RateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{

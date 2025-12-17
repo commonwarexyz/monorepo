@@ -8,7 +8,7 @@ use commonware_utils::{
     ordered::{Map, Set},
     TryCollect,
 };
-use governor::Quota;
+use commonware_runtime::Quota;
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
@@ -313,7 +313,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 1,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -373,7 +373,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -446,7 +446,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();

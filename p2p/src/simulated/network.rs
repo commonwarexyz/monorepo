@@ -24,7 +24,7 @@ use futures::{
     channel::{mpsc, oneshot},
     future, SinkExt, StreamExt,
 };
-use governor::Quota;
+use commonware_runtime::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -1287,7 +1287,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
     use futures::FutureExt;
-    use governor::Quota;
+    use commonware_runtime::Quota;
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
