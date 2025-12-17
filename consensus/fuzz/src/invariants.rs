@@ -1,5 +1,7 @@
 use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
-use commonware_consensus::simplex::{elector::Elector, mocks::reporter::Reporter, scheme::Scheme};
+use commonware_consensus::simplex::{
+    elector::ElectorConfig, mocks::reporter::Reporter, scheme::Scheme,
+};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::quorum;
 use rand::{CryptoRng, Rng};
@@ -171,7 +173,7 @@ pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<
 where
     E: Rng + CryptoRng,
     S: Scheme<Sha256Digest>,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
 {
     reporters
         .iter()

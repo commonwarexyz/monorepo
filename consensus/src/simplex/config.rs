@@ -1,5 +1,5 @@
 use super::{
-    elector::Elector,
+    elector::ElectorConfig,
     types::{Activity, Context},
 };
 use crate::{
@@ -15,7 +15,7 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the consensus engine.
 pub struct Config<
     S: Scheme,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>>,
@@ -33,12 +33,15 @@ pub struct Config<
     /// the wrong validator.
     pub scheme: S,
 
-    /// Leader election strategy.
+    /// Leader election configuration.
     ///
     /// Determines how leaders are selected for each view. Built-in options include
-    /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
-    /// [`Random`](super::elector::Random) for unpredictable selection using BLS
+    /// [`RoundRobinConfig`](super::elector::RoundRobinConfig) for deterministic rotation and
+    /// [`RandomConfig`](super::elector::RandomConfig) for unpredictable selection using BLS
     /// threshold signatures.
+    ///
+    /// The configuration is used internally by consensus to build the actual elector
+    /// with the correct participant set.
     pub elector: L,
 
     /// Blocker for the network.
@@ -118,7 +121,7 @@ pub struct Config<
 
 impl<
         S: Scheme,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>>,

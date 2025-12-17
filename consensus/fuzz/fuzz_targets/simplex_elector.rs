@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        elector::{Elector, Random, RoundRobin},
+        elector::{Elector, ElectorConfig, RandomConfig, RoundRobinConfig},
         scheme::{bls12381_threshold, ed25519},
     },
     types::{Round, View},
@@ -35,10 +35,10 @@ struct FuzzInput {
     elector: FuzzElector,
 }
 
-fn fuzz<S, E>(input: &FuzzInput, mut elector: E, certificate: Option<&S::Certificate>)
+fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
 where
     S: Scheme<PublicKey = PublicKey>,
-    E: Elector<S>,
+    L: ElectorConfig<S>,
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {
@@ -55,7 +55,7 @@ where
         return;
     }
 
-    elector.initialize(&participants);
+    let elector = elector_config.build(&participants);
 
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {
@@ -70,22 +70,22 @@ where
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, _>(&input, <RoundRobin>::default(), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::default(), None);
         }
         FuzzElector::RoundRobinShuffled(seed) => {
-            fuzz::<ed25519::Scheme, _>(&input, <RoundRobin>::shuffled(seed), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::shuffled(seed), None);
         }
         FuzzElector::RandomMinPk(certificate) => {
             fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(
                 &input,
-                Random::default(),
+                RandomConfig,
                 Some(certificate),
             );
         }
         FuzzElector::RandomMinSig(certificate) => {
             fuzz::<bls12381_threshold::Scheme<_, MinSig>, _>(
                 &input,
-                Random::default(),
+                RandomConfig,
                 Some(certificate),
             );
         }

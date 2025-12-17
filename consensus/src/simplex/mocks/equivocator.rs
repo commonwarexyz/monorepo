@@ -3,7 +3,7 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
-        elector::Elector,
+        elector::{Elector, ElectorConfig},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
@@ -16,7 +16,7 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: certificate::Scheme, L: Elector<S>, H: Hasher> {
+pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
     pub namespace: Vec<u8>,
@@ -25,10 +25,11 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Elector<S>, H: Hasher> {
+pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
+{
     context: ContextCell<E>,
     scheme: S,
-    elector: L,
+    elector: L::Elector,
     namespace: Vec<u8>,
     epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
@@ -36,10 +37,13 @@ pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Electo
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Elector<S>, H: Hasher>
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
     Equivocator<E, S, L, H>
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
+        // Build elector with participants
+        let elector = cfg.elector.build(cfg.scheme.participants());
+
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
@@ -47,7 +51,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Elector<S>, H: Hasher>
             epoch: cfg.epoch,
             relay: cfg.relay,
             hasher: cfg.hasher,
-            elector: cfg.elector,
+            elector,
             sent: HashSet::new(),
         }
     }
@@ -70,9 +74,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Elector<S>, H: Hasher>
     ) {
         let (mut vote_sender, _) = vote_network;
         let (_, mut certificate_receiver) = certificate_network;
-
-        // Initialize elector with participants
-        self.elector.initialize(self.scheme.participants());
 
         loop {
             // Listen to recovered certificates

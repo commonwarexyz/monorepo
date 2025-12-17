@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Elector, Random, RoundRobin},
+            elector::{ElectorConfig, RandomConfig, RoundRobinConfig},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
@@ -403,7 +403,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -643,18 +643,18 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        all_online::<_, _, RoundRobin>(ed25519::fixture);
+        all_online::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        all_online::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        all_online::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n_active = 5;
@@ -807,18 +807,18 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        observer::<_, _, RoundRobin>(ed25519::fixture);
+        observer::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        observer::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        observer::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        observer::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        observer::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -1000,18 +1000,18 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown::<_, _, RoundRobin>(ed25519::fixture);
+        unclean_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -1258,18 +1258,18 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        backfill::<_, _, RoundRobin>(ed25519::fixture);
+        backfill::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        backfill::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        backfill::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        backfill::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        backfill::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -1520,18 +1520,18 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        one_offline::<_, _, RoundRobin>(ed25519::fixture);
+        one_offline::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        one_offline::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        one_offline::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -1706,18 +1706,18 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        slow_validator::<_, _, RoundRobin>(ed25519::fixture);
+        slow_validator::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        slow_validator::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        slow_validator::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -1917,18 +1917,18 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        all_recovery::<_, _, RoundRobin>(ed25519::fixture);
+        all_recovery::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        all_recovery::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        all_recovery::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        all_recovery::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        all_recovery::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 10;
@@ -2118,18 +2118,18 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_partition() {
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        partition::<_, _, RoundRobin>(ed25519::fixture);
+        partition::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        partition::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        partition::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        partition::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        partition::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -2278,11 +2278,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinPk, _>);
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinSig, _>);
-        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
-        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
-        slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
+        slow_and_lossy_links::<_, _, RandomConfig>(0, bls12381_threshold::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, RandomConfig>(0, bls12381_threshold::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobinConfig>(0, bls12381_multisig::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, RoundRobinConfig>(0, bls12381_multisig::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobinConfig>(0, ed25519::fixture);
     }
 
     #[test_group("slow")]
@@ -2292,43 +2292,43 @@ mod tests {
         // because it is the most complex test.
         for seed in 1..6 {
             let ts_pk_state_1 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+                slow_and_lossy_links::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
             let ts_pk_state_2 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+                slow_and_lossy_links::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
-            let ts_sig_state_1 = slow_and_lossy_links::<_, _, Random>(
+            let ts_sig_state_1 = slow_and_lossy_links::<_, _, RandomConfig>(
                 seed,
                 bls12381_threshold::fixture::<MinSig, _>,
             );
-            let ts_sig_state_2 = slow_and_lossy_links::<_, _, Random>(
+            let ts_sig_state_2 = slow_and_lossy_links::<_, _, RandomConfig>(
                 seed,
                 bls12381_threshold::fixture::<MinSig, _>,
             );
             assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
-            let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+            let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobinConfig>(
                 seed,
                 bls12381_multisig::fixture::<MinPk, _>,
             );
-            let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+            let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobinConfig>(
                 seed,
                 bls12381_multisig::fixture::<MinPk, _>,
             );
             assert_eq!(ms_pk_state_1, ms_pk_state_2);
 
-            let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+            let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobinConfig>(
                 seed,
                 bls12381_multisig::fixture::<MinSig, _>,
             );
-            let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+            let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobinConfig>(
                 seed,
                 bls12381_multisig::fixture::<MinSig, _>,
             );
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            let ed_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
-            let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
+            let ed_state_1 = slow_and_lossy_links::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
+            let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
@@ -2354,7 +2354,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -2529,11 +2529,11 @@ mod tests {
     #[test_traced]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            conflicter::<_, _, RoundRobin>(seed, ed25519::fixture);
+            conflicter::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            conflicter::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            conflicter::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -2541,7 +2541,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -2699,11 +2699,11 @@ mod tests {
     #[test_traced]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            invalid::<_, _, RoundRobin>(seed, ed25519::fixture);
+            invalid::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            invalid::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            invalid::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            invalid::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            invalid::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -2711,7 +2711,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -2870,11 +2870,11 @@ mod tests {
     #[test_traced]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
+            impersonator::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            impersonator::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            impersonator::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -2882,7 +2882,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 7;
@@ -3120,7 +3120,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_pk() {
         for seed in 0..5 {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            equivocator::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
         }
     }
 
@@ -3128,7 +3128,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_sig() {
         for seed in 0..5 {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            equivocator::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
         }
     }
 
@@ -3136,7 +3136,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_pk() {
         for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            equivocator::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
         }
     }
 
@@ -3144,7 +3144,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_sig() {
         for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            equivocator::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
         }
     }
 
@@ -3152,7 +3152,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_ed25519() {
         for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, ed25519::fixture);
+            equivocator::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -3160,7 +3160,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -3318,11 +3318,11 @@ mod tests {
     #[test_traced]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            reconfigurer::<_, _, RoundRobin>(seed, ed25519::fixture);
+            reconfigurer::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            reconfigurer::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            reconfigurer::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            reconfigurer::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            reconfigurer::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -3330,7 +3330,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -3498,11 +3498,11 @@ mod tests {
     #[test_traced]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            nuller::<_, _, RoundRobin>(seed, ed25519::fixture);
+            nuller::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            nuller::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            nuller::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            nuller::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            nuller::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -3510,7 +3510,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 4;
@@ -3661,11 +3661,11 @@ mod tests {
     #[test_traced]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-            outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            outdated::<_, _, RoundRobin>(seed, ed25519::fixture);
+            outdated::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            outdated::<_, _, RandomConfig>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            outdated::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            outdated::<_, _, RoundRobinConfig>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            outdated::<_, _, RoundRobinConfig>(seed, ed25519::fixture);
         }
     }
 
@@ -3673,7 +3673,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 10;
@@ -3813,38 +3813,38 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        run_1k::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        run_1k::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_pk() {
-        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        run_1k::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_sig() {
-        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        run_1k::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_ed25519() {
-        run_1k::<_, _, RoundRobin>(ed25519::fixture);
+        run_1k::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 1;
@@ -3992,27 +3992,27 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, false);
+        engine_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>, false);
+        engine_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>, false);
+        engine_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>, false);
+        engine_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>, false);
+        engine_shutdown::<_, _, RoundRobinConfig>(ed25519::fixture, false);
     }
 
     #[test_traced]
     fn test_graceful_shutdown() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, true);
+        engine_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>, true);
+        engine_shutdown::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>, true);
+        engine_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>, true);
+        engine_shutdown::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>, true);
+        engine_shutdown::<_, _, RoundRobinConfig>(ed25519::fixture, true);
     }
 
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let n = 3;
         let required_containers = View::new(10);
@@ -4199,20 +4199,20 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        attributable_reporter_filtering::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        attributable_reporter_filtering::<_, _, RoundRobin>(
+        attributable_reporter_filtering::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        attributable_reporter_filtering::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        attributable_reporter_filtering::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        attributable_reporter_filtering::<_, _, RoundRobinConfig>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        attributable_reporter_filtering::<_, _, RoundRobin>(ed25519::fixture);
+        attributable_reporter_filtering::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -4574,17 +4574,17 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
+        split_views_no_lockup::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
+        L: ElectorConfig<bls12381_threshold::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -4726,8 +4726,8 @@ mod tests {
 
     #[test_traced]
     fn test_tle() {
-        tle::<MinPk, Random>();
-        tle::<MinSig, Random>();
+        tle::<MinPk, RandomConfig>();
+        tle::<MinSig, RandomConfig>();
     }
 
     fn hailstorm<S, F, L>(
@@ -4739,7 +4739,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         // Create context
         let n = 5;
@@ -5050,13 +5050,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
-            hailstorm::<_, _, Random>(
+            hailstorm::<_, _, RandomConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_threshold::fixture::<MinPk, _>
             ),
-            hailstorm::<_, _, Random>(
+            hailstorm::<_, _, RandomConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5069,13 +5069,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
-            hailstorm::<_, _, Random>(
+            hailstorm::<_, _, RandomConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_threshold::fixture::<MinSig, _>
             ),
-            hailstorm::<_, _, Random>(
+            hailstorm::<_, _, RandomConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5088,13 +5088,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
-            hailstorm::<_, _, RoundRobin>(
+            hailstorm::<_, _, RoundRobinConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_multisig::fixture::<MinPk, _>
             ),
-            hailstorm::<_, _, RoundRobin>(
+            hailstorm::<_, _, RoundRobinConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5107,13 +5107,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
-            hailstorm::<_, _, RoundRobin>(
+            hailstorm::<_, _, RoundRobinConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_multisig::fixture::<MinSig, _>
             ),
-            hailstorm::<_, _, RoundRobin>(
+            hailstorm::<_, _, RoundRobinConfig>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5126,8 +5126,8 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_ed25519() {
         assert_eq!(
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture),
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture)
+            hailstorm::<_, _, RoundRobinConfig>(0, 10, ViewDelta::new(15), ed25519::fixture),
+            hailstorm::<_, _, RoundRobinConfig>(0, 10, ViewDelta::new(15), ed25519::fixture)
         );
     }
 
@@ -5136,7 +5136,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         let faults = max_faults(n);
         let required_containers = View::new(100);
@@ -5453,7 +5453,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
     {
         for strategy in [
             Strategy::View,
@@ -5482,37 +5482,37 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_pk() {
-        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        test_twins::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_sig() {
-        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        test_twins::<_, _, RoundRobinConfig>(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_pk() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        test_twins::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_sig() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        test_twins::<_, _, RandomConfig>(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
-        test_twins::<_, _, RoundRobin>(ed25519::fixture);
+        test_twins::<_, _, RoundRobinConfig>(ed25519::fixture);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_view() {
-        twins::<_, _, Random>(
+        twins::<_, _, RandomConfig>(
             0,
             10,
             Strategy::View,
@@ -5528,7 +5528,7 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_shuffle() {
-        twins::<_, _, Random>(
+        twins::<_, _, RandomConfig>(
             0,
             10,
             Strategy::Shuffle,

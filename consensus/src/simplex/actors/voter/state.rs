@@ -1,7 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
-        elector::Elector,
+        elector::{Elector, ElectorConfig},
         interesting, min_active,
         scheme::Scheme,
         types::{
@@ -28,7 +28,7 @@ use tracing::{debug, warn};
 const GENESIS_VIEW: View = View::zero();
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme, L: Elector<S>> {
+pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
     pub elector: L,
     pub namespace: Vec<u8>,
@@ -43,10 +43,11 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+{
     context: E,
     scheme: S,
-    elector: L,
+    elector: L::Elector,
     namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
@@ -63,10 +64,10 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest>
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
-    pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -74,13 +75,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Diges
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
 
-        // Initialize elector with participants
-        cfg.elector.initialize(cfg.scheme.participants());
+        // Build elector with participants
+        let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {
             context,
             scheme: cfg.scheme,
-            elector: cfg.elector,
+            elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
@@ -540,7 +541,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Diges
 mod tests {
     use super::*;
     use crate::simplex::{
-        elector::RoundRobin,
+        elector::RoundRobinConfig,
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -564,7 +565,7 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: <RoundRobinConfig>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -647,7 +648,7 @@ mod tests {
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
                 scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -733,7 +734,7 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -791,7 +792,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
@@ -848,7 +849,7 @@ mod tests {
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
                 scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -901,7 +902,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -948,7 +949,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -996,7 +997,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -1047,7 +1048,7 @@ mod tests {
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: <RoundRobinConfig>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1085,7 +1086,7 @@ mod tests {
                 context,
                 Config {
                     scheme: local_scheme,
-                    elector: <RoundRobin>::default(),
+                    elector: <RoundRobinConfig>::default(),
                     namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1112,7 +1113,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: <RoundRobinConfig>::default(),
                 namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),

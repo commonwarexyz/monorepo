@@ -6,7 +6,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{batcher, resolver},
-        elector::Elector,
+        elector::ElectorConfig,
         metrics::{self, Outbound},
         scheme::Scheme,
         types::{
@@ -52,7 +52,7 @@ enum Resolved {
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -83,7 +83,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
-        L: Elector<S>,
+        L: ElectorConfig<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
