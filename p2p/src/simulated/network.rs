@@ -6,25 +6,25 @@ use super::{
     transmitter::{self, Completion},
     Error,
 };
-use crate::{utils::limited::filter_rate_limited, Channel, Message, Recipients};
-use bytes::{Buf, Bytes};
+use crate::{
+    utils::limited::{LimitedSender, Peers},
+    Channel, CheckedSender as _, Message, Recipients,
+};
+use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork,
-    RateLimiter, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::{ordered::Set, TryCollect};
+use commonware_utils::{channels::ring, ordered::Set, NZUsize, TryCollect};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future,
-    lock::Mutex,
-    SinkExt, StreamExt,
+    future, SinkExt, StreamExt,
 };
-use governor::clock::Clock as GClock;
+use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -32,7 +32,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -121,6 +120,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     // Channel to receive messages from the oracle
     ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
+    // Sender to the oracle channel (passed to Senders for PeerSource subscriptions)
+    oracle_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
     // The receiver is polled in the main loop
@@ -152,12 +154,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
 
-    // Rate limiters for each (sender, channel) pair, shared with Senders
-    #[allow(clippy::type_complexity)]
-    rate_limiters: HashMap<(P, Channel), Arc<Mutex<RateLimiter<P, E>>>>,
-
-    // Shared list of tracked peers, used by Senders for Recipients::All
-    tracked_peers: Arc<Mutex<Vec<P>>>,
+    // Subscribers to tracked peer list updates (used by PeerSource for LimitedSender)
+    peer_subscribers: Vec<ring::Sender<Vec<P>>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -192,6 +190,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
+                oracle_sender: oracle_sender.clone(),
                 sender,
                 receiver,
                 links: HashMap::new(),
@@ -201,8 +200,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
-                rate_limiters: HashMap::new(),
-                tracked_peers: Arc::new(Mutex::new(Vec::new())),
+                peer_subscribers: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -309,13 +307,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 
                 // Notify all subscribers about the new peer set
                 let all = self.all_tracked_peers();
-                let notification = (id, peers, all.clone());
+                let notification = (id, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
 
-                // Update shared tracked peers list for Senders
-                let peer_list: Vec<P> = all.into_iter().collect();
-                *self.tracked_peers.lock().await = peer_list;
+                // Broadcast updated peer list to LimitedSender subscribers
+                self.broadcast_peer_list().await;
             }
             ingress::Message::Register {
                 channel,
@@ -324,17 +321,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 result,
             } => {
                 // If peer does not exist, then create it.
-                self.ensure_peer_exists(&public_key).await;
+                let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // Create rate limiter for this (sender, channel) pair, wrapped for sharing
+                // When not using peer sets, broadcast updated peer list to subscribers
+                if is_new && self.peer_sets.is_empty() {
+                    self.broadcast_peer_list().await;
+                }
+
+                // Get clock for the rate limiter
                 let clock = self
                     .context
                     .with_label(&format!("rate_limiter_{channel}_{public_key}"))
                     .take();
-                let rate_limiter =
-                    Arc::new(Mutex::new(RateLimiter::hashmap_with_clock(quota, clock)));
-                self.rate_limiters
-                    .insert((public_key.clone(), channel), rate_limiter.clone());
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let (sender, handle) = Sender::new(
@@ -343,8 +341,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    rate_limiter,
-                    self.tracked_peers.clone(),
+                    self.oracle_sender.clone(),
+                    clock,
+                    quota,
                 );
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
@@ -380,6 +379,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 }
                 self.subscribers.push(sender);
             }
+            ingress::Message::SubscribePeers { response } => {
+                // Create a ring channel for the subscriber
+                let (mut sender, receiver) = ring::channel(NZUsize!(1));
+
+                // Send current peer list immediately
+                let peer_list: Vec<P> = self.all_tracked_peers().into_iter().collect();
+                let _ = sender.send(peer_list).await;
+
+                // Store sender for future broadcasts
+                self.peer_subscribers.push(sender);
+
+                // Return the receiver to the subscriber
+                let _ = response.send(receiver);
+            }
             ingress::Message::LimitBandwidth {
                 public_key,
                 egress_cap,
@@ -387,7 +400,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 result,
             } => {
                 // If peer does not exist, then create it.
-                self.ensure_peer_exists(&public_key).await;
+                let (_, is_new) = self.ensure_peer_exists(&public_key).await;
+
+                // When not using peer sets, broadcast updated peer list to subscribers
+                if is_new && self.peer_sets.is_empty() {
+                    self.broadcast_peer_list().await;
+                }
 
                 // Update bandwidth limits
                 let now = self.context.current();
@@ -407,8 +425,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 result,
             } => {
                 // If sender or receiver does not exist, then create it.
-                self.ensure_peer_exists(&sender).await;
-                let receiver_socket = self.ensure_peer_exists(&receiver).await;
+                let (_, sender_is_new) = self.ensure_peer_exists(&sender).await;
+                let (receiver_socket, receiver_is_new) = self.ensure_peer_exists(&receiver).await;
+
+                // When not using peer sets, broadcast updated peer list to subscribers
+                if (sender_is_new || receiver_is_new) && self.peer_sets.is_empty() {
+                    self.broadcast_peer_list().await;
+                }
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -451,8 +474,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 
     /// Ensure a peer exists, creating it if necessary.
     ///
-    /// Returns the socket address of the peer.
-    async fn ensure_peer_exists(&mut self, public_key: &P) -> SocketAddr {
+    /// Returns the socket address of the peer and a boolean indicating if a new peer was created.
+    async fn ensure_peer_exists(&mut self, public_key: &P) -> (SocketAddr, bool) {
         if !self.peers.contains_key(public_key) {
             // Create peer
             let socket = self.get_next_socket();
@@ -467,19 +490,49 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
             // Once ready, add to peers
             self.peers.insert(public_key.clone(), peer);
 
-            socket
+            (socket, true)
         } else {
-            self.peers.get(public_key).unwrap().socket
+            (self.peers.get(public_key).unwrap().socket, false)
         }
     }
 
+    /// Broadcast updated peer list to all peer subscribers.
+    ///
+    /// This is called when the peer list changes (either from peer set updates
+    /// or from new peers being added when not using peer sets).
+    ///
+    /// Subscribers whose receivers have been dropped are removed to prevent
+    /// memory leaks.
+    async fn broadcast_peer_list(&mut self) {
+        let peer_list = self.all_tracked_peers().into_iter().collect::<Vec<_>>();
+        let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
+        for mut subscriber in self.peer_subscribers.drain(..) {
+            if subscriber.send(peer_list.clone()).await.is_ok() {
+                live_subscribers.push(subscriber);
+            }
+        }
+        self.peer_subscribers = live_subscribers;
+    }
+
     /// Get all tracked peers as an ordered set.
+    ///
+    /// When peer sets are registered, returns only the peers from those sets.
+    /// Otherwise, returns all registered peers (for compatibility with tests
+    /// that don't use peer sets).
     fn all_tracked_peers(&self) -> Set<P> {
-        self.peer_refs
-            .keys()
-            .cloned()
-            .try_collect()
-            .expect("BTreeMap keys are unique")
+        if self.peer_sets.is_empty() {
+            self.peers
+                .keys()
+                .cloned()
+                .try_collect()
+                .expect("BTreeMap keys are unique")
+        } else {
+            self.peer_refs
+                .keys()
+                .cloned()
+                .try_collect()
+                .expect("BTreeMap keys are unique")
+        }
     }
 }
 
@@ -586,22 +639,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
                 continue;
             };
 
-            // Check rate limit for this (sender, channel) pair
-            // Note: We use try_lock here since we're in a synchronous context.
-            // If the lock is held (rare), we skip the check and let the message through.
-            if let Some(limiter) = self.rate_limiters.get(&(origin.clone(), channel)) {
-                if let Some(guard) = limiter.try_lock() {
-                    if guard.check_key(&recipient).is_err() {
-                        trace!(
-                            ?origin,
-                            ?recipient,
-                            reason = "rate limited",
-                            "dropping message"
-                        );
-                        continue;
-                    }
-                }
-            }
+            // Note: Rate limiting is handled by the Sender before messages reach here.
+            // The Sender filters recipients via LimitedSender::check() or in Sender::send().
 
             // Record sent message as soon as we determine there is a link with recipient (approximates
             // having an open connection)
@@ -677,37 +716,61 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
     }
 }
 
-/// Implementation of a [crate::Sender] for the simulated network.
+/// Provides peer subscriptions for the simulated network.
 ///
-/// Also implements [crate::LimitedSender] to support rate-limit checking
-/// before sending messages.
-pub struct Sender<P: PublicKey, E: GClock> {
+/// Implements [`crate::utils::limited::Peers`] to provide peer list updates
+/// to [`crate::utils::limited::LimitedSender`].
+pub struct PeerSource<P: PublicKey, E: GClock + Send + 'static> {
+    sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for PeerSource<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> PeerSource<P, E> {
+    const fn new(sender: mpsc::UnboundedSender<ingress::Message<P, E>>) -> Self {
+        Self { sender }
+    }
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> Peers for PeerSource<P, E> {
+    type PublicKey = P;
+
+    async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let _ = self
+            .sender
+            .unbounded_send(ingress::Message::SubscribePeers {
+                response: response_tx,
+            });
+        // If the network is closed, return an empty receiver
+        response_rx.await.unwrap_or_else(|_| {
+            let (_sender, receiver) = ring::channel(NZUsize!(1));
+            receiver
+        })
+    }
+}
+
+/// Implementation of a [crate::Sender] for the simulated network without rate limiting.
+///
+/// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
+#[derive(Clone)]
+pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
-    rate_limiter: Arc<Mutex<RateLimiter<P, E>>>,
-    tracked_peers: Arc<Mutex<Vec<P>>>,
 }
 
-impl<P: PublicKey, E: GClock> Clone for Sender<P, E> {
-    fn clone(&self) -> Self {
-        Self {
-            me: self.me.clone(),
-            channel: self.channel,
-            max_size: self.max_size,
-            high: self.high.clone(),
-            low: self.low.clone(),
-            rate_limiter: self.rate_limiter.clone(),
-            tracked_peers: self.tracked_peers.clone(),
-        }
-    }
-}
-
-impl<P: PublicKey, E: GClock> Debug for Sender<P, E> {
+impl<P: PublicKey> Debug for UnlimitedSender<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sender")
+        f.debug_struct("UnlimitedSender")
             .field("me", &self.me)
             .field("channel", &self.channel)
             .field("max_size", &self.max_size)
@@ -715,15 +778,64 @@ impl<P: PublicKey, E: GClock> Debug for Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock> Sender<P, E> {
+impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
+    type Error = Error;
+    type PublicKey = P;
+
+    async fn send(
+        &mut self,
+        recipients: Recipients<P>,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<Vec<P>, Error> {
+        // Check message size
+        if message.len() > self.max_size {
+            return Err(Error::MessageTooLarge(message.len()));
+        }
+
+        // Send message
+        let (sender, receiver) = oneshot::channel();
+        let channel = if priority { &self.high } else { &self.low };
+        channel
+            .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
+            .map_err(|_| Error::NetworkClosed)?;
+        receiver.await.map_err(|_| Error::NetworkClosed)
+    }
+}
+
+/// Implementation of a [crate::Sender] for the simulated network.
+///
+/// Also implements [crate::LimitedSender] to support rate-limit checking
+/// before sending messages.
+pub struct Sender<P: PublicKey, E: GClock + Send + 'static> {
+    limited_sender: LimitedSender<E, UnlimitedSender<P>, PeerSource<P, E>>,
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for Sender<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            limited_sender: self.limited_sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> Debug for Sender<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static> Sender<P, E> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task<P>>,
-        rate_limiter: Arc<Mutex<RateLimiter<P, E>>>,
-        tracked_peers: Arc<Mutex<Vec<P>>>,
+        oracle_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+        clock: E,
+        quota: Quota,
     ) -> (Self, Handle<()>) {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
@@ -754,19 +866,22 @@ impl<P: PublicKey, E: GClock> Sender<P, E> {
             }
         });
 
-        // Return sender
-        (
-            Self {
-                me,
-                channel,
-                max_size,
-                high,
-                low,
-                rate_limiter,
-                tracked_peers,
-            },
-            processor,
-        )
+        // Create the unlimited sender
+        let unlimited_sender = UnlimitedSender {
+            me,
+            channel,
+            max_size,
+            high,
+            low,
+        };
+
+        // Create the peer source for resolving Recipients::All
+        let peer_source = PeerSource::new(oracle_sender);
+
+        // Wrap in LimitedSender from utils
+        let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
+
+        (Self { limited_sender }, processor)
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
@@ -799,72 +914,11 @@ impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::Sender for Sender<
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
-        // Check message size
-        if message.len() > self.max_size {
-            return Err(Error::MessageTooLarge(message.len()));
+        // Check rate limits first, then send
+        match self.limited_sender.check(recipients).await {
+            Ok(checked_sender) => checked_sender.send(message, priority).await,
+            Err(_) => Ok(Vec::new()), // All recipients rate-limited
         }
-
-        // Send message
-        let (sender, receiver) = oneshot::channel();
-        let channel = if priority { &self.high } else { &self.low };
-        channel
-            .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
-    }
-}
-
-/// A [`CheckedSender`] for the simulated network.
-///
-/// Holds pre-checked recipients that passed rate limit validation.
-pub struct CheckedSender<'a, P: PublicKey, E: GClock> {
-    sender: &'a mut Sender<P, E>,
-    recipients: Recipients<P>,
-}
-
-impl<'a, P: PublicKey, E: GClock> Debug for CheckedSender<'a, P, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CheckedSender")
-            .field("recipients", &self.recipients)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<'a, P: PublicKey, E: GClock + Clone + Send + 'static> crate::CheckedSender
-    for CheckedSender<'a, P, E>
-{
-    type PublicKey = P;
-    type Error = Error;
-
-    async fn send(
-        self,
-        mut message: impl Buf,
-        priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        let message = message.copy_to_bytes(message.remaining());
-
-        // Check message size
-        if message.len() > self.sender.max_size {
-            return Err(Error::MessageTooLarge(message.len()));
-        }
-
-        // Send message
-        let (sender, receiver) = oneshot::channel();
-        let channel = if priority {
-            &self.sender.high
-        } else {
-            &self.sender.low
-        };
-        channel
-            .unbounded_send((
-                self.sender.channel,
-                self.sender.me.clone(),
-                self.recipients,
-                message,
-                sender,
-            ))
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
@@ -872,7 +926,7 @@ impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::LimitedSender for 
     type PublicKey = P;
     type Clock = E;
     type Checked<'a>
-        = CheckedSender<'a, P, E>
+        = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
     where
         Self: 'a;
 
@@ -880,58 +934,32 @@ impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::LimitedSender for 
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, E::Instant> {
-        // Compute filtered recipients while holding the rate limiter lock
-        let recipients = {
-            let rate_limit = self.rate_limiter.lock().await;
-
-            match recipients {
-                Recipients::One(ref peer) => match rate_limit.check_key(peer) {
-                    Ok(()) => recipients,
-                    Err(not_until) => return Err(not_until.earliest_possible()),
-                },
-                Recipients::Some(ref peers) => {
-                    let (allowed, max_retry) = filter_rate_limited(peers.iter(), &rate_limit);
-                    if allowed.is_empty() {
-                        match max_retry {
-                            Some(retry) => return Err(retry),
-                            None => recipients,
-                        }
-                    } else {
-                        Recipients::Some(allowed)
-                    }
-                }
-                Recipients::All => {
-                    // Get current tracked peers from the shared state
-                    let known_peers = self.tracked_peers.lock().await.clone();
-                    let (allowed, max_retry) = filter_rate_limited(known_peers.iter(), &rate_limit);
-                    if allowed.is_empty() {
-                        match max_retry {
-                            Some(retry) => return Err(retry),
-                            None => Recipients::Some(Vec::new()),
-                        }
-                    } else {
-                        Recipients::Some(allowed)
-                    }
-                }
-            }
-        };
-
-        Ok(CheckedSender {
-            recipients,
-            sender: self,
-        })
+        self.limited_sender.check(recipients).await
     }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
-#[derive(Clone)]
-pub struct SplitSender<P: PublicKey, E: GClock, F: SplitForwarder<P>> {
+pub struct SplitSender<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P, E>,
     forwarder: F,
 }
 
-impl<P: PublicKey, E: GClock, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, E, F> {
+impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> Clone
+    for SplitSender<P, E, F>
+{
+    fn clone(&self) -> Self {
+        Self {
+            replica: self.replica,
+            inner: self.inner.clone(),
+            forwarder: self.forwarder.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> std::fmt::Debug
+    for SplitSender<P, E, F>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SplitSender")
             .field("replica", &self.replica)

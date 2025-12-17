@@ -180,8 +180,8 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    CheckedSender, Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter,
-    SplitSender, SplitTarget,
+    Config, Network, PeerSource, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter,
+    SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
