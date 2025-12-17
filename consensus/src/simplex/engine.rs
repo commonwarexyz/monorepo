@@ -17,16 +17,16 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
-    L: Elector<S>,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, B, D, A, R, F, L>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F>,
@@ -39,16 +39,16 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-        L: Elector<S>,
-    > Engine<E, S, B, D, A, R, F, L>
+    > Engine<E, S, L, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F, L>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 

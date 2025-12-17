@@ -52,12 +52,12 @@ enum Resolved {
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
-    L: Elector<S>,
 > {
     context: ContextCell<E>,
     state: State<E, S, L, D>,
@@ -83,15 +83,15 @@ pub struct Actor<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-        L: Elector<S>,
-    > Actor<E, S, B, D, A, R, F, L>
+    > Actor<E, S, L, B, D, A, R, F>
 {
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F, L>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");

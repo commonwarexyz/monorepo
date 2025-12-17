@@ -15,12 +15,12 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the consensus engine.
 pub struct Config<
     S: Scheme,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
-    L: Elector<S>,
 > {
     /// Signing scheme for the consensus engine.
     ///
@@ -118,13 +118,13 @@ pub struct Config<
 
 impl<
         S: Scheme,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-        L: Elector<S>,
-    > Config<S, B, D, A, R, F, L>
+    > Config<S, L, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

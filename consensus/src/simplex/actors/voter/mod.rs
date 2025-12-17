@@ -20,12 +20,12 @@ use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     S: Scheme,
+    L: Elector<S>,
     B: Blocker,
     D: Digest,
     A: Automaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
-    L: Elector<S>,
 > {
     pub scheme: S,
     pub elector: L,
@@ -53,9 +53,9 @@ mod tests {
     use crate::{
         simplex::{
             actors::{batcher, resolver},
+            elector::{Elector, Random, RoundRobin},
             mocks,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
-            select_leader,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Round, View},
@@ -125,10 +125,11 @@ mod tests {
     /// 1. Send a finalization for view 100.
     /// 2. Send a notarization from resolver for view 50 (should be ignored).
     /// 3. Send a finalization for view 300 (should be processed).
-    fn stale_backfill<S, F>(mut fixture: F)
+    fn stale_backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -155,10 +156,12 @@ mod tests {
 
             // Initialize voter actor
             let me = participants[0].clone();
+            let elector = L::new(schemes[0].participants());
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -177,6 +180,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -340,11 +344,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls12381_threshold::fixture::<MinPk, _>);
-        stale_backfill(bls12381_threshold::fixture::<MinSig, _>);
-        stale_backfill(bls12381_multisig::fixture::<MinPk, _>);
-        stale_backfill(bls12381_multisig::fixture::<MinSig, _>);
-        stale_backfill(ed25519::fixture);
+        stale_backfill::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
+        stale_backfill::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
+        stale_backfill::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
+        stale_backfill::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -356,10 +360,11 @@ mod tests {
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
-    fn append_old_interesting_view<S, F>(mut fixture: F)
+    fn append_old_interesting_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -388,10 +393,12 @@ mod tests {
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
             let me = participants[0].clone();
+            let elector = L::new(signing.participants());
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -408,6 +415,7 @@ mod tests {
             actor.start();
             let voter_config = Config {
                 scheme: signing.clone(),
+                elector,
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -623,18 +631,19 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls12381_threshold::fixture::<MinPk, _>);
-        append_old_interesting_view(bls12381_threshold::fixture::<MinSig, _>);
-        append_old_interesting_view(bls12381_multisig::fixture::<MinPk, _>);
-        append_old_interesting_view(bls12381_multisig::fixture::<MinSig, _>);
-        append_old_interesting_view(ed25519::fixture);
+        append_old_interesting_view::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
-    fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
+    fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -660,10 +669,12 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -682,6 +693,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -794,17 +806,26 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_threshold::fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519::fixture);
+        finalization_without_notarization_certificate::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        finalization_without_notarization_certificate::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        finalization_without_notarization_certificate::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
-    fn certificate_conflicts_proposal<S, F>(mut fixture: F)
+    fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -830,10 +851,12 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -852,6 +875,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -985,17 +1009,26 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_threshold::fixture::<MinSig, _>);
-        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_conflicts_proposal(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_conflicts_proposal(ed25519::fixture);
+        certificate_conflicts_proposal::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certificate_conflicts_proposal::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
-    fn proposal_conflicts_certificate<S, F>(mut fixture: F)
+    fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1018,10 +1051,12 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
 
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1039,6 +1074,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1159,17 +1195,26 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_threshold::fixture::<MinSig, _>);
-        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinPk, _>);
-        proposal_conflicts_certificate(bls12381_multisig::fixture::<MinSig, _>);
-        proposal_conflicts_certificate(ed25519::fixture);
+        proposal_conflicts_certificate::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        proposal_conflicts_certificate::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
-    fn certificate_verifies_proposal<S, F>(mut fixture: F)
+    fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1192,10 +1237,12 @@ mod tests {
                 ..
             } = fixture(&mut context, n);
 
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1213,11 +1260,12 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_certificate_conflicts_proposal_test".to_string(),
+                partition: "voter_certificate_verifies_proposal_test".to_string(),
                 epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -1325,11 +1373,19 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_threshold::fixture::<MinSig, _>);
-        certificate_verifies_proposal(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_verifies_proposal(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_verifies_proposal(ed25519::fixture);
+        certificate_verifies_proposal::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certificate_verifies_proposal::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1341,7 +1397,7 @@ mod tests {
     /// 3. Our proposal should be dropped when the conflict is detected
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey, Seed = ()>,
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -1371,7 +1427,9 @@ mod tests {
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
-            let (leader, leader_idx) = select_leader::<S>(&participants, view2_round, None);
+            let elector = RoundRobin::new(schemes[0].participants());
+            let leader_idx = elector.elect(view2_round, None);
+            let leader = participants[leader_idx as usize].clone();
 
             // Create a voter with the leader's identity
             let leader_scheme = schemes[leader_idx as usize].clone();
@@ -1394,6 +1452,7 @@ mod tests {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: leader_scheme.clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1401,6 +1460,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
+                elector,
                 blocker: oracle.control(leader.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1542,17 +1602,20 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_drop_our_proposal_on_conflict() {
+        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519::fixture);
     }
 
-    fn populate_resolver_on_restart<S, F>(mut fixture: F)
+    fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1578,10 +1641,12 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1600,6 +1665,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1691,6 +1757,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1765,17 +1832,22 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart(bls12381_threshold::fixture::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_threshold::fixture::<MinSig, _>);
-        populate_resolver_on_restart(bls12381_multisig::fixture::<MinPk, _>);
-        populate_resolver_on_restart(bls12381_multisig::fixture::<MinSig, _>);
-        populate_resolver_on_restart(ed25519::fixture);
+        populate_resolver_on_restart::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        populate_resolver_on_restart::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        populate_resolver_on_restart::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
-    fn finalization_from_resolver<S, F>(mut fixture: F)
+    fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
@@ -1803,10 +1875,12 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1825,6 +1899,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1918,11 +1993,11 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver(bls12381_threshold::fixture::<MinPk, _>);
-        finalization_from_resolver(bls12381_threshold::fixture::<MinSig, _>);
-        finalization_from_resolver(bls12381_multisig::fixture::<MinPk, _>);
-        finalization_from_resolver(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_from_resolver(ed25519::fixture);
+        finalization_from_resolver::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -1931,10 +2006,11 @@ mod tests {
     /// 1. Resolver sends a certificate to the voter
     /// 2. Voter processes it and constructs the same certificate
     /// 3. Voter sends it back to resolver (unnecessary)
-    fn no_resolver_boomerang<S, F>(mut fixture: F)
+    fn no_resolver_boomerang<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1960,10 +2036,12 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Setup application mock
+            let elector = L::new(schemes[0].participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1982,6 +2060,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
+                elector,
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2090,19 +2169,20 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang(bls12381_threshold::fixture::<MinPk, _>);
-        no_resolver_boomerang(bls12381_threshold::fixture::<MinSig, _>);
-        no_resolver_boomerang(bls12381_multisig::fixture::<MinPk, _>);
-        no_resolver_boomerang(bls12381_multisig::fixture::<MinSig, _>);
-        no_resolver_boomerang(ed25519::fixture);
+        no_resolver_boomerang::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, Random<_, _>>(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, RoundRobin<_>>(bls12381_multisig::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
     /// immediately rather than waiting for the timeout.
-    fn verification_failure_emits_nullify_immediately<S, F>(mut fixture: F)
+    fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2131,10 +2211,12 @@ mod tests {
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
             let me = participants[0].clone();
+            let elector = L::new(signing.participants());
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -2156,6 +2238,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
+                elector,
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2298,10 +2381,18 @@ mod tests {
 
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
-        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinPk, _>);
-        verification_failure_emits_nullify_immediately(bls12381_threshold::fixture::<MinSig, _>);
-        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
-        verification_failure_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
-        verification_failure_emits_nullify_immediately(ed25519::fixture);
+        verification_failure_emits_nullify_immediately::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        verification_failure_emits_nullify_immediately::<_, _, Random<_, _>>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin<_>>(ed25519::fixture);
     }
 }
