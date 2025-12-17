@@ -4,11 +4,10 @@ use super::{Config, PeerLabel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
-    Clock, Metrics, RateLimiter,
+    Clock, KeyedRateLimiter, Metrics,
 };
 use commonware_utils::PrioritySet;
 use either::Either;
-use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -40,7 +39,7 @@ pub enum Error {
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
+pub struct Requester<E: Clock + Rng + Metrics, P: PublicKey> {
     context: E,
     me: Option<P>,
     metrics: super::Metrics,
@@ -51,7 +50,7 @@ pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     excluded: HashSet<P>,
 
     // Rate limiter for participants
-    rate_limiter: RateLimiter<P, E>,
+    rate_limiter: KeyedRateLimiter<P, E>,
     // Participants and their performance (lower is better)
     participants: PrioritySet<P, u128>,
 
@@ -80,10 +79,10 @@ pub struct Request<P: PublicKey> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
+impl<E: Clock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, context.clone());
+        let rate_limiter = KeyedRateLimiter::hashmap_with_clock(config.rate_limit, context.clone());
 
         // TODO(#1833): Metrics should use embedded context
         let metrics = super::Metrics::init(context.clone());
@@ -312,9 +311,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::NZU32;
-    use governor::Quota;
     use std::time::Duration;
 
     #[test]

@@ -60,10 +60,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -85,12 +84,18 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey>,
+        Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         )>,
     ) {
         let (network, oracle) = Network::new(
@@ -121,7 +126,7 @@ mod tests {
     }
 
     async fn add_link(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         link: Link,
         peers: &[PublicKey],
         from: usize,
@@ -143,8 +148,14 @@ mod tests {
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,

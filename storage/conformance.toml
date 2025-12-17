@@ -38,6 +38,14 @@ hash = "8c43d6d3a0ffb749db46d02a461cdc131c14b331aed670ee36e76bd716cdbaec"
 n_cases = 65536
 hash = "b4f2eb51a158d964317fb1714dbe708ffbe6673453dc648eabdd72409fb30440"
 
+["commonware_storage::journal::conformance::FixedJournal"]
+n_cases = 512
+hash = "9cd764e31b5dbc0bd78cd0908851ba1d645f083884beacd2c8a63f66de0fb9db"
+
+["commonware_storage::journal::conformance::VariableJournal"]
+n_cases = 512
+hash = "dd8b09a6db193093b30f00bfcece47afd7a4c6f08002331872e45749c4c40a3e"
+
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
 hash = "e3e6735a810f1002164333013fbff442c91a690483e75fe7a78618a96d5afd62"

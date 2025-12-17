@@ -8,11 +8,11 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{net::SocketAddr, num::NonZeroU32};
@@ -33,10 +33,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
-    C: Signer,
-> {
+pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -49,9 +46,7 @@ pub struct Actor<
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
-{
+impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_concurrent_rate_limited = Counter::default();
@@ -141,11 +136,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create the rate limiters
-        let ip_rate_limiter = RateLimiter::hashmap_with_clock(
+        let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_ip,
             self.context.clone(),
         );
-        let subnet_rate_limiter = RateLimiter::hashmap_with_clock(
+        let subnet_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
             self.allowed_handshake_rate_per_subnet,
             self.context.clone(),
         );

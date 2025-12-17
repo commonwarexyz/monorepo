@@ -17,7 +17,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
 
@@ -25,7 +24,7 @@ use tracing::debug;
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- Configuration ----------
@@ -55,7 +54,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -294,10 +293,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, Quota, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
     use futures::future::Either;
-    use governor::Quota;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -12,11 +12,7 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{
-            unordered::{self, IndexedLog},
-            value::VariableEncoding,
-            VariableConfig, VariableValue,
-        },
+        any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
         Error,
     },
@@ -33,13 +29,13 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -125,8 +121,8 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -289,10 +285,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(756)
-            );
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm state is preserved after close and reopen.
@@ -305,10 +298,7 @@ pub(super) mod test {
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(756)
-            );
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -342,7 +332,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
 
             async fn apply_more_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
@@ -404,7 +394,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
 
             async fn apply_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());

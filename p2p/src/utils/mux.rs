@@ -460,8 +460,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
-    use governor::Quota;
+    use commonware_runtime::{deterministic, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;
@@ -477,7 +476,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<Pk> {
+    fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -496,7 +495,7 @@ mod tests {
     }
 
     /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk>, a: Pk, b: Pk) {
+    async fn link_bidirectional(oracle: &mut Oracle<Pk, deterministic::Context>, a: Pk, b: Pk) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
@@ -504,7 +503,7 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk>,
+        oracle: &mut Oracle<Pk, deterministic::Context>,
         seed: u64,
     ) -> (
         Pk,
@@ -524,13 +523,13 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer_with_backup_and_global_sender(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk>,
+        oracle: &mut Oracle<Pk, deterministic::Context>,
         seed: u64,
     ) -> (
         Pk,
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
         mpsc::Receiver<BackupResponse<Pk>>,
-        GlobalSender<simulated::Sender<Pk>>,
+        GlobalSender<simulated::Sender<Pk, deterministic::Context>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
