@@ -47,12 +47,17 @@ use std::marker::PhantomData;
 /// For all subsequent views, a certificate from the previous view is provided. Implementations
 /// can use the certificate to derive randomness (like [`Random`]) or ignore it entirely
 /// (like [`RoundRobin`]).
-pub trait Elector<S: Scheme>: Send + 'static {
+pub trait Elector<S: Scheme>: Clone + Send + 'static {
+    /// Creates a new elector for the given set of participants.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if `participants` is empty.
+    fn new(participants: &Set<S::PublicKey>) -> Self;
+
     /// Selects the leader for the given round.
     ///
-    /// The `certificate` is `None` only for view 1; implementations should handle this case
-    /// (typically by falling back to a deterministic selection like round-robin).
-    ///
+    /// The `certificate` is expected to be `None` only for view 1.
     /// This method **must** be a pure function given the elector's construction state.
     ///
     /// Returns the index of the selected leader in the participants list.
@@ -62,7 +67,7 @@ pub trait Elector<S: Scheme>: Send + 'static {
 /// Simple round-robin leader election.
 ///
 /// Rotates through participants based on `(epoch + view) % num_participants`.
-/// The rotation order can be shuffled using a seed.
+/// The rotation order can be shuffled at construction using a seed.
 ///
 /// Works with any signing scheme.
 #[derive(Clone, Debug)]
@@ -72,24 +77,12 @@ pub struct RoundRobin<S: Scheme> {
 }
 
 impl<S: Scheme> RoundRobin<S> {
-    /// Creates a new round-robin elector without shuffling.
-    ///
-    /// Leaders rotate in index order: 0, 1, 2, ..., n-1, 0, 1, ...
-    pub fn new(participants: &Set<S::PublicKey>) -> Self {
-        assert!(!participants.is_empty());
-
-        Self {
-            permutation: (0..participants.len() as u32).collect(),
-            _phantom: PhantomData,
-        }
-    }
-
     /// Creates a new round-robin elector with shuffled order based on seed.
     ///
     /// The seed determines the permutation of leader indices, so different seeds
     /// produce different rotation orders.
-    pub fn with_seed(participants: &Set<S::PublicKey>, seed: u64) -> Self {
-        assert!(!participants.is_empty());
+    pub fn shuffled(participants: &Set<S::PublicKey>, seed: u64) -> Self {
+        assert!(!participants.is_empty(), "no participants");
 
         let mut permutation = (0..participants.len() as u32).collect::<Vec<_>>();
         permutation.sort_by_key(|&index| {
@@ -107,6 +100,15 @@ impl<S: Scheme> RoundRobin<S> {
 }
 
 impl<S: Scheme> Elector<S> for RoundRobin<S> {
+    fn new(participants: &Set<S::PublicKey>) -> Self {
+        assert!(!participants.is_empty(), "no participants");
+
+        Self {
+            permutation: (0..participants.len() as u32).collect(),
+            _phantom: PhantomData,
+        }
+    }
+
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> u32 {
         let n = self.permutation.len();
         let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
@@ -127,23 +129,20 @@ pub struct Random<P: PublicKey, V: Variant> {
     _phantom: PhantomData<(P, V)>,
 }
 
-impl<P: PublicKey, V: Variant> Random<P, V> {
-    /// Creates a new random elector for the given participants.
-    pub fn new(participants: &Set<P>) -> Self {
-        assert!(!participants.is_empty());
+impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random<P, V>
+where
+    P: PublicKey,
+    V: Variant + Send + Sync + 'static,
+{
+    fn new(participants: &Set<P>) -> Self {
+        assert!(!participants.is_empty(), "no participants");
 
         Self {
             n: participants.len(),
             _phantom: PhantomData,
         }
     }
-}
 
-impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random<P, V>
-where
-    P: PublicKey,
-    V: Variant + Send + Sync + 'static,
-{
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
         assert!(certificate.is_some() || round.view() == View::new(1));
 
@@ -225,14 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn round_robin_with_seed_shuffles_order() {
+    fn round_robin_shuffled_changes_order() {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector_no_seed = RoundRobin::<ed25519::Scheme>::new(&participants);
-        let elector_seed_1 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 1);
-        let elector_seed_2 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 2);
+        let elector_seed_1 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 1);
+        let elector_seed_2 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 2);
 
         // Collect first 5 leaders from each
         let epoch = Epoch::new(0);
@@ -268,8 +267,8 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
-        let elector1 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 12345);
-        let elector2 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 12345);
+        let elector1 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 12345);
+        let elector2 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 12345);
 
         let epoch = Epoch::new(0);
         for view in 1..=10 {
@@ -287,9 +286,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "no participants")]
-    fn round_robin_with_seed_panics_on_empty_participants() {
+    fn round_robin_shuffled_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        RoundRobin::<ed25519::Scheme>::with_seed(&participants, 42);
+        RoundRobin::<ed25519::Scheme>::shuffled(&participants, 42);
     }
 
     #[test]
