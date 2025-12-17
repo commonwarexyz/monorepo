@@ -145,7 +145,7 @@ where
             return Ok(Some(span));
         }
 
-        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
             // DB is empty.
             return Ok(None);
         };
@@ -202,13 +202,10 @@ where
         start: K,
     ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
     where
-        V::Value: 'a,
+        V: 'a,
     {
         let start_iter = self.snapshot.get(&start);
-        let mut init_pending = self
-            .fetch_all_updates(start_iter, None)
-            .await?
-            .expect("wrap-around shouldn't happen");
+        let mut init_pending = self.fetch_all_updates(start_iter).await?;
         init_pending.retain(|x| x.key >= start);
 
         Ok(stream::unfold(
@@ -219,50 +216,40 @@ where
                     return Some((Ok((item.key, item.value)), (driver_key, pending)));
                 }
 
-                let Some(iter) = self.snapshot.next_translated_key(&driver_key) else {
+                let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key) else {
                     return None; // DB is empty
                 };
+                if wrapped {
+                    return None; // End of DB
+                }
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
                 // fetch a much larger batch of "pending" keys.
-                match self.fetch_all_updates(iter, Some(&driver_key)).await {
-                    Ok(None) => None, // reached the end
-                    Ok(Some(mut items)) => {
-                        let item = items
-                            .pop()
-                            .unwrap_or_else(|| unreachable!("items should not be empty"));
+                match self.fetch_all_updates(iter).await {
+                    Ok(mut pending) => {
+                        let item = pending.pop().expect("pending is not empty");
                         let key = item.key.clone();
-                        Some((Ok((item.key, item.value)), (key, items)))
+                        Some((Ok((item.key, item.value)), (key, pending)))
                     }
-                    Err(e) => Some((Err(e), (driver_key, Vec::new()))),
+                    Err(e) => Some((Err(e), (driver_key, pending))),
                 }
             },
         ))
     }
 
     /// Fetches all update operations corresponding to the input locations, returning the result in
-    /// reverse order of the keys. Returns None if the results have cycled around from the
-    /// last_seen_key.
+    /// reverse order of the keys.
     async fn fetch_all_updates(
         &self,
         locs: impl IntoIterator<Item = &Location>,
-        last_seen_key: Option<&K>,
-    ) -> Result<Option<Vec<Update<K, V>>>, Error> {
+    ) -> Result<Vec<Update<K, V>>, Error> {
         let futures = locs
             .into_iter()
             .map(|loc| Self::get_update_op(&self.log, *loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
-        if let Some(last) = last_seen_key {
-            if let Some(smallest) = updates.last() {
-                if smallest.key <= *last {
-                    return Ok(None); // Wrapped around
-                }
-            }
-        }
-
-        Ok(Some(updates))
+        Ok(updates)
     }
 }
 
@@ -291,7 +278,7 @@ where
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
-        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
             unreachable!("database should not be empty");
         };
 
@@ -553,7 +540,7 @@ where
 
         // Find & update the affected span.
         if prev_key.is_none() {
-            let Some(iter) = self.snapshot.prev_translated_key(&key) else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
             let last_key = self.last_key_in_iter(iter).await?;
@@ -690,8 +677,7 @@ where
         // previous _translated_ key for any created or deleted key.
         let mut locations = Vec::new();
         for key in deleted.iter().chain(created.keys()) {
-            let iter = self.snapshot.prev_translated_key(key);
-            let Some(iter) = iter else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
                 continue;
             };
             locations.extend(iter.copied());
@@ -1488,15 +1474,15 @@ mod test {
 
             // Start key collides & precedes the only key in the db.
             {
-                let start = FixedBytes::from([0x00u8, 0x00, 0x00, 0x01]);
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x01]);
                 let mut stream = db.stream_range(start).await.unwrap().boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert!(stream.next().await.is_none());
             }
 
-            // Start key collides & follows the only key in the dsb.
+            // Start key collides & follows the only key in the db.
             {
-                let start = FixedBytes::from([0x20u8, 0x00, 0x00, 0xFF]);
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
                 let mut stream = db.stream_range(start).await.unwrap().boxed_local();
                 assert!(stream.next().await.is_none());
             }

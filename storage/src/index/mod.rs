@@ -170,17 +170,19 @@ pub trait Ordered: Unordered {
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`. The implementation will cycle around to the last
-    // translated key if `key` is less than or equal to the first translated key. Returns None if
-    // there are no keys in the index.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    // translated key if `key` is less than or equal to the first translated key. The returned
+    // boolean indicates whether the result is from cycling. Returns None if there are no keys in
+    // the index.
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // follows the result of translating `key`. The implementation will cycle around to the first
-    // translated key if `key` is greater than or equal to the last translated key. Returns None if
-    // there are no keys in the index.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    // translated key if `key` is greater than or equal to the last translated key. The returned
+    // boolean indicates whether the result is from cycling. Returns None if there are no keys in
+    // the index.
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a;
 
