@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
-        elector::RoundRobin,
+        elector::{Elector, RoundRobin},
         scheme,
         types::{Certificate, Context},
     },
@@ -351,11 +351,12 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
+        let elector = RoundRobin::new(scheme.participants());
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
                 scheme,
-                elector: RoundRobin,
+                elector,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
