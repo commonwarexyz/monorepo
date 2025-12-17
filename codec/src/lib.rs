@@ -212,9 +212,9 @@ pub use codec::*;
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
-// Re-export network types
+// Re-export Hostname for the hostname! macro
 #[cfg(feature = "std")]
-pub use types::net::{Hostname, MAX_HOSTNAME_LABEL_LEN, MAX_HOSTNAME_LEN};
+pub use types::net::Hostname;
 
 #[cfg(feature = "arbitrary")]
 pub mod conformance;

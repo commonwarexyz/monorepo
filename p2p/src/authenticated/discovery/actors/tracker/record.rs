@@ -219,8 +219,10 @@ impl<C: PublicKey> Record<C> {
     /// - We have the ingress address of the peer
     /// - It is not ourselves or blocked
     /// - We are not already connected or reserved
-    /// - The ingress address is valid (not DNS when disabled, hostname not too long)
+    /// - The ingress address is valid (not DNS when disabled)
     /// - The ingress IP is global (or private IPs are allowed) for Socket addresses
+    ///
+    /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
     #[allow(unstable_name_collisions)]
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {

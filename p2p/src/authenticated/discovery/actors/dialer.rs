@@ -17,7 +17,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{IpAddrExt, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{seq::SliceRandom, CryptoRng, Rng};
 use std::time::Duration;
@@ -105,21 +105,12 @@ impl<E: Spawner + Clock + Network + Resolver + Rng + CryptoRng + Metrics, C: Sig
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             move |context| async move {
-                // Resolve ingress to socket address
-                let address = match ingress.resolve(&context).await {
-                    Ok(addr) => addr,
-                    Err(err) => {
-                        debug!(?ingress, ?err, "failed to resolve ingress address");
-                        return;
-                    }
-                };
-
-                // Check if resolved IP is allowed
-                #[allow(unstable_name_collisions)]
-                if !allow_private_ips && !address.ip().is_global() {
-                    debug!(?address, "resolved address is private, skipping dial");
+                // Resolve ingress to socket address (filtered by private IP policy)
+                let Some(address) = ingress.resolve_filtered(&context, allow_private_ips).await
+                else {
+                    debug!(?ingress, "failed to resolve or private IP filtered");
                     return;
-                }
+                };
 
                 // Attempt to dial peer
                 let (sink, stream) = match context.dial(address).await {

@@ -132,29 +132,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
-        let mut set_peers = Vec::new();
-        for (peer, addr) in peers {
+        for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr);
+                    entry.update(addr.clone());
                     entry
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    entry.insert(Record::known(addr))
+                    entry.insert(Record::known(addr.clone()))
                 }
             };
             record.increment();
-            set_peers.push(peer);
         }
-        self.sets.insert(
-            index,
-            set_peers
-                .into_iter()
-                .try_collect()
-                .expect("peers are unique"),
-        );
+        self.sets.insert(index, peers.into_keys());
 
         // Remove oldest entries if necessary
         let mut deleted_peers = Vec::new();

@@ -5,6 +5,7 @@ use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, Hostname, Read, ReadExt, Write,
 };
 use commonware_runtime::{Error as RuntimeError, Resolver};
+use commonware_utils::IpAddrExt;
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -71,6 +72,24 @@ impl Ingress {
             }
         }
     }
+
+    /// Resolve and filter by private IP policy.
+    ///
+    /// Returns `None` if:
+    /// - DNS resolution fails
+    /// - The resolved IP is private and `allow_private_ips` is false
+    #[allow(unstable_name_collisions)]
+    pub async fn resolve_filtered(
+        &self,
+        resolver: &impl Resolver,
+        allow_private_ips: bool,
+    ) -> Option<SocketAddr> {
+        let addr = self.resolve(resolver).await.ok()?;
+        if !allow_private_ips && !addr.ip().is_global() {
+            return None;
+        }
+        Some(addr)
+    }
 }
 
 impl Write for Ingress {
@@ -125,7 +144,7 @@ impl From<SocketAddr> for Ingress {
     }
 }
 
-/// Full address specification for lookup network (needs IP filtering).
+/// Full address specification for peer-to-peer networking.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Address {
     /// Same address for both ingress (dialing) and egress (IP filtering).

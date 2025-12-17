@@ -322,11 +322,11 @@ impl NetworkScheme for Lookup {
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
-        let peer_list: Vec<(_, Address)> = peer
+        let peer_list: Vec<_> = peer
             .topo
             .peers
             .iter()
-            .map(|p| (p.public_key.clone(), p.address.into()))
+            .map(|p| (p.public_key.clone(), Address::from(p.address)))
             .collect();
 
         // Register multiple peer sets to seed the network

@@ -335,7 +335,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.get(peer).is_some_and(|r| r.allowed())
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self

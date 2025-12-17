@@ -342,7 +342,7 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let ingress = crate::Ingress::Socket(socket);
+        let ingress: crate::Ingress = socket.into();
         let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
@@ -1060,7 +1060,7 @@ mod tests {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
-                    assert_eq!(infos[0].ingress, crate::Ingress::Socket(peer1_addr));
+                    assert_eq!(infos[0].ingress, peer1_addr.into());
                 }
                 _ => panic!("Expected Peers message from tracker"),
             }
