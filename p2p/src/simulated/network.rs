@@ -520,7 +520,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Otherwise, returns all registered peers (for compatibility with tests
     /// that don't use peer sets).
     fn all_tracked_peers(&self) -> Set<P> {
-        if self.peer_sets.is_empty() {
+        if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
                 .cloned()
