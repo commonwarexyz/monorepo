@@ -18,7 +18,6 @@ commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
 
