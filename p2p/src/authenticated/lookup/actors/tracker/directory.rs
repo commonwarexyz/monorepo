@@ -300,7 +300,7 @@ mod tests {
         lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::NZU32;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
