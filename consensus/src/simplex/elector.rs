@@ -23,7 +23,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Blake3, Hasher, PublicKey,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey,
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
@@ -81,14 +81,14 @@ impl<S: Scheme> RoundRobin<S> {
     ///
     /// The seed determines the permutation of leader indices, so different seeds
     /// produce different rotation orders.
-    pub fn shuffled(participants: &Set<S::PublicKey>, seed: u64) -> Self {
+    pub fn shuffled<H: Hasher>(participants: &Set<S::PublicKey>, seed: &[u8]) -> Self {
         assert!(!participants.is_empty(), "no participants");
 
         let mut permutation = (0..participants.len() as u32).collect::<Vec<_>>();
+        let mut hasher = H::new();
         permutation.sort_by_key(|&index| {
-            let mut hasher = Blake3::new();
-            hasher.update(&seed.to_le_bytes());
-            hasher.update(&index.to_le_bytes());
+            hasher.update(seed);
+            hasher.update(&index.encode());
             hasher.finalize()
         });
 
@@ -169,7 +169,7 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
-        sha256::Digest as Sha256Digest,
+        sha256::Digest as Sha256Digest, Blake3,
     };
     use commonware_utils::{quorum_from_slice, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
@@ -228,8 +228,10 @@ mod tests {
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector_no_seed = RoundRobin::<ed25519::Scheme>::new(&participants);
-        let elector_seed_1 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 1);
-        let elector_seed_2 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 2);
+        let elector_seed_1 =
+            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed1");
+        let elector_seed_2 =
+            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed2");
 
         // Collect first 5 leaders from each
         let epoch = Epoch::new(0);
@@ -265,8 +267,10 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
-        let elector1 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 12345);
-        let elector2 = RoundRobin::<ed25519::Scheme>::shuffled(&participants, 12345);
+        let elector1 =
+            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"same_seed");
+        let elector2 =
+            RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"same_seed");
 
         let epoch = Epoch::new(0);
         for view in 1..=10 {
@@ -286,7 +290,7 @@ mod tests {
     #[should_panic(expected = "no participants")]
     fn round_robin_shuffled_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        RoundRobin::<ed25519::Scheme>::shuffled(&participants, 42);
+        RoundRobin::<ed25519::Scheme>::shuffled::<Blake3>(&participants, b"seed");
     }
 
     #[test]
