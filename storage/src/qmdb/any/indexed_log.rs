@@ -89,10 +89,6 @@ pub struct IndexedLog<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-// =============================================================================
-// Shared impl blocks - work with any Operation<K, V, U> where U: Update<K, V>
-// =============================================================================
-
 impl<E, K, V, U, C, I, H, S> IndexedLog<E, C, I, H, U, S>
 where
     E: Storage + Clock + Metrics,

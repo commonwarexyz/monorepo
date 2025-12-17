@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     qmdb::{
-        any::{ordered::fixed::Fixed, FixedConfig as Config},
+        any::{ordered::Fixed, FixedConfig as Config},
         store::Batchable as _,
     },
     translator::EightCap,

@@ -28,17 +28,13 @@ use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
-pub mod fixed;
+mod fixed;
 pub mod sync;
-pub mod variable;
+mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
-pub use fixed::Fixed;
-pub use variable::Variable;
-
-// =============================================================================
-// Unordered-specific impl blocks
-// =============================================================================
+pub use fixed::{Fixed, Operation as FixedOperation, Update as FixedUpdate};
+pub use variable::{Operation as VariableOperation, Update as VariableUpdate, Variable};
 
 impl<
         E: Storage + Clock + Metrics,

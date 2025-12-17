@@ -9,8 +9,8 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::{fixed::Fixed as OFixed, variable::Variable as OVariable},
-            unordered::{fixed::Fixed as UFixed, variable::Variable as UVariable},
+            ordered::{Fixed as OFixed, Variable as OVariable},
+            unordered::{Fixed as UFixed, Variable as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{

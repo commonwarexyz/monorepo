@@ -640,7 +640,7 @@ mod tests {
             Location,
         },
         qmdb::{
-            any::unordered::{fixed::Operation, Update},
+            any::unordered::{FixedOperation as Operation, Update},
             operation::Committable,
         },
     };

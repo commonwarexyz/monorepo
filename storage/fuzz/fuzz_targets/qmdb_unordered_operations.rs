@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
-        any::{unordered::fixed::Fixed, FixedConfig as Config},
+        any::{unordered::Fixed, FixedConfig as Config},
         store::CleanStore as _,
         verify_proof,
     },

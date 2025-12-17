@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::variable::Variable as OVariable, unordered::variable::Variable as UVariable,
+            ordered::Variable as OVariable, unordered::Variable as UVariable,
             VariableConfig as AConfig,
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},

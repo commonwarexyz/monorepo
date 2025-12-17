@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::fixed::{Fixed, Operation, Update},
+            ordered::{Fixed, FixedOperation as Operation, FixedUpdate as Update},
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},

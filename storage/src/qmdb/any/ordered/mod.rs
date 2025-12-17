@@ -32,12 +32,12 @@ use std::{
     ops::Bound,
 };
 
-pub mod fixed;
-pub mod variable;
+mod fixed;
+mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
-pub use fixed::Fixed;
-pub use variable::Variable;
+pub use fixed::{Fixed, Operation as FixedOperation, Update as FixedUpdate};
+pub use variable::{Operation as VariableOperation, Update as VariableUpdate, Variable};
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
@@ -51,10 +51,6 @@ enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// preceding key that does exist in the snapshot.
     NotExists(Update<K, V>),
 }
-
-// =============================================================================
-// Ordered-specific impl blocks
-// =============================================================================
 
 impl<
         E: Storage + Clock + Metrics,

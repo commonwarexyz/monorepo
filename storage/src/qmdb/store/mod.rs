@@ -92,7 +92,7 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::{
         any::{
-            unordered::{variable::Operation, Update},
+            unordered::{Update, VariableOperation as Operation},
             VariableValue,
         },
         build_snapshot_from_log, create_key, delete_key,
