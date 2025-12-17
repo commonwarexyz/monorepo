@@ -167,16 +167,6 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
         self.last_translated_key().map(|res| (res, true))
     }
 
-    /// Get the values associated with the translated key that lexicographically follows the result
-    /// of translating `key`.
-    ///
-    /// For example, if the translator is looking only at the first byte of a key, and the index
-    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
-    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
-    /// associated with 2d, and `get_next([2d])` would return `None`. Because values associated with
-    /// the same translated key can appear in any order, keys with the same first byte in this
-    /// example would need to be ordered by the caller if a full ordering over the untranslated
-    /// keyspace is desired.
     fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a,
@@ -189,8 +179,6 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
         self.first_translated_key().map(|res| (res, true))
     }
 
-    /// Get the values associated with the lexicographically first translated key, or None if the
-    /// index is empty.
     fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
@@ -200,8 +188,6 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
             .map(|(_, record)| ImmutableCursor::new(record))
     }
 
-    /// Get the values associated with the lexicographically last translated key, or None if the
-    /// index is empty.
     fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
