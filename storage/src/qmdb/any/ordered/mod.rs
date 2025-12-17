@@ -27,12 +27,10 @@ use std::{
     ops::Bound,
 };
 
-mod fixed;
-mod variable;
+pub mod fixed;
+pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
-pub use fixed::{Fixed, Operation as FixedOperation, Update as FixedUpdate};
-pub use variable::{Operation as VariableOperation, Update as VariableUpdate, Variable};
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
@@ -952,10 +950,10 @@ mod test {
     use core::{future::Future, pin::Pin};
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = Fixed<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type FixedDb = fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Variable] type used in these unit tests.
-    type VariableDb = Variable<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [variable::Db] type used in these unit tests.
+    type VariableDb = variable::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_fixed_db(context: Context) -> FixedDb {

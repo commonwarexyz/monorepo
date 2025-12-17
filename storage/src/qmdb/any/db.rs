@@ -34,10 +34,10 @@ pub(crate) type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> =
 
 /// An "Any" QMDB implementation generic over ordered/ordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
-/// - [crate::qmdb::any::ordered::Fixed]
-/// - [crate::qmdb::any::ordered::Variable]
-/// - [crate::qmdb::any::unordered::Fixed]
-/// - [crate::qmdb::any::unordered::Variable]
+/// - [crate::qmdb::any::ordered::fixed::Db]
+/// - [crate::qmdb::any::ordered::variable::Db]
+/// - [crate::qmdb::any::unordered::fixed::Db]
+/// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous,

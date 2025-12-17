@@ -8,7 +8,10 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{Fixed, FixedOperation, Update},
+            unordered::{
+                fixed::{Db, Operation as FixedOperation},
+                Update,
+            },
             FixedConfig as Config,
         },
         store::CleanStore,
@@ -18,7 +21,7 @@ use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
-pub type Database<E> = Fixed<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = FixedOperation<Key, Value>;

@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{
-            unordered::{Fixed, FixedOperation},
+            unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
         store::CleanStore as _,
@@ -122,7 +122,7 @@ async fn test_sync<
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<
-        Fixed<deterministic::Context, Key, Value, Sha256, TwoCap>,
+        Db<deterministic::Context, Key, Value, Sha256, TwoCap>,
         R,
     > = sync::engine::Config {
         context,
@@ -155,7 +155,7 @@ fn fuzz(mut input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut db =
-            Fixed::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
+            Db::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
                 .await
                 .expect("Failed to init source db");
 
@@ -235,7 +235,7 @@ fn fuzz(mut input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Fixed::<_, Key, Value, Sha256, TwoCap>::init(
+                    db = Db::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config(TEST_NAME),
                     )

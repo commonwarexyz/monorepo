@@ -10,10 +10,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            ordered::{self, Db},
-            value::FixedEncoding,
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, ordered, value::FixedEncoding, FixedConfig as Config,
+            FixedValue,
         },
         Error,
     },
@@ -29,13 +27,13 @@ pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Fixed<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Fixed<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns a [Fixed] qmdb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
@@ -113,8 +111,8 @@ mod test {
         }
     }
 
-    /// A type alias for the concrete [Fixed] type used in these unit tests.
-    type AnyTest = Fixed<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -245,7 +243,7 @@ mod test {
             let seed = context.next_u64();
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
             let mut db =
-                Fixed::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
+                Db::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
                     .await
                     .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
@@ -904,7 +902,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                db: &mut Fixed<Context, Digest, i32, Sha256, T>,
+                db: &mut Db<Context, Digest, i32, Sha256, T>,
                 rng: &mut StdRng,
             ) {
                 let mut keys = BTreeMap::new();
@@ -964,19 +962,17 @@ mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
-            let mut db =
-                Fixed::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
-                    .await
-                    .unwrap();
+            let mut db = Db::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
+                .await
+                .unwrap();
             insert_random(&mut db, &mut rng).await;
             db.destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
-            let mut db =
-                Fixed::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
-                    .await
-                    .unwrap();
+            let mut db = Db::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
+                .await
+                .unwrap();
             insert_random(&mut db, &mut rng).await;
             db.destroy().await.unwrap();
         });

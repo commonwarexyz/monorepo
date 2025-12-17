@@ -23,13 +23,11 @@ use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
-mod fixed;
+pub mod fixed;
 pub mod sync;
-mod variable;
+pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
-pub use fixed::{Fixed, Operation as FixedOperation, Update as FixedUpdate};
-pub use variable::{Operation as VariableOperation, Update as VariableUpdate, Variable};
 
 impl<
         E: Storage + Clock + Metrics,
@@ -450,10 +448,10 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = Fixed<Context, Digest, Digest, Sha256, TwoCap>;
+    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Variable] type used in these unit tests.
-    type VariableDb = Variable<Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [variable::Db] type used in these unit tests.
+    type VariableDb = variable::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {
