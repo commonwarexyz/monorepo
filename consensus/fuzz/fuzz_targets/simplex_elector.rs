@@ -12,7 +12,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::Scheme,
     ed25519::{PrivateKey, PublicKey},
-    Signer,
+    Sha256, Signer,
 };
 use commonware_math::algebra::Random as _;
 use commonware_utils::{ordered::Set, TryCollect};
@@ -70,10 +70,10 @@ where
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::default(), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::<Sha256>::default(), None);
         }
         FuzzElector::RoundRobinShuffled(seed) => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::shuffled(seed), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::<Sha256>::shuffled(seed), None);
         }
         FuzzElector::RandomMinPk(certificate) => {
             fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(
