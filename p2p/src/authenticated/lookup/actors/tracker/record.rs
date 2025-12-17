@@ -154,14 +154,14 @@ impl Record {
     /// - We have a known address of the peer
     /// - It is not ourselves or blocked
     /// - We are not already connected or reserved
-    /// - The ingress address is valid (not DNS when disabled, hostname not too long)
+    /// - The ingress address is valid (not DNS when disabled)
     /// - The egress IP is global (or private IPs are allowed)
     #[allow(unstable_name_collisions)]
-    pub fn dialable(&self, allow_private_ips: bool, max_host_len: Option<usize>) -> bool {
+    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match &self.address {
             Address::Known(addr) => {
                 self.status == Status::Inert
-                    && addr.ingress().is_valid(max_host_len)
+                    && addr.ingress().is_valid(allow_dns)
                     && (allow_private_ips || addr.egress_ip().is_global())
             }
             _ => false,

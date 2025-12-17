@@ -17,6 +17,5 @@ pub struct Config<C: PublicKey> {
     pub max_peer_set_size: u64,
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
-    pub max_host_len: Option<usize>,
     pub info_verifier: InfoVerifier<C>,
 }

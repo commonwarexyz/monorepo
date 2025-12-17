@@ -13,6 +13,10 @@ const INGRESS_DNS_PREFIX: u8 = 1;
 const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
 const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
+/// Maximum DNS hostname length (255 bytes per RFC 1035 wire format).
+/// Used at decode time to prevent DoS attacks while ensuring peer set consistency.
+pub const MAX_DNS_HOSTNAME_LEN: usize = 255;
+
 /// What we dial to connect to a peer.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ingress {
@@ -44,14 +48,14 @@ impl Ingress {
         }
     }
 
-    /// Returns whether this ingress address is valid given the `max_host_len` configuration.
+    /// Returns whether this ingress address is valid given the `allow_dns` configuration.
     ///
     /// - `Socket` addresses are always valid.
-    /// - `Dns` addresses are valid only if `max_host_len` is `Some(n)` and `host.len() <= n`.
-    pub fn is_valid(&self, max_host_len: Option<usize>) -> bool {
+    /// - `Dns` addresses are valid only if `allow_dns` is `true`.
+    pub const fn is_valid(&self, allow_dns: bool) -> bool {
         match self {
             Self::Socket(_) => true,
-            Self::Dns { host, .. } => max_host_len.is_some_and(|max| host.len() <= max),
+            Self::Dns { .. } => allow_dns,
         }
     }
 
@@ -104,13 +108,9 @@ impl EncodeSize for Ingress {
 }
 
 impl Read for Ingress {
-    /// Configuration for reading an `Ingress`.
-    ///
-    /// - `Some(n)` = DNS enabled with max hostname length of `n`
-    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
-    type Cfg = Option<usize>;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, max_host_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let prefix = u8::read(buf)?;
         match prefix {
             INGRESS_SOCKET_PREFIX => {
@@ -118,13 +118,8 @@ impl Read for Ingress {
                 Ok(Self::Socket(addr))
             }
             INGRESS_DNS_PREFIX => {
-                let Some(max_len) = max_host_len else {
-                    return Err(CodecError::Invalid(
-                        "Ingress::Dns",
-                        "DNS addresses disabled",
-                    ));
-                };
-                let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..=*max_len), ()))?;
+                let bytes =
+                    Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..=MAX_DNS_HOSTNAME_LEN), ()))?;
                 let host = String::from_utf8(bytes)
                     .map_err(|_| CodecError::Invalid("Ingress::Dns", "Invalid UTF-8 hostname"))?;
                 let port = u16::read(buf)?;
@@ -210,13 +205,9 @@ impl EncodeSize for Address {
 }
 
 impl Read for Address {
-    /// Configuration for reading an `Address`.
-    ///
-    /// - `Some(n)` = DNS enabled with max hostname length of `n`
-    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
-    type Cfg = Option<usize>;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, max_host_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let prefix = u8::read(buf)?;
         match prefix {
             ADDRESS_SYMMETRIC_PREFIX => {
@@ -224,7 +215,7 @@ impl Read for Address {
                 Ok(Self::Symmetric(addr))
             }
             ADDRESS_ASYMMETRIC_PREFIX => {
-                let ingress = Ingress::read_cfg(buf, max_host_len)?;
+                let ingress = Ingress::read(buf)?;
                 let egress = SocketAddr::read(buf)?;
                 Ok(Self::Asymmetric { ingress, egress })
             }
@@ -272,7 +263,7 @@ impl arbitrary::Arbitrary<'_> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{DecodeExt, Encode};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -286,7 +277,7 @@ mod tests {
         for addr in addrs {
             let ingress = Ingress::Socket(addr);
             let encoded = ingress.encode();
-            let decoded = Ingress::decode_cfg(encoded, &Some(256)).unwrap();
+            let decoded = Ingress::decode(encoded).unwrap();
             assert_eq!(ingress, decoded);
         }
     }
@@ -305,7 +296,7 @@ mod tests {
                 port,
             };
             let encoded = ingress.encode();
-            let decoded = Ingress::decode_cfg(encoded, &Some(256)).unwrap();
+            let decoded = Ingress::decode(encoded).unwrap();
             assert_eq!(ingress, decoded);
         }
     }
@@ -313,11 +304,11 @@ mod tests {
     #[test]
     fn test_ingress_dns_max_len_exceeded() {
         let ingress = Ingress::Dns {
-            host: "a".repeat(100),
+            host: "a".repeat(300),
             port: 8080,
         };
         let encoded = ingress.encode();
-        let result = Ingress::decode_cfg(encoded, &Some(50));
+        let result = Ingress::decode(encoded);
         assert!(result.is_err());
     }
 
@@ -350,7 +341,7 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let address = Address::Symmetric(addr);
         let encoded = address.encode();
-        let decoded = Address::decode_cfg(encoded, &Some(256)).unwrap();
+        let decoded = Address::decode(encoded).unwrap();
         assert_eq!(address, decoded);
     }
 
@@ -363,7 +354,7 @@ mod tests {
             egress: egress_addr,
         };
         let encoded = address.encode();
-        let decoded = Address::decode_cfg(encoded, &Some(256)).unwrap();
+        let decoded = Address::decode(encoded).unwrap();
         assert_eq!(address, decoded);
     }
 
@@ -378,7 +369,7 @@ mod tests {
             egress: egress_addr,
         };
         let encoded = address.encode();
-        let decoded = Address::decode_cfg(encoded, &Some(256)).unwrap();
+        let decoded = Address::decode(encoded).unwrap();
         assert_eq!(address, decoded);
     }
 
@@ -428,54 +419,21 @@ mod tests {
     }
 
     #[test]
-    fn test_ingress_dns_decode_fails_when_disabled() {
-        let ingress = Ingress::Dns {
-            host: "example.com".to_string(),
-            port: 8080,
-        };
-        let encoded = ingress.encode();
-
-        // Should fail when DNS is disabled (None)
-        let result = Ingress::decode_cfg(encoded.clone(), &None);
-        assert!(
-            result.is_err(),
-            "DNS ingress should fail to decode when DNS is disabled"
-        );
-
-        // Should succeed when DNS is enabled
-        let result = Ingress::decode_cfg(encoded, &Some(256));
-        assert!(
-            result.is_ok(),
-            "DNS ingress should decode when DNS is enabled"
-        );
-    }
-
-    #[test]
     fn test_ingress_is_valid() {
         let socket = Ingress::Socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
         let dns = Ingress::Dns {
             host: "example.com".to_string(),
             port: 8080,
         };
-        let long_dns = Ingress::Dns {
-            host: "a".repeat(100),
-            port: 8080,
-        };
 
-        // Socket is always valid regardless of max_host_len
-        assert!(socket.is_valid(None));
-        assert!(socket.is_valid(Some(50)));
-        assert!(socket.is_valid(Some(256)));
+        // Socket is always valid regardless of allow_dns
+        assert!(socket.is_valid(false));
+        assert!(socket.is_valid(true));
 
-        // DNS is invalid when disabled (None)
-        assert!(!dns.is_valid(None));
-        // DNS is valid when hostname fits within limit
-        assert!(dns.is_valid(Some(256)));
-        assert!(dns.is_valid(Some(11))); // "example.com" is 11 chars
-                                         // DNS is invalid when hostname exceeds limit
-        assert!(!dns.is_valid(Some(10)));
-        assert!(!long_dns.is_valid(Some(50)));
-        assert!(long_dns.is_valid(Some(100)));
+        // DNS is invalid when disabled
+        assert!(!dns.is_valid(false));
+        // DNS is valid when enabled
+        assert!(dns.is_valid(true));
     }
 
     #[cfg(feature = "arbitrary")]

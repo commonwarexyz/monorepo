@@ -222,7 +222,7 @@ impl<C: PublicKey> Record<C> {
     /// - The ingress address is valid (not DNS when disabled, hostname not too long)
     /// - The ingress IP is global (or private IPs are allowed) for Socket addresses
     #[allow(unstable_name_collisions)]
-    pub fn dialable(&self, allow_private_ips: bool, max_host_len: Option<usize>) -> bool {
+    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
         }
@@ -231,7 +231,7 @@ impl<C: PublicKey> Record<C> {
             Address::Discovered(info, _) => &info.ingress,
             _ => return false,
         };
-        if !ingress.is_valid(max_host_len) {
+        if !ingress.is_valid(allow_dns) {
             return false;
         }
         // For Socket addresses, check if private IPs are allowed

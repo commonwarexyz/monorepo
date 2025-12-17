@@ -24,10 +24,7 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
-    /// Maximum length of a DNS hostname in an ingress address.
-    ///
-    /// - `Some(n)` = DNS enabled with max hostname length of `n`
-    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
-    pub max_host_len: Option<usize>,
+    /// Whether DNS-based ingress addresses are allowed.
+    pub allow_dns: bool,
     pub listener: Mailbox<HashSet<IpAddr>>,
 }

@@ -25,11 +25,8 @@ pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
-    /// Maximum length of a DNS hostname in an ingress address.
-    ///
-    /// - `Some(n)` = DNS enabled with max hostname length of `n`
-    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
-    pub max_host_len: Option<usize>,
+    /// Whether DNS-based ingress addresses are allowed.
+    pub allow_dns: bool,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -47,9 +44,8 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
-    /// Maximum length of a DNS hostname in an ingress address.
-    /// `None` means DNS is disabled.
-    max_host_len: Option<usize>,
+    /// Whether DNS-based ingress addresses are allowed.
+    allow_dns: bool,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -86,7 +82,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         Self {
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
-            max_host_len: cfg.max_host_len,
+            allow_dns: cfg.allow_dns,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -238,7 +234,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.max_host_len))
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -342,7 +338,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
-            max_host_len: Some(256),
+            allow_dns: true,
             max_sets: 1,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -403,7 +399,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
-            max_host_len: Some(256),
+            allow_dns: true,
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -490,7 +486,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
-            max_host_len: Some(256),
+            allow_dns: true,
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -535,7 +531,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
-            max_host_len: Some(256),
+            allow_dns: true,
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -630,10 +626,10 @@ mod tests {
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
 
-        // DNS is disabled when max_host_len is None
+        // DNS is disabled
         let config = super::Config {
             allow_private_ips: true,
-            max_host_len: None,
+            allow_dns: false,
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -697,7 +693,7 @@ mod tests {
         // Private IPs are NOT allowed
         let config = super::Config {
             allow_private_ips: false,
-            max_host_len: Some(256),
+            allow_dns: true,
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };

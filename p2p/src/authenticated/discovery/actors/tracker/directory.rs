@@ -25,11 +25,8 @@ pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
-    /// Maximum length of a DNS hostname in an ingress address.
-    ///
-    /// - `Some(n)` = DNS enabled with max hostname length of `n`
-    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
-    pub max_host_len: Option<usize>,
+    /// Whether DNS-based ingress addresses are allowed.
+    pub allow_dns: bool,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -50,9 +47,8 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     /// Whether private IPs are connectable.
     allow_private_ips: bool,
 
-    /// Maximum length of a DNS hostname in an ingress address.
-    /// `None` means DNS is disabled.
-    max_host_len: Option<usize>,
+    /// Whether DNS-based ingress addresses are allowed.
+    allow_dns: bool,
 
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -108,7 +104,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         Self {
             context,
             allow_private_ips: cfg.allow_private_ips,
-            max_host_len: cfg.max_host_len,
+            allow_dns: cfg.allow_dns,
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             peers,
@@ -345,7 +341,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.max_host_len))
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();

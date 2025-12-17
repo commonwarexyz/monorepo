@@ -67,7 +67,7 @@ impl<
                 address: cfg.dialable.clone(),
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
-                max_host_len: cfg.max_host_len,
+                allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
@@ -154,7 +154,6 @@ impl<
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
-                max_host_len: self.cfg.max_host_len,
                 info_verifier: self.info_verifier,
             },
         );

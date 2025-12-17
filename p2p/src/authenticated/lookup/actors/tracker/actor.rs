@@ -67,7 +67,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             max_sets: cfg.tracked_peer_sets,
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
-            max_host_len: cfg.max_host_len,
+            allow_dns: cfg.allow_dns,
         };
 
         // Create the mailboxes
@@ -249,7 +249,7 @@ mod tests {
                 tracked_peer_sets: 2,
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
-                max_host_len: Some(256),
+                allow_dns: true,
                 listener: registered_ips_sender,
             },
             registered_ips_receiver,

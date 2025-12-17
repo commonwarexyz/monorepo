@@ -35,7 +35,6 @@ pub struct Actor<
     max_peer_set_size: u64,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
-    max_host_len: Option<usize>,
     info_verifier: InfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
@@ -86,7 +85,6 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                max_host_len: cfg.max_host_len,
                 info_verifier: cfg.info_verifier,
                 receiver,
                 connections,
@@ -156,7 +154,6 @@ impl<
                                         max_peer_set_size: self.max_peer_set_size,
                                         allowed_peers_rate: self.allowed_peers_rate,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
-                                        max_host_len: self.max_host_len,
                                         info_verifier,
                                     },
                                 );

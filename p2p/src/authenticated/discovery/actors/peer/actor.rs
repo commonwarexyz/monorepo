@@ -33,7 +33,6 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     max_bit_vec: u64,
     max_peers: usize,
-    max_host_len: Option<usize>,
 
     mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
@@ -62,7 +61,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 info_verifier: cfg.info_verifier,
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
-                max_host_len: cfg.max_host_len,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -191,7 +189,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         max_bit_vec: self.max_bit_vec,
                         max_peers: self.max_peers,
                         max_data_length: msg.len(), // apply loose bound to data read to prevent memory exhaustion
-                        max_host_len: self.max_host_len,
                     };
                     let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
