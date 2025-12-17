@@ -97,8 +97,7 @@ impl<S: LimitedSender, V: Codec> WrappedLimitedSender<S, V> {
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <<S as LimitedSender>::Checked<'_> as CheckedSender>::Error>
-    {
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         match self.check(recipients).await {
             Ok(checked) => checked.send(message, priority).await,
             Err(_) => Ok(vec![]),
@@ -130,8 +129,7 @@ impl<'a, S: LimitedSender, V: Codec> CheckedWrappedSender<'a, S, V> {
         self,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <<S as LimitedSender>::Checked<'a> as CheckedSender>::Error>
-    {
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
         let encoded = message.encode();
         self.sender.send(encoded.freeze(), priority).await
     }

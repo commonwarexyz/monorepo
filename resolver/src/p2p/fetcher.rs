@@ -1,9 +1,6 @@
 use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{
-    utils::codec::{WrappedLimitedSender, WrappedSender},
-    LimitedSender, Recipients,
-};
+use commonware_p2p::{utils::codec::WrappedLimitedSender, LimitedSender, Recipients};
 use commonware_runtime::{
     telemetry::metrics::status::{self, CounterExt, GaugeExt, Status},
     Clock, Metrics,
@@ -265,6 +262,8 @@ where
             .map(|(k, (_, retry))| (k.clone(), *retry))
             .collect();
 
+        let mut earliest_next_try: Option<SystemTime> = None;
+
         // Try pending keys until one succeeds
         for (key, retry) in pending_keys {
             // Get eligible peers for this key
@@ -293,19 +292,21 @@ where
                 let now = self.context.current();
                 let deadline = now.checked_add(self.timeout).expect("time overflowed");
 
-                // Try to send
-                let result = sender
-                    .send(
-                        Recipients::One(peer.clone()),
-                        wire::Message {
-                            id,
-                            payload: wire::Payload::Request(key.clone()),
-                        },
-                        self.priority_requests,
-                    )
-                    .await;
+                let checked = match sender.check(Recipients::One(peer.clone())).await {
+                    Ok(checked) => checked,
+                    Err(not_until) => {
+                        earliest_next_try =
+                            earliest_next_try.map_or(Some(not_until), |e| Some(e.min(not_until)));
+                        continue;
+                    }
+                };
 
-                match result {
+                // Try to send
+                let message = wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key.clone()),
+                };
+                match checked.send(message, self.priority_requests).await {
                     Ok(sent) if !sent.is_empty() => {
                         // Success - remove from pending and add to active
                         self.requests_sent.inc(Status::Success);
@@ -323,9 +324,9 @@ where
                         return;
                     }
                     Ok(_) => {
-                        // Empty result - peer was rate-limited by Sender, try next
+                        // Empty result - peer dropped message, try next
                         self.requests_sent.inc(Status::Dropped);
-                        debug!(?peer, "send returned empty (rate limited)");
+                        debug!(?peer, "send returned empty");
                         continue;
                     }
                     Err(err) => {
@@ -346,8 +347,9 @@ where
             }
         }
 
-        // No keys could be fetched, set waiter to retry later
-        self.waiter = Some(self.context.current().saturating_add(self.retry_timeout));
+        // No keys could be fetched, set waiter to retry as soon as possible
+        self.waiter = earliest_next_try
+            .or_else(|| Some(self.context.current().saturating_add(self.retry_timeout)))
     }
 
     /// Retains only the fetches with keys greater than the given key.
@@ -1420,7 +1422,7 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
             let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
+            let mut sender = WrappedLimitedSender::new(FailMockSender::default());
 
             // Add targets and attempt fetch
             fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
@@ -1443,7 +1445,7 @@ mod tests {
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            let mut sender = WrappedLimitedSender::new(SuccessMockSender::default());
 
             // Timeout does not remove target
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
@@ -1499,7 +1501,7 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait indefinitely
-            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            let mut sender = WrappedLimitedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender).await;
 
             // Targets should still exist (no fallback cleared them)

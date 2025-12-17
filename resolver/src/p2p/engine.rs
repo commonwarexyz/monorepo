@@ -9,7 +9,8 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
-    Blocker, LimitedSender, Manager, Receiver, Recipients, utils::codec::{WrappedLimitedSender, WrappedSender, wrap, wrap_limited}
+    utils::codec::{wrap_limited, WrappedLimitedSender},
+    Blocker, LimitedSender, Manager, Receiver, Recipients,
 };
 use commonware_runtime::{
     spawn_cell,

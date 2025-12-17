@@ -78,7 +78,7 @@ pub trait Sender: Debug + Clone + Send + Sync + 'static {
 /// filtering out any that are currently rate-limited.
 pub trait LimitedSender: Sender + Clone + Send + Sync + 'static {
     /// The type of [`CheckedSender`] returned after checking recipients.
-    type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
+    type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
     where
         Self: 'a;
 
@@ -98,11 +98,11 @@ pub trait LimitedSender: Sender + Clone + Send + Sync + 'static {
     fn check<'a>(
         &'a mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>>;
+    ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>> + Send;
 }
 
 /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
-pub trait CheckedSender {
+pub trait CheckedSender: Send {
     /// Public key type used to identify [`Recipients`].
     type PublicKey: PublicKey;
 
@@ -128,7 +128,7 @@ pub trait CheckedSender {
         self,
         message: Bytes,
         priority: bool,
-    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>>;
+    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
 
 /// Interface for receiving messages from arbitrary recipients.
