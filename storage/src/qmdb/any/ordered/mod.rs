@@ -21,7 +21,10 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
-use futures::future::try_join_all;
+use futures::{
+    future::try_join_all,
+    stream::{self, Stream},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
@@ -142,7 +145,7 @@ where
             return Ok(Some(span));
         }
 
-        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
             // DB is empty.
             return Ok(None);
         };
@@ -191,6 +194,63 @@ where
             .await
             .map(|op| op.map(|(data, _)| data.value))
     }
+
+    /// Streams all active (key, value) pairs in the database in key order, starting from the first
+    /// active key greater than or equal to `start`.
+    pub async fn stream_range<'a>(
+        &'a self,
+        start: K,
+    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
+    where
+        V: 'a,
+    {
+        let start_iter = self.snapshot.get(&start);
+        let mut init_pending = self.fetch_all_updates(start_iter).await?;
+        init_pending.retain(|x| x.key >= start);
+
+        Ok(stream::unfold(
+            (start, init_pending),
+            move |(driver_key, mut pending): (K, Vec<Update<K, V>>)| async move {
+                if !pending.is_empty() {
+                    let item = pending.pop().expect("pending is not empty");
+                    return Some((Ok((item.key, item.value)), (driver_key, pending)));
+                }
+
+                let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key) else {
+                    return None; // DB is empty
+                };
+                if wrapped {
+                    return None; // End of DB
+                }
+
+                // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
+                // fetch a much larger batch of "pending" keys.
+                match self.fetch_all_updates(iter).await {
+                    Ok(mut pending) => {
+                        let item = pending.pop().expect("pending is not empty");
+                        let key = item.key.clone();
+                        Some((Ok((item.key, item.value)), (key, pending)))
+                    }
+                    Err(e) => Some((Err(e), (driver_key, pending))),
+                }
+            },
+        ))
+    }
+
+    /// Fetches all update operations corresponding to the input locations, returning the result in
+    /// reverse order of the keys.
+    async fn fetch_all_updates(
+        &self,
+        locs: impl IntoIterator<Item = &Location>,
+    ) -> Result<Vec<Update<K, V>>, Error> {
+        let futures = locs
+            .into_iter()
+            .map(|loc| Self::get_update_op(&self.log, *loc));
+        let mut updates = try_join_all(futures).await?;
+        updates.sort_by(|a, b| b.key.cmp(&a.key));
+
+        Ok(updates)
+    }
 }
 
 impl<
@@ -218,7 +278,7 @@ where
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
-        let Some(iter) = self.snapshot.prev_translated_key(key) else {
+        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
             unreachable!("database should not be empty");
         };
 
@@ -480,7 +540,7 @@ where
 
         // Find & update the affected span.
         if prev_key.is_none() {
-            let Some(iter) = self.snapshot.prev_translated_key(&key) else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
             let last_key = self.last_key_in_iter(iter).await?;
@@ -617,8 +677,7 @@ where
         // previous _translated_ key for any created or deleted key.
         let mut locations = Vec::new();
         for key in deleted.iter().chain(created.keys()) {
-            let iter = self.snapshot.prev_translated_key(key);
-            let Some(iter) = iter else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
                 continue;
             };
             locations.extend(iter.copied());
@@ -948,6 +1007,7 @@ mod test {
     };
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
+    use futures::StreamExt as _;
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
     type FixedDb = fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
@@ -1388,6 +1448,124 @@ mod test {
             assert_eq!(span1.1.next_key, key2);
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_stream_range() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+
+            let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x05]);
+            let val = Sha256::fill(1u8);
+
+            // Test the single-bucket case.
+            db.create(key1.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Start key is in the DB.
+            {
+                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key collides & precedes the only key in the db.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x01]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key collides & follows the only key in the db.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key precedes the key in the DB without colliding.
+            {
+                let start = FixedBytes::from([0x00u8, 0x00, 0x00, 0x01]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key follows the key in the DB without colliding.
+            {
+                let start = FixedBytes::from([0xFFu8, 0x00, 0x00, 0x11]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
+            // Now test the multiple bucket cases.
+            let key2_1 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x05]);
+            let key2_2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x11]);
+            let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
+
+            db.create(key2_1.clone(), val).await.unwrap();
+            db.create(key2_2.clone(), val).await.unwrap();
+            db.create(key3.clone(), val).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Start key is in the DB.
+            {
+                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in DB but collides with an earlier key.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in the DB but collides with a later key.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in the DB but falls between two colliding keys.
+            {
+                let start = FixedBytes::from([0x20u8, 0x00, 0x00, 0x06]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is in the DB and collides with an earlier key.
+            {
+                let mut stream = db.stream_range(key2_2.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+            // Start key is > key3. Should yield nothing.
+            {
+                let start = FixedBytes::from([0x40u8, 0x00, 0x00, 0x00]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
             db.destroy().await.unwrap();
         });
     }
