@@ -29,7 +29,8 @@ impl Conformance for FixedJournal {
                 .await
                 .unwrap();
 
-            let mut data_to_write = vec![0u64; context.gen_range(0..16384)];
+            let mut data_to_write =
+                vec![0u64; context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
             context.fill(&mut data_to_write[..]);
 
             for item in data_to_write.iter() {
@@ -76,7 +77,8 @@ impl Conformance for VariableJournal {
                     .await
                     .unwrap();
 
-            let mut data_to_write = vec![Vec::new(); context.gen_range(0..16384)];
+            let mut data_to_write =
+                vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
             for item in data_to_write.iter_mut() {
                 let size = context.gen_range(0..256);
                 item.resize(size, 0);
