@@ -10,7 +10,7 @@ use crate::{
             CleanAny, DirtyAny, ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::Operation as OperationTrait,
+        operation::{Committable as _, Operation as OperationTrait},
         store::Batchable,
         update_key, update_known_loc, Error, Index,
     },
@@ -247,7 +247,6 @@ where
         log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
-        use crate::qmdb::operation::Committable;
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
         let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
