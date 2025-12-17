@@ -59,7 +59,8 @@ where
         response: oneshot::Sender<bool>,
     ) {
         if store.get_by_digest(&digest).is_some() {
-            let _ = response.send(true);
+            let ok = verify_stored_block_against_context(store, &context, &digest);
+            let _ = response.send(ok);
             return;
         }
 
@@ -117,7 +118,8 @@ where
 
         if store.get_by_digest(&digest).is_some() {
             for request in pending {
-                let _ = request.response.send(true);
+                let ok = verify_stored_block_against_context(store, &request.context, &digest);
+                let _ = request.response.send(ok);
             }
             self.received.remove(&digest);
             return;
@@ -125,7 +127,8 @@ where
 
         for request in pending {
             if store.get_by_digest(&digest).is_some() {
-                let _ = request.response.send(true);
+                let ok = verify_stored_block_against_context(store, &request.context, &digest);
+                let _ = request.response.send(ok);
                 continue;
             }
             let block = match self.received.get(&digest).cloned() {
@@ -152,6 +155,20 @@ fn decode_block(bytes: Bytes, cfg: &crate::types::BlockCfg) -> anyhow::Result<Bl
 fn encode_block(block: &Block) -> Bytes {
     use commonware_codec::Encode as _;
     Bytes::copy_from_slice(block.encode().as_ref())
+}
+
+fn verify_stored_block_against_context(
+    store: &ChainStore,
+    context: &Context<ConsensusDigest, PublicKey>,
+    digest: &ConsensusDigest,
+) -> bool {
+    let Some(entry) = store.get_by_digest(digest) else {
+        return false;
+    };
+    let Some(parent) = store.get_by_digest(&context.parent.1) else {
+        return false;
+    };
+    entry.block.parent == parent.block.id() && entry.block.height == parent.block.height + 1
 }
 
 fn try_verify_and_insert(
