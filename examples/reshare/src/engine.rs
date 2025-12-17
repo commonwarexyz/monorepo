@@ -11,7 +11,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{elector::Elector, scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
@@ -30,7 +30,7 @@ use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{num::NonZero, time::Instant};
+use std::{marker::PhantomData, num::NonZero, time::Instant};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -67,7 +67,7 @@ where
     pub freezer_table_initial_size: u32,
 }
 
-pub struct Engine<E, C, P, B, H, V, S>
+pub struct Engine<E, C, P, B, H, V, S, L>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
@@ -76,6 +76,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -101,11 +102,12 @@ where
         H,
         Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
         S,
+        L,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
-impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
+impl<E, C, P, B, H, V, S, L> Engine<E, C, P, B, H, V, S, L>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
@@ -114,6 +116,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
@@ -259,6 +262,7 @@ where
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
+                _phantom: PhantomData,
             },
         );
 

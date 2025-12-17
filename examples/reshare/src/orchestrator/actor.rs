@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
-        elector::{Elector, RoundRobin},
+        elector::Elector,
         scheme,
         types::{Certificate, Context},
     },
@@ -33,11 +33,11 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S>
+pub struct Config<B, V, C, H, A, S, L>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -46,6 +46,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
+    L: Elector<S>,
 {
     pub oracle: B,
     pub application: A,
@@ -58,9 +59,11 @@ where
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
+
+    pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S>
+pub struct Actor<E, B, V, C, H, A, S, L>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -70,6 +73,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -84,9 +88,10 @@ where
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
+    _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
+impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -96,9 +101,13 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
+    pub fn new(
+        context: E,
+        config: Config<B, V, C, H, A, S, L>,
+    ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
@@ -114,6 +123,7 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
+                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -351,7 +361,7 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let elector = RoundRobin::new(scheme.participants());
+        let elector = L::new(scheme.participants());
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
