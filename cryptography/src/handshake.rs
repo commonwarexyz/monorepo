@@ -476,11 +476,59 @@ mod test {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        struct HandshakeFlow;
+
+        impl Conformance for HandshakeFlow {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                let dialer_key = PrivateKey::random(&mut rng);
+                let listener_key = PrivateKey::random(&mut rng);
+
+                // Execute the complete handshake flow
+                let (d_state, syn) = dial_start(
+                    &mut rng,
+                    Context::new(
+                        &Transcript::new(b"flow"),
+                        seed,
+                        seed..seed + 1,
+                        dialer_key.clone(),
+                        listener_key.public_key(),
+                    ),
+                );
+                let (l_state, syn_ack) = listen_start(
+                    &mut rng,
+                    Context::new(
+                        &Transcript::new(b"flow"),
+                        seed,
+                        seed..seed + 1,
+                        listener_key,
+                        dialer_key.public_key(),
+                    ),
+                    syn,
+                )
+                .expect("handshake failed");
+                let (ack, mut d_send, _d_recv) =
+                    dial_end(d_state, syn_ack).expect("handshake failed");
+                let (_l_send, mut l_recv) = listen_end(l_state, ack).expect("handshake failed");
+
+                // Test end-to-end encryption
+                let msg = seed.to_le_bytes();
+                let ciphertext = d_send.send(&msg).expect("send failed");
+                let decrypted = l_recv.recv(&ciphertext).expect("recv failed");
+                assert_eq!(msg, decrypted.as_slice());
+
+                // Return deterministic representation of the complete flow
+                ciphertext
+            }
+        }
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Syn<crate::ed25519::Signature>>,
             CodecConformance<SynAck<crate::ed25519::Signature>>,
             CodecConformance<Ack>,
+            HandshakeFlow,
         }
     }
 }
