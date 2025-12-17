@@ -116,7 +116,7 @@ hash = "b98d0717af705e8b60af88a8337154eaced6659c3cc9f604aa4f55585a28b77f"
 
 ["commonware_cryptography::handshake::test::conformance::HandshakeFlow"]
 n_cases = 65536
-hash = "e5982e675d0e7addf7b4dbb35947530d923a191ddeb4e436808e1b0fd8ed13f2"
+hash = "3a1efb3c5b734cf9149f8ce71cc237c327da5c0f24c07c09e5a7c5fc0312aaa3"
 
 ["commonware_cryptography::lthash::tests::conformance::CodecConformance<LtHash>"]
 n_cases = 65536

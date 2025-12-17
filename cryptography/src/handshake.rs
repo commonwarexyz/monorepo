@@ -497,6 +497,11 @@ mod test {
                         listener_key.public_key(),
                     ),
                 );
+
+                // Capture transcript of all messages exchanged
+                let mut transcript = Vec::new();
+                transcript.extend(syn.encode());
+
                 let (l_state, syn_ack) = listen_start(
                     &mut rng,
                     Context::new(
@@ -509,8 +514,12 @@ mod test {
                     syn,
                 )
                 .expect("handshake failed");
+                transcript.extend(syn_ack.encode());
+
                 let (ack, mut d_send, _d_recv) =
                     dial_end(d_state, syn_ack).expect("handshake failed");
+                transcript.extend(ack.encode());
+
                 let (_l_send, mut l_recv) = listen_end(l_state, ack).expect("handshake failed");
 
                 // Test end-to-end encryption
@@ -518,9 +527,9 @@ mod test {
                 let ciphertext = d_send.send(&msg).expect("send failed");
                 let decrypted = l_recv.recv(&ciphertext).expect("recv failed");
                 assert_eq!(msg, decrypted.as_slice());
+                transcript.extend(ciphertext);
 
-                // Return deterministic representation of the complete flow
-                ciphertext
+                transcript
             }
         }
 
