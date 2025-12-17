@@ -113,25 +113,10 @@ where
     }
 
     /// Returns the location of the oldest operation that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_loc()
-    }
-
-    /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
-    /// reading it from the last commit, which is assumed to be the last operation in the log.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is empty or the last operation is not a commit floor operation.
-    pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, H, S>,
-    ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
-        let last_commit = log.read(last_commit_loc).await?;
-        last_commit.has_floor().map_or_else(
-            || unreachable!("last commit is not a CommitFloor operation"),
-            Ok,
-        )
+    pub fn oldest_retained_loc(&self) -> Location {
+        self.log
+            .oldest_retained_loc()
+            .expect("at least one operation should exist")
     }
 
     /// Get the metadata associated with the last commit.
@@ -171,19 +156,16 @@ where
     {
         // If the last-known inactivity floor is behind the current floor, then invoke the callback
         // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
+        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit = log.read(last_commit_loc).await?;
+        let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
+        if let Some(known_inactivity_floor) = known_inactivity_floor {
+            (*known_inactivity_floor..*inactivity_floor_loc).for_each(|_| callback(false, None));
         }
 
         // Build snapshot from the log
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
-
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
 
         Ok(Self {
             log,

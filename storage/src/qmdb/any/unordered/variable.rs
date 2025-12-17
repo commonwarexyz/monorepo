@@ -288,10 +288,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(756)
-            );
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm state is preserved after close and reopen.
@@ -304,10 +301,7 @@ pub(super) mod test {
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(756)
-            );
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
