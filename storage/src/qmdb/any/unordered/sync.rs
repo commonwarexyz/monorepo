@@ -257,7 +257,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 mod tests {
     use super::*;
     use crate::{
-        journal::{self, contiguous::fixed},
+        journal,
         mmr::iterator::nodes_to_pin,
         qmdb::{
             self,
