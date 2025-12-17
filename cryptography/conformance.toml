@@ -98,6 +98,10 @@ hash = "9010ca9b2849258179377f855fb77967ff003c8f349258d868bab76b0bfa1c5a"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
+["commonware_cryptography::handshake::conformance::Handshake"]
+n_cases = 4096
+hash = "ed6ff974cf9460e825683ccaef3946e46c0db7281b41209dcee641ad1d46db77"
+
 ["commonware_cryptography::handshake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
