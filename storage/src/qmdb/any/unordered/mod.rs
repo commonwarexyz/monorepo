@@ -447,7 +447,7 @@ pub(super) mod test {
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [fixed::Db] type used in these unit tests.
     type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
     /// A type alias for the concrete [variable::Db] type used in these unit tests.

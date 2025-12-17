@@ -949,7 +949,7 @@ mod test {
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [fixed::Db] type used in these unit tests.
     type FixedDb = fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
