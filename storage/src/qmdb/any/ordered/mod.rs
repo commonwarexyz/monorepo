@@ -176,7 +176,7 @@ where
                 op.is_update(),
                 "location does not reference update operation. loc={loc}"
             );
-            if *op.key().expect("update operation must have key") == *key {
+            if op.key().expect("update operation must have key") == key {
                 let Operation::Update(data) = op else {
                     unreachable!("expected update operation");
                 };
