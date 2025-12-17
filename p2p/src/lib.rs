@@ -10,7 +10,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
@@ -133,7 +133,7 @@ pub trait CheckedSender {
     /// receive the message.
     fn send(
         self,
-        message: impl Buf + Send,
+        message: Bytes,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>>;
 }

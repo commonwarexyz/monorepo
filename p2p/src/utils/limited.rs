@@ -1,7 +1,7 @@
 //! Rate-limited [`Sender`] wrapper.
 
 use crate::{Recipients, Sender};
-use bytes::Buf;
+use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::RateLimiter;
 use commonware_utils::channels::ring;
@@ -105,9 +105,7 @@ where
         if let Some(ref mut subscription) = self.peer_subscription {
             if let Some(peers) = subscription.next().now_or_never().flatten() {
                 self.known_peers = peers;
-
                 rate_limit.retain_recent();
-                rate_limit.shrink_to_fit();
             }
         }
 
@@ -190,10 +188,9 @@ impl<'a, S: Sender> crate::CheckedSender for CheckedSender<'a, S> {
 
     async fn send(
         self,
-        mut message: impl Buf,
+        message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        let message = message.copy_to_bytes(message.remaining());
         self.sender.send(self.recipients, message, priority).await
     }
 }

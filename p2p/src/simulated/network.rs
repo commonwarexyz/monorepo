@@ -866,7 +866,6 @@ impl<P: PublicKey, E: GClock + Send + 'static> Sender<P, E> {
             }
         });
 
-        // Create the unlimited sender
         let unlimited_sender = UnlimitedSender {
             me,
             channel,
@@ -874,11 +873,7 @@ impl<P: PublicKey, E: GClock + Send + 'static> Sender<P, E> {
             high,
             low,
         };
-
-        // Create the peer source for resolving Recipients::All
         let peer_source = PeerSource::new(oracle_sender);
-
-        // Wrap in LimitedSender from utils
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)
