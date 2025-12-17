@@ -49,10 +49,13 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobin},
+    simplex::{
+        self,
+        elector::{Elector, RoundRobin},
+    },
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, Sha256, Signer as _};
+use commonware_cryptography::{certificate::Scheme, ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU32};
@@ -204,9 +207,10 @@ fn main() {
         );
 
         // Initialize consensus
+        let elector = RoundRobin::new(scheme.participants());
         let cfg = simplex::Config {
             scheme,
-            elector: RoundRobin,
+            elector,
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
