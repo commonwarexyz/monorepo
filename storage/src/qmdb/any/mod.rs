@@ -25,6 +25,7 @@ use std::{
     ops::Range,
 };
 
+pub(crate) mod db;
 mod operation;
 
 mod value;

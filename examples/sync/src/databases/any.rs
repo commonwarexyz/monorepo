@@ -9,7 +9,7 @@ use commonware_storage::{
         self,
         any::{
             unordered::{
-                fixed::{Any, Operation as FixedOperation},
+                fixed::{Db, Operation as FixedOperation},
                 Update,
             },
             FixedConfig as Config,
@@ -21,7 +21,7 @@ use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
-pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = FixedOperation<Key, Value>;

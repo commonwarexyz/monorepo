@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{
-            unordered::fixed::{Any, Operation as FixedOperation},
+            unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
         store::CleanStore as _,
@@ -121,17 +121,19 @@ async fn test_sync<
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
-        sync::engine::Config {
-            context,
-            update_rx: None,
-            db_config,
-            fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
-            target,
-            resolver,
-            apply_batch_size: 100,
-            max_outstanding_requests: 10,
-        };
+    let sync_config: sync::engine::Config<
+        Db<deterministic::Context, Key, Value, Sha256, TwoCap>,
+        R,
+    > = sync::engine::Config {
+        context,
+        update_rx: None,
+        db_config,
+        fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
+        target,
+        resolver,
+        apply_batch_size: 100,
+        max_outstanding_requests: 10,
+    };
 
     if let Ok(synced) = sync::sync(sync_config).await {
         let actual_root = synced.root();
@@ -153,7 +155,7 @@ fn fuzz(mut input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut db =
-            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
+            Db::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
                 .await
                 .expect("Failed to init source db");
 
@@ -233,7 +235,7 @@ fn fuzz(mut input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+                    db = Db::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config(TEST_NAME),
                     )

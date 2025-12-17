@@ -1,79 +1,33 @@
 use crate::{
-    journal::{
-        authenticated,
-        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
-    },
+    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     mmr::{
-        mem::{Clean, Dirty, State},
-        Location, Proof,
+        mem::{Dirty, State},
+        Location,
     },
     qmdb::{
-        any::{CleanAny, DirtyAny, ValueEncoding},
+        any::{
+            db::{AuthenticatedLog, Db},
+            CleanAny, DirtyAny, ValueEncoding,
+        },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable, Operation as _},
-        store::{Batchable, LogStore},
-        update_key, update_known_loc, Error, FloorHelper, Index,
+        operation::{Committable as _, Operation as OperationTrait},
+        store::Batchable,
+        update_key, update_known_loc, Error, Index,
     },
-    AuthenticatedBitMap,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use core::{num::NonZeroU64, ops::Range};
+use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
-use tracing::debug;
 
 pub mod fixed;
 pub mod sync;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
-
-type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
-
-/// An indexed, authenticated log of database operations.
-pub struct IndexedLog<
-    E: Storage + Clock + Metrics,
-    C: Contiguous,
-    I: Index,
-    H: Hasher,
-    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
-> where
-    C::Item: Codec,
-{
-    /// A (pruned) log of all operations in order of their application. The index of each
-    /// operation in the log is called its _location_, which is a stable identifier.
-    ///
-    /// # Invariants
-    ///
-    /// - The log is never pruned beyond the inactivity floor.
-    /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<E, C, H, S>,
-
-    /// A location before which all operations are "inactive" (that is, operations before this point
-    /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: Location,
-
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location,
-
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update.
-    ///
-    /// # Invariant
-    ///
-    /// - Only references [Operation::Update]s.
-    pub(crate) snapshot: I,
-
-    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
-    /// active operation to tip.
-    pub(crate) steps: u64,
-
-    /// The number of active keys in the snapshot.
-    pub(crate) active_keys: usize,
-}
 
 impl<
         E: Storage + Clock + Metrics,
@@ -83,40 +37,10 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    pub fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
-    /// reading it from the last commit, which is assumed to be the last operation in the log.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, H, S>,
-    ) -> Result<Location, Error> {
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
-        let last_commit = log.read(last_commit_loc).await?;
-        let inactivity_floor = match last_commit {
-            Operation::CommitFloor(_, loc) => loc,
-            _ => unreachable!("last commit is not a CommitFloor operation"),
-        };
-
-        Ok(inactivity_floor)
-    }
-
-    /// Whether the snapshot currently has no active keys.
-    pub const fn is_empty(&self) -> bool {
-        self.active_keys == 0
-    }
-
     /// Returns the value for `key` and its location, or None if the key is not active.
     pub(crate) async fn get_with_loc(
         &self,
@@ -138,30 +62,11 @@ where
         Ok(None)
     }
 
-    /// Returns the location of the oldest operation that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_loc()
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
         self.get_with_loc(key)
             .await
             .map(|op| op.map(|(value, _)| value))
-    }
-
-    /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        match self.log.read(self.last_commit_loc).await? {
-            Operation::CommitFloor(value, _) => Ok(value),
-            _ => unreachable!("last commit is not a CommitFloor operation"),
-        }
     }
 }
 
@@ -173,7 +78,7 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
@@ -330,52 +235,11 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
+    > Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
-    /// building events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the last operation is not a commit.
-    pub async fn init_from_log<F>(
-        mut index: I,
-        log: AuthenticatedLog<E, C, H>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
-        }
-
-        // Build snapshot from the log
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
-
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot: index,
-            last_commit_loc,
-            steps: 0,
-            active_keys,
-        })
-    }
-
-    /// Returns an [IndexedLog] initialized directly from the given components. The log is
+    /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     async fn from_components(
@@ -395,150 +259,9 @@ where
             last_commit_loc,
             steps: 0,
             active_keys,
+            _update: core::marker::PhantomData,
         })
     }
-
-    /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
-    /// Raises the floor to the tip if the db is empty.
-    pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        Ok(self.inactivity_floor_loc)
-    }
-
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
-        &mut self,
-        status: &mut AuthenticatedBitMap<D, N, Dirty>,
-    ) -> Result<Location, Error> {
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self
-                    .as_floor_helper()
-                    .raise_floor_with_bitmap(status, loc)
-                    .await?;
-            }
-        }
-        self.steps = 0;
-
-        Ok(self.inactivity_floor_loc)
-    }
-
-    /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) const fn as_floor_helper(
-        &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
-        FloorHelper {
-            snapshot: &mut self.snapshot,
-            log: &mut self.log,
-        }
-    }
-
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    /// Applies the given commit operation to the log and commits it to disk. Does not raise the
-    /// inactivity floor.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the given operation is not a commit operation.
-    pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        assert!(op.is_commit(), "commit operation expected");
-        self.last_commit_loc = self.op_count();
-        self.log.append(op).await?;
-
-        self.log.commit().await.map_err(Into::into)
-    }
-
-    /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
-    /// authenticated log will be be committed before consuming.
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(mut self, commit_log: bool) -> Result<(), Error> {
-        if commit_log {
-            self.log.commit().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations.
-    pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        let start_loc = self.last_commit_loc + 1;
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await?;
-
-        Ok(start_loc..self.op_count())
-    }
-
-    /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
-    }
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await.map_err(Into::into)
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
-    }
 }
 
 impl<
@@ -548,170 +271,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, Dirty> {
-        IndexedLog {
-            log: self.log.into_dirty(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            steps: self.steps,
-            active_keys: self.active_keys,
-        }
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, I, H, Dirty>
-where
-    Operation<K, V>: Codec,
-{
-    /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, C, I, H, Clean<H::Digest>> {
-        IndexedLog {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            steps: self.steps,
-            active_keys: self.active_keys,
-        }
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await.map(|_| ())
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::qmdb::store::CleanStore for IndexedLog<E, C, I, H>
-where
-    Operation<K, V>: Codec,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Dirty = IndexedLog<E, C, I, H, Dirty>;
-
-    fn into_dirty(self) -> Self::Dirty {
-        self.into_dirty()
-    }
-
-    fn root(&self) -> Self::Digest {
-        self.log.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        let size = self.op_count();
-        self.log
-            .historical_proof(size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-        S: State<DigestOf<H>>,
-    > LogStore for IndexedLog<E, C, I, H, S>
-where
-    Operation<K, V>: Codec,
-{
-    type Value = V::Value;
-
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > crate::store::Store for IndexedLog<E, C, I, H>
+    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -731,7 +291,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, C, I, H>
+    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -747,7 +307,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
+    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -760,19 +320,19 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::qmdb::store::DirtyStore for IndexedLog<E, C, I, H, Dirty>
+    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
-    type Digest = H::Digest;
-    type Operation = C::Item;
-    type Clean = IndexedLog<E, C, I, H>;
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit(None).await.map(|_| ())
+    }
 
-    async fn merkleize(self) -> Result<Self::Clean, Error> {
-        Ok(self.merkleize())
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
@@ -783,7 +343,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, C, I, H>
+    > CleanAny for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -821,7 +381,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, C, I, H, Dirty>
+    > DirtyAny for Db<E, C, I, H, Update<K, V>, Dirty>
 where
     Operation<K, V>: Codec,
 {
@@ -844,7 +404,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for IndexedLog<E, C, I, H>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -870,7 +430,7 @@ pub(super) mod test {
         mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::DirtyStore as _,
+            store::{DirtyStore as _, LogStore as _},
             verify_proof,
         },
         translator::TwoCap,
@@ -886,11 +446,11 @@ pub(super) mod test {
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [fixed::Db] type used in these unit tests.
+    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.<
-    type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap, Clean<Digest>>;
+    /// A type alias for the concrete [variable::Db] type used in these unit tests.
+    type VariableDb = variable::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {

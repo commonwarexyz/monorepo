@@ -10,7 +10,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            ordered::fixed::{Any, Operation, Update},
+            ordered::fixed::{Db, Operation, Update},
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
@@ -42,11 +42,11 @@ pub struct Current<
     const N: usize,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
-    /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
+    /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T, S>,
+    any: Db<E, K, V, H, T, S>,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
+    /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     status: BitMap<H::Digest, N, S>,
 
@@ -165,7 +165,7 @@ impl<
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !Any::<E, K, V, H, T>::span_contains(&data.key, &data.next_key, key) {
+                if !Db::<E, K, V, H, T>::span_contains(&data.key, &data.next_key, key) {
                     // If the key is not within the span, then this proof cannot prove its
                     // exclusion.
                     return false;
@@ -230,7 +230,7 @@ impl<
 
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
-        let any = Any::init_with_callback(
+        let any = Db::init_with_callback(
             context.with_label("any"),
             config.to_any_config(),
             Some(last_known_inactivity_floor),

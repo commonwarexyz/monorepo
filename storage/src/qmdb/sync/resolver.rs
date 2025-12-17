@@ -3,7 +3,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            unordered::fixed::{Any, Operation as FixedOperation},
+            unordered::fixed::{Db, Operation},
             FixedValue, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
@@ -60,7 +60,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
-impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
+impl<E, K, V, H, T> Resolver for Arc<Db<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -70,7 +70,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
+    type Op = Operation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -90,9 +90,9 @@ where
     }
 }
 
-/// Implement Resolver directly for `Arc<RwLock<Any>>` to eliminate the need for wrapper types
+/// Implement Resolver directly for `Arc<RwLock<Db>>` to eliminate the need for wrapper types
 /// while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Db<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -102,7 +102,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
+    type Op = Operation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -205,7 +205,7 @@ pub(crate) mod tests {
         V: FixedValue + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = FixedOperation<K, V>;
+        type Op = Operation<K, V>;
         type Error = qmdb::Error;
 
         async fn get_operations(

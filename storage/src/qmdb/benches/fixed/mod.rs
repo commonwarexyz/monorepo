@@ -9,8 +9,8 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::{fixed::Any as OAny, variable::Any as OVAny},
-            unordered::{fixed::Any as UAny, variable::Any as UVAny},
+            ordered::{fixed::Db as OFixed, variable::Db as OVariable},
+            unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
@@ -87,10 +87,10 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type UAnyDb =
-    UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type OAnyDb =
-    OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type UFixedDb =
+    UFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type OFixedDb =
+    OFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type UCurrentDb = UCurrent<
     Context,
     <Sha256 as Hasher>::Digest,
@@ -109,9 +109,9 @@ type OCurrentDb = OCurrent<
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type UVAnyDb =
-    UVAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+    UVariable<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type OVAnyDb =
-    OVAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+    OVariable<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Configuration for any QMDB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -176,19 +176,19 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 }
 
 /// Get an unordered any QMDB instance.
-async fn get_any_unordered_fixed(ctx: Context) -> UAnyDb {
+async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+    UFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
         .await
         .unwrap()
 }
 
 /// Get an ordered any QMDB instance.
-async fn get_any_ordered_fixed(ctx: Context) -> OAnyDb {
+async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+    OFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
         .await
         .unwrap()
 }
@@ -219,13 +219,13 @@ async fn get_store(ctx: Context) -> StoreDb {
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    UVAny::init(ctx, variable_any_cfg).await.unwrap()
+    UVariable::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    OVAny::init(ctx, variable_any_cfg).await.unwrap()
+    OVariable::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

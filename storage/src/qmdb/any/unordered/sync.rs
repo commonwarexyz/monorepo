@@ -1,15 +1,10 @@
+use super::fixed::{Db, Operation};
 use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{
-        self,
-        any::{
-            unordered::fixed::{Any, Operation},
-            FixedValue,
-        },
-    },
+    qmdb::{self, any::FixedValue},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -22,7 +17,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -267,12 +262,9 @@ mod tests {
         qmdb::{
             self,
             any::unordered::{
-                fixed::{
-                    test::{
-                        any_db_config, apply_ops, create_test_config, create_test_db,
-                        create_test_ops, AnyTest,
-                    },
-                    Any, Operation,
+                fixed::test::{
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest,
                 },
                 Update,
             },
@@ -1411,7 +1403,7 @@ mod tests {
             }
 
             let db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     any_db_config("sync_basic"),
                     log,
@@ -1468,7 +1460,7 @@ mod tests {
             // Create and populate two databases.
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(context.next_u64());
-            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config.clone())
+            let mut sync_db: AnyTest = Db::init(context.clone(), sync_db_config.clone())
                 .await
                 .unwrap();
             let original_ops = create_test_ops(NUM_OPS);
@@ -1514,7 +1506,7 @@ mod tests {
 
             // Re-open `sync_db`
             let sync_db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     sync_db_config,
                     journal,
@@ -1570,7 +1562,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let db_config = create_test_config(context.next_u64());
-            let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
+            let mut db = Db::init(context.clone(), db_config.clone()).await.unwrap();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             db.commit(None).await.unwrap();
@@ -1599,7 +1591,7 @@ mod tests {
             mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     db_config,
                     journal,

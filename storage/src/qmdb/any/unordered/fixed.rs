@@ -6,10 +6,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            unordered::{self, IndexedLog},
-            value::FixedEncoding,
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, unordered, value::FixedEncoding, FixedConfig as Config,
+            FixedValue,
         },
         Error,
     },
@@ -25,13 +23,13 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
@@ -114,8 +112,8 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
