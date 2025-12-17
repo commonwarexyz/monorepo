@@ -321,6 +321,7 @@ mod tests {
         types::Address as PeerAddress,
         Ingress,
     };
+    use commonware_codec::hostname;
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
@@ -550,7 +551,7 @@ mod tests {
         let egress_socket_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 9090);
         let dns_addr = PeerAddress::Asymmetric {
             ingress: Ingress::Dns {
-                host: "node.example.com".to_string(),
+                host: hostname!("node.example.com"),
                 port: 8080,
             },
             egress: egress_socket_2,
@@ -591,7 +592,7 @@ mod tests {
             assert_eq!(
                 record_2.ingress(),
                 Some(Ingress::Dns {
-                    host: "node.example.com".to_string(),
+                    host: hostname!("node.example.com"),
                     port: 8080
                 }),
                 "Ingress should be DNS address"
@@ -643,7 +644,7 @@ mod tests {
         let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
         let dns_peer_addr = PeerAddress::Asymmetric {
             ingress: Ingress::Dns {
-                host: "node.example.com".to_string(),
+                host: hostname!("node.example.com"),
                 port: 8080,
             },
             egress: egress_socket,

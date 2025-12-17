@@ -18,6 +18,10 @@ hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
 n_cases = 65536
 hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
 
+["commonware_codec::types::net::test::conformance::CodecConformance<Hostname>"]
+n_cases = 65536
+hash = "7e48234785aa28a959d63b7e477ac404cc07930c159501b2f7303ff461036fd0"
+
 ["commonware_codec::types::net::test::conformance::CodecConformance<IpAddr>"]
 n_cases = 65536
 hash = "10aa05c3541805af1d1c6a9d598a2523eb117cf8bb8145c45246f1a8bebdcd76"

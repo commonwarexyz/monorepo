@@ -369,7 +369,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::{hostname, Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
@@ -709,7 +709,7 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
-                host: "node.example.com".to_string(),
+                host: hostname!("node.example.com"),
                 port: 8080,
             };
             let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
@@ -728,7 +728,7 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
-                host: "validator-1.network.io".to_string(),
+                host: hostname!("validator-1.network.io"),
                 port: 9090,
             };
             let original = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
@@ -757,7 +757,7 @@ mod tests {
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
-                host: "peer.network.com".to_string(),
+                host: hostname!("peer.network.com"),
                 port: 8080,
             };
             let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
@@ -779,7 +779,7 @@ mod tests {
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
-                host: "internal.local".to_string(),
+                host: hostname!("internal.local"),
                 port: 8080,
             };
             let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);

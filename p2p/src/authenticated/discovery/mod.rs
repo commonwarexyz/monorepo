@@ -227,6 +227,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
+    use commonware_codec::hostname;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -1149,7 +1150,7 @@ mod tests {
                     vec![(
                         addresses[0].clone(),
                         crate::Ingress::Dns {
-                            host: "boot.local".to_string(),
+                            host: hostname!("boot.local"),
                             port: base_port,
                         },
                     )]
@@ -1277,7 +1278,7 @@ mod tests {
                 vec![(
                     peer0.public_key(),
                     crate::Ingress::Dns {
-                        host: "boot.local".to_string(),
+                        host: hostname!("boot.local"),
                         port: base_port,
                     },
                 )],
@@ -1390,7 +1391,7 @@ mod tests {
                     vec![(
                         addresses[0].clone(),
                         crate::Ingress::Dns {
-                            host: "boot.local".to_string(),
+                            host: hostname!("boot.local"),
                             port: base_port,
                         },
                     )]
@@ -1515,7 +1516,7 @@ mod tests {
             let bootstrappers = vec![(
                 peer0.public_key(),
                 crate::Ingress::Dns {
-                    host: "boot.local".to_string(),
+                    host: hostname!("boot.local"),
                     port: base_port,
                 },
             )];

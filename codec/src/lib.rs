@@ -212,6 +212,9 @@ pub use codec::*;
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
+// Re-export network types
+#[cfg(feature = "std")]
+pub use types::net::{Hostname, MAX_HOSTNAME_LABEL_LEN, MAX_HOSTNAME_LEN};
 
 #[cfg(feature = "arbitrary")]
 pub mod conformance;

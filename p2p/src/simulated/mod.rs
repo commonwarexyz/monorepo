@@ -189,6 +189,7 @@ mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
+    use commonware_codec::hostname;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
@@ -2504,7 +2505,7 @@ mod tests {
             };
             let addr2 = crate::Address::Asymmetric {
                 ingress: crate::Ingress::Dns {
-                    host: "node2.example.com".to_string(),
+                    host: hostname!("node2.example.com"),
                     port: 8080,
                 },
                 egress: SocketAddr::from(([192, 168, 1, 2], 9090)),

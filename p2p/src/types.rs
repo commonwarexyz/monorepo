@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    EncodeSize, Error as CodecError, FixedSize, Hostname, Read, ReadExt, Write,
 };
 use commonware_runtime::{Error as RuntimeError, Resolver};
 use std::net::{IpAddr, SocketAddr};
@@ -13,10 +13,6 @@ const INGRESS_DNS_PREFIX: u8 = 1;
 const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
 const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
-/// Maximum DNS hostname length (255 bytes per RFC 1035 wire format).
-/// Used at decode time to prevent DoS attacks while ensuring peer set consistency.
-pub const MAX_DNS_HOSTNAME_LEN: usize = 255;
-
 /// What we dial to connect to a peer.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ingress {
@@ -25,7 +21,7 @@ pub enum Ingress {
     /// DNS-based ingress address.
     Dns {
         /// Hostname to resolve.
-        host: String,
+        host: Hostname,
         /// Port to connect to.
         port: u16,
     },
@@ -67,10 +63,10 @@ impl Ingress {
         match self {
             Self::Socket(addr) => Ok(*addr),
             Self::Dns { host, port } => {
-                let ips = resolver.resolve(host).await?;
+                let ips = resolver.resolve(host.as_str()).await?;
                 let ip = ips
                     .first()
-                    .ok_or(RuntimeError::ResolveFailed(host.clone()))?;
+                    .ok_or_else(|| RuntimeError::ResolveFailed(host.to_string()))?;
                 Ok(SocketAddr::new(*ip, *port))
             }
         }
@@ -86,9 +82,7 @@ impl Write for Ingress {
             }
             Self::Dns { host, port } => {
                 INGRESS_DNS_PREFIX.write(buf);
-                let bytes = host.as_bytes();
-                bytes.len().write(buf);
-                buf.put_slice(bytes);
+                host.write(buf);
                 port.write(buf);
             }
         }
@@ -100,9 +94,7 @@ impl EncodeSize for Ingress {
         u8::SIZE
             + match self {
                 Self::Socket(addr) => addr.encode_size(),
-                Self::Dns { host, port } => {
-                    host.len().encode_size() + host.len() + port.encode_size()
-                }
+                Self::Dns { host, port } => host.encode_size() + port.encode_size(),
             }
     }
 }
@@ -118,10 +110,7 @@ impl Read for Ingress {
                 Ok(Self::Socket(addr))
             }
             INGRESS_DNS_PREFIX => {
-                let bytes =
-                    Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..=MAX_DNS_HOSTNAME_LEN), ()))?;
-                let host = String::from_utf8(bytes)
-                    .map_err(|_| CodecError::Invalid("Ingress::Dns", "Invalid UTF-8 hostname"))?;
+                let host = Hostname::read(buf)?;
                 let port = u16::read(buf)?;
                 Ok(Self::Dns { host, port })
             }
@@ -236,10 +225,7 @@ impl arbitrary::Arbitrary<'_> for Ingress {
         if u.ratio(1, 2)? {
             Ok(Self::Socket(u.arbitrary()?))
         } else {
-            let len: u8 = u.int_in_range(1..=64)?;
-            let host: String = (0..len)
-                .map(|_| u.choose(&['a', 'b', 'c', 'd', 'e', 'f', '1', '2', '3', '.', '-']))
-                .collect::<Result<_, _>>()?;
+            let host: Hostname = u.arbitrary()?;
             let port = u.arbitrary()?;
             Ok(Self::Dns { host, port })
         }
@@ -263,7 +249,7 @@ impl arbitrary::Arbitrary<'_> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{hostname, DecodeExt, Encode};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -292,7 +278,7 @@ mod tests {
 
         for (host, port) in cases {
             let ingress = Ingress::Dns {
-                host: host.to_string(),
+                host: hostname!(host),
                 port,
             };
             let encoded = ingress.encode();
@@ -303,12 +289,16 @@ mod tests {
 
     #[test]
     fn test_ingress_dns_max_len_exceeded() {
-        let ingress = Ingress::Dns {
-            host: "a".repeat(300),
-            port: 8080,
-        };
-        let encoded = ingress.encode();
-        let result = Ingress::decode(encoded);
+        // Manually encode an invalid DNS entry with a hostname that's too long
+        // (Hostname::new() would reject this, so we encode manually)
+        let mut buf = Vec::new();
+        INGRESS_DNS_PREFIX.write(&mut buf);
+        let long_hostname = "a".repeat(300);
+        long_hostname.len().write(&mut buf);
+        buf.extend(long_hostname.as_bytes());
+        8080u16.write(&mut buf);
+
+        let result = Ingress::decode(bytes::Bytes::from(buf));
         assert!(result.is_err());
     }
 
@@ -318,7 +308,7 @@ mod tests {
         assert_eq!(socket.port(), 8080);
 
         let dns = Ingress::Dns {
-            host: "example.com".to_string(),
+            host: hostname!("example.com"),
             port: 443,
         };
         assert_eq!(dns.port(), 443);
@@ -330,7 +320,7 @@ mod tests {
         assert_eq!(socket.ip(), Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
         let dns = Ingress::Dns {
-            host: "example.com".to_string(),
+            host: hostname!("example.com"),
             port: 443,
         };
         assert_eq!(dns.ip(), None);
@@ -363,7 +353,7 @@ mod tests {
         let egress_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
         let address = Address::Asymmetric {
             ingress: Ingress::Dns {
-                host: "node.example.com".to_string(),
+                host: hostname!("node.example.com"),
                 port: 8080,
             },
             egress: egress_addr,
@@ -388,7 +378,7 @@ mod tests {
 
         let asymmetric = Address::Asymmetric {
             ingress: Ingress::Dns {
-                host: "example.com".to_string(),
+                host: hostname!("example.com"),
                 port: 8080,
             },
             egress: egress_addr,
@@ -396,7 +386,7 @@ mod tests {
         assert_eq!(
             asymmetric.ingress(),
             Ingress::Dns {
-                host: "example.com".to_string(),
+                host: hostname!("example.com"),
                 port: 8080
             }
         );
@@ -422,7 +412,7 @@ mod tests {
     fn test_ingress_is_valid() {
         let socket = Ingress::Socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
         let dns = Ingress::Dns {
-            host: "example.com".to_string(),
+            host: hostname!("example.com"),
             port: 8080,
         };
 

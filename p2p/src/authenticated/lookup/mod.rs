@@ -171,6 +171,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
+    use commonware_codec::{hostname, Hostname};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -1051,19 +1052,20 @@ mod tests {
                 let private_key = ed25519::PrivateKey::from_seed(i as u64);
                 let public_key = private_key.public_key();
                 let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                let host = format!("peer-{i}.local");
-                peers_and_sks.push((private_key, public_key, socket, host));
+                let host_str = format!("peer-{i}.local");
+                let host = Hostname::new(&host_str).unwrap();
+                peers_and_sks.push((private_key, public_key, socket, host_str, host));
             }
 
             // Register DNS mappings for all peers
-            for (_, _, socket, host) in &peers_and_sks {
-                context.resolver_register(host.clone(), Some(vec![socket.ip()]));
+            for (_, _, socket, host_str, _) in &peers_and_sks {
+                context.resolver_register(host_str.clone(), Some(vec![socket.ip()]));
             }
 
             // Create peer addresses with DNS ingress
             let peers: Vec<(_, crate::Address)> = peers_and_sks
                 .iter()
-                .map(|(_, pk, socket, host)| {
+                .map(|(_, pk, socket, _, host)| {
                     (
                         pk.clone(),
                         crate::Address::Asymmetric {
@@ -1079,7 +1081,7 @@ mod tests {
 
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
-            for (i, (private_key, public_key, socket, _)) in peers_and_sks.iter().enumerate() {
+            for (i, (private_key, public_key, socket, _, _)) in peers_and_sks.iter().enumerate() {
                 let context = context.with_label(&format!("peer-{i}"));
 
                 // Create network
@@ -1197,7 +1199,7 @@ mod tests {
                         // Peers 2, 3: Asymmetric with DNS ingress
                         crate::Address::Asymmetric {
                             ingress: crate::Ingress::Dns {
-                                host: format!("peer-{i}.local"),
+                                host: hostname!(&format!("peer-{i}.local")),
                                 port: socket.port(),
                             },
                             egress: *socket,
@@ -1337,7 +1339,7 @@ mod tests {
                     peer0.public_key(),
                     crate::Address::Asymmetric {
                         ingress: crate::Ingress::Dns {
-                            host: "peer-0.local".to_string(),
+                            host: hostname!("peer-0.local"),
                             port: socket0.port(),
                         },
                         egress: socket0,
