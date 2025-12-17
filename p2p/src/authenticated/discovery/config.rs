@@ -32,7 +32,10 @@ pub struct Config<C: Signer> {
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
 
     /// Maximum length of a DNS hostname in an ingress address.
-    pub max_host_len: usize,
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    pub max_host_len: Option<usize>,
 
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
@@ -139,7 +142,7 @@ impl<C: Signer> Config<C> {
             listen,
             dialable: dialable.into(),
             bootstrappers,
-            max_host_len: 256,
+            max_host_len: Some(256),
 
             allow_private_ips: false,
             max_message_size,
@@ -183,7 +186,7 @@ impl<C: Signer> Config<C> {
             listen,
             dialable: dialable.into(),
             bootstrappers,
-            max_host_len: 256,
+            max_host_len: Some(256),
 
             allow_private_ips: true,
             max_message_size,
@@ -220,7 +223,7 @@ impl<C: Signer> Config<C> {
             listen,
             dialable: listen.into(),
             bootstrappers,
-            max_host_len: 256,
+            max_host_len: Some(256),
 
             allow_private_ips: true,
             max_message_size,

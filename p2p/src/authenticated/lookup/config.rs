@@ -24,6 +24,12 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Maximum length of a DNS hostname in an ingress address.
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    pub max_host_len: Option<usize>,
+
     /// Whether or not to attempt handshakes on incoming connections
     /// from unregistered IP addresses.
     pub attempt_unregistered_handshakes: bool,
@@ -106,6 +112,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: false,
+            max_host_len: Some(256),
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -137,6 +144,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: true,
+            max_host_len: Some(256),
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -163,6 +171,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: true,
+            max_host_len: Some(256),
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,

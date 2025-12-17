@@ -35,7 +35,7 @@ pub struct Actor<
     max_peer_set_size: u64,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
-    max_host_len: usize,
+    max_host_len: Option<usize>,
     info_verifier: InfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,

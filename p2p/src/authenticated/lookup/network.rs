@@ -66,6 +66,7 @@ impl<
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                max_host_len: cfg.max_host_len,
                 listener: listener_mailbox,
             },
         );

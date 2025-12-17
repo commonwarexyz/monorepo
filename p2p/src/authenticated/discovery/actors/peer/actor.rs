@@ -33,7 +33,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     max_bit_vec: u64,
     max_peers: usize,
-    max_host_len: usize,
+    max_host_len: Option<usize>,
 
     mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,

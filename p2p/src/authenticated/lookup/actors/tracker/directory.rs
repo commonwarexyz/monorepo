@@ -25,6 +25,12 @@ pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
+    /// Maximum length of a DNS hostname in an ingress address.
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    pub max_host_len: Option<usize>,
+
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
@@ -40,6 +46,10 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
 
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Maximum length of a DNS hostname in an ingress address.
+    /// `None` means DNS is disabled.
+    max_host_len: Option<usize>,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -76,6 +86,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         Self {
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
+            max_host_len: cfg.max_host_len,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -124,22 +135,36 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             }
         }
 
-        // Create and store new peer set
-        for (peer, addr) in &peers {
+        // Create and store new peer set, filtering out invalid addresses
+        let mut valid_peers = Vec::new();
+        for (peer, addr) in peers {
+            // Skip peers with invalid ingress addresses (e.g., DNS when disabled)
+            if !addr.ingress().is_valid(self.max_host_len) {
+                warn!(?peer, "skipping peer with invalid ingress address");
+                continue;
+            }
+
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr.clone());
+                    entry.update(addr);
                     entry
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    entry.insert(Record::known(addr.clone()))
+                    entry.insert(Record::known(addr))
                 }
             };
             record.increment();
+            valid_peers.push(peer);
         }
-        self.sets.insert(index, peers.into_keys());
+        self.sets.insert(
+            index,
+            valid_peers
+                .into_iter()
+                .try_collect()
+                .expect("peers are unique"),
+        );
 
         // Remove oldest entries if necessary
         let mut deleted_peers = Vec::new();
@@ -323,6 +348,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            max_host_len: Some(256),
             max_sets: 1,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -383,6 +409,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            max_host_len: Some(256),
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -469,6 +496,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            max_host_len: Some(256),
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -513,6 +541,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            max_host_len: Some(256),
             max_sets: 3,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
@@ -597,6 +626,72 @@ mod tests {
                 !registered.contains(&ingress_socket.ip()),
                 "Registered should NOT contain peer 1's ingress IP"
             );
+        });
+    }
+
+    #[test]
+    fn test_dns_addresses_rejected_when_disabled() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+
+        // DNS is disabled when max_host_len is None
+        let config = super::Config {
+            allow_private_ips: true,
+            max_host_len: None,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        // Create peers with different address types
+        let pk_socket = ed25519::PrivateKey::from_seed(1).public_key();
+        let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let socket_peer_addr = PeerAddress::Symmetric(socket_addr);
+
+        let pk_dns = ed25519::PrivateKey::from_seed(2).public_key();
+        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+        let dns_peer_addr = PeerAddress::Asymmetric {
+            ingress: Ingress::Dns {
+                host: "node.example.com".to_string(),
+                port: 8080,
+            },
+            egress: egress_socket,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Add set with both socket and DNS addresses
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_socket.clone(), socket_peer_addr.clone()),
+                        (pk_dns.clone(), dns_peer_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Socket peer should be tracked
+            assert!(
+                directory.peers.contains_key(&pk_socket),
+                "Socket peer should be tracked"
+            );
+
+            // DNS peer should NOT be tracked (filtered out)
+            assert!(
+                !directory.peers.contains_key(&pk_dns),
+                "DNS peer should not be tracked when DNS is disabled"
+            );
+
+            // Verify dialable only returns socket peer
+            let dialable = directory.dialable();
+            assert_eq!(dialable.len(), 1);
+            assert_eq!(dialable[0], pk_socket);
         });
     }
 }

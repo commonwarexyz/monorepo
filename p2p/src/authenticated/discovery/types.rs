@@ -57,7 +57,10 @@ pub struct PayloadConfig {
     pub max_data_length: usize,
 
     /// The maximum length of a DNS hostname in an ingress address.
-    pub max_host_len: usize,
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    pub max_host_len: Option<usize>,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -274,10 +277,13 @@ impl<C: PublicKey> Write for Info<C> {
 }
 
 impl<C: PublicKey> Read for Info<C> {
-    /// Maximum host length for DNS ingress addresses.
-    type Cfg = usize;
+    /// Configuration for reading an `Info`.
+    ///
+    /// - `Some(n)` = DNS enabled with max hostname length of `n`
+    /// - `None` = DNS disabled (rejects `Ingress::Dns` addresses)
+    type Cfg = Option<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, max_host_len: &usize) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_host_len: &Option<usize>) -> Result<Self, CodecError> {
         let ingress = Ingress::read_cfg(buf, max_host_len)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
@@ -431,7 +437,8 @@ mod tests {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
         let decoded =
-            Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), 256)).unwrap();
+            Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), Some(256)))
+                .unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.ingress, decoded.ingress);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -440,11 +447,11 @@ mod tests {
         }
 
         let too_short =
-            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(..3), 256));
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(..3), Some(256)));
         assert!(matches!(too_short, Err(CodecError::InvalidLength(3))));
 
         let too_long =
-            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(4..), 256));
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(4..), Some(256)));
         assert!(matches!(too_long, Err(CodecError::InvalidLength(3))));
     }
 
@@ -455,7 +462,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 100,
-            max_host_len: 256,
+            max_host_len: Some(256),
         };
 
         // Test BitVec
@@ -503,7 +510,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 100,
-            max_host_len: 256,
+            max_host_len: Some(256),
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
@@ -516,7 +523,7 @@ mod tests {
             max_bit_vec: 8,
             max_peers: 10,
             max_data_length: 32,
-            max_host_len: 256,
+            max_host_len: Some(256),
         };
         let encoded = Payload::<PublicKey>::BitVec(BitVec {
             index: 5,
@@ -533,7 +540,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 1,
             max_data_length: 32,
-            max_host_len: 256,
+            max_host_len: Some(256),
         };
         let peers = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(peers).encode();
@@ -547,7 +554,7 @@ mod tests {
             max_bit_vec: 1024,
             max_peers: 10,
             max_data_length: 4,
-            max_host_len: 256,
+            max_host_len: Some(256),
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
@@ -797,7 +804,7 @@ mod tests {
             };
             let original = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
             let encoded = original.encode();
-            let decoded = Info::<PublicKey>::decode_cfg(encoded, &256).unwrap();
+            let decoded = Info::<PublicKey>::decode_cfg(encoded, &Some(256)).unwrap();
 
             assert_eq!(decoded.ingress, dns_ingress);
             assert_eq!(decoded.timestamp, timestamp);
@@ -852,6 +859,35 @@ mod tests {
             assert!(
                 validator.validate(&context, &[peer]).is_ok(),
                 "DNS ingress should bypass private IP check"
+            );
+        });
+    }
+
+    #[test]
+    fn info_dns_decode_fails_when_dns_disabled() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let peer_key = PrivateKey::random(&mut context);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: "node.example.com".to_string(),
+                port: 8080,
+            };
+            let original = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
+            let encoded = original.encode();
+
+            // Decoding should fail when DNS is disabled (max_host_len is None)
+            let result = Info::<PublicKey>::decode_cfg(encoded.clone(), &None);
+            assert!(
+                result.is_err(),
+                "Decoding DNS ingress should fail when DNS is disabled"
+            );
+
+            // Decoding should succeed when DNS is enabled
+            let result = Info::<PublicKey>::decode_cfg(encoded, &Some(256));
+            assert!(
+                result.is_ok(),
+                "Decoding DNS ingress should succeed when DNS is enabled"
             );
         });
     }
