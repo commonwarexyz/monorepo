@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        elector::{Elector, ElectorConfig, RandomConfig, RoundRobinConfig},
+        elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
         scheme::{bls12381_threshold, ed25519},
     },
     types::{Round, View},
@@ -70,24 +70,16 @@ where
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
         FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::<Sha256>::default(), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobin::<Sha256>::default(), None);
         }
         FuzzElector::RoundRobinShuffled(seed) => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobinConfig::<Sha256>::shuffled(seed), None);
+            fuzz::<ed25519::Scheme, _>(&input, RoundRobin::<Sha256>::shuffled(seed), None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(
-                &input,
-                RandomConfig,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinSig>, _>(
-                &input,
-                RandomConfig,
-                Some(certificate),
-            );
+            fuzz::<bls12381_threshold::Scheme<_, MinSig>, _>(&input, Random, Some(certificate));
         }
     }
 });

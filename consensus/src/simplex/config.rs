@@ -1,5 +1,5 @@
 use super::{
-    elector::ElectorConfig,
+    elector::Config as ElectorConfig,
     types::{Activity, Context},
 };
 use crate::{
@@ -36,8 +36,8 @@ pub struct Config<
     /// Leader election configuration.
     ///
     /// Determines how leaders are selected for each view. Built-in options include
-    /// [`RoundRobinConfig`](super::elector::RoundRobinConfig) for deterministic rotation and
-    /// [`RandomConfig`](super::elector::RandomConfig) for unpredictable selection using BLS
+    /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
+    /// [`Random`](super::elector::Random) for unpredictable selection using BLS
     /// threshold signatures.
     ///
     /// The configuration is used internally by consensus to build the actual elector

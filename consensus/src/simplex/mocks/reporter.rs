@@ -2,7 +2,7 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        elector::{Elector, ElectorConfig},
+        elector::{Config as ElectorConfig, Elector},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,

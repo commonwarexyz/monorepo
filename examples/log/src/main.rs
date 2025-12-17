@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobinConfig},
+    simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
@@ -206,7 +206,7 @@ fn main() {
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
-            elector: RoundRobinConfig::<Sha256>::default(),
+            elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),

@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
-        elector::ElectorConfig,
+        elector::Config as ElectorConfig,
         scheme,
         types::{Certificate, Context},
     },

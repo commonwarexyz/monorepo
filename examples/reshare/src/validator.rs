@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver,
-    simplex::{elector::ElectorConfig, scheme::Scheme},
+    simplex::{elector::Config as ElectorConfig, scheme::Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
@@ -163,7 +163,7 @@ mod test {
     };
     use anyhow::anyhow;
     use commonware_consensus::{
-        simplex::elector::{RandomConfig, RoundRobinConfig},
+        simplex::elector::{Random, RoundRobin},
         types::Epoch,
     };
     use commonware_cryptography::{
@@ -428,10 +428,10 @@ mod test {
             pk: PublicKey,
         ) {
             if self.output.is_none() {
-                self.start_one::<EdScheme, RoundRobinConfig>(ctx, oracle, updates, pk)
+                self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig>, RandomConfig>(ctx, oracle, updates, pk)
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
                     .await;
             }
         }
@@ -724,9 +724,9 @@ mod test {
 
                         info!(pk = ?pk, "restarting participant");
                         if team.output.is_none() {
-                            team.start_one::<EdScheme, RoundRobinConfig>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig>, RandomConfig>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

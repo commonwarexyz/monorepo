@@ -6,7 +6,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{batcher, resolver},
-        elector::ElectorConfig,
+        elector::Config as ElectorConfig,
         metrics::{self, Outbound},
         scheme::Scheme,
         types::{

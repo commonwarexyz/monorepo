@@ -3,7 +3,7 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
-        elector::{Elector, ElectorConfig},
+        elector::{Config as ElectorConfig, Elector},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
