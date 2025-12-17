@@ -43,10 +43,8 @@ pub struct Network<
     info_verifier: InfoVerifier<C::PublicKey>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
-        C: Signer,
-    > Network<E, C>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///

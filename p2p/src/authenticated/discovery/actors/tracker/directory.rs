@@ -9,7 +9,7 @@ use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
 };
 use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
-use governor::{clock::Clock as GClock, Quota};
+use governor::Quota;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -32,7 +32,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -62,7 +62,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

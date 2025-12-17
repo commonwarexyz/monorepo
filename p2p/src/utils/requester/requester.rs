@@ -8,7 +8,6 @@ use commonware_runtime::{
 };
 use commonware_utils::PrioritySet;
 use either::Either;
-use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -40,7 +39,7 @@ pub enum Error {
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
+pub struct Requester<E: Clock + Rng + Metrics, P: PublicKey> {
     context: E,
     me: Option<P>,
     metrics: super::Metrics,
@@ -80,7 +79,7 @@ pub struct Request<P: PublicKey> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
+impl<E: Clock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<P>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, context.clone());

@@ -46,7 +46,6 @@ use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
 };
-use governor::clock::Clock as GClock;
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
@@ -103,7 +102,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<E, B, P, FC, FB, A = Exact>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -162,7 +161,7 @@ where
 
 impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
