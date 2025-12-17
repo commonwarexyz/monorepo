@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::variable::Any as OAny, unordered::variable::Any as UAny,
+            ordered::variable::Variable as OVariable, unordered::variable::Variable as UVariable,
             VariableConfig as AConfig,
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
@@ -59,8 +59,8 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
-type UAnyDb = UAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type OAnyDb = OAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+type UAnyDb = UVariable<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+type OAnyDb = OVariable<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 
 fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -99,13 +99,13 @@ async fn get_store(ctx: Context) -> StoreDb {
 async fn get_any_unordered(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UAny::init(ctx, any_cfg).await.unwrap()
+    UVariable::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OAny::init(ctx, any_cfg).await.unwrap()
+    OVariable::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

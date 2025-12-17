@@ -399,13 +399,6 @@ where
     }
 }
 
-// =============================================================================
-// Trait implementations
-// =============================================================================
-
-// Note: StorePersistable is implemented in the specialized modules because it requires StoreMut,
-// which depends on the specialized `update` method.
-
 impl<E, K, V, U, C, I, H> crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
@@ -517,7 +510,3 @@ where
         Ok(self.merkleize())
     }
 }
-
-// Note: Store, StoreMut, StoreDeletable, CleanAny, DirtyAny, and Batchable trait implementations
-// are in the specialized modules (ordered/mod.rs and unordered/mod.rs) because they depend on
-// methods like `get`, `update`, `create`, `delete` which have different implementations.

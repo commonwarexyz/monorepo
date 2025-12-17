@@ -1,5 +1,4 @@
-//! An authenticated database that provides succinct proofs of _any_ value ever associated
-//! with a key, where values can have varying sizes.
+//! An _unordered_ variant of an authenticated database with variable-size values.
 //!
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
@@ -33,13 +32,13 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+pub type Variable<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Variable<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Variable] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -125,8 +124,8 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    /// A type alias for the concrete [Variable] type used in these unit tests.
+    type AnyTest = Variable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -342,7 +341,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
 
             async fn apply_more_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Variable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
@@ -404,7 +403,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
 
             async fn apply_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Variable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());

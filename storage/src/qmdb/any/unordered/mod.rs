@@ -33,6 +33,8 @@ pub mod sync;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
+pub use fixed::Fixed;
+pub use variable::Variable;
 
 // =============================================================================
 // Unordered-specific impl blocks
@@ -237,9 +239,6 @@ where
     }
 }
 
-// Note: init_from_log, raise_floor, raise_floor_with_bitmap, as_floor_helper, prune
-// are all in the shared indexed_log.rs module.
-
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
@@ -278,9 +277,6 @@ where
         })
     }
 }
-
-// Note: apply_commit_op, simulate_failure, commit, sync, close, destroy, into_dirty, merkleize,
-// StorePersistable, LogStorePrunable, CleanStore, LogStore, DirtyStore are all in the shared indexed_log.rs module.
 
 impl<
         E: Storage + Clock + Metrics,
@@ -353,8 +349,6 @@ where
         self.destroy().await
     }
 }
-
-// Note: DirtyStore is in the shared indexed_log.rs module.
 
 impl<
         E: Storage + Clock + Metrics,
@@ -467,10 +461,10 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
+    type FixedDb = Fixed<Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Variable] type used in these unit tests.
+    type VariableDb = Variable<Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {

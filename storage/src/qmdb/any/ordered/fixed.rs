@@ -1,4 +1,4 @@
-//! An _ordered_ variant of a Any authenticated database with fixed-size values which additionally
+//! An _ordered_ variant of an authenticated database with fixed-size values which additionally
 //! maintains the lexicographic-next active key of each active key. For example, if the active key
 //! set is `{bar, baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for
 //! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
@@ -29,13 +29,13 @@ pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+pub type Fixed<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Fixed<E, K, V, H, T>
 {
-    /// Returns an [Any] qmdb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Fixed] qmdb initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
@@ -113,8 +113,8 @@ mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Fixed] type used in these unit tests.
+    type AnyTest = Fixed<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -245,7 +245,7 @@ mod test {
             let seed = context.next_u64();
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
             let mut db =
-                Any::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
+                Fixed::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
                     .await
                     .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
@@ -904,7 +904,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                db: &mut Any<Context, Digest, i32, Sha256, T>,
+                db: &mut Fixed<Context, Digest, i32, Sha256, T>,
                 rng: &mut StdRng,
             ) {
                 let mut keys = BTreeMap::new();
@@ -964,17 +964,19 @@ mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
-            let mut db = Any::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
-                .await
-                .unwrap();
+            let mut db =
+                Fixed::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
+                    .await
+                    .unwrap();
             insert_random(&mut db, &mut rng).await;
             db.destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
-            let mut db = Any::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
-                .await
-                .unwrap();
+            let mut db =
+                Fixed::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
+                    .await
+                    .unwrap();
             insert_random(&mut db, &mut rng).await;
             db.destroy().await.unwrap();
         });

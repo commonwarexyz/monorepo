@@ -36,11 +36,13 @@ pub mod fixed;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+pub use fixed::Fixed;
+pub use variable::Variable;
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 
-/// The return type of the `Any::update_loc` method.
+/// The return type of the `IndexedLog::update_loc` method.
 enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
@@ -743,10 +745,6 @@ where
     }
 }
 
-// Note: init_from_log, raise_floor, raise_floor_with_bitmap, as_floor_helper, prune,
-// into_dirty, merkleize, apply_commit_op, simulate_failure, commit, sync, close, destroy
-// are all in the shared indexed_log.rs module.
-
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
@@ -766,8 +764,6 @@ where
         self.destroy().await
     }
 }
-
-// Note: LogStorePrunable, CleanStore, LogStore are in the shared indexed_log.rs module.
 
 impl<
         E: Storage + Clock + Metrics,
@@ -820,8 +816,6 @@ where
         self.delete(key).await
     }
 }
-
-// Note: DirtyStore is in the shared indexed_log.rs module.
 
 impl<
         E: Storage + Clock + Metrics,
@@ -967,10 +961,10 @@ mod test {
     use core::{future::Future, pin::Pin};
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type FixedDb = fixed::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type FixedDb = Fixed<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type VariableDb = variable::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Variable] type used in these unit tests.
+    type VariableDb = Variable<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_fixed_db(context: Context) -> FixedDb {
