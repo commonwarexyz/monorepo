@@ -87,9 +87,9 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type UAnyDb =
+type UFixedDb =
     UFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type OAnyDb =
+type OFixedDb =
     OFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type UCurrentDb = UCurrent<
     Context,
@@ -176,7 +176,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 }
 
 /// Get an unordered any QMDB instance.
-async fn get_any_unordered_fixed(ctx: Context) -> UAnyDb {
+async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -185,7 +185,7 @@ async fn get_any_unordered_fixed(ctx: Context) -> UAnyDb {
 }
 
 /// Get an ordered any QMDB instance.
-async fn get_any_ordered_fixed(ctx: Context) -> OAnyDb {
+async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
