@@ -504,7 +504,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -523,7 +523,7 @@ mod tests {
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
-        assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_notarization(), Some(certificate));
 
         // Should not vote again
@@ -557,7 +557,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -576,7 +576,7 @@ mod tests {
         let (accepted, equivocator) = round.add_finalization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
-        assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_finalization(), Some(certificate));
 
         // Add conflicting notarization certificate
@@ -615,7 +615,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal.clone()));
 
         // Add matching notarization certificate
@@ -677,7 +677,7 @@ mod tests {
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round, now);
-        round.set_leader(None);
+        round.set_leader(0);
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
         round.replay(&Artifact::Nullify(nullify_local));
@@ -718,7 +718,7 @@ mod tests {
 
         // Replay finalize and verify nullify is blocked
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(None);
+        round.set_leader(0);
         round.replay(&Artifact::Finalize(finalize_local));
 
         // Check that construct_nullify returns None
