@@ -39,9 +39,6 @@ pub struct Config<
     /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
     /// [`Random`](super::elector::Random) for unpredictable selection using BLS
     /// threshold signatures.
-    ///
-    /// The configuration is used internally by consensus to build the actual elector
-    /// with the correct participant set.
     pub elector: L,
 
     /// Blocker for the network.
