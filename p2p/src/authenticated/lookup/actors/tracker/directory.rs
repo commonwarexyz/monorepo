@@ -10,7 +10,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect,
+    IpAddrExt, TryCollect,
 };
 use governor::{clock::Clock as GClock, Quota};
 use rand::Rng;
@@ -141,6 +141,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             // Skip peers with invalid ingress addresses (e.g., DNS when disabled)
             if !addr.ingress().is_valid(self.max_host_len) {
                 warn!(?peer, "skipping peer with invalid ingress address");
+                continue;
+            }
+
+            // Skip peers with private egress IPs when not allowed
+            #[allow(unstable_name_collisions)]
+            if !self.allow_private_ips && !addr.egress_ip().is_global() {
+                warn!(?peer, "skipping peer with private egress IP");
                 continue;
             }
 
@@ -692,6 +699,69 @@ mod tests {
             let dialable = directory.dialable();
             assert_eq!(dialable.len(), 1);
             assert_eq!(dialable[0], pk_socket);
+        });
+    }
+
+    #[test]
+    fn test_private_egress_ip_rejected_when_not_allowed() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+
+        // Private IPs are NOT allowed
+        let config = super::Config {
+            allow_private_ips: false,
+            max_host_len: Some(256),
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        // Create peer with public egress IP
+        let pk_public = ed25519::PrivateKey::from_seed(1).public_key();
+        let public_addr =
+            PeerAddress::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
+
+        // Create peer with private egress IP
+        let pk_private = ed25519::PrivateKey::from_seed(2).public_key();
+        let private_addr = PeerAddress::Symmetric(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Add set with both public and private egress IPs
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_public.clone(), public_addr.clone()),
+                        (pk_private.clone(), private_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Public peer should be tracked
+            assert!(
+                directory.peers.contains_key(&pk_public),
+                "Public peer should be tracked"
+            );
+
+            // Private peer should NOT be tracked (filtered out)
+            assert!(
+                !directory.peers.contains_key(&pk_private),
+                "Private peer should not be tracked when private IPs are not allowed"
+            );
+
+            // Verify registered() only returns public IP
+            let registered = directory.registered();
+            assert!(registered.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
+            assert!(!registered.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
     }
 }
