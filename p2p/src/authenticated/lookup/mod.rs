@@ -178,7 +178,7 @@ mod tests {
         TryCollect, NZU32,
     };
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::{clock::ReasonablyRealtime, Quota};
+    use governor::Quota;
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
@@ -216,7 +216,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner + Clock + Rng + CryptoRng + RNetwork + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,

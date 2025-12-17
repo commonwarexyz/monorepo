@@ -13,7 +13,7 @@ use commonware_runtime::{
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
+use governor::{Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -39,10 +39,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
-    C: Signer,
-> {
+pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -59,9 +56,7 @@ pub struct Actor<
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
-{
+impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
