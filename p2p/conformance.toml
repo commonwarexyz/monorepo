@@ -8,11 +8,11 @@ hash = "6e3772525660cd57a4223330b548ab47656d68ab0bfb8014d4efbeb9c1646508"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Info<PublicKey>>"]
 n_cases = 65536
-hash = "d903e0c7e8fa28e20c13f53ab852885fb761041ff35ead7818590eba57b2fd10"
+hash = "37457ac4dfe77e8021f89721d9ec60ebcf8334faa9e591116a3ce52b63ea0799"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Payload<PublicKey>>"]
 n_cases = 65536
-hash = "201e2895809111ab82f43879467cd4ae71b453ee05f51d8b6e3eec5d0ff2f50f"
+hash = "11d648c15d815169a7d101edb2f9e97e491e1dfe976e00755054578d3388c625"
 
 ["commonware_p2p::authenticated::lookup::types::tests::conformance::CodecConformance<Message>"]
 n_cases = 65536
