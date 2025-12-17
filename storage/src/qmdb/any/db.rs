@@ -32,7 +32,7 @@ use tracing::debug;
 pub(crate) type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> =
     authenticated::Journal<E, C, H, S>;
 
-/// An "Any" QMDB implementation generic over ordered/ordered keys and variable/fixed values.
+/// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
 /// - [crate::qmdb::any::ordered::fixed::Db]
 /// - [crate::qmdb::any::ordered::variable::Db]
