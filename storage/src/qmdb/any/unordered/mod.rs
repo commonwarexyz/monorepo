@@ -242,7 +242,7 @@ where
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
-    pub(crate) async fn from_components(
+    async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,

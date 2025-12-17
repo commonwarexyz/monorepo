@@ -1,4 +1,5 @@
-//! An _unordered_ variant of an authenticated database with variable-size values.
+//! An authenticated database that provides succinct proofs of _any_ value ever associated
+//! with a key, where values can have varying sizes.
 //!
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
