@@ -157,6 +157,19 @@ fn encode_block(block: &Block) -> Bytes {
     Bytes::copy_from_slice(block.encode().as_ref())
 }
 
+// `verify(context, digest)` is contextual: it asks whether `digest` is a valid child of
+// `context.parent.1` (the parent digest simplex is building on).
+//
+// Even if `digest` is already present in `ChainStore` (cached from a previous propose/verify),
+// we must still check that it extends the specific parent in `context`, otherwise we could
+// vote "valid" for a block on the wrong fork.
+//
+// In this example, non-genesis blocks are only inserted once their actual parent entry is
+// present (`handle_propose` / `try_verify_and_insert` require it) and we never prune.
+// So a missing `context.parent` here indicates an inconsistent request (or corrupted state).
+//
+// Improving liveness for out-of-order delivery (child arrives before parent) would require a
+// fetch/resolver path and deferring verification until the parent is available.
 fn verify_stored_block_against_context(
     store: &ChainStore,
     context: &Context<ConsensusDigest, PublicKey>,
