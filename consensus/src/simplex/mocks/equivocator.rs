@@ -71,6 +71,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: Elector<S>, H: Hasher>
         let (mut vote_sender, _) = vote_network;
         let (_, mut certificate_receiver) = certificate_network;
 
+        // Initialize elector with participants
         self.elector.initialize(self.scheme.participants());
 
         loop {

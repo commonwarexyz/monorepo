@@ -68,6 +68,7 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
+        // Initialize elector with participants
         cfg.elector.initialize(&cfg.participants);
 
         Self {
