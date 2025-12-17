@@ -277,7 +277,9 @@ pub type RateLimiter<K, C> = governor::RateLimiter<
 ///
 /// It is necessary to mock time to provide deterministic execution
 /// of arbitrary tasks.
-pub trait Clock: Clone + Send + Sync + 'static {
+pub trait Clock:
+    governor::clock::Clock<Instant = SystemTime> + Clone + Send + Sync + 'static
+{
     /// Returns the current time.
     fn current(&self) -> SystemTime;
 

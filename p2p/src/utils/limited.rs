@@ -3,11 +3,11 @@
 use crate::{Recipients, Sender};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::RateLimiter;
+use commonware_runtime::{Clock, RateLimiter};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
-use std::{cmp, fmt, sync::Arc};
+use governor::Quota;
+use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
 ///
@@ -26,7 +26,7 @@ pub trait Peers: Clone + Send + Sync + 'static {
 /// A wrapper around a [`Sender`] that provides rate limiting with retry-time feedback.
 pub struct LimitedSender<E, S, P>
 where
-    E: GClock,
+    E: Clock,
     S: Sender,
     P: Peers<PublicKey = S::PublicKey>,
 {
@@ -39,7 +39,7 @@ where
 
 impl<E, S, P> Clone for LimitedSender<E, S, P>
 where
-    E: GClock,
+    E: Clock,
     S: Sender,
     P: Peers<PublicKey = S::PublicKey>,
 {
@@ -56,7 +56,7 @@ where
 
 impl<E, S, P> fmt::Debug for LimitedSender<E, S, P>
 where
-    E: GClock,
+    E: Clock,
     S: Sender,
     P: Peers<PublicKey = S::PublicKey>,
 {
@@ -69,7 +69,7 @@ where
 
 impl<E, S, P> LimitedSender<E, S, P>
 where
-    E: GClock,
+    E: Clock,
     S: Sender,
     P: Peers<PublicKey = S::PublicKey>,
 {
@@ -93,7 +93,7 @@ where
     pub async fn check(
         &mut self,
         recipients: Recipients<S::PublicKey>,
-    ) -> Result<CheckedSender<'_, S>, E::Instant> {
+    ) -> Result<CheckedSender<'_, S>, SystemTime> {
         // Lazily establish peer subscription on first use
         if self.peer_subscription.is_none() {
             self.peer_subscription = Some(self.peers.subscribe().await);
@@ -151,10 +151,10 @@ where
 pub(crate) fn filter_rate_limited<'a, K, C>(
     peers: impl Iterator<Item = &'a K>,
     rate_limit: &RateLimiter<K, C>,
-) -> (Vec<K>, Option<C::Instant>)
+) -> (Vec<K>, Option<SystemTime>)
 where
     K: PublicKey,
-    C: GClock,
+    C: Clock,
 {
     peers.fold(
         (Vec::new(), None),

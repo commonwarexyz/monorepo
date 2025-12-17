@@ -14,8 +14,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
-use governor::clock::Clock as GClock;
-use std::{error::Error as StdError, fmt::Debug, future::Future};
+use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
 pub mod authenticated;
 pub mod simulated;
@@ -81,9 +80,6 @@ pub trait LimitedSender: Clone + Send + Sync + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
 
-    /// The type of [`GClock`] used for rate-limiting.
-    type Clock: GClock + Send + 'static;
-
     /// The type of [`CheckedSender`] returned after checking recipients.
     type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
     where
@@ -105,7 +101,7 @@ pub trait LimitedSender: Clone + Send + Sync + 'static {
     fn check<'a>(
         &'a mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = Result<Self::Checked<'a>, <Self::Clock as GClock>::Instant>>;
+    ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>>;
 }
 
 /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.

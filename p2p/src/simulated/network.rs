@@ -24,7 +24,7 @@ use futures::{
     channel::{mpsc, oneshot},
     future, SinkExt, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
+use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -102,7 +102,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> {
+pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
@@ -162,7 +162,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: Pu
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -536,7 +536,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
     }
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
@@ -720,11 +720,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + Metrics, P: PublicKey> Netwo
 ///
 /// Implements [`crate::utils::limited::Peers`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
-pub struct PeerSource<P: PublicKey, E: GClock + Send + 'static> {
+pub struct PeerSource<P: PublicKey, E: Clock> {
     sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> Clone for PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> Clone for PeerSource<P, E> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -732,13 +732,13 @@ impl<P: PublicKey, E: GClock + Send + 'static> Clone for PeerSource<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> PeerSource<P, E> {
     const fn new(sender: mpsc::UnboundedSender<ingress::Message<P, E>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> Peers for PeerSource<P, E> {
+impl<P: PublicKey, E: Clock> Peers for PeerSource<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
@@ -807,11 +807,11 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 ///
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
-pub struct Sender<P: PublicKey, E: GClock + Send + 'static> {
+pub struct Sender<P: PublicKey, E: Clock> {
     limited_sender: LimitedSender<E, UnlimitedSender<P>, PeerSource<P, E>>,
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> Clone for Sender<P, E> {
+impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
     fn clone(&self) -> Self {
         Self {
             limited_sender: self.limited_sender.clone(),
@@ -819,13 +819,13 @@ impl<P: PublicKey, E: GClock + Send + 'static> Clone for Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> Debug for Sender<P, E> {
+impl<P: PublicKey, E: Clock> Debug for Sender<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sender").finish_non_exhaustive()
     }
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static> Sender<P, E> {
+impl<P: PublicKey, E: Clock> Sender<P, E> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         context: impl Spawner + Metrics,
@@ -899,7 +899,7 @@ impl<P: PublicKey, E: GClock + Send + 'static> Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::Sender for Sender<P, E> {
+impl<P: PublicKey, E: Clock> crate::Sender for Sender<P, E> {
     type Error = Error;
     type PublicKey = P;
 
@@ -917,9 +917,8 @@ impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::Sender for Sender<
     }
 }
 
-impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::LimitedSender for Sender<P, E> {
+impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     type PublicKey = P;
-    type Clock = E;
     type Checked<'a>
         = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
     where
@@ -928,21 +927,19 @@ impl<P: PublicKey, E: GClock + Clone + Send + 'static> crate::LimitedSender for 
     async fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> Result<Self::Checked<'_>, E::Instant> {
+    ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
     }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
-pub struct SplitSender<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> {
+pub struct SplitSender<P: PublicKey, E: Clock, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P, E>,
     forwarder: F,
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> Clone
-    for SplitSender<P, E, F>
-{
+impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> Clone for SplitSender<P, E, F> {
     fn clone(&self) -> Self {
         Self {
             replica: self.replica,
@@ -952,9 +949,7 @@ impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> Clone
     }
 }
 
-impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> std::fmt::Debug
-    for SplitSender<P, E, F>
-{
+impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, E, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SplitSender")
             .field("replica", &self.replica)
@@ -963,9 +958,7 @@ impl<P: PublicKey, E: GClock + Send + 'static, F: SplitForwarder<P>> std::fmt::D
     }
 }
 
-impl<P: PublicKey, E: GClock + Clone + Send + 'static, F: SplitForwarder<P>> crate::Sender
-    for SplitSender<P, E, F>
-{
+impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::Sender for SplitSender<P, E, F> {
     type Error = Error;
     type PublicKey = P;
 
