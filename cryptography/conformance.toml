@@ -100,7 +100,7 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
 ["commonware_cryptography::handshake::conformance::Handshake"]
 n_cases = 4096
-hash = "35e9cd2a06bbb901d98e6297abaf3730ef6dea3d88241ce342bbac3431bff744"
+hash = "ed6ff974cf9460e825683ccaef3946e46c0db7281b41209dcee641ad1d46db77"
 
 ["commonware_cryptography::handshake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536

@@ -12,7 +12,7 @@ use commonware_math::algebra::Random;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS_";
+const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
 
 struct Handshake;
 
