@@ -62,7 +62,7 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
-pub async fn link_peers<P: PublicKey, E: governor::clock::Clock>(
+pub async fn link_peers<P: PublicKey, E: governor::clock::Clock + Send + 'static>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
     action: Action,
@@ -97,7 +97,7 @@ pub async fn link_peers<P: PublicKey, E: governor::clock::Clock>(
     }
 }
 
-pub async fn register<P: PublicKey, E: governor::clock::Clock>(
+pub async fn register<P: PublicKey, E: governor::clock::Clock + Send + 'static>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
 ) -> HashMap<

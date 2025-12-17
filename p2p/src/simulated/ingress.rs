@@ -1,7 +1,10 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::{Map, Set};
+use commonware_utils::{
+    channels::ring,
+    ordered::{Map, Set},
+};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -10,7 +13,7 @@ use governor::{clock::Clock as GClock, Quota};
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
-pub enum Message<P: PublicKey, E: GClock> {
+pub enum Message<P: PublicKey, E: GClock + Send + 'static> {
     Register {
         channel: Channel,
         public_key: P,
@@ -28,6 +31,9 @@ pub enum Message<P: PublicKey, E: GClock> {
     },
     Subscribe {
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+    },
+    SubscribePeers {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -79,11 +85,11 @@ pub struct Link {
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
 #[derive(Debug)]
-pub struct Oracle<P: PublicKey, E: GClock> {
+pub struct Oracle<P: PublicKey, E: GClock + Send + 'static> {
     sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
-impl<P: PublicKey, E: GClock> Clone for Oracle<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for Oracle<P, E> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -91,7 +97,7 @@ impl<P: PublicKey, E: GClock> Clone for Oracle<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock> Oracle<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Oracle<P, E> {
     /// Create a new instance of the oracle.
     pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P, E>>) -> Self {
         Self { sender }
@@ -246,18 +252,18 @@ impl<P: PublicKey, E: GClock> Oracle<P, E> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-pub struct Manager<P: PublicKey, E: GClock> {
+pub struct Manager<P: PublicKey, E: GClock + Send + 'static> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey, E: GClock> std::fmt::Debug for Manager<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> std::fmt::Debug for Manager<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Manager").finish_non_exhaustive()
     }
 }
 
-impl<P: PublicKey, E: GClock> Clone for Manager<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for Manager<P, E> {
     fn clone(&self) -> Self {
         Self {
             oracle: self.oracle.clone(),
@@ -293,18 +299,18 @@ impl<P: PublicKey, E: GClock + Send + 'static> crate::Manager for Manager<P, E> 
 /// Because [SocketAddr]s are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all [SocketAddr]s to be valid.
-pub struct SocketManager<P: PublicKey, E: GClock> {
+pub struct SocketManager<P: PublicKey, E: GClock + Send + 'static> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey, E: GClock> std::fmt::Debug for SocketManager<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> std::fmt::Debug for SocketManager<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SocketManager").finish_non_exhaustive()
     }
 }
 
-impl<P: PublicKey, E: GClock> Clone for SocketManager<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for SocketManager<P, E> {
     fn clone(&self) -> Self {
         Self {
             oracle: self.oracle.clone(),
@@ -334,7 +340,7 @@ impl<P: PublicKey, E: GClock + Send + 'static> crate::Manager for SocketManager<
 
 /// Individual control interface for a peer in the simulated network.
 #[derive(Debug)]
-pub struct Control<P: PublicKey, E: GClock> {
+pub struct Control<P: PublicKey, E: GClock + Send + 'static> {
     /// The public key of the peer this control interface is for.
     me: P,
 
@@ -342,7 +348,7 @@ pub struct Control<P: PublicKey, E: GClock> {
     sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
-impl<P: PublicKey, E: GClock> Clone for Control<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Clone for Control<P, E> {
     fn clone(&self) -> Self {
         Self {
             me: self.me.clone(),
@@ -351,7 +357,7 @@ impl<P: PublicKey, E: GClock> Clone for Control<P, E> {
     }
 }
 
-impl<P: PublicKey, E: GClock> Control<P, E> {
+impl<P: PublicKey, E: GClock + Send + 'static> Control<P, E> {
     /// Register the communication interfaces for the peer over a given [Channel].
     ///
     /// # Rate Limiting
