@@ -66,7 +66,7 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<
 impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest>
     State<E, S, L, D>
 {
-    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+    pub fn new(context: E, mut cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -74,13 +74,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Diges
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
 
-        let mut elector = cfg.elector;
-        elector.initialize(cfg.scheme.participants());
+        // Initialize elector with participants
+        cfg.elector.initialize(cfg.scheme.participants());
 
         Self {
             context,
             scheme: cfg.scheme,
-            elector,
+            elector: cfg.elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
