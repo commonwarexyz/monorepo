@@ -66,9 +66,8 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::{NZU32, ordered::Map};
-//! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -171,14 +170,13 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        deterministic, tokio, Clock, Metrics, Network as RNetwork, Quota, Runner, Spawner,
     };
     use commonware_utils::{
         ordered::{Map, Set},
         TryCollect, NZU32,
     };
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
@@ -216,7 +214,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner + Clock + Rng + CryptoRng + RNetwork + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,

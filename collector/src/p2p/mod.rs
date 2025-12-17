@@ -60,10 +60,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use governor::Quota;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)

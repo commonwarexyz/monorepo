@@ -5,9 +5,9 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
@@ -42,17 +42,17 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
 #[derive(Clone)]
-pub struct Sender<P: PublicKey, C: GClock> {
+pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
 
-impl<P: PublicKey, C: GClock> Debug for Sender<P, C> {
+impl<P: PublicKey, C: Clock> Debug for Sender<P, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sender").finish()
     }
 }
 
-impl<P: PublicKey, C: GClock> Sender<P, C> {
+impl<P: PublicKey, C: Clock> Sender<P, C> {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
@@ -73,10 +73,9 @@ impl<P: PublicKey, C: GClock> Sender<P, C> {
 impl<P, C> crate::LimitedSender for Sender<P, C>
 where
     P: PublicKey,
-    C: GClock + Clone + Send + 'static,
+    C: Clock + Clone + Send + 'static,
 {
     type PublicKey = P;
-    type Clock = C;
     type Checked<'a>
         = CheckedSender<'a, UnlimitedSender<P>>
     where
@@ -85,7 +84,7 @@ where
     async fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> Result<Self::Checked<'_>, <Self::Clock as GClock>::Instant> {
+    ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
     }
 }
@@ -93,7 +92,7 @@ where
 impl<P, C> crate::Sender for Sender<P, C>
 where
     P: PublicKey,
-    C: GClock + Clone + Send + 'static,
+    C: Clock + Clone + Send + 'static,
 {
     type Error = Error;
     type PublicKey = P;
@@ -156,10 +155,10 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
-    pub fn register<C: GClock>(
+    pub fn register<C: Clock>(
         &mut self,
         channel: Channel,
-        rate: governor::Quota,
+        rate: Quota,
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {

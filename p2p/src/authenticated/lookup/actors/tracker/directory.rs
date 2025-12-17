@@ -2,13 +2,13 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
+    Quota, Spawner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
     TryCollect,
 };
-use governor::{clock::Clock as GClock, Quota};
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -45,7 +45,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
-    rate_limiter: RateLimiter<C, E>,
+    rate_limiter: KeyedRateLimiter<C, E>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -56,7 +56,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
@@ -64,7 +64,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         peers.insert(myself, Record::myself());
 
         // Other initialization.
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
+        let rate_limiter = KeyedRateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         let metrics = Metrics::init(context);
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
@@ -300,7 +300,7 @@ mod tests {
         lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::NZU32;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -313,7 +313,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 1,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -373,7 +373,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -446,7 +446,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 3,
-            rate_limit: governor::Quota::per_second(NZU32!(10)),
+            rate_limit: Quota::per_second(NZU32!(10)),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();

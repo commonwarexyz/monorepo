@@ -86,11 +86,10 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Clock, Metrics, Runner, Spawner,
+        Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU32, NonZeroUsize},

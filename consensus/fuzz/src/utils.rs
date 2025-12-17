@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use governor::Quota;
+use commonware_runtime::{Clock, Quota};
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
@@ -62,7 +62,7 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
-pub async fn link_peers<P: PublicKey, E: governor::clock::Clock + Send + 'static>(
+pub async fn link_peers<P: PublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
     action: Action,
@@ -97,7 +97,7 @@ pub async fn link_peers<P: PublicKey, E: governor::clock::Clock + Send + 'static
     }
 }
 
-pub async fn register<P: PublicKey, E: governor::clock::Clock + Send + 'static>(
+pub async fn register<P: PublicKey, E: Clock>(
     oracle: &mut Oracle<P, E>,
     validators: &[P],
 ) -> HashMap<

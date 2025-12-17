@@ -129,11 +129,10 @@ mod tests {
         utils::requester,
         Manager,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,

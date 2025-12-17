@@ -460,8 +460,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
-    use governor::Quota;
+    use commonware_runtime::{deterministic, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
 
     type Pk = commonware_cryptography::ed25519::PublicKey;

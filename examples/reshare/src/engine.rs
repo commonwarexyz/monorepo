@@ -28,7 +28,6 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
-use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use std::{num::NonZero, time::Instant};
 use tracing::{error, info, warn};
@@ -69,7 +68,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -107,7 +106,7 @@ where
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,

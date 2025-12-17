@@ -7,8 +7,7 @@ use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota;
+use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{

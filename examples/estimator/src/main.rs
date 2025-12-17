@@ -9,7 +9,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
+    deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
 };
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
@@ -20,7 +20,6 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -290,9 +289,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<
-    C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore + GClock,
->(
+async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -335,7 +332,7 @@ async fn run_simulation_logic<
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
+async fn setup_network_identities<C: Clock>(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
 ) -> Vec<PeerIdentity<C>> {
@@ -372,7 +369,7 @@ async fn setup_network_identities<C: GClock + Clone + Send + 'static>(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links<C: GClock + Clone + Send + 'static>(
+async fn setup_network_links<C: Clock>(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     identities: &[PeerIdentity<C>],
     latencies: &Latencies,
@@ -397,7 +394,7 @@ async fn setup_network_links<C: GClock + Clone + Send + 'static>(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock + Clone + Send + GClock + 'static>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
@@ -556,7 +553,7 @@ async fn process_single_command_check<C: Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Clock + GClock + Clone + Send + 'static>(
+async fn process_command<C: Clock>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,

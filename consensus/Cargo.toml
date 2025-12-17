@@ -32,7 +32,6 @@ commonware-macros.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
-governor.workspace = true
 pin-project.workspace = true
 prometheus-client.workspace = true
 rand_distr.workspace = true

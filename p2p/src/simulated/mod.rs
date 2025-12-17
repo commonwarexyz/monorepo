@@ -61,9 +61,8 @@
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -194,10 +193,9 @@ mod tests {
         Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
     use commonware_utils::{ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
