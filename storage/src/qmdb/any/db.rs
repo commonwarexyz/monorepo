@@ -38,7 +38,6 @@ pub(crate) type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> =
 /// - [crate::qmdb::any::ordered::Variable]
 /// - [crate::qmdb::any::unordered::Fixed]
 /// - [crate::qmdb::any::unordered::Variable]
-
 pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous,
