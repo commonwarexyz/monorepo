@@ -194,10 +194,9 @@ mod tests {
         Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
     use commonware_utils::{ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use commonware_runtime::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},

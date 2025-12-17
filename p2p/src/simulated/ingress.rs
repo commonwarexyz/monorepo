@@ -1,7 +1,7 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channels::ring,
     ordered::{Map, Set},
@@ -10,7 +10,6 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use commonware_runtime::Quota;
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 

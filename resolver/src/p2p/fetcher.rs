@@ -405,9 +405,8 @@ mod tests {
     use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
-        Runner as _,
+        Quota, Runner as _,
     };
-    use commonware_runtime::Quota;
     use std::{fmt, time::Duration};
 
     // Mock error type for testing

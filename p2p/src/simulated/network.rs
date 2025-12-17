@@ -15,7 +15,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Quota,
+    Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{channels::ring, ordered::Set, NZUsize, TryCollect};
@@ -24,7 +25,6 @@ use futures::{
     channel::{mpsc, oneshot},
     future, SinkExt, StreamExt,
 };
-use commonware_runtime::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -1285,9 +1285,8 @@ mod tests {
     use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;
-    use commonware_runtime::Quota;
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;

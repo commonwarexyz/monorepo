@@ -20,10 +20,9 @@ use commonware_p2p::{
     Blocker, Receiver, Sender,
 };
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
-use commonware_runtime::Quota;
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::debug;

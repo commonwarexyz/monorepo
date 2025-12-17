@@ -229,11 +229,10 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        deterministic, tokio, Clock, Metrics, Network as RNetwork, Quota, Runner, Spawner,
     };
     use commonware_utils::{ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use commonware_runtime::Quota;
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,

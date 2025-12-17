@@ -2,13 +2,13 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, RateLimiter, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Quota, RateLimiter,
+    Spawner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
     TryCollect,
 };
-use commonware_runtime::Quota;
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},

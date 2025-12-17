@@ -1,6 +1,6 @@
 use commonware_cryptography::Signer;
-use commonware_utils::NZU32;
 use commonware_runtime::Quota;
+use commonware_utils::NZU32;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Configuration for the peer-to-peer instance.

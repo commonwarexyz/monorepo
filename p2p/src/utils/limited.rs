@@ -3,10 +3,9 @@
 use crate::{Recipients, Sender};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, RateLimiter};
+use commonware_runtime::{Clock, Quota, RateLimiter};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
-use commonware_runtime::Quota;
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
@@ -201,9 +200,8 @@ mod tests {
     use crate::CheckedSender as _;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic::Runner, Runner as _};
+    use commonware_runtime::{deterministic::Runner, Quota, Runner as _};
     use commonware_utils::{channels::ring, NZUsize, NZU32};
-    use commonware_runtime::Quota;
     use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;

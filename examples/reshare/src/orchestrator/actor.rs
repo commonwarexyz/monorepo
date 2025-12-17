@@ -25,11 +25,11 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Quota, Spawner,
+    Storage,
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use commonware_runtime::Quota;
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};

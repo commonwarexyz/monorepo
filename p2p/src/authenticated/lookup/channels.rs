@@ -6,9 +6,8 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
-use commonware_runtime::Quota;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and

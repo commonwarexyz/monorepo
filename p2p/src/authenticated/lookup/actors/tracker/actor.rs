@@ -234,10 +234,9 @@ mod tests {
     };
     use commonware_runtime::{
         deterministic::{self},
-        Clock, Runner,
+        Clock, Quota, Runner,
     };
     use commonware_utils::NZU32;
-    use commonware_runtime::Quota;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,

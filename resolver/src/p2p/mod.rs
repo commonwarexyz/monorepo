@@ -84,10 +84,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
-    use commonware_runtime::Quota;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;

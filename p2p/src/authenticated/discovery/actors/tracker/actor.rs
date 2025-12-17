@@ -293,10 +293,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, Quota, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
     use futures::future::Either;
-    use commonware_runtime::Quota;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

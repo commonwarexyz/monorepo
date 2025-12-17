@@ -8,11 +8,11 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, Quota, SinkOf, Spawner,
+    StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
-use commonware_runtime::Quota;
 use governor::RateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};

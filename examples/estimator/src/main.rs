@@ -9,7 +9,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
+    deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
 };
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
@@ -20,7 +20,6 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use commonware_runtime::Quota;
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
