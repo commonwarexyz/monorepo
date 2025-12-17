@@ -6,10 +6,11 @@
 //! # Built-in Electors
 //!
 //! - [`RoundRobin`]: Simple deterministic rotation through participants based on view number.
-//!   Works with any signing scheme.
+//!   Works with any signing scheme. Ignores certificates entirely.
 //!
-//! - [`ThresholdRandomness`]: Uses randomness derived from BLS threshold signatures for
-//!   unpredictable leader selection. Only works with [`bls12381_threshold`].
+//! - [`Random`]: Uses randomness derived from BLS threshold signatures for unpredictable
+//!   leader selection. Falls back to round-robin for the first view (no certificate available).
+//!   Only works with [`bls12381_threshold`].
 //!
 //! # Custom Electors
 //!
@@ -18,7 +19,7 @@
 
 use crate::{
     simplex::scheme::bls12381_threshold::{self, Seed},
-    types::{Epoch, Round},
+    types::{Round, View},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -31,42 +32,31 @@ use commonware_utils::ordered::Set;
 /// # Determinism Requirement
 ///
 /// Implementations **must** be deterministic: given the same inputs (`participants`, `round`,
-/// and `seed`), the [`elect`](Elector::elect) method must always return the same leader index.
-/// This is critical for consensus correctness - all honest participants must agree on the
-/// leader for each round.
+/// and `certificate`), the [`elect`](Elector::elect) method must always return the same leader
+/// index. This is critical for consensus correctness - all honest participants must agree on
+/// the leader for each round.
 ///
-/// Similarly, [`first`](Elector::first) must be deterministic given the same `participants`
-/// and `epoch`, and [`seed`](Elector::seed) must produce the same seed given the same
-/// `round` and `certificate`.
+/// # Certificate Handling
+///
+/// The `certificate` parameter is `None` only for view 1 (the first view after genesis).
+/// For all subsequent views, a certificate from the previous view is provided. Implementations
+/// can use the certificate to derive randomness (like [`Random`]) or ignore it entirely
+/// (like [`RoundRobin`]).
 pub trait Elector<S: Scheme>: Send + 'static {
-    /// The seed type used for leader election.
+    /// Selects the leader for the given round.
     ///
-    /// For deterministic electors like [`RoundRobin`], this is `()`.
-    /// For randomness-based electors, this contains the randomness source.
-    type Seed;
-
-    /// Selects the leader for the first view of an epoch (view 1, no previous certificate).
-    ///
-    /// This method **must** be a pure function.
-    ///
-    /// The default implementation selects `epoch % num_participants`.
-    fn first(&self, participants: &Set<S::PublicKey>, epoch: Epoch) -> u32 {
-        assert!(
-            !participants.is_empty(),
-            "no participants to select leader from"
-        );
-        (epoch.get() as usize % participants.len()) as u32
-    }
-
-    /// Extracts the seed from a certificate for the given round.
-    fn seed(&self, round: Round, certificate: &S::Certificate) -> Self::Seed;
-
-    /// Selects the leader for the given round using the provided seed.
+    /// The `certificate` is `None` only for view 1; implementations should handle this case
+    /// (typically by falling back to a deterministic selection like round-robin).
     ///
     /// This method **must** be a pure function.
     ///
     /// Returns the index of the selected leader in the participants list.
-    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, seed: Self::Seed) -> u32;
+    fn elect(
+        &self,
+        participants: &Set<S::PublicKey>,
+        round: Round,
+        certificate: Option<&S::Certificate>,
+    ) -> u32;
 }
 
 /// Simple round-robin leader election.
@@ -78,11 +68,12 @@ pub trait Elector<S: Scheme>: Send + 'static {
 pub struct RoundRobin;
 
 impl<S: Scheme> Elector<S> for RoundRobin {
-    type Seed = ();
-
-    fn seed(&self, _round: Round, _certificate: &S::Certificate) {}
-
-    fn elect(&self, participants: &Set<S::PublicKey>, round: Round, _seed: ()) -> u32 {
+    fn elect(
+        &self,
+        participants: &Set<S::PublicKey>,
+        round: Round,
+        _certificate: Option<&S::Certificate>,
+    ) -> u32 {
         assert!(
             !participants.is_empty(),
             "no participants to select leader from"
@@ -99,26 +90,37 @@ impl<S: Scheme> Elector<S> for RoundRobin {
 ///
 /// Only works with [`bls12381_threshold`] signing scheme.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ThresholdRandomness;
+pub struct Random;
 
-impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for ThresholdRandomness
+impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random
 where
     P: PublicKey,
     V: Variant + Send + Sync,
 {
-    type Seed = Seed<V>;
-
-    fn seed(&self, round: Round, certificate: &bls12381_threshold::Signature<V>) -> Self::Seed {
-        Seed::new(round, certificate.seed_signature)
-    }
-
-    fn elect(&self, participants: &Set<P>, _round: Round, seed: Self::Seed) -> u32 {
+    fn elect(
+        &self,
+        participants: &Set<P>,
+        round: Round,
+        certificate: Option<&bls12381_threshold::Signature<V>>,
+    ) -> u32 {
         assert!(
             !participants.is_empty(),
             "no participants to select leader from"
         );
 
+        assert!(certificate.is_some() || round.view() == View::new(1));
+
+        let Some(certificate) = certificate else {
+            return <RoundRobin as Elector<bls12381_threshold::Scheme<P, V>>>::elect(
+                &RoundRobin,
+                participants,
+                round,
+                certificate,
+            );
+        };
+
         // Encode seed and use modulo to select leader
+        let seed = Seed::<V>::new(round, certificate.seed_signature);
         let encoded = seed.encode();
         commonware_utils::modulo(encoded.as_ref(), participants.len() as u64) as u32
     }
@@ -132,11 +134,10 @@ mod tests {
             scheme::{bls12381_threshold, ed25519},
             types::Subject,
         },
-        types::View,
+        types::{Epoch, View},
     };
     use commonware_cryptography::{
-        bls12381::{self, primitives::variant::MinPk},
-        certificate::mocks::Fixture,
+        bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
         sha256::Digest as Sha256Digest,
     };
     use commonware_utils::{quorum_from_slice, TryFromIterator};
@@ -152,7 +153,7 @@ mod tests {
         let epoch = Epoch::new(0);
 
         // Run through 3 * n views, record the sequence of leaders
-        // RoundRobin uses () as seed, so we don't need certificates
+        // RoundRobin ignores certificates, so we pass None
         let mut leaders = Vec::new();
         for view in 1..=(3 * n as u64) {
             let round = Round::new(epoch, View::new(view));
@@ -160,7 +161,7 @@ mod tests {
                 &elector,
                 &participants,
                 round,
-                (),
+                None,
             ));
         }
 
@@ -171,20 +172,22 @@ mod tests {
     }
 
     #[test]
-    fn round_robin_first_cycles_through_epochs() {
+    fn round_robin_cycles_through_epochs() {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector = RoundRobin;
 
-        // Record first leader for epochs 0..n
+        // Record leader for view 1 of epochs 0..n
         let leaders: Vec<_> = (0..n as u64)
             .map(|e| {
-                <RoundRobin as Elector<ed25519::Scheme>>::first(
+                let round = Round::new(Epoch::new(e), View::new(1));
+                <RoundRobin as Elector<ed25519::Scheme>>::elect(
                     &elector,
                     &participants,
-                    Epoch::new(e),
+                    round,
+                    None,
                 )
             })
             .collect();
@@ -196,14 +199,6 @@ mod tests {
             seen[leader as usize] = true;
         }
         assert!(seen.iter().all(|x| *x));
-    }
-
-    #[test]
-    #[should_panic(expected = "no participants")]
-    fn round_robin_first_panics_on_empty_participants() {
-        let participants = Set::default();
-        let elector = RoundRobin;
-        <RoundRobin as Elector<ed25519::Scheme>>::first(&elector, &participants, Epoch::new(1));
     }
 
     #[test]
@@ -212,29 +207,30 @@ mod tests {
         let participants = Set::default();
         let elector = RoundRobin;
         let round = Round::new(Epoch::new(1), View::new(1));
-        <RoundRobin as Elector<ed25519::Scheme>>::elect(&elector, &participants, round, ());
+        <RoundRobin as Elector<ed25519::Scheme>>::elect(&elector, &participants, round, None);
     }
 
     #[test]
-    fn threshold_randomness_first_cycles_through_epochs() {
+    fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = ThresholdRandomness;
 
-        // Record first leader for epochs 0..n
+        // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
             .map(|e| {
-                <ThresholdRandomness as Elector<bls12381_threshold::Scheme<_, MinPk>>>::first(
-                    &elector,
+                let round = Round::new(Epoch::new(e), View::new(1));
+                <Random as Elector<bls12381_threshold::Scheme<_, MinPk>>>::elect(
+                    &Random,
                     &participants,
-                    Epoch::new(e),
+                    round,
+                    None,
                 )
             })
             .collect();
 
-        // Each participant should be selected exactly once
+        // Each participant should be selected exactly once (same as RoundRobin)
         let mut seen = vec![false; n];
         for &leader in &leaders {
             assert!(!seen[leader as usize]);
@@ -244,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn threshold_randomness_elect() {
+    fn random_uses_certificate_randomness() {
         type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
         let mut rng = StdRng::seed_from_u64(42);
@@ -254,10 +250,10 @@ mod tests {
             ..
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector = ThresholdRandomness;
+        let elector = Random;
         let quorum = quorum_from_slice(&schemes) as usize;
 
-        // Create first certificate for round (1, 2)
+        // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
         let attestations1: Vec<_> = schemes
             .iter()
@@ -269,7 +265,7 @@ mod tests {
             .collect();
         let cert1 = schemes[0].assemble(attestations1).unwrap();
 
-        // Create second certificate for round (1, 3) (different round -> different seed signature)
+        // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
         let attestations2: Vec<_> = schemes
             .iter()
@@ -281,60 +277,39 @@ mod tests {
             .collect();
         let cert2 = schemes[0].assemble(attestations2).unwrap();
 
-        // Extract seeds from certificates
-        let seed1 = <ThresholdRandomness as Elector<S>>::seed(&elector, round1, &cert1);
-        let seed2 = <ThresholdRandomness as Elector<S>>::seed(&elector, round2, &cert2);
-
-        // Same seed always gives same leader
-        let leader1a = <ThresholdRandomness as Elector<S>>::elect(
-            &elector,
-            &participants,
-            round1,
-            seed1.clone(),
-        );
-        let leader1b =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round1, seed1);
+        // Same certificate always gives same leader
+        let leader1a = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert1));
+        let leader1b = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert1));
         assert_eq!(leader1a, leader1b);
 
-        // Different seeds produce different leaders
+        // Different certificates produce different leaders
         //
-        // NOTE: In general, different seeds could produce the same leader by chance.
+        // NOTE: In general, different certificates could produce the same leader by chance.
         // However, for our specific test inputs (rng seed 42, 5 participants), we've
         // verified these produce different results.
-        let leader2 = <ThresholdRandomness as Elector<S>>::elect(
-            &elector,
-            &participants,
-            round1,
-            seed2.clone(),
-        );
+        let leader2 = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert2));
         assert_ne!(leader1a, leader2);
-
-        // The output of the election is entirely determined by the seed, so using the same seed
-        // across different rounds leads to the same result
-        let leader3 =
-            <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round2, seed2);
-        assert_eq!(leader2, leader3);
     }
 
     #[test]
     #[should_panic(expected = "no participants")]
-    fn threshold_randomness_first_panics_on_empty_participants() {
-        type S = bls12381_threshold::Scheme<bls12381::PublicKey, MinPk>;
-
-        let participants = Set::default();
-        let elector = ThresholdRandomness;
-        <ThresholdRandomness as Elector<S>>::first(&elector, &participants, Epoch::new(1));
-    }
-
-    #[test]
-    #[should_panic(expected = "no participants")]
-    fn threshold_randomness_elect_panics_on_empty_participants() {
+    fn random_panics_on_empty_participants_view_1() {
         type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
-        // Create a real seed from fixture, but use empty participants
+        let participants = Set::default();
+        let round = Round::new(Epoch::new(1), View::new(1));
+        <Random as Elector<S>>::elect(&Random, &participants, round, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "no participants")]
+    fn random_panics_on_empty_participants_with_cert() {
+        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+
+        // Create a certificate, but use empty participants
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 3);
-        let round = Round::new(Epoch::new(1), View::new(1));
+        let round = Round::new(Epoch::new(1), View::new(2));
         let quorum = quorum_from_slice(&schemes) as usize;
         let attestations: Vec<_> = schemes
             .iter()
@@ -347,8 +322,20 @@ mod tests {
         let cert = schemes[0].assemble(attestations).unwrap();
 
         let participants = Set::default();
-        let elector = ThresholdRandomness;
-        let seed = <ThresholdRandomness as Elector<S>>::seed(&elector, round, &cert);
-        <ThresholdRandomness as Elector<S>>::elect(&elector, &participants, round, seed);
+        <Random as Elector<S>>::elect(&Random, &participants, round, Some(&cert));
+    }
+
+    #[test]
+    #[should_panic]
+    fn random_panics_on_none_certificate_after_view_1() {
+        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+
+        // View 2 requires a certificate
+        let round = Round::new(Epoch::new(1), View::new(2));
+        <Random as Elector<S>>::elect(&Random, &participants, round, None);
     }
 }

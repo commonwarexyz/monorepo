@@ -140,26 +140,21 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S
     /// If `seed` is `None`, this **must** be the first view after genesis (view 1).
     /// For all subsequent views, a seed derived from the previous view's certificate
     /// must be provided.
-    fn enter_view(&mut self, view: View, seed: Option<L::Seed>) -> bool {
+    fn enter_view(&mut self, view: View, certificate: Option<&S::Certificate>) -> bool {
         if view <= self.view {
             return false;
         }
-
-        // Seed is required for all views after view 1
-        assert!(seed.is_some() || view == GENESIS_VIEW.next());
 
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
         let advance_deadline = now + self.notarization_timeout;
 
         // Compute leader using elector
-        let leader = match seed {
-            Some(seed) => {
-                self.elector
-                    .elect(self.scheme.participants(), Rnd::new(self.epoch, view), seed)
-            }
-            None => self.elector.first(self.scheme.participants(), self.epoch),
-        };
+        let leader = self.elector.elect(
+            self.scheme.participants(),
+            Rnd::new(self.epoch, view),
+            certificate,
+        );
 
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
@@ -228,23 +223,15 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = notarization.view();
-        let seed = self
-            .elector
-            .seed(notarization.round(), &notarization.certificate);
-        let added = self.create_round(view).add_notarization(notarization);
-        self.enter_view(view.next(), Some(seed));
-        added
+        self.enter_view(view.next(), Some(&notarization.certificate));
+        self.create_round(view).add_notarization(notarization)
     }
 
     /// Inserts a nullification certificate and advances into the next view.
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
-        let seed = self
-            .elector
-            .seed(nullification.round(), &nullification.certificate);
-        let added = self.create_round(view).add_nullification(nullification);
-        self.enter_view(view.next(), Some(seed));
-        added
+        self.enter_view(view.next(), Some(&nullification.certificate));
+        self.create_round(view).add_nullification(nullification)
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
@@ -258,12 +245,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S
             self.last_finalized = view;
         }
 
-        let seed = self
-            .elector
-            .seed(finalization.round(), &finalization.certificate);
-        let added = self.create_round(view).add_finalization(finalization);
-        self.enter_view(view.next(), Some(seed));
-        added
+        self.enter_view(view.next(), Some(&finalization.certificate));
+        self.create_round(view).add_finalization(finalization)
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.

@@ -4,6 +4,7 @@ use crate::{
     types::Round as Rnd,
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_utils::ordered::Quorum;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -131,7 +132,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Sets the leader for this round using the pre-computed leader index.
     pub fn set_leader(&mut self, leader: u32) {
-        let key = self.scheme.participants()[leader as usize].clone();
+        let key = self
+            .scheme
+            .participants()
+            .key(leader)
+            .cloned()
+            .expect("leader index comes from elector, must be within bounds");
         debug!(round=?self.round, ?leader, ?key, "leader elected");
         self.leader = Some(Leader { idx: leader, key });
     }
