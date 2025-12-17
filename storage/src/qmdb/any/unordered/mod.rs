@@ -25,13 +25,11 @@ use futures::future::try_join_all;
 use std::collections::BTreeMap;
 use tracing::debug;
 
-mod operation;
-use operation::Operation;
-pub use operation::{FixedOperation, VariableOperation};
-
 pub mod fixed;
 pub mod sync;
 pub mod variable;
+
+pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
@@ -128,7 +126,7 @@ where
         for &loc in iter {
             let op = self.log.read(loc).await?;
             match &op {
-                Operation::Update(k, value) => {
+                Operation::Update(Update(k, value)) => {
                     if k == key {
                         return Ok(Some((value.clone(), loc)));
                     }
@@ -202,7 +200,9 @@ where
         let new_loc = self.op_count();
         let res = self.update_loc(&key, new_loc).await?;
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(Update(key, value)))
+            .await?;
         if res.is_some() {
             self.steps += 1;
         } else {
@@ -219,7 +219,9 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(Update(key, value)))
+            .await?;
         self.active_keys += 1;
 
         Ok(true)
@@ -292,7 +294,7 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(Operation::Update(key.clone(), value))
+                    .append(Operation::Update(Update(key.clone(), value)))
                     .await?;
                 callback(true, Some(old_loc));
             } else {
@@ -310,7 +312,9 @@ where
                 continue; // attempt to delete a non-existent key
             };
             self.snapshot.insert(&key, self.op_count());
-            self.log.append(Operation::Update(key, value)).await?;
+            self.log
+                .append(Operation::Update(Update(key, value)))
+                .await?;
             callback(true, None);
             self.active_keys += 1;
         }

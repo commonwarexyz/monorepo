@@ -77,6 +77,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("dns resolution failed: {0}")]
+    ResolveFailed(String),
     #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
     PartitionNameInvalid(String),
     #[error("partition creation failed: {0}")]
@@ -414,6 +416,17 @@ pub trait Network: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
 }
 
+/// Interface for DNS resolution.
+pub trait Resolver: Clone + Send + Sync + 'static {
+    /// Resolve a hostname to IP addresses.
+    ///
+    /// Returns a list of IP addresses that the hostname resolves to.
+    fn resolve(
+        &self,
+        host: &str,
+    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+}
+
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
 pub trait Listener: Sync + Send + 'static {
@@ -555,6 +568,7 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -2215,6 +2229,85 @@ mod tests {
         test_metrics_label(executor);
     }
 
+    #[test_collect_traces]
+    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
+        let executor = deterministic::Runner::new(deterministic::Config::default());
+        executor.start(|context| async move {
+            context
+                .with_label("test")
+                .instrumented()
+                .spawn(|context| async move {
+                    tracing::info!(field = "test field", "test log");
+
+                    context
+                        .with_label("inner")
+                        .instrumented()
+                        .spawn(|_| async move {
+                            tracing::info!("inner log");
+                        })
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        });
+
+        let info_traces = traces.get_by_level(Level::INFO);
+        assert_eq!(info_traces.len(), 2);
+
+        // Outer log (single span)
+        info_traces
+            .expect_event_at_index(0, |event| {
+                event.metadata.expect_content_exact("test log")?;
+                event.metadata.expect_field_count(1)?;
+                event.metadata.expect_field_exact("field", "test field")?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test")
+                })
+            })
+            .unwrap();
+
+        info_traces
+            .expect_event_at_index(1, |event| {
+                event.metadata.expect_content_exact("inner log")?;
+                event.metadata.expect_field_count(0)?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test_inner")
+                })
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_deterministic_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register DNS mappings
+            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+            context.resolver_register("example.com", Some(vec![ip1, ip2]));
+
+            // Resolve registered hostname
+            let addrs = context.resolve("example.com").await.unwrap();
+            assert_eq!(addrs, vec![ip1, ip2]);
+
+            // Resolve unregistered hostname
+            let result = context.resolve("unknown.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Remove mapping
+            context.resolver_register("example.com", None);
+            let result = context.resolve("example.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
     #[test]
     fn test_tokio_error_future() {
         let runner = tokio::Runner::default();
@@ -2625,58 +2718,18 @@ mod tests {
         });
     }
 
-    #[test_collect_traces]
-    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
-        let executor = deterministic::Runner::new(deterministic::Config::default());
+    #[test]
+    fn test_tokio_resolver() {
+        let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            context
-                .with_label("test")
-                .instrumented()
-                .spawn(|context| async move {
-                    tracing::info!(field = "test field", "test log");
-
-                    context
-                        .with_label("inner")
-                        .instrumented()
-                        .spawn(|_| async move {
-                            tracing::info!("inner log");
-                        })
-                        .await
-                        .unwrap();
-                })
-                .await
-                .unwrap();
+            let addrs = context.resolve("localhost").await.unwrap();
+            assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
         });
-
-        let info_traces = traces.get_by_level(Level::INFO);
-        assert_eq!(info_traces.len(), 2);
-
-        // Outer log (single span)
-        info_traces
-            .expect_event_at_index(0, |event| {
-                event.metadata.expect_content_exact("test log")?;
-                event.metadata.expect_field_count(1)?;
-                event.metadata.expect_field_exact("field", "test field")?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test")
-                })
-            })
-            .unwrap();
-
-        info_traces
-            .expect_event_at_index(1, |event| {
-                event.metadata.expect_content_exact("inner log")?;
-                event.metadata.expect_field_count(0)?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test_inner")
-                })
-            })
-            .unwrap();
     }
 }

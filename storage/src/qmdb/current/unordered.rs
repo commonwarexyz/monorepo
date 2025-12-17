@@ -10,7 +10,10 @@ use crate::{
     },
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
+            unordered::{
+                fixed::{Any, Operation},
+                Update,
+            },
             CleanAny, DirtyAny, FixedValue,
         },
         current::{merkleize_grafted_bitmap, Config, OperationProof, RangeProof},
@@ -110,7 +113,7 @@ impl<
         proof: &KeyValueProof<H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(key, value);
+        let op = Operation::Update(Update(key, value));
 
         proof.verify(hasher, Self::grafting_height(), op, root)
     }
@@ -979,7 +982,7 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(k, v1);
+            let op = Operation::Update(Update(k, v1));
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof_inactive.range_proof,
@@ -1153,7 +1156,7 @@ pub mod test {
                 // it's a key-updating operation.
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
-                    Operation::Update(key, value) => (key, value),
+                    Operation::Update(Update(key, value)) => (key, value),
                     Operation::CommitFloor(_, _) => continue,
                     Operation::Delete(_) => {
                         unreachable!("location does not reference update/commit operation")

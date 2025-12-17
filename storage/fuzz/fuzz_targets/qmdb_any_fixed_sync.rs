@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            unordered::fixed::{Any, Operation as FixedOperation},
             FixedConfig as Config,
         },
         store::CleanStore as _,

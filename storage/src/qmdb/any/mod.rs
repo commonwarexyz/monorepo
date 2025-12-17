@@ -25,10 +25,7 @@ use std::{
     ops::Range,
 };
 
-// Context byte prefixes for Any operation types.
-const DELETE_CONTEXT: u8 = 0;
-const UPDATE_CONTEXT: u8 = 1;
-const COMMIT_FLOOR_CONTEXT: u8 = 2;
+mod operation;
 
 mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
