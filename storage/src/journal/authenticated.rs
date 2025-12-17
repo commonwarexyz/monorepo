@@ -639,7 +639,10 @@ mod tests {
             journaled::{Config as MmrConfig, Mmr},
             Location,
         },
-        qmdb::{any::unordered::FixedOperation as Operation, operation::Committable},
+        qmdb::{
+            any::unordered::{fixed::Operation, Update},
+            operation::Committable,
+        },
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
@@ -698,7 +701,10 @@ mod tests {
 
     /// Create a test operation with predictable values based on index.
     fn create_operation(index: u8) -> Operation<Digest, Digest> {
-        Operation::Update(Sha256::fill(index), Sha256::fill(index.wrapping_add(1)))
+        Operation::Update(Update(
+            Sha256::fill(index),
+            Sha256::fill(index.wrapping_add(1)),
+        ))
     }
 
     /// Create an authenticated journal with N committed operations.

@@ -91,7 +91,10 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
-        any::{unordered::VariableOperation as Operation, VariableValue},
+        any::{
+            unordered::{variable::Operation, Update},
+            VariableValue,
+        },
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
         update_key, Error, FloorHelper,
@@ -352,7 +355,7 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(loc).await? else {
+            let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -425,7 +428,9 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(Update(key, value)))
+            .await?;
 
         Ok(())
     }
@@ -440,7 +445,9 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
+        self.log
+            .append(Operation::Update(Update(key, value)))
+            .await?;
 
         Ok(true)
     }

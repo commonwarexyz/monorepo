@@ -3,7 +3,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            unordered::fixed::{Any, Operation as FixedOperation},
             FixedValue, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},

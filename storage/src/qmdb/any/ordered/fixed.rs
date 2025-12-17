@@ -11,7 +11,8 @@ use crate::{
     qmdb::{
         any::{
             init_fixed_authenticated_log,
-            ordered::{FixedOperation as Operation, IndexedLog},
+            ordered::{self, IndexedLog},
+            value::FixedEncoding,
             FixedConfig as Config, FixedValue,
         },
         Error,
@@ -22,6 +23,9 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
+
+pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -72,7 +76,7 @@ mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher as Standard},
         qmdb::{
-            any::ordered::KeyData,
+            any::ordered::Update,
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -158,7 +162,7 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(KeyData {
+                ops.push(Operation::Update(Update {
                     key,
                     value,
                     next_key,
@@ -824,7 +828,7 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(KeyData {
+            let changed_op = Operation::Update(Update {
                 key: Sha256::hash(b"key1"),
                 value: Sha256::hash(b"value1"),
                 next_key: Sha256::hash(b"key2"),
