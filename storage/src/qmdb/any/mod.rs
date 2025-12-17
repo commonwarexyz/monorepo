@@ -25,7 +25,7 @@ use std::{
     ops::Range,
 };
 
-pub(crate) mod indexed_log;
+pub(crate) mod db;
 mod operation;
 
 mod value;

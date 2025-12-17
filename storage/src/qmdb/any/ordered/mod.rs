@@ -1,6 +1,6 @@
 //! Ordered variant of the indexed log database.
 //!
-//! This module provides the ordered-specific implementation of `IndexedLog`, which maintains
+//! This module provides the ordered-specific implementation of `Db`, which maintains
 //! a circular linked list of active keys via their `next_key` fields.
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            indexed_log::{AuthenticatedLog, IndexedLog},
+            db::{AuthenticatedLog, Db},
             CleanAny, DirtyAny, ValueEncoding,
         },
         delete_known_loc,
@@ -42,7 +42,7 @@ pub use variable::{Operation as VariableOperation, Update as VariableUpdate, Var
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 
-/// The return type of the `IndexedLog::update_loc` method.
+/// The return type of the `Db::update_loc` method.
 enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
@@ -60,7 +60,7 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
@@ -208,7 +208,7 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
@@ -748,7 +748,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -768,7 +768,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -788,7 +788,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -804,7 +804,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -820,7 +820,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, C, I, H, Update<K, V>>
+    > CleanAny for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -858,7 +858,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, C, I, H, Update<K, V>, Dirty>
+    > DirtyAny for Db<E, C, I, H, Update<K, V>, Dirty>
 where
     Operation<K, V>: Codec,
 {
@@ -919,7 +919,7 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .expect("possible_previous should not be empty")
 }
 
-impl<E, K, V, C, I, H> Batchable for IndexedLog<E, C, I, H, Update<K, V>>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

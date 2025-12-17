@@ -1,6 +1,6 @@
 //! Unordered variant of the indexed log database.
 //!
-//! This module provides the unordered-specific implementation of `IndexedLog`, which is a simpler
+//! This module provides the unordered-specific implementation of `Db`, which is a simpler
 //! key-value store without the span maintenance logic of the ordered variant.
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
     },
     qmdb::{
         any::{
-            indexed_log::{AuthenticatedLog, IndexedLog},
+            db::{AuthenticatedLog, Db},
             CleanAny, DirtyAny, ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
@@ -44,7 +44,7 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
@@ -85,7 +85,7 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, S>
 where
     Operation<K, V>: Codec,
 {
@@ -242,11 +242,11 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, I, H, Update<K, V>>
+    > Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
-    /// Returns an [IndexedLog] initialized directly from the given components. The log is
+    /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     ///
@@ -281,7 +281,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -301,7 +301,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -317,7 +317,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -333,7 +333,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for IndexedLog<E, C, I, H, Update<K, V>>
+    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -353,7 +353,7 @@ impl<
         C: PersistableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > CleanAny for IndexedLog<E, C, I, H, Update<K, V>>
+    > CleanAny for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -391,7 +391,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > DirtyAny for IndexedLog<E, C, I, H, Update<K, V>, Dirty>
+    > DirtyAny for Db<E, C, I, H, Update<K, V>, Dirty>
 where
     Operation<K, V>: Codec,
 {
@@ -414,7 +414,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for IndexedLog<E, C, I, H, Update<K, V>>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

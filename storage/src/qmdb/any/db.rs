@@ -1,9 +1,5 @@
-//! A shared, generic indexed log implementation for authenticated databases.
-//!
-//! This module provides the core `IndexedLog` struct that is used by both ordered and unordered
-//! database variants. The struct is parameterized by the operation type and index type, allowing
-//! specialized behavior through different type parameters.
-
+//! A shared, generic implementation of the "Any" QMDB.
+/// The impl block in this file defines shared functionality across all "Any" QMDB variants.
 use super::operation::{update::Update, Operation};
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -31,20 +27,18 @@ use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
-/// Type alias for the authenticated journal used by IndexedLog.
+/// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> =
     authenticated::Journal<E, C, H, S>;
 
-/// An indexed, authenticated log of database operations.
-///
-/// This struct is parameterized by:
-/// - `E`: The runtime environment (Storage + Clock + Metrics)
-/// - `C`: The contiguous journal type
-/// - `I`: The index type (ordered or unordered)
-/// - `H`: The hasher type
-/// - `U`: The update type (ordered or unordered update payload)
-/// - `S`: The MMR state type (Clean or Dirty)
-pub struct IndexedLog<
+/// An "Any" QMDB implementation generic over ordered/ordered keys and variable/fixed values.
+/// Consider using one of the following specialized variants instead, which may be more ergonomic:
+/// - [crate::qmdb::any::ordered::Fixed]
+/// - [crate::qmdb::any::ordered::Variable]
+/// - [crate::qmdb::any::unordered::Fixed]
+/// - [crate::qmdb::any::unordered::Variable]
+
+pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous,
     I,
@@ -89,7 +83,7 @@ pub struct IndexedLog<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-impl<E, K, V, U, C, I, H, S> IndexedLog<E, C, I, H, U, S>
+impl<E, K, V, U, C, I, H, S> Db<E, C, I, H, U, S>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -149,7 +143,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> IndexedLog<E, C, I, H, U>
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -160,7 +154,7 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
     ///
     /// # Panics
@@ -275,7 +269,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> IndexedLog<E, C, I, H, U>
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -287,8 +281,8 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> IndexedLog<E, C, I, H, U, Dirty> {
-        IndexedLog {
+    pub fn into_dirty(self) -> Db<E, C, I, H, U, Dirty> {
+        Db {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
@@ -300,7 +294,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> IndexedLog<E, C, I, H, U, Dirty>
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Dirty>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -312,8 +306,8 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> IndexedLog<E, C, I, H, U, Clean<H::Digest>> {
-        IndexedLog {
+    pub fn merkleize(self) -> Db<E, C, I, H, U, Clean<H::Digest>> {
+        Db {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
@@ -325,7 +319,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> IndexedLog<E, C, I, H, U>
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -395,7 +389,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> crate::qmdb::store::LogStorePrunable for IndexedLog<E, C, I, H, U>
+impl<E, K, V, U, C, I, H> crate::qmdb::store::LogStorePrunable for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -411,7 +405,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> crate::qmdb::store::CleanStore for IndexedLog<E, C, I, H, U>
+impl<E, K, V, U, C, I, H> crate::qmdb::store::CleanStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -424,7 +418,7 @@ where
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Dirty = IndexedLog<E, C, I, H, U, Dirty>;
+    type Dirty = Db<E, C, I, H, U, Dirty>;
 
     fn into_dirty(self) -> Self::Dirty {
         self.into_dirty()
@@ -456,7 +450,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, S> LogStore for IndexedLog<E, C, I, H, U, S>
+impl<E, K, V, U, C, I, H, S> LogStore for Db<E, C, I, H, U, S>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -487,7 +481,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> crate::qmdb::store::DirtyStore for IndexedLog<E, C, I, H, U, Dirty>
+impl<E, K, V, U, C, I, H> crate::qmdb::store::DirtyStore for Db<E, C, I, H, U, Dirty>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -500,7 +494,7 @@ where
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
-    type Clean = IndexedLog<E, C, I, H, U>;
+    type Clean = Db<E, C, I, H, U>;
 
     async fn merkleize(self) -> Result<Self::Clean, Error> {
         Ok(self.merkleize())
