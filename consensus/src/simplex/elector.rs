@@ -5,8 +5,8 @@
 //!
 //! # Built-in Electors
 //!
-//! - [`RoundRobin`]: Simple deterministic rotation through participants based on view number.
-//!   Works with any signing scheme. Ignores certificates entirely.
+//! - [`RoundRobin`]: Deterministic rotation through participants based on view number.
+//!   Optionally shuffled using a seed. Works with any signing scheme.
 //!
 //! - [`Random`]: Uses randomness derived from BLS threshold signatures for unpredictable
 //!   leader selection. Falls back to round-robin for the first view (no certificate available).
@@ -23,18 +23,23 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, PublicKey,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Blake3, Hasher, PublicKey,
 };
 use commonware_utils::ordered::Set;
+use std::marker::PhantomData;
 
 /// Selects leaders for consensus rounds.
 ///
+/// Electors are constructed with a participant set and then used to elect leaders
+/// for rounds within that epoch. A new elector should be created for each epoch
+/// (when participants may change).
+///
 /// # Determinism Requirement
 ///
-/// Implementations **must** be deterministic: given the same inputs (`participants`, `round`,
-/// and `certificate`), the [`elect`](Elector::elect) method must always return the same leader
-/// index. This is critical for consensus correctness - all honest participants must agree on
-/// the leader for each round.
+/// Implementations **must** be deterministic: given the same construction parameters
+/// and the same inputs to [`elect`](Elector::elect), the method must always return
+/// the same leader index. This is critical for consensus correctness - all honest
+/// participants must agree on the leader for each round.
 ///
 /// # Certificate Handling
 ///
@@ -48,81 +53,110 @@ pub trait Elector<S: Scheme>: Send + 'static {
     /// The `certificate` is `None` only for view 1; implementations should handle this case
     /// (typically by falling back to a deterministic selection like round-robin).
     ///
-    /// This method **must** be a pure function.
+    /// This method **must** be a pure function given the elector's construction state.
     ///
     /// Returns the index of the selected leader in the participants list.
-    fn elect(
-        &self,
-        participants: &Set<S::PublicKey>,
-        round: Round,
-        certificate: Option<&S::Certificate>,
-    ) -> u32;
+    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> u32;
 }
 
 /// Simple round-robin leader election.
 ///
 /// Rotates through participants based on `(epoch + view) % num_participants`.
+/// The rotation order can be shuffled using a seed.
 ///
 /// Works with any signing scheme.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RoundRobin;
+#[derive(Clone, Debug)]
+pub struct RoundRobin<S: Scheme> {
+    permutation: Vec<u32>,
+    _phantom: PhantomData<S>,
+}
 
-impl<S: Scheme> Elector<S> for RoundRobin {
-    fn elect(
-        &self,
-        participants: &Set<S::PublicKey>,
-        round: Round,
-        _certificate: Option<&S::Certificate>,
-    ) -> u32 {
-        assert!(
-            !participants.is_empty(),
-            "no participants to select leader from"
-        );
-        ((round.epoch().get().wrapping_add(round.view().get())) as usize % participants.len())
-            as u32
+impl<S: Scheme> RoundRobin<S> {
+    /// Creates a new round-robin elector without shuffling.
+    ///
+    /// Leaders rotate in index order: 0, 1, 2, ..., n-1, 0, 1, ...
+    pub fn new(participants: &Set<S::PublicKey>) -> Self {
+        assert!(!participants.is_empty());
+
+        Self {
+            permutation: (0..participants.len() as u32).collect(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Creates a new round-robin elector with shuffled order based on seed.
+    ///
+    /// The seed determines the permutation of leader indices, so different seeds
+    /// produce different rotation orders.
+    pub fn with_seed(participants: &Set<S::PublicKey>, seed: u64) -> Self {
+        assert!(!participants.is_empty());
+
+        let mut permutation = (0..participants.len() as u32).collect::<Vec<_>>();
+        permutation.sort_by_key(|&index| {
+            let mut hasher = Blake3::new();
+            hasher.update(&seed.to_le_bytes());
+            hasher.update(&index.to_le_bytes());
+            hasher.finalize()
+        });
+
+        Self {
+            permutation,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: Scheme> Elector<S> for RoundRobin<S> {
+    fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> u32 {
+        let n = self.permutation.len();
+        let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
+        self.permutation[idx]
     }
 }
 
 /// Leader election using threshold signature randomness.
 ///
 /// Uses the seed signature from BLS threshold certificates to derive unpredictable
-/// leader selection.
+/// leader selection. Falls back to standard round-robin for view 1 when no
+/// certificate is available.
 ///
 /// Only works with [`bls12381_threshold`] signing scheme.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Random;
+#[derive(Clone, Debug)]
+pub struct Random<P: PublicKey, V: Variant> {
+    n: usize,
+    _phantom: PhantomData<(P, V)>,
+}
 
-impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random
+impl<P: PublicKey, V: Variant> Random<P, V> {
+    /// Creates a new random elector for the given participants.
+    pub fn new(participants: &Set<P>) -> Self {
+        assert!(!participants.is_empty());
+
+        Self {
+            n: participants.len(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<P, V> Elector<bls12381_threshold::Scheme<P, V>> for Random<P, V>
 where
     P: PublicKey,
-    V: Variant + Send + Sync,
+    V: Variant + Send + Sync + 'static,
 {
-    fn elect(
-        &self,
-        participants: &Set<P>,
-        round: Round,
-        certificate: Option<&bls12381_threshold::Signature<V>>,
-    ) -> u32 {
-        assert!(
-            !participants.is_empty(),
-            "no participants to select leader from"
-        );
-
+    fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
         assert!(certificate.is_some() || round.view() == View::new(1));
 
         let Some(certificate) = certificate else {
-            return <RoundRobin as Elector<bls12381_threshold::Scheme<P, V>>>::elect(
-                &RoundRobin,
-                participants,
-                round,
-                certificate,
-            );
+            // Standard round-robin for view 1
+            return ((round.epoch().get().wrapping_add(round.view().get())) as usize % self.n)
+                as u32;
         };
 
-        // Encode seed and use modulo to select leader
+        // Use certificate randomness
         let seed = Seed::<V>::new(round, certificate.seed_signature);
         let encoded = seed.encode();
-        commonware_utils::modulo(encoded.as_ref(), participants.len() as u64) as u32
+        commonware_utils::modulo(encoded.as_ref(), self.n as u64) as u32
     }
 }
 
@@ -149,20 +183,14 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = RoundRobin;
+        let elector = RoundRobin::<ed25519::Scheme>::new(&participants);
         let epoch = Epoch::new(0);
 
         // Run through 3 * n views, record the sequence of leaders
-        // RoundRobin ignores certificates, so we pass None
         let mut leaders = Vec::new();
         for view in 1..=(3 * n as u64) {
             let round = Round::new(epoch, View::new(view));
-            leaders.push(<RoundRobin as Elector<ed25519::Scheme>>::elect(
-                &elector,
-                &participants,
-                round,
-                None,
-            ));
+            leaders.push(elector.elect(round, None));
         }
 
         // Verify leaders cycle: consecutive leaders differ by 1 (mod n)
@@ -177,18 +205,13 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector = RoundRobin;
+        let elector = RoundRobin::<ed25519::Scheme>::new(&participants);
 
         // Record leader for view 1 of epochs 0..n
         let leaders: Vec<_> = (0..n as u64)
             .map(|e| {
                 let round = Round::new(Epoch::new(e), View::new(1));
-                <RoundRobin as Elector<ed25519::Scheme>>::elect(
-                    &elector,
-                    &participants,
-                    round,
-                    None,
-                )
+                elector.elect(round, None)
             })
             .collect();
 
@@ -202,12 +225,71 @@ mod tests {
     }
 
     #[test]
+    fn round_robin_with_seed_shuffles_order() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+
+        let elector_no_seed = RoundRobin::<ed25519::Scheme>::new(&participants);
+        let elector_seed_1 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 1);
+        let elector_seed_2 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 2);
+
+        // Collect first 5 leaders from each
+        let epoch = Epoch::new(0);
+        let leaders_no_seed: Vec<_> = (1..=5)
+            .map(|v| elector_no_seed.elect(Round::new(epoch, View::new(v)), None))
+            .collect();
+        let leaders_seed_1: Vec<_> = (1..=5)
+            .map(|v| elector_seed_1.elect(Round::new(epoch, View::new(v)), None))
+            .collect();
+        let leaders_seed_2: Vec<_> = (1..=5)
+            .map(|v| elector_seed_2.elect(Round::new(epoch, View::new(v)), None))
+            .collect();
+
+        // No seed should be identity permutation
+        assert_eq!(leaders_no_seed, vec![1, 2, 3, 4, 0]);
+
+        // Different seeds should produce different permutations
+        assert_ne!(leaders_seed_1, leaders_no_seed);
+        assert_ne!(leaders_seed_2, leaders_no_seed);
+        assert_ne!(leaders_seed_1, leaders_seed_2);
+
+        // Each permutation should still cover all participants
+        for leaders in [&leaders_seed_1, &leaders_seed_2] {
+            let mut sorted = leaders.clone();
+            sorted.sort();
+            assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn round_robin_same_seed_is_deterministic() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+
+        let elector1 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 12345);
+        let elector2 = RoundRobin::<ed25519::Scheme>::with_seed(&participants, 12345);
+
+        let epoch = Epoch::new(0);
+        for view in 1..=10 {
+            let round = Round::new(epoch, View::new(view));
+            assert_eq!(elector1.elect(round, None), elector2.elect(round, None));
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "no participants")]
-    fn round_robin_elect_panics_on_empty_participants() {
-        let participants = Set::default();
-        let elector = RoundRobin;
-        let round = Round::new(Epoch::new(1), View::new(1));
-        <RoundRobin as Elector<ed25519::Scheme>>::elect(&elector, &participants, round, None);
+    fn round_robin_new_panics_on_empty_participants() {
+        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
+        RoundRobin::<ed25519::Scheme>::new(&participants);
+    }
+
+    #[test]
+    #[should_panic(expected = "no participants")]
+    fn round_robin_with_seed_panics_on_empty_participants() {
+        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
+        RoundRobin::<ed25519::Scheme>::with_seed(&participants, 42);
     }
 
     #[test]
@@ -216,17 +298,13 @@ mod tests {
         let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
+        let elector = Random::<_, MinPk>::new(&participants);
 
         // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
             .map(|e| {
                 let round = Round::new(Epoch::new(e), View::new(1));
-                <Random as Elector<bls12381_threshold::Scheme<_, MinPk>>>::elect(
-                    &Random,
-                    &participants,
-                    round,
-                    None,
-                )
+                elector.elect(round, None)
             })
             .collect();
 
@@ -241,8 +319,6 @@ mod tests {
 
     #[test]
     fn random_uses_certificate_randomness() {
-        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
-
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             participants,
@@ -250,7 +326,7 @@ mod tests {
             ..
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector = Random;
+        let elector = Random::<_, MinPk>::new(&participants);
         let quorum = quorum_from_slice(&schemes) as usize;
 
         // Create certificate for round (1, 2)
@@ -278,8 +354,8 @@ mod tests {
         let cert2 = schemes[0].assemble(attestations2).unwrap();
 
         // Same certificate always gives same leader
-        let leader1a = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert1));
-        let leader1b = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert1));
+        let leader1a = elector.elect(round1, Some(&cert1));
+        let leader1b = elector.elect(round1, Some(&cert1));
         assert_eq!(leader1a, leader1b);
 
         // Different certificates produce different leaders
@@ -287,55 +363,27 @@ mod tests {
         // NOTE: In general, different certificates could produce the same leader by chance.
         // However, for our specific test inputs (rng seed 42, 5 participants), we've
         // verified these produce different results.
-        let leader2 = <Random as Elector<S>>::elect(&elector, &participants, round1, Some(&cert2));
+        let leader2 = elector.elect(round1, Some(&cert2));
         assert_ne!(leader1a, leader2);
     }
 
     #[test]
     #[should_panic(expected = "no participants")]
-    fn random_panics_on_empty_participants_view_1() {
-        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
-
-        let participants = Set::default();
-        let round = Round::new(Epoch::new(1), View::new(1));
-        <Random as Elector<S>>::elect(&Random, &participants, round, None);
-    }
-
-    #[test]
-    #[should_panic(expected = "no participants")]
-    fn random_panics_on_empty_participants_with_cert() {
-        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
-
-        // Create a certificate, but use empty participants
-        let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 3);
-        let round = Round::new(Epoch::new(1), View::new(2));
-        let quorum = quorum_from_slice(&schemes) as usize;
-        let attestations: Vec<_> = schemes
-            .iter()
-            .take(quorum)
-            .map(|s| {
-                s.sign::<Sha256Digest>(b"test", Subject::Nullify { round })
-                    .unwrap()
-            })
-            .collect();
-        let cert = schemes[0].assemble(attestations).unwrap();
-
-        let participants = Set::default();
-        <Random as Elector<S>>::elect(&Random, &participants, round, Some(&cert));
+    fn random_panics_on_empty_participants() {
+        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
+        Random::<_, MinPk>::new(&participants);
     }
 
     #[test]
     #[should_panic]
     fn random_panics_on_none_certificate_after_view_1() {
-        type S = bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
-
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
         let participants = Set::try_from_iter(participants).unwrap();
+        let elector = Random::<_, MinPk>::new(&participants);
 
         // View 2 requires a certificate
         let round = Round::new(Epoch::new(1), View::new(2));
-        <Random as Elector<S>>::elect(&Random, &participants, round, None);
+        elector.elect(round, None);
     }
 }

@@ -37,8 +37,8 @@ pub struct Config<
     ///
     /// Determines how leaders are selected for each view. Built-in options include
     /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
-    /// [`ThresholdRandomness`](super::elector::ThresholdRandomness) for unpredictable
-    /// selection using BLS threshold signatures.
+    /// [`Random`](super::elector::Random) for unpredictable selection using BLS
+    /// threshold signatures.
     pub elector: L,
 
     /// Blocker for the network.

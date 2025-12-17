@@ -150,11 +150,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest, L: Elector<S
         let advance_deadline = now + self.notarization_timeout;
 
         // Compute leader using elector
-        let leader = self.elector.elect(
-            self.scheme.participants(),
-            Rnd::new(self.epoch, view),
-            certificate,
-        );
+        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
 
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
