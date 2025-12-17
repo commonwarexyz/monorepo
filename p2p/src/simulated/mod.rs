@@ -61,9 +61,8 @@
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
-//! use commonware_runtime::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
