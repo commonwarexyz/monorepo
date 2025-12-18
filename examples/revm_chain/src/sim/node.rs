@@ -33,6 +33,8 @@ type Peer = ed25519::PublicKey;
 type ChannelSender = simulated::Sender<Peer>;
 type ChannelReceiver = simulated::Receiver<Peer>;
 
+// This example keeps everything in a single epoch for simplicity. The `Marshaled` wrapper also
+// supports epoch boundaries, but exercising that logic is out-of-scope for this demo.
 const EPOCH_LENGTH: u64 = u64::MAX;
 
 #[derive(Clone)]
@@ -164,6 +166,7 @@ async fn start_node(
     )
     .await?;
 
+    // Adapt the application to simplex by delegating full-block dissemination/backfill to marshal.
     let marshaled = Marshaled::new(
         context.with_label(&format!("marshaled_{index}")),
         app,
@@ -172,6 +175,8 @@ async fn start_node(
     );
 
     let seed_reporter = application::SeedReporter::<MinSig>::new(state.clone());
+    // Feed both the application-specific reporter (seed hashing) and marshal itself with simplex
+    // activity (notarizations/finalizations).
     let reporter = Reporters::from((seed_reporter, marshal_mailbox.clone()));
 
     // Submit the deterministic demo transfer before starting consensus so the first leader can
@@ -267,6 +272,10 @@ async fn start_marshal<M>(
 where
     M: commonware_p2p::Manager<PublicKey = Peer>,
 {
+    // Marshal wires together:
+    // - a best-effort broadcast for blocks,
+    // - a request/response resolver for ancestor backfill, and
+    // - local archives for finalized blocks and certificates.
     let ctx = context.with_label(&format!("marshal_{index}"));
     let partition_prefix = format!("revm-chain-marshal-{index}");
     let scheme_provider = ConstantSchemeProvider::from(scheme.clone());

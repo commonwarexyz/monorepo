@@ -1,3 +1,12 @@
+//! Consensus-facing application implementation for the REVM chain example.
+//!
+//! Threshold-simplex orders only block commitments (digests). Full blocks are disseminated and
+//! backfilled by `commonware_consensus::marshal`. The `commonware_consensus::application::marshaled::Marshaled`
+//! wrapper bridges these layers by fetching required ancestors from marshal and calling into this
+//! module with an `AncestorStream` you can iterate to walk back over pending blocks.
+//!
+//! The node wiring that wraps this application lives in `examples/revm_chain/src/sim/node.rs`.
+
 use super::state::Shared;
 use crate::{
     consensus::{digest_for_block, ConsensusDigest, PublicKey},
@@ -52,6 +61,8 @@ where
     ) -> Option<Self::Block> {
         let parent = ancestry.next().await?;
 
+        // Transactions remain in the mempool until the block that includes them finalizes. Walk
+        // back over pending ancestors so we do not propose a block that re-includes in-flight txs.
         let mut included = BTreeSet::<TxId>::new();
         for tx in parent.txs.iter() {
             included.insert(tx.id());

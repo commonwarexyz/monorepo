@@ -1,3 +1,12 @@
+//! Reporters used by the REVM chain example.
+//!
+//! This example uses two independent reporting streams:
+//! - `SeedReporter`: listens to threshold-simplex notarization/finalization activity and stores a
+//!   32-byte hash of the threshold seed for each digest. The proposer uses this to set
+//!   `prevrandao` for the next block.
+//! - `FinalizedReporter`: listens to `commonware_consensus::marshal::Update` and reacts to
+//!   finalized blocks (prunes the mempool and forwards a finalization event to the simulation).
+
 use super::state::Shared;
 use crate::{
     consensus::{digest_for_block, ConsensusDigest, FinalizationEvent},
@@ -97,6 +106,8 @@ impl Reporter for FinalizedReporter {
                 let digest = digest_for_block(&block);
                 self.state.prune_mempool(&block.txs).await;
                 let _ = self.finalized.unbounded_send((self.node, digest));
+                // Marshal waits for the application to acknowledge processing before advancing the
+                // delivery floor. Without this, the node can stall on finalized block delivery.
                 ack.acknowledge();
             }
         }

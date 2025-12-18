@@ -25,6 +25,8 @@ pub(super) const CHANNEL_VOTES: u64 = 0;
 pub(super) const CHANNEL_CERTS: u64 = 1;
 pub(super) const CHANNEL_RESOLVER: u64 = 2;
 pub(super) const CHANNEL_BLOCKS: u64 = 3;
+// Marshal backfill requests/responses use a resolver protocol and are kept separate from the
+// best-effort broadcast channel used for full blocks.
 pub(super) const CHANNEL_BACKFILL: u64 = 4;
 pub(super) const BLOCK_CODEC_MAX_TXS: usize = 64;
 pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;

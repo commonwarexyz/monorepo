@@ -1,3 +1,14 @@
+//! Node-local state for the REVM chain example.
+//!
+//! Threshold-simplex orders only block digests. Full blocks are verified by the application and
+//! disseminated/backfilled by `commonware_consensus::marshal`. This module holds the minimal
+//! shared state needed by the example:
+//! - a mempool of submitted transactions,
+//! - per-block execution snapshots (`InMemoryDB`) keyed by the consensus digest, and
+//! - a per-digest seed hash used to populate the next block's `prevrandao`.
+//!
+//! The deterministic simulation queries this state through `crate::application::Handle`.
+
 use crate::{
     consensus::{digest_for_block, ConsensusDigest},
     types::{Block, StateRoot, Tx, TxId},
