@@ -57,6 +57,7 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BufMut;
     use commonware_runtime::{deterministic, mocks, Runner};
     use rand::Rng;
 
@@ -120,8 +121,9 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let read = stream.recv(vec![0; 4]).await.unwrap();
-            assert_eq!(read.as_ref(), (buf.len() as u32).to_be_bytes());
+            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08] (2 bytes)
+            let read = stream.recv(vec![0; 2]).await.unwrap();
+            assert_eq!(read.as_ref(), &[0x80, 0x08]); // 1024 as varint
             let read = stream
                 .recv(vec![0; MAX_MESSAGE_SIZE as usize])
                 .await
@@ -156,8 +158,10 @@ mod tests {
             let mut msg = [0u8; MAX_MESSAGE_SIZE as usize];
             context.fill(&mut msg);
 
-            let mut buf = BytesMut::with_capacity(4 + msg.len());
-            buf.put_u32(MAX_MESSAGE_SIZE);
+            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
+            let mut buf = BytesMut::with_capacity(2 + msg.len());
+            buf.put_u8(0x80);
+            buf.put_u8(0x08);
             buf.extend_from_slice(&msg);
             sink.send(buf).await.unwrap();
 
@@ -174,8 +178,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            let mut buf = BytesMut::with_capacity(4);
-            buf.put_u32(MAX_MESSAGE_SIZE);
+            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
+            let mut buf = BytesMut::with_capacity(2);
+            buf.put_u8(0x80);
+            buf.put_u8(0x08);
             sink.send(buf).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
@@ -186,23 +192,44 @@ mod tests {
     }
 
     #[test]
-    fn test_recv_frame_short_length_prefix() {
+    fn test_recv_frame_incomplete_varint() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Manually insert a frame with a short length prefix
-            let mut buf = BytesMut::with_capacity(3);
-            buf.put_u8(0x00);
-            buf.put_u8(0x00);
-            buf.put_u8(0x00);
+            // Send incomplete varint (continuation bit set but no following byte)
+            let mut buf = BytesMut::with_capacity(1);
+            buf.put_u8(0x80); // Continuation bit set, expects more bytes
 
             sink.send(buf).await.unwrap();
             drop(sink); // Close the sink to simulate a closed stream
 
-            // Expect an error rather than a panic
+            // Expect an error because varint is incomplete
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::RecvFailed(_))));
+        });
+    }
+
+    #[test]
+    fn test_recv_frame_invalid_varint_overflow() {
+        let (mut sink, mut stream) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Send a varint that overflows u32 (more than 5 bytes with continuation bits)
+            let mut buf = BytesMut::with_capacity(6);
+            buf.put_u8(0xFF); // 7 bits + continue
+            buf.put_u8(0xFF); // 7 bits + continue
+            buf.put_u8(0xFF); // 7 bits + continue
+            buf.put_u8(0xFF); // 7 bits + continue
+            buf.put_u8(0xFF); // 5th byte with overflow bits set + continue
+            buf.put_u8(0x01); // 6th byte
+
+            sink.send(buf).await.unwrap();
+
+            // Expect an error because varint overflows u32
+            let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
+            assert!(matches!(&result, Err(Error::InvalidVarint)));
         });
     }
 }
