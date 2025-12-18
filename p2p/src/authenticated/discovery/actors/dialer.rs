@@ -104,14 +104,15 @@ impl<E: Spawner + Clock + Network + Resolver + Rng + CryptoRng + Metrics, C: Sig
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
-            move |context| async move {
-                // Resolve ingress to socket address (filtered by private IP policy)
-                let Some(address) = ingress
+            move |mut context| async move {
+                // Resolve ingress to socket addresses (filtered by private IP policy)
+                let addresses: Vec<_> = ingress
                     .resolve_filtered(&context, allow_private_ips)
                     .await
-                    .and_then(|mut addrs| addrs.next())
-                else {
-                    debug!(?ingress, "failed to resolve or private IP filtered");
+                    .map(Iterator::collect)
+                    .unwrap_or_default();
+                let Some(&address) = addresses.choose(&mut context) else {
+                    debug!(?ingress, "failed to resolve or no valid addresses");
                     return;
                 };
 
