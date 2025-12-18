@@ -9,8 +9,8 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use bytes::{Buf, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
+use bytes::{Buf, Bytes};
+use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -358,10 +358,8 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
-        let mut prefix = BytesMut::with_capacity(subchannel.encode_size());
-        subchannel.write(&mut prefix);
         self.inner
-            .send(prefix.freeze().chain(message), priority)
+            .send(subchannel.encode().chain(message), priority)
             .await
     }
 }
