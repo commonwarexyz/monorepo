@@ -105,7 +105,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                // Set the initial deadlin (no need to send right away)
+                // Set the initial deadline (no need to send right away)
                 let mut deadline = context.current() + self.ping_frequency;
 
                 // Enter into the main loop
