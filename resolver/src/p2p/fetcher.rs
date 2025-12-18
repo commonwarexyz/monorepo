@@ -2,13 +2,16 @@ use crate::p2p::wire;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
-    telemetry::metrics::status::{self, CounterExt, GaugeExt, Status},
+    telemetry::metrics::{
+        histogram::Buckets,
+        status::{self, CounterExt, GaugeExt, Status},
+    },
     Clock, Metrics,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{family::Family, gauge::Gauge},
+    metrics::{family::Family, gauge::Gauge, histogram::Histogram},
 };
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -140,6 +143,9 @@ where
     /// Status of individual network requests sent to peers
     requests_sent: status::Counter,
 
+    /// Histogram of successful response durations
+    resolves: Histogram,
+
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
 }
@@ -171,6 +177,12 @@ where
             "Status of individual network requests sent to peers",
             requests_sent.clone(),
         );
+        let resolves = Histogram::new(Buckets::NETWORK);
+        context.register(
+            "resolves",
+            "Number and duration of requests that were resolved",
+            resolves.clone(),
+        );
         Self {
             context,
             me: config.me,
@@ -190,6 +202,7 @@ where
             performance,
             requests_created,
             requests_sent,
+            resolves,
             _s: PhantomData,
         }
     }
@@ -329,6 +342,7 @@ where
                         // Empty result - peer dropped message, try next
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, "send returned empty");
+                        self.update_performance(&peer, self.timeout);
                     }
                     Err(err) => {
                         // Send error - not rate-limited, just failed
@@ -438,8 +452,6 @@ where
     /// Removes and returns the key with the next request timeout.
     ///
     /// Targets are not removed on timeout.
-    ///
-    /// Panics if there are no timeouts.
     pub fn pop_active(&mut self) -> Option<Key> {
         // Pop the next deadline
         let (id, _) = self.active.pop()?;
@@ -482,6 +494,7 @@ where
                 .duration_since(req.start)
                 .unwrap_or_default();
             self.update_performance(&req.peer, elapsed);
+            self.resolves.observe(elapsed.as_secs_f64());
         } else {
             // Treat lack of response as a timeout
             self.update_performance(&req.peer, self.timeout);
