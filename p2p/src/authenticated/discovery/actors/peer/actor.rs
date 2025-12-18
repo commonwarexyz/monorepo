@@ -319,3 +319,410 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authenticated::{
+        discovery::{
+            actors::{router, tracker},
+            channels::Channels,
+            types::InfoVerifier,
+        },
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    };
+    use commonware_codec::Encode;
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_runtime::{deterministic, mocks, Runner, Spawner};
+    use commonware_stream::{self, Config as StreamConfig};
+    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use prometheus_client::metrics::{counter::Counter, family::Family};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+
+    type PublicKey = commonware_cryptography::ed25519::PublicKey;
+
+    const NAMESPACE: &[u8] = b"test_peer_actor";
+    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+
+    fn default_info_verifier(me: PublicKey) -> InfoVerifier<PublicKey> {
+        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
+        types::Info::verifier(me, 10, Duration::from_secs(60), ip_namespace)
+    }
+
+    fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
+        Config {
+            mailbox_size: 10,
+            gossip_bit_vec_frequency: Duration::from_secs(30),
+            allowed_bit_vec_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(
+                10
+            )),
+            max_peer_set_size: 128,
+            allowed_peers_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(10)),
+            peer_gossip_max_count: 10,
+            info_verifier: default_info_verifier(me),
+            sent_messages: Family::<metrics::Message, Counter>::default(),
+            received_messages: Family::<metrics::Message, Counter>::default(),
+            rate_limited: Family::<metrics::Message, Counter>::default(),
+        }
+    }
+
+    fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
+        StreamConfig {
+            signing_key: key,
+            namespace: NAMESPACE.to_vec(),
+            max_message_size: MAX_MESSAGE_SIZE,
+            synchrony_bound: Duration::from_secs(10),
+            max_handshake_age: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(10),
+        }
+    }
+
+    fn signed_peer_info(
+        signer: &mut PrivateKey,
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> types::Info<PublicKey> {
+        let ingress: crate::Ingress = socket.into();
+        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
+        let signature = signer.sign(&ip_namespace, &(ingress.clone(), timestamp).encode());
+        types::Info {
+            ingress,
+            timestamp,
+            public_key: signer.public_key(),
+            signature,
+        }
+    }
+
+    fn signed_peer_info_with_pk(
+        signer: &mut PrivateKey,
+        socket: SocketAddr,
+        timestamp: u64,
+        public_key: PublicKey,
+    ) -> types::Info<PublicKey> {
+        let ingress: crate::Ingress = socket.into();
+        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
+        let signature = signer.sign(&ip_namespace, &(ingress.clone(), timestamp).encode());
+        types::Info {
+            ingress,
+            timestamp,
+            public_key,
+            signature,
+        }
+    }
+
+    fn create_channels() -> Channels<PublicKey> {
+        let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
+        let messenger = router::Messenger::new(router_mailbox);
+        Channels::new(messenger, MAX_MESSAGE_SIZE)
+    }
+
+    #[test]
+    fn test_missing_greeting_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            // Set up mock channels for the connection
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            // Establish encrypted connection via handshake
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.clone().spawn({
+                move |ctx| async move {
+                    commonware_stream::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+                context.clone(),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            // Create peer actor (from remote's perspective, local is the peer)
+            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+                context.clone(),
+                default_peer_config(remote_pk),
+            );
+
+            // Create greeting info for the peer actor to send
+            let mut local_signer = local_key.clone();
+            let greeting = signed_peer_info(
+                &mut local_signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+
+            // Create tracker mailbox
+            let (tracker_mailbox, _tracker_receiver) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Create empty channels
+            let channels = create_channels();
+
+            // Send a non-greeting message first (BitVec)
+            let bit_vec = types::Payload::<PublicKey>::BitVec(types::BitVec {
+                index: 0,
+                bits: BitMap::ones(10),
+            });
+            local_sender
+                .send(&bit_vec.encode())
+                .await
+                .expect("send failed");
+
+            // Run peer actor and expect MissingGreeting error
+            let result = peer_actor
+                .run(
+                    local_pk,
+                    greeting,
+                    (remote_sender, remote_receiver),
+                    tracker_mailbox,
+                    channels,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::MissingGreeting)),
+                "Expected MissingGreeting error, got: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_duplicate_greeting_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            // Set up mock channels for the connection
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            // Establish encrypted connection via handshake
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.clone().spawn({
+                move |ctx| async move {
+                    commonware_stream::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+                context.clone(),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            // Create peer actor (from remote's perspective, local is the peer)
+            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+                context.clone(),
+                default_peer_config(remote_pk),
+            );
+
+            // Create greeting info for the peer actor to send
+            let mut local_signer = local_key.clone();
+            let greeting = signed_peer_info(
+                &mut local_signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+
+            // Create tracker mailbox
+            let (tracker_mailbox, _tracker_receiver) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Create empty channels
+            let channels = create_channels();
+
+            // Send first greeting (valid)
+            let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
+            local_sender
+                .send(&first_greeting.encode())
+                .await
+                .expect("send failed");
+
+            // Send second greeting (should cause error)
+            let second_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
+            local_sender
+                .send(&second_greeting.encode())
+                .await
+                .expect("send failed");
+
+            // Run peer actor and expect DuplicateGreeting error
+            let result = peer_actor
+                .run(
+                    local_pk,
+                    greeting,
+                    (remote_sender, remote_receiver),
+                    tracker_mailbox,
+                    channels,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::DuplicateGreeting)),
+                "Expected DuplicateGreeting error, got: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_greeting_public_key_mismatch_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let wrong_key = PrivateKey::from_seed(3);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+            let wrong_pk = wrong_key.public_key();
+
+            // Set up mock channels for the connection
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            // Establish encrypted connection via handshake
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.clone().spawn({
+                move |ctx| async move {
+                    commonware_stream::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+                context.clone(),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            // Create peer actor (from remote's perspective, local is the peer)
+            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+                context.clone(),
+                default_peer_config(remote_pk),
+            );
+
+            // Create greeting info for the peer actor to send
+            let mut local_signer = local_key.clone();
+            let greeting = signed_peer_info(
+                &mut local_signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+
+            // Create tracker mailbox
+            let (tracker_mailbox, _tracker_receiver) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Create empty channels
+            let channels = create_channels();
+
+            // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
+            let wrong_greeting = signed_peer_info_with_pk(
+                &mut local_signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+                wrong_pk,
+            );
+            let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
+            local_sender
+                .send(&greeting_payload.encode())
+                .await
+                .expect("send failed");
+
+            // Run peer actor and expect GreetingPublicKeyMismatch error
+            let result = peer_actor
+                .run(
+                    local_pk,
+                    greeting,
+                    (remote_sender, remote_receiver),
+                    tracker_mailbox,
+                    channels,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::GreetingPublicKeyMismatch)),
+                "Expected GreetingPublicKeyMismatch error, got: {result:?}"
+            );
+        });
+    }
+}
