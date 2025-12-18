@@ -1,4 +1,5 @@
 use crate::{mocks, Error, StableBuf};
+use bytes::Buf;
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -16,7 +17,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Buf + Send) -> Result<(), Error> {
         self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
 }

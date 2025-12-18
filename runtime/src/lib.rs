@@ -22,6 +22,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use bytes::Buf;
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
@@ -475,10 +476,7 @@ pub trait Sink: Sync + Send + 'static {
     /// # Warning
     ///
     /// If the sink returns an error, part of the message may still be delivered.
-    fn send(
-        &mut self,
-        msg: impl Into<StableBuf> + Send,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(&mut self, msg: impl Buf + Send) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -2791,7 +2789,7 @@ mod tests {
                     let request = format!(
                         "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
                     );
-                    sink.send(Bytes::from(request).to_vec()).await.unwrap();
+                    sink.send(Bytes::from(request)).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

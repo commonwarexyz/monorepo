@@ -240,8 +240,13 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
-        let mut msg = msg.into();
+    async fn send(&mut self, msg: impl Buf + Send) -> Result<(), crate::Error> {
+        // For now, collect the message into a stable buffer. In the future,
+        // we could optimize this by using writev w/ a keepalive for the iovecs.
+        let mut msg: StableBuf = {
+            let buf = msg.copy_to_bytes(msg.remaining());
+            bytes::BytesMut::from(buf).into()
+        };
         let mut bytes_sent = 0;
         let msg_len = msg.len();
 
