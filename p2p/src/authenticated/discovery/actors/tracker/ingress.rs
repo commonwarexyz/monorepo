@@ -42,7 +42,8 @@ pub enum Message<C: PublicKey> {
     /// Notify the tracker that a peer has been successfully connected.
     ///
     /// The tracker responds with the greeting info that must be sent to the peer
-    /// before any other messages.
+    /// before any other messages. If the peer is not eligible, the channel is dropped
+    /// (signaling termination).
     Connect {
         /// The public key of the peer.
         public_key: C,
@@ -50,8 +51,8 @@ pub enum Message<C: PublicKey> {
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
-        /// One-shot channel to return the greeting info (or None if peer is not eligible).
-        responder: oneshot::Sender<Option<types::Info<C>>>,
+        /// One-shot channel to return the greeting info. Dropped if peer is not eligible.
+        responder: oneshot::Sender<types::Info<C>>,
     },
 
     /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
@@ -137,7 +138,8 @@ pub enum Message<C: PublicKey> {
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker and receive the greeting info.
     ///
-    /// Returns `Some(info)` if the peer is eligible, `None` otherwise.
+    /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
+    /// dropped (peer not eligible).
     pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Connect {
@@ -146,7 +148,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
             responder: tx,
         })
         .unwrap();
-        rx.await.unwrap()
+        rx.await.ok()
     }
 
     /// Send a `Construct` message to the tracker.

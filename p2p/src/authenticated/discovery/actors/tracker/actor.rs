@@ -187,9 +187,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 dialer,
                 responder,
             } => {
-                // Return None if peer is not authorized
+                // Drop responder if peer is not authorized (signals kill)
                 if !self.directory.eligible(&public_key) {
-                    let _ = responder.send(None);
                     return;
                 }
 
@@ -198,7 +197,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Return greeting with our own info
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
-                let _ = responder.send(Some(info));
+                let _ = responder.send(info);
             }
             Message::Construct {
                 public_key,
