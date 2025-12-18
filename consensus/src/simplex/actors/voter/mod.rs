@@ -233,7 +233,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -475,7 +475,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -754,7 +754,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -938,7 +938,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1506,7 +1506,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1714,7 +1714,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1946,7 +1946,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -2109,7 +2109,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),

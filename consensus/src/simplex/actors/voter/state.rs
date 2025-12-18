@@ -861,6 +861,67 @@ mod tests {
     }
 
     #[test]
+    fn parent_certificate_prefers_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let local_scheme = schemes[1].clone(); // leader of view 2
+            let cfg = Config {
+                scheme: local_scheme,
+                elector: <RoundRobin>::default(),
+                namespace: namespace.clone(),
+                epoch: Epoch::new(7),
+                activity_timeout: ViewDelta::new(3),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Add notarization for parent view
+            let parent_round = Rnd::new(state.epoch(), View::new(1));
+            let parent_proposal =
+                Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+            state.add_notarization(notarization.clone());
+
+            // Insert proposal at view 2 with parent at view 1
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([22u8; 32]),
+            );
+            state.proposed(proposal);
+
+            // parent_certificate returns the notarization
+            let cert = state.parent_certificate(View::new(2)).unwrap();
+            assert!(matches!(cert, Certificate::Notarization(n) if n == notarization));
+
+            // Add finalization for the same parent view
+            let finalize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
+            state.add_finalization(finalization.clone());
+
+            // parent_certificate now returns the finalization (preferred)
+            let cert = state.parent_certificate(View::new(2)).unwrap();
+            assert!(matches!(cert, Certificate::Finalization(f) if f == finalization));
+        });
+    }
+
+    #[test]
     fn parent_payload_errors_without_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {

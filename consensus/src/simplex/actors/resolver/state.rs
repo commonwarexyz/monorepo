@@ -1,5 +1,5 @@
 use crate::{
-    simplex::types::{Certificate, Finalization, Notarization, Nullification},
+    simplex::types::{Certificate, Finalization, Nullification},
     types::View,
     Viewable,
 };
@@ -9,14 +9,12 @@ use commonware_utils::sequence::U64;
 use std::collections::BTreeMap;
 
 /// Tracks all known certificates from the last
-/// notarized or finalized view to the current view.
+/// finalized view to the current view.
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
     /// Most recent finalized certificate.
     floor: Option<Finalization<S, D>>,
-    /// Notarizations for any view greater than the floor.
-    notarizations: BTreeMap<View, Notarization<S, D>>,
     /// Nullifications for any view greater than the floor.
     nullifications: BTreeMap<View, Nullification<S>>,
     /// Window of requests to send to the resolver.
@@ -29,7 +27,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         Self {
             current_view: View::zero(),
             floor: None,
-            notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
             fetch_concurrent,
         }
@@ -51,11 +48,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
             }
             Certificate::Notarization(notarization) => {
-                // Update current view
-                let view = notarization.view();
-                if self.encounter_view(view) {
-                    self.notarizations.insert(view, notarization);
-                }
+                // Update current view (notarizations don't set the floor)
+                self.encounter_view(notarization.view());
             }
             Certificate::Finalization(finalization) => {
                 // Update current view
@@ -119,7 +113,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let floor = self.floor_view();
         self.nullifications.retain(|view, _| *view > floor);
-        self.notarizations.retain(|view, _| *view > floor);
         resolver.retain(move |key| *key > floor.into()).await;
     }
 }
@@ -310,7 +303,7 @@ mod tests {
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
-        // Notarization does not set floor
+        // Notarization does not set floor or prune
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
         state
             .handle(
@@ -320,10 +313,10 @@ mod tests {
             .await;
 
         assert!(state.floor.is_none());
-        assert!(state.nullifications.is_empty());
-        assert!(resolver.outstanding().is_empty());
+        assert_eq!(state.nullifications.len(), 3); // nullifications remain
+        assert_eq!(resolver.outstanding(), vec![1, 2, 3]); // requests remain
 
-        // Finalization at the same view sets floor
+        // Finalization sets floor and prunes
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
         state
             .handle(
