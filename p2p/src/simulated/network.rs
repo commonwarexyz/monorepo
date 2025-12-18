@@ -938,14 +938,14 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
-        // Do a rate limit check with the original recipients.
-        // The forwarder may filter these based on message content at send time.
-        let checked = self.inner.limited_sender.check(recipients.clone()).await?;
         Ok(SplitCheckedSender {
-            checked,
+            // Perform a rate limit check with the entire set of original recipients although
+            // the forwarder may filter these (based on message content) during send.
+            checked: self.inner.limited_sender.check(recipients.clone()).await?,
             replica: self.replica,
             forwarder: self.forwarder.clone(),
-            original_recipients: recipients,
+            recipients,
+
             _phantom: std::marker::PhantomData,
         })
     }
@@ -959,8 +959,8 @@ pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> 
     checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
     replica: SplitOrigin,
     forwarder: F,
-    original_recipients: Recipients<P>,
-    #[allow(dead_code)]
+    recipients: Recipients<P>,
+
     _phantom: std::marker::PhantomData<E>,
 }
 
@@ -975,17 +975,14 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        // Apply forwarder with actual message content
-        let routed_recipients =
-            (self.forwarder)(self.replica, &self.original_recipients, &message);
-        let Some(routed_recipients) = routed_recipients else {
-            // Forwarder decided to drop this message
+        // Determine the set of recipients that will receive the message
+        let Some(routed_recipients) = (self.forwarder)(self.replica, &self.recipients, &message)
+        else {
             return Ok(Vec::new());
         };
 
-        // Update recipients based on forwarder and send
-        // (rate limit quota was already consumed in SplitSender::check)
-        self.checked.set_recipients(routed_recipients);
+        // Update recipients in checked (already rate limited) and send
+        self.checked.modify_recipients(routed_recipients);
         self.checked.send(message, priority).await
     }
 }
