@@ -158,6 +158,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
+                allow_private_ips: self.cfg.allow_private_ips,
                 attempt_unregistered_handshakes: self.cfg.attempt_unregistered_handshakes,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
