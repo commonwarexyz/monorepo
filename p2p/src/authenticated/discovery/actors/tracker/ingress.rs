@@ -40,8 +40,8 @@ pub enum Message<C: PublicKey> {
 
     // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Peers] message (containing solely the local node's information) should be
-    /// sent to the peer.
+    /// [types::Payload::Greeting] message (containing solely the local node's information) should
+    /// be sent to the peer.
     Connect {
         /// The public key of the peer.
         public_key: C,

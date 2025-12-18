@@ -143,6 +143,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             None => return Err(Error::PeerDisconnected),
                         };
                         let (metric, payload) = match msg {
+                            Message::Greeting(info) =>
+                                (metrics::Message::new_greeting(&peer), types::Payload::Greeting(info)),
                             Message::BitVec(bit_vec) =>
                                 (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                             Message::Peers(peers) =>
@@ -177,6 +179,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                     RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
+                let mut greeting_received = false;
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
@@ -198,8 +201,39 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         }
                     };
 
+                    // Handle greeting protocol
+                    if let types::Payload::Greeting(info) = msg {
+                        self.received_messages
+                            .get_or_create(&metrics::Message::new_greeting(&peer))
+                            .inc();
+                        if greeting_received {
+                            debug!(?peer, "received duplicate greeting");
+                            return Err(Error::DuplicateGreeting);
+                        }
+                        greeting_received = true;
+
+                        // Validate and forward greeting info to tracker
+                        self.info_verifier.validate(&context, std::slice::from_ref(&info)).map_err(Error::Types)?;
+                        tracker.peers(vec![info]);
+                        continue;
+                    }
+
+                    // Require greeting before any other message
+                    if !greeting_received {
+                        let metric = match &msg {
+                            types::Payload::Greeting(_) => unreachable!(),
+                            types::Payload::BitVec(_) => metrics::Message::new_bit_vec(&peer),
+                            types::Payload::Peers(_) => metrics::Message::new_peers(&peer),
+                            types::Payload::Data(data) => metrics::Message::new_data(&peer, data.channel),
+                        };
+                        self.received_messages.get_or_create(&metric).inc();
+                        debug!(?peer, "expected greeting as first message");
+                        return Err(Error::MissingGreeting);
+                    }
+
                     // Update metrics
                     let metric = match &msg {
+                        types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
                         types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
                         types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
@@ -208,6 +242,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
                     // Wait until rate limiter allows us to process the message
                     let rate_limiter = match &msg {
+                        types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(_) => &bit_vec_rate_limiter,
                         types::Payload::Peers(_) => &peers_rate_limiter,
                         types::Payload::Data(data) => {
@@ -233,6 +268,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
 
                     match msg {
+                        types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
                             tracker.bit_vec(bit_vec, self.mailbox.clone());

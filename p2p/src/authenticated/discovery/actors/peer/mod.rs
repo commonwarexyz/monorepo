@@ -49,4 +49,8 @@ pub enum Error {
     InvalidChannel,
     #[error("types: {0}")]
     Types(types::Error),
+    #[error("missing greeting")]
+    MissingGreeting,
+    #[error("duplicate greeting")]
+    DuplicateGreeting,
 }

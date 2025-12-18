@@ -196,9 +196,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Mark the record as connected
                 self.directory.connect(&public_key, dialer);
 
-                // Proactively send our own info to the peer
+                // Send greeting with our own info
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
-                let _ = peer.peers(vec![info]).await;
+                let _ = peer.greeting(info).await;
             }
             Message::Construct {
                 public_key,
@@ -377,7 +377,7 @@ mod tests {
             .next()
             .await
             .expect("no response after initialization");
-        assert!(matches!(response, peer::Message::Peers(_)));
+        assert!(matches!(response, peer::Message::Greeting(_)));
         res
     }
 
@@ -491,14 +491,12 @@ mod tests {
                 .await;
 
             match peer_receiver.next().await {
-                Some(peer::Message::Peers(infos)) => {
-                    assert_eq!(infos.len(), 1);
-                    let tracker_info = &infos[0];
+                Some(peer::Message::Greeting(tracker_info)) => {
                     assert_eq!(tracker_info.public_key, tracker_pk);
                     assert_eq!(tracker_info.ingress, cfg.address);
                     assert!(tracker_info.verify(&ip_namespace));
                 }
-                _ => panic!("Expected Peers message with tracker info"),
+                _ => panic!("Expected Greeting message with tracker info"),
             }
         });
     }
