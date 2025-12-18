@@ -73,6 +73,19 @@ struct NodeInit<'a> {
     demo: &'a demo::DemoTransfer,
 }
 
+struct MarshalStart<M> {
+    index: usize,
+    public_key: Peer,
+    control: simulated::Control<Peer>,
+    manager: M,
+    scheme: ThresholdScheme,
+    buffer_pool: PoolRef,
+    block_codec_config: crate::types::BlockCfg,
+    blocks: (ChannelSender, ChannelReceiver),
+    backfill: (ChannelSender, ChannelReceiver),
+    application: application::FinalizedReporter,
+}
+
 /// Spawn all nodes (application + consensus) for a simulation run.
 pub(super) async fn start_all_nodes(
     context: &deterministic::Context,
@@ -150,16 +163,18 @@ async fn start_node(
 
     let marshal_mailbox = start_marshal(
         context,
-        index,
-        public_key.clone(),
-        control.clone(),
-        oracle.manager(),
-        scheme.clone(),
-        buffer_pool.clone(),
-        block_cfg.clone(),
-        blocks,
-        backfill,
-        finalized_reporter,
+        MarshalStart {
+            index,
+            public_key: public_key.clone(),
+            control: control.clone(),
+            manager: oracle.manager(),
+            scheme: scheme.clone(),
+            buffer_pool: buffer_pool.clone(),
+            block_codec_config: block_cfg,
+            blocks,
+            backfill,
+            application: finalized_reporter,
+        },
     )
     .await?;
 
@@ -244,7 +259,7 @@ async fn register_channels(
     })
 }
 
-fn block_codec_cfg() -> crate::types::BlockCfg {
+const fn block_codec_cfg() -> crate::types::BlockCfg {
     crate::types::BlockCfg {
         max_txs: BLOCK_CODEC_MAX_TXS,
         tx: crate::types::TxCfg {
@@ -255,20 +270,24 @@ fn block_codec_cfg() -> crate::types::BlockCfg {
 
 async fn start_marshal<M>(
     context: &deterministic::Context,
-    index: usize,
-    public_key: Peer,
-    control: simulated::Control<Peer>,
-    manager: M,
-    scheme: ThresholdScheme,
-    buffer_pool: PoolRef,
-    block_codec_config: crate::types::BlockCfg,
-    blocks: (ChannelSender, ChannelReceiver),
-    backfill: (ChannelSender, ChannelReceiver),
-    application: application::FinalizedReporter,
+    start: MarshalStart<M>,
 ) -> anyhow::Result<marshal::Mailbox<ThresholdScheme, crate::Block>>
 where
     M: commonware_p2p::Manager<PublicKey = Peer>,
 {
+    let MarshalStart {
+        index,
+        public_key,
+        control,
+        manager,
+        scheme,
+        buffer_pool,
+        block_codec_config,
+        blocks,
+        backfill,
+        application,
+    } = start;
+
     // Marshal wires together:
     // - a best-effort broadcast for blocks,
     // - a request/response resolver for ancestor backfill, and
@@ -299,7 +318,7 @@ where
         mailbox_size: MAILBOX_SIZE,
         deque_size: 10,
         priority: false,
-        codec_config: block_codec_config.clone(),
+        codec_config: block_codec_config,
     };
     let (broadcast_engine, buffer) =
         buffered::Engine::<_, Peer, crate::Block>::new(ctx.with_label("broadcast"), broadcast_cfg);
@@ -343,7 +362,7 @@ where
             freezer_journal_buffer_pool: buffer_pool.clone(),
             ordinal_partition: format!("{partition_prefix}-finalized-blocks-ordinal"),
             items_per_section: NZU64!(10),
-            codec_config: block_codec_config.clone(),
+            codec_config: block_codec_config,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
         },
