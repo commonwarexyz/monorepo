@@ -9,6 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -99,7 +100,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         let rate_limits = Arc::new(rate_limits);
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
-        let ping_rate = Quota::with_period(self.ping_frequency / 2).unwrap();
+        let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
+        let ping_rate = Quota::with_period(half).unwrap();
         let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer

@@ -15,6 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -180,7 +181,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             .spawn(move |context| async move {
                 // Use half the gossip frequency for rate limiting to allow for timing
                 // jitter at message boundaries.
-                let rate = Quota::with_period(self.gossip_bit_vec_frequency / 2).unwrap();
+                let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
+                let rate = Quota::with_period(half).unwrap();
                 let bit_vec_rate_limiter =
                     RateLimiter::direct_with_clock(rate, context.clone());
                 let peers_rate_limiter =
