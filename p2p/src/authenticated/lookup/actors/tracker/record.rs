@@ -1,4 +1,4 @@
-use crate::types::{Address as PeerAddress, Ingress};
+use crate::types::{self, Ingress};
 use std::net::IpAddr;
 
 /// Represents information known about a peer's address.
@@ -8,7 +8,7 @@ pub enum Address {
     Myself,
 
     /// Address is provided when peer is registered.
-    Known(PeerAddress),
+    Known(types::Address),
 
     /// Peer is blocked.
     /// We don't care to track its information.
@@ -51,7 +51,7 @@ impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub const fn known(addr: PeerAddress) -> Self {
+    pub const fn known(addr: types::Address) -> Self {
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
@@ -73,7 +73,7 @@ impl Record {
     // ---------- Setters ----------
 
     /// Update the record with a new address.
-    pub fn update(&mut self, addr: PeerAddress) {
+    pub fn update(&mut self, addr: types::Address) {
         if matches!(self.address, Address::Myself | Address::Blocked) {
             return;
         }
@@ -235,8 +235,8 @@ mod tests {
         SocketAddr::from(([54, 12, 1, 9], 8080))
     }
 
-    fn test_address() -> PeerAddress {
-        PeerAddress::Symmetric(test_socket())
+    fn test_address() -> types::Address {
+        types::Address::Symmetric(test_socket())
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
         // Eligible, Inert, and correct IP - acceptable
-        let mut record = Record::known(PeerAddress::Symmetric(public_socket));
+        let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
         assert!(
             record.acceptable(egress_ip),
@@ -450,14 +450,14 @@ mod tests {
         );
 
         // Not eligible (sets=0) - not acceptable
-        let record_not_eligible = Record::known(PeerAddress::Symmetric(public_socket));
+        let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
         assert!(
             !record_not_eligible.acceptable(egress_ip),
             "Not acceptable when not eligible"
         );
 
         // Already reserved - not acceptable
-        let mut record_reserved = Record::known(PeerAddress::Symmetric(public_socket));
+        let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
         record_reserved.reserve();
         assert!(
@@ -466,7 +466,7 @@ mod tests {
         );
 
         // Already connected - not acceptable
-        let mut record_connected = Record::known(PeerAddress::Symmetric(public_socket));
+        let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
         record_connected.reserve();
         record_connected.connect();
@@ -476,7 +476,7 @@ mod tests {
         );
 
         // Blocked - not acceptable
-        let mut record_blocked = Record::known(PeerAddress::Symmetric(public_socket));
+        let mut record_blocked = Record::known(types::Address::Symmetric(public_socket));
         record_blocked.increment();
         record_blocked.block();
         assert!(
@@ -492,14 +492,14 @@ mod tests {
 
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-        let record_public = Record::known(PeerAddress::Symmetric(public_socket));
+        let record_public = Record::known(types::Address::Symmetric(public_socket));
         assert!(record_public.dialable(false, true));
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
         let private_ingress =
             SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 8080);
         let public_egress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 9090);
-        let asymmetric_private_ingress = PeerAddress::Asymmetric {
+        let asymmetric_private_ingress = types::Address::Asymmetric {
             ingress: Ingress::Socket(private_ingress),
             egress: public_egress,
         };
@@ -517,7 +517,7 @@ mod tests {
         let public_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 8080);
         let private_egress =
             SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 9090);
-        let asymmetric_private_egress = PeerAddress::Asymmetric {
+        let asymmetric_private_egress = types::Address::Asymmetric {
             ingress: Ingress::Socket(public_ingress),
             egress: private_egress,
         };
@@ -528,7 +528,7 @@ mod tests {
         );
 
         // DNS ingress (no IP to check) - dialable (DNS private check happens at dial time)
-        let dns_ingress = PeerAddress::Asymmetric {
+        let dns_ingress = types::Address::Asymmetric {
             ingress: Ingress::Dns {
                 host: commonware_utils::hostname!("example.com"),
                 port: 8080,

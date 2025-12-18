@@ -1,7 +1,7 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
-    types::Address as PeerAddress,
+    types::Address,
     Ingress,
 };
 use commonware_cryptography::PublicKey;
@@ -116,7 +116,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Map<C, PeerAddress>) -> Option<Vec<C>> {
+    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<Vec<C>> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -317,7 +317,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 mod tests {
     use crate::{
         authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
-        types::Address as PeerAddress,
+        types::Address,
         Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
@@ -325,8 +325,8 @@ mod tests {
     use commonware_utils::{hostname, NZU32};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    fn addr(socket: SocketAddr) -> PeerAddress {
-        PeerAddress::Symmetric(socket)
+    fn addr(socket: SocketAddr) -> Address {
+        Address::Symmetric(socket)
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let ingress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
         let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-        let asymmetric_addr = PeerAddress::Asymmetric {
+        let asymmetric_addr = Address::Asymmetric {
             ingress: Ingress::Socket(ingress_socket),
             egress: egress_socket,
         };
@@ -547,7 +547,7 @@ mod tests {
         // Create another peer with DNS-based ingress
         let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
         let egress_socket_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 9090);
-        let dns_addr = PeerAddress::Asymmetric {
+        let dns_addr = Address::Asymmetric {
             ingress: Ingress::Dns {
                 host: hostname!("node.example.com"),
                 port: 8080,
@@ -636,11 +636,11 @@ mod tests {
         // Create peers with different address types
         let pk_socket = ed25519::PrivateKey::from_seed(1).public_key();
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let socket_peer_addr = PeerAddress::Symmetric(socket_addr);
+        let socket_peer_addr = Address::Symmetric(socket_addr);
 
         let pk_dns = ed25519::PrivateKey::from_seed(2).public_key();
         let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-        let dns_peer_addr = PeerAddress::Asymmetric {
+        let dns_peer_addr = Address::Asymmetric {
             ingress: Ingress::Dns {
                 host: hostname!("node.example.com"),
                 port: 8080,
@@ -700,11 +700,11 @@ mod tests {
         // Create peer with public egress IP
         let pk_public = ed25519::PrivateKey::from_seed(1).public_key();
         let public_addr =
-            PeerAddress::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
+            Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
 
         // Create peer with private egress IP
         let pk_private = ed25519::PrivateKey::from_seed(2).public_key();
-        let private_addr = PeerAddress::Symmetric(SocketAddr::new(
+        let private_addr = Address::Symmetric(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             8080,
         ));

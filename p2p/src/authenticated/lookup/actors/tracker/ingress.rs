@@ -5,7 +5,7 @@ use crate::{
         mailbox::UnboundedMailbox,
         Mailbox,
     },
-    types::Address as PeerAddress,
+    types::Address,
     Ingress,
 };
 use commonware_cryptography::PublicKey;
@@ -18,10 +18,7 @@ use std::net::IpAddr;
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register {
-        index: u64,
-        peers: Map<C, PeerAddress>,
-    },
+    Register { index: u64, peers: Map<C, Address> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -190,7 +187,7 @@ impl<C: PublicKey> Oracle<C> {
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
-    type Peers = Map<C, PeerAddress>;
+    type Peers = Map<C, Address>;
 
     /// Register a set of authorized peers at a given index.
     ///
