@@ -330,9 +330,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(peers)
     }
 
-    /// Returns true if the peer is able to be connected to.
-    pub fn allowed(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.allowed())
+    /// Returns true if the peer is eligible for connection.
+    ///
+    /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
+    pub fn eligible(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
@@ -348,9 +350,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         result
     }
 
-    /// Returns true if the peer is listenable.
-    pub fn listenable(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.listenable())
+    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    pub fn acceptable(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     // --------- Helpers ----------
@@ -361,8 +363,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
-        // Not reservable
-        if !self.allowed(peer) {
+        // Not reservable (must be in a peer set)
+        if !self.eligible(peer) {
             return None;
         }
 

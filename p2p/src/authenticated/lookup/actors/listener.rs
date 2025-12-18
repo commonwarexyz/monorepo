@@ -33,6 +33,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
+    pub allow_private_ips: bool,
     pub attempt_unregistered_handshakes: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
@@ -44,6 +45,7 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
+    allow_private_ips: bool,
     attempt_unregistered_handshakes: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
@@ -89,6 +91,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
+            allow_private_ips: cfg.allow_private_ips,
             attempt_unregistered_handshakes: cfg.attempt_unregistered_handshakes,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
@@ -113,9 +116,10 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
+        let source_ip = address.ip();
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.listenable(peer),
+            |peer| tracker.acceptable(peer, source_ip),
             stream_cfg,
             stream,
             sink,
@@ -198,8 +202,15 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 };
                 debug!(?address, "accepted incoming connection");
 
-                // Check whether the IP is registered
+                // Check whether the IP is private
                 let ip = address.ip();
+                if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
+                    self.handshakes_blocked.inc();
+                    debug!(?address, "rejecting private address");
+                    continue;
+                }
+
+                // Check whether the IP is registered
                 if !self.attempt_unregistered_handshakes && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
@@ -302,6 +313,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     attempt_unregistered_handshakes: false,
                     allowed_handshake_rate_per_ip,
@@ -321,7 +333,7 @@ mod tests {
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
-                        tracker::Message::Listenable { responder, .. } => {
+                        tracker::Message::Acceptable { responder, .. } => {
                             let _ = responder.send(true);
                         }
                         tracker::Message::Listen { reservation, .. } => {
@@ -469,6 +481,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    allow_private_ips: true,
                     attempt_unregistered_handshakes: false,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
@@ -481,7 +494,7 @@ mod tests {
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
-                        tracker::Message::Listenable { responder, .. } => {
+                        tracker::Message::Acceptable { responder, .. } => {
                             let _ = responder.send(true);
                         }
                         tracker::Message::Listen { reservation, .. } => {
@@ -549,6 +562,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    allow_private_ips: true,
                     attempt_unregistered_handshakes: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
@@ -561,7 +575,7 @@ mod tests {
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
-                        tracker::Message::Listenable { responder, .. } => {
+                        tracker::Message::Acceptable { responder, .. } => {
                             let _ = responder.send(true);
                         }
                         tracker::Message::Listen { reservation, .. } => {
@@ -599,6 +613,95 @@ mod tests {
             let metrics = context.encode();
             assert!(
                 metrics.contains("handshakes_blocked_total 0"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn blocks_private_ips() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-private-ips".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let (mut updates_tx, updates_rx) = mpsc::channel(1);
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    allow_private_ips: false,
+                    attempt_unregistered_handshakes: true,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+                updates_rx,
+            );
+
+            // Register the IP so it would be allowed if not for the private IP check
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            updates_tx
+                .send(allowed)
+                .await
+                .expect("update registered ips");
+
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Acceptable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Connect to the listener from a private IP
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Check metrics - should be blocked because it's a private IP
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshakes_blocked_total 1"),
                 "{}",
                 metrics
             );

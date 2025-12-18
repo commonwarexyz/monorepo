@@ -28,6 +28,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
+    pub allow_private_ips: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
@@ -38,9 +39,11 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
+    allow_private_ips: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
+    handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
@@ -49,6 +52,12 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
 impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
+        let handshakes_blocked = Counter::default();
+        context.register(
+            "handshakes_blocked",
+            "number of handshake attempts blocked because the IP was private",
+            handshakes_blocked.clone(),
+        );
         let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
             "handshake_concurrent_rate_limited",
@@ -73,9 +82,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
+            allow_private_ips: cfg.allow_private_ips,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
+            handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
@@ -94,7 +105,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
     ) {
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.listenable(peer),
+            |peer| tracker.acceptable(peer),
             stream_cfg,
             stream,
             sink,
@@ -170,6 +181,14 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 };
                 debug!(?address, "accepted incoming connection");
 
+                // Check whether the IP is private
+                let ip = address.ip();
+                if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
+                    self.handshakes_blocked.inc();
+                    debug!(?address, "rejecting private address");
+                    continue;
+                }
+
                 // Cleanup the rate limiters periodically
                 if accepted > CLEANUP_INTERVAL {
                     ip_rate_limiter.shrink_to_fit();
@@ -177,9 +196,6 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     accepted = 0;
                 }
                 accepted += 1;
-
-                // Check whether the IP (and subnet) exceeds its rate limit
-                let ip = address.ip();
                 let ip_limited = if ip_rate_limiter.check_key(&ip).is_err() {
                     self.handshakes_ip_rate_limited.inc();
                     debug!(?address, "ip exceeded handshake rate limit");
@@ -272,6 +288,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip,
                     allowed_handshake_rate_per_subnet,
@@ -282,7 +299,7 @@ mod tests {
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
-                        tracker::Message::Listenable { responder, .. } => {
+                        tracker::Message::Acceptable { responder, .. } => {
                             let _ = responder.send(true);
                         }
                         tracker::Message::Listen { reservation, .. } => {
@@ -393,5 +410,83 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test_traced("DEBUG")]
+    fn blocks_private_ips() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-private-ips".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    allow_private_ips: false,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Acceptable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Connect to the listener from a private IP
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Check metrics - should be blocked because it's a private IP
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshakes_blocked_total 1"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
     }
 }

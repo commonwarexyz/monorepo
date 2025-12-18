@@ -11,7 +11,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect,
+    IpAddrExt, TryCollect,
 };
 use rand::Rng;
 use std::{
@@ -213,11 +213,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .expect("HashMap keys are unique")
     }
 
-    /// Returns true if the peer is able to be connected to.
-    pub fn allowed(&self, peer: &C) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|r| r.allowed(self.allow_private_ips))
+    /// Returns true if the peer is eligible for connection.
+    ///
+    /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.
+    /// This does NOT check IP validity - that is done separately for dialing (ingress)
+    /// and accepting (egress).
+    pub fn eligible(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
@@ -233,21 +235,26 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         result
     }
 
-    /// Returns true if the peer is listenable.
-    pub fn listenable(&self, peer: &C) -> bool {
+    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    ///
+    /// Checks eligibility (peer set membership), egress IP match, and connection status.
+    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
         self.peers
             .get(peer)
-            .is_some_and(|r| r.listenable(self.allow_private_ips))
+            .is_some_and(|r| r.acceptable(source_ip))
     }
 
-    /// Return all registered IP addresses (egress IPs for filtering).
-    pub fn registered(&self) -> HashSet<IpAddr> {
-        // Using `.allowed()` here excludes any peers that are still connected but no longer
-        // part of a peer set (and will be dropped shortly).
+    /// Return egress IPs we should listen for (accept incoming connections from).
+    ///
+    /// Only includes IPs from peers that are:
+    /// - Eligible (in a peer set, not blocked, not ourselves)
+    /// - Have a valid egress IP (global, or private IPs are allowed)
+    pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .values()
-            .filter(|r| r.allowed(self.allow_private_ips))
+            .filter(|r| r.eligible())
             .filter_map(|r| r.egress_ip())
+            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 
@@ -259,8 +266,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
-        // Not reservable
-        if !self.allowed(peer) {
+        // Not reservable (must be in a peer set)
+        if !self.eligible(peer) {
             return None;
         }
 
@@ -595,7 +602,7 @@ mod tests {
             );
 
             // Verify registered() returns egress IPs for IP filtering
-            let registered = directory.registered();
+            let registered = directory.listenable();
             assert!(
                 registered.contains(&egress_socket.ip()),
                 "Registered should contain peer 1's egress IP"
@@ -735,7 +742,7 @@ mod tests {
             assert_eq!(dialable[0], pk_public);
 
             // Verify registered() only returns public IP (private IP excluded from filter)
-            let registered = directory.registered();
+            let registered = directory.listenable();
             assert!(registered.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
             assert!(!registered.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
