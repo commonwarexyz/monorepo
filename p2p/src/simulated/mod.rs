@@ -186,7 +186,7 @@ pub use network::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
@@ -2445,8 +2445,8 @@ mod tests {
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let addr1: crate::Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
-            let addr2: crate::Address = SocketAddr::from(([127, 0, 0, 1], 4001)).into();
+            let addr1: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let addr2: Address = SocketAddr::from(([127, 0, 0, 1], 4001)).into();
 
             let mut manager = oracle.socket_manager();
             let peers: Map<_, _> = [(pk1.clone(), addr1.clone()), (pk2.clone(), addr2.clone())]
@@ -2496,12 +2496,12 @@ mod tests {
             let pk2 = PrivateKey::from_seed(2).public_key();
 
             // Use asymmetric addresses where ingress (dial) differs from egress (filter)
-            let addr1 = crate::Address::Asymmetric {
-                ingress: crate::Ingress::Socket(SocketAddr::from(([10, 0, 0, 1], 8080))),
+            let addr1 = Address::Asymmetric {
+                ingress: Ingress::Socket(SocketAddr::from(([10, 0, 0, 1], 8080))),
                 egress: SocketAddr::from(([192, 168, 1, 1], 9090)),
             };
-            let addr2 = crate::Address::Asymmetric {
-                ingress: crate::Ingress::Dns {
+            let addr2 = Address::Asymmetric {
+                ingress: Ingress::Dns {
                     host: hostname!("node2.example.com"),
                     port: 8080,
                 },

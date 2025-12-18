@@ -285,9 +285,7 @@ mod tests {
             },
             Mailbox,
         },
-        Blocker,
-        Manager,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
+        Blocker, Ingress, Manager,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -342,7 +340,7 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let ingress: crate::Ingress = socket.into();
+        let ingress: Ingress = socket.into();
         let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
@@ -721,7 +719,7 @@ mod tests {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
                     assert_eq!(received_pk2_info.public_key, pk2);
-                    assert_eq!(received_pk2_info.ingress, crate::Ingress::Socket(pk2_addr));
+                    assert_eq!(received_pk2_info.ingress, Ingress::Socket(pk2_addr));
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
                 _ => panic!("pk1 did not receive expected Info for pk2",),
@@ -923,7 +921,7 @@ mod tests {
                         addr,
                     ) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, crate::Ingress::Socket(boot_addr));
+                        assert_eq!(*addr, Ingress::Socket(boot_addr));
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }

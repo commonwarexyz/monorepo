@@ -169,7 +169,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -1054,13 +1054,13 @@ mod tests {
             }
 
             // Create peer addresses with DNS ingress
-            let peers: Vec<(_, crate::Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = peers_and_sks
                 .iter()
                 .map(|(_, pk, socket, _, host)| {
                     (
                         pk.clone(),
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: host.clone(),
                                 port: socket.port(),
                             },
@@ -1179,17 +1179,17 @@ mod tests {
             }
 
             // Create peer addresses - peers 0,1 use Symmetric, peers 2,3 use DNS Asymmetric
-            let peers: Vec<(_, crate::Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = peers_and_sks
                 .iter()
                 .enumerate()
                 .map(|(i, (_, pk, socket))| {
                     let addr = if i < 2 {
                         // Peers 0, 1: Symmetric socket address
-                        crate::Address::Symmetric(*socket)
+                        Address::Symmetric(*socket)
                     } else {
                         // Peers 2, 3: Asymmetric with DNS ingress
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: hostname!(&format!("peer-{i}.local")),
                                 port: socket.port(),
                             },
@@ -1309,9 +1309,9 @@ mod tests {
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
 
             // Peer 0 knows about peer 1 with a socket address
-            let peers0: Vec<(_, crate::Address)> = vec![
-                (peer0.public_key(), crate::Address::Symmetric(socket0)),
-                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+            let peers0: Vec<(_, Address)> = vec![
+                (peer0.public_key(), Address::Symmetric(socket0)),
+                (peer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0.update(0, peers0.try_into().unwrap()).await;
 
@@ -1325,18 +1325,18 @@ mod tests {
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
 
             // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
-            let peers1: Vec<(_, crate::Address)> = vec![
+            let peers1: Vec<(_, Address)> = vec![
                 (
                     peer0.public_key(),
-                    crate::Address::Asymmetric {
-                        ingress: crate::Ingress::Dns {
+                    Address::Asymmetric {
+                        ingress: Ingress::Dns {
                             host: hostname!("peer-0.local"),
                             port: socket0.port(),
                         },
                         egress: socket0,
                     },
                 ),
-                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+                (peer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle1.update(0, peers1.try_into().unwrap()).await;
 
@@ -1367,5 +1367,107 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    fn test_dns_mixed_ips_connectivity() {
+        // Test that peers can connect even when DNS resolves to multiple IPs
+        // where most are unreachable. The dialer randomly picks an IP, so
+        // eventually it should pick the reachable one.
+        //
+        // Run over 25 seeds to ensure we exercise the random IP selection.
+        for seed in 0..25 {
+            let base_port = 3500;
+
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(120)));
+            let executor = deterministic::Runner::new(cfg);
+            executor.start(|context| async move {
+                let peer0 = ed25519::PrivateKey::from_seed(0);
+                let peer1 = ed25519::PrivateKey::from_seed(1);
+
+                let good_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                let socket0 = SocketAddr::new(good_ip, base_port);
+                let socket1 = SocketAddr::new(good_ip, base_port + 1);
+
+                // Register DNS mappings with 3 bad IPs and 1 good IP for both peers
+                let mut all_ips0: Vec<IpAddr> = (1..=3)
+                    .map(|i| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 100 + i)))
+                    .collect();
+                all_ips0.push(good_ip);
+                context.resolver_register("peer-0.local", Some(all_ips0));
+
+                let mut all_ips1: Vec<IpAddr> = (1..=3)
+                    .map(|i| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 110 + i)))
+                    .collect();
+                all_ips1.push(good_ip);
+                context.resolver_register("peer-1.local", Some(all_ips1));
+
+                // Create peer addresses - both peers use DNS with mixed IPs
+                let peers: Vec<(_, Address)> = vec![
+                    (
+                        peer0.public_key(),
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
+                                host: hostname!("peer-0.local"),
+                                port: base_port,
+                            },
+                            egress: socket0,
+                        },
+                    ),
+                    (
+                        peer1.public_key(),
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
+                                host: hostname!("peer-1.local"),
+                                port: base_port + 1,
+                            },
+                            egress: socket1,
+                        },
+                    ),
+                ];
+
+                // Create peer 0
+                let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
+                let (mut network0, mut oracle0) =
+                    Network::new(context.with_label("peer-0"), config0);
+                oracle0.update(0, peers.clone().try_into().unwrap()).await;
+                let (_sender0, mut receiver0) =
+                    network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network0.start();
+
+                // Create peer 1
+                let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
+                let (mut network1, mut oracle1) =
+                    Network::new(context.with_label("peer-1"), config1);
+                oracle1.update(0, peers.clone().try_into().unwrap()).await;
+                let (mut sender1, _receiver1) =
+                    network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network1.start();
+
+                // Wait for peers to connect (may take multiple attempts due to random IP selection)
+                let pk0 = peer0.public_key();
+                loop {
+                    let sent = sender1
+                        .send(
+                            Recipients::One(pk0.clone()),
+                            peer1.public_key().to_vec().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    if !sent.is_empty() {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+
+                // Verify peer 0 received the message
+                let (sender, msg) = receiver0.recv().await.unwrap();
+                assert_eq!(sender, peer1.public_key());
+                assert_eq!(msg.as_ref(), peer1.public_key().as_ref());
+            });
+        }
     }
 }

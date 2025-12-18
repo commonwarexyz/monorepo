@@ -25,6 +25,9 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
 
     /// Whether or not to allow DNS-based ingress addresses.
+    ///
+    /// When dialing a DNS-based address, the hostname is resolved and a random IP
+    /// is selected from the results (shuffled for each dial attempt).
     pub allow_dns: bool,
 
     /// Whether or not to attempt handshakes on incoming connections

@@ -224,7 +224,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, Blocker, Manager};
+    use crate::{authenticated::lookup::actors::peer, Blocker, Ingress, Manager};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -508,7 +508,7 @@ mod tests {
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }
-                assert_eq!(ingress, crate::Ingress::Socket(boot_addr));
+                assert_eq!(ingress, Ingress::Socket(boot_addr));
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);

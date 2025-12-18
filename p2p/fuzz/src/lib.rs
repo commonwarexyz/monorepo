@@ -326,7 +326,7 @@ impl NetworkScheme for Lookup {
             .topo
             .peers
             .iter()
-            .map(|p| (p.public_key.clone(), Address::from(p.address)))
+            .map(|p| (p.public_key.clone(), p.address.into()))
             .collect();
 
         // Register multiple peer sets to seed the network
