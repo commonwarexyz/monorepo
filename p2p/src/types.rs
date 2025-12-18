@@ -50,10 +50,9 @@ impl Ingress {
     ///
     /// Note: For `Dns` addresses, private IP checks are performed after resolution in
     /// [`resolve_filtered`](Self::resolve_filtered).
-    #[allow(unstable_name_collisions)]
     pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
-            Self::Socket(addr) => allow_private_ips || addr.ip().is_global(),
+            Self::Socket(addr) => allow_private_ips || IpAddrExt::is_global(&addr.ip()),
             Self::Dns { .. } => allow_dns,
         }
     }
@@ -80,14 +79,13 @@ impl Ingress {
     /// Returns `None` if:
     /// - DNS resolution fails
     /// - The resolved IP is private and `allow_private_ips` is false
-    #[allow(unstable_name_collisions)]
     pub async fn resolve_filtered(
         &self,
         resolver: &impl Resolver,
         allow_private_ips: bool,
     ) -> Option<SocketAddr> {
         let addr = self.resolve(resolver).await.ok()?;
-        if !allow_private_ips && !addr.ip().is_global() {
+        if !allow_private_ips && !IpAddrExt::is_global(&addr.ip()) {
             return None;
         }
         Some(addr)

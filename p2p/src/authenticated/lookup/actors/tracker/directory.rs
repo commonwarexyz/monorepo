@@ -249,13 +249,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Only includes IPs from peers that are:
     /// - Eligible (in a peer set, not blocked, not ourselves)
     /// - Have a valid egress IP (global, or private IPs are allowed)
-    #[allow(unstable_name_collisions)]
     pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .values()
             .filter(|r| r.eligible())
             .filter_map(|r| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || ip.is_global())
+            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 
