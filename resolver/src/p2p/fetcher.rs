@@ -271,6 +271,8 @@ where
             .collect();
 
         let mut earliest_next_try: Option<SystemTime> = None;
+        // Track if we found any eligible peers across all keys
+        let mut had_eligible_peers = false;
 
         // Try pending keys until one succeeds
         for (key, retry) in pending_keys {
@@ -285,6 +287,7 @@ where
 
             // Found eligible peers - request creation succeeded
             self.requests_created.inc(Status::Success);
+            had_eligible_peers = true;
 
             // Track if this is an untargeted key (tries all eligible peers)
             let is_untargeted = !self.targets.contains_key(&key);
@@ -297,12 +300,15 @@ where
                 let now = self.context.current();
                 let deadline = now.checked_add(self.timeout).expect("time overflowed");
 
+                // Check if we can send to this peer. This call consumes a rate limit
+                // token if successful, meaning even if the subsequent send() fails,
+                // this peer will have consumed a rate limit token.
                 let checked = match sender.check(Recipients::One(peer.clone())).await {
                     Ok(checked) => checked,
                     Err(not_until) => {
+                        // Peer is rate-limited, track when we can retry
                         earliest_next_try =
                             earliest_next_try.map_or(Some(not_until), |e| Some(e.min(not_until)));
-                        // Look for another peer
                         continue;
                     }
                 };
@@ -355,9 +361,22 @@ where
             }
         }
 
-        // No keys could be fetched, set waiter to retry as soon as possible.
-        self.waiter =
-            earliest_next_try.or_else(|| Some(self.context.now().saturating_add(Duration::MAX)));
+        // No keys could be fetched. Set waiter based on what we learned.
+        //
+        // Priority order for determining retry timing:
+        // 1. Rate limit info (earliest_next_try) - most accurate timing
+        // 2. retry_timeout - if peers exist but all sends failed
+        // 3. Duration::MAX - if no eligible peers exist (wait for external events
+        //    like reconcile() or add_targets() to change the situation)
+        self.waiter = earliest_next_try.or_else(|| {
+            if had_eligible_peers {
+                // Peers exist but all sends failed - retry after timeout
+                Some(self.context.current() + self.retry_timeout)
+            } else {
+                // No eligible peers - wait indefinitely for external changes
+                Some(self.context.current().saturating_add(Duration::MAX))
+            }
+        });
     }
 
     /// Retains only the fetches with keys greater than the given key.
@@ -582,7 +601,7 @@ mod tests {
     };
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
-        deterministic::{Context, Runner},
+        deterministic::{self, Context, Runner},
         KeyedRateLimiter, Quota, Runner as _, RwLock,
     };
     use commonware_utils::NZU32;
@@ -1354,10 +1373,10 @@ mod tests {
             fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
             fetcher.fetch(&mut sender).await;
 
-            // Waiter should be set to far future (no eligible participants)
+            // Waiter should be set to far future (no eligible peers at all)
             assert!(fetcher.waiter.is_some());
-            let far_future = fetcher.waiter.unwrap();
-            assert!(far_future > context.current() + Duration::from_secs(1000));
+            let waiter_time = fetcher.waiter.unwrap();
+            assert!(waiter_time > context.current() + Duration::from_secs(1000));
 
             // Add targets should clear the waiter
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
@@ -1376,6 +1395,55 @@ mod tests {
             // clear_targets should clear the waiter
             fetcher.clear_targets(&MockKey(1));
             assert!(fetcher.waiter.is_none());
+        });
+    }
+
+    #[test]
+    fn test_waiter_uses_retry_timeout_on_send_failure() {
+        let cfg = deterministic::Config::default().with_timeout(Some(Duration::from_secs(5)));
+        let runner = Runner::new(cfg);
+        runner.start(|context| async move {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let retry_timeout = Duration::from_millis(100);
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout,
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+                Fetcher::new(context.clone(), config);
+            // Add peers (FailMockSender doesn't rate limit, just fails sends)
+            fetcher.reconcile(&[public_key, peer1, peer2]);
+            let mut sender = WrappedSender::new(FailMockSender::default());
+
+            // Add key and attempt fetch - all sends will fail
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender).await;
+
+            // Key should still be pending (send failed)
+            assert_eq!(fetcher.len_pending(), 1);
+
+            // Waiter should be set to retry_timeout from now, not Duration::MAX
+            let pending_deadline = fetcher.get_pending_deadline().unwrap();
+            let max_expected = context.current() + retry_timeout + Duration::from_millis(10);
+            assert!(
+                pending_deadline <= max_expected,
+                "pending deadline {:?} should be within retry_timeout of now, not Duration::MAX",
+                pending_deadline.duration_since(context.current())
+            );
+
+            // Wait for pending deadline and retry - should succeed quickly
+            let wait_duration = pending_deadline
+                .duration_since(context.current())
+                .unwrap_or(Duration::ZERO);
+            context.sleep(wait_duration).await;
+
+            // Should be able to fetch again (this would hang if waiter was Duration::MAX)
+            fetcher.fetch(&mut sender).await;
         });
     }
 
@@ -1617,7 +1685,7 @@ mod tests {
             // Add key to pending
             fetcher.add_ready(MockKey(1));
 
-            // Fetch should not fallback to any peer - it should wait indefinitely
+            // Fetch should not fallback to any peer - it should wait for targets
             let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender).await;
 
@@ -1628,8 +1696,10 @@ mod tests {
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 0);
 
-            // Waiter should be set to far future (waiting for target peer)
+            // Waiter should be set to far future (no eligible peers at all)
             assert!(fetcher.waiter.is_some());
+            let waiter_time = fetcher.waiter.unwrap();
+            assert!(waiter_time > context.current() + Duration::from_secs(1000));
         });
     }
 
