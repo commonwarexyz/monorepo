@@ -122,10 +122,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Create the first level
-        let mut levels = NonEmptyVec::new(
-            NonEmptyVec::try_from(leaves)
-                .expect("guaranteed non-empty since we add an empty node above"),
-        );
+        let mut levels = NonEmptyVec::new(NonEmptyVec::from_vec_unchecked(leaves));
 
         // Construct the tree level-by-level
         let mut current_level = levels.last();
@@ -148,9 +145,7 @@ impl<H: Hasher> Tree<H> {
             }
 
             // Add the computed level to the tree
-            levels.push(NonEmptyVec::try_from(next_level).expect(
-                "guaranteed non-empty since we process pairs and always push at least one",
-            ));
+            levels.push(NonEmptyVec::from_vec_unchecked(next_level));
             current_level = levels.last();
         }
         Self { empty, levels }
