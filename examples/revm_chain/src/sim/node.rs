@@ -5,8 +5,8 @@
 //! - a threshold-simplex engine instance that orders opaque digests.
 
 use super::{
-    demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS, CHANNEL_BACKFILL,
-    CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
+    demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
+    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
 use crate::{application, consensus};
 use anyhow::Context as _;
@@ -17,14 +17,11 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
     Reporters,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig,
-    ed25519,
-};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{simulated, utils::requester};
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _};
 use commonware_storage::archive::immutable;
-use commonware_utils::{NZU64, NZUsize, NZU32};
+use commonware_utils::{NZUsize, NZU32, NZU64};
 use futures::channel::mpsc;
 use governor::Quota;
 use std::{sync::Arc, time::Duration};
@@ -338,7 +335,9 @@ where
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
-            freezer_journal_partition: format!("{partition_prefix}-finalized-blocks-freezer-journal"),
+            freezer_journal_partition: format!(
+                "{partition_prefix}-finalized-blocks-freezer-journal"
+            ),
             freezer_journal_target_size: 1024,
             freezer_journal_compression: None,
             freezer_journal_buffer_pool: buffer_pool.clone(),

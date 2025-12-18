@@ -141,7 +141,12 @@ impl Shared {
         inner.blocks.get(parent).cloned()
     }
 
-    pub(crate) async fn insert_verified(&self, digest: ConsensusDigest, block: Block, db: InMemoryDB) {
+    pub(crate) async fn insert_verified(
+        &self,
+        digest: ConsensusDigest,
+        block: Block,
+        db: InMemoryDB,
+    ) {
         let mut inner = self.inner.lock().await;
         inner.blocks.insert(digest, BlockState { block, db });
     }
@@ -153,11 +158,7 @@ impl Shared {
         }
     }
 
-    pub(crate) async fn build_txs(
-        &self,
-        max_txs: usize,
-        excluded: &BTreeSet<TxId>,
-    ) -> Vec<Tx> {
+    pub(crate) async fn build_txs(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.lock().await;
         inner
             .mempool

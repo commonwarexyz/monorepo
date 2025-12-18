@@ -5,9 +5,7 @@ mod handle;
 mod reporters;
 mod state;
 
-pub use handle::Handle;
-
 pub(crate) use app::RevmApplication;
+pub use handle::Handle;
 pub(crate) use reporters::{FinalizedReporter, SeedReporter};
 pub(crate) use state::Shared;
-

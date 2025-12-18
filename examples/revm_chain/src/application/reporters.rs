@@ -16,8 +16,7 @@ use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
     marshal::Update,
     simplex::{
-        signing_scheme::bls12381_threshold::Seedable as _,
-        signing_scheme::bls12381_threshold,
+        signing_scheme::{bls12381_threshold, bls12381_threshold::Seedable as _},
         types::Activity,
     },
     Reporter,

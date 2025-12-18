@@ -37,4 +37,3 @@ impl Handle {
         self.state.query_seed(digest).await
     }
 }
-
