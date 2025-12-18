@@ -1544,4 +1544,89 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_dns_mixed_ips_connectivity() {
+        // Test that peers can connect even when DNS resolves to multiple IPs
+        // where most are unreachable. The dialer randomly picks an IP, so
+        // eventually it should pick the reachable one.
+        //
+        // Run over 25 seeds to ensure we exercise the random IP selection.
+        for seed in 0..25 {
+            let base_port = 3400;
+
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(120)));
+            let executor = deterministic::Runner::new(cfg);
+            executor.start(|context| async move {
+                let peer0 = ed25519::PrivateKey::from_seed(0);
+                let peer1 = ed25519::PrivateKey::from_seed(1);
+
+                let good_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                let socket0 = SocketAddr::new(good_ip, base_port);
+                let socket1 = SocketAddr::new(good_ip, base_port + 1);
+
+                // Register DNS mapping with 3 bad IPs and 1 good IP
+                let mut all_ips: Vec<IpAddr> = (1..=3)
+                    .map(|i| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 100 + i)))
+                    .collect();
+                all_ips.push(good_ip);
+                context.resolver_register("boot.local", Some(all_ips));
+
+                let addresses: Vec<_> = vec![peer0.public_key(), peer1.public_key()];
+
+                // Create peer 0 (bootstrapper)
+                let config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
+                let (mut network0, mut oracle0) =
+                    Network::new(context.with_label("peer-0"), config0);
+                oracle0
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+                let (_sender0, mut receiver0) =
+                    network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network0.start();
+
+                // Create peer 1 using DNS bootstrapper (will resolve to all IPs)
+                let bootstrappers = vec![(
+                    peer0.public_key(),
+                    crate::Ingress::Dns {
+                        host: hostname!("boot.local"),
+                        port: base_port,
+                    },
+                )];
+                let config1 = Config::test(peer1.clone(), socket1, bootstrappers, 1_024 * 1_024);
+                let (mut network1, mut oracle1) =
+                    Network::new(context.with_label("peer-1"), config1);
+                oracle1
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+                let (mut sender1, _receiver1) =
+                    network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network1.start();
+
+                // Wait for peer 1 to connect (may take multiple attempts due to random IP selection)
+                let pk0 = peer0.public_key();
+                loop {
+                    let sent = sender1
+                        .send(
+                            Recipients::One(pk0.clone()),
+                            peer1.public_key().to_vec().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    if !sent.is_empty() {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+
+                // Verify peer 0 received the message
+                let (sender, msg) = receiver0.recv().await.unwrap();
+                assert_eq!(sender, peer1.public_key());
+                assert_eq!(msg.as_ref(), peer1.public_key().as_ref());
+            });
+        }
+    }
 }
