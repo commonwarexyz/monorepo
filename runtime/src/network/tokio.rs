@@ -1,4 +1,5 @@
 use crate::Error;
+use bytes::Buf;
 use commonware_utils::StableBuf;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
@@ -18,9 +19,9 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
+    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all(msg.into().as_ref()))
+        timeout(self.write_timeout, self.sink.write_all_buf(&mut msg))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;
