@@ -10,11 +10,13 @@
 use super::state::Shared;
 use crate::{
     consensus::{digest_for_block, ConsensusDigest, FinalizationEvent},
+    execution::{evm_env, execute_txs},
     types::Block,
 };
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
     marshal::Update,
+    Block as _,
     simplex::{
         signing_scheme::{bls12381_threshold, bls12381_threshold::Seedable as _},
         types::Activity,
@@ -103,6 +105,25 @@ impl Reporter for FinalizedReporter {
             Update::Tip(_, _) => {}
             Update::Block(block, ack) => {
                 let digest = digest_for_block(&block);
+                if self.state.query_state_root(digest).await.is_none() {
+                    let parent_digest = block.parent();
+                    let parent_snapshot = self
+                        .state
+                        .parent_snapshot(&parent_digest)
+                        .await
+                        .expect("missing parent snapshot");
+                    let (db, outcome) = execute_txs(
+                        parent_snapshot.db,
+                        evm_env(block.height, block.prevrandao),
+                        parent_snapshot.state_root,
+                        &block.txs,
+                    )
+                    .expect("execute finalized block");
+                    assert_eq!(outcome.state_root, block.state_root, "state root mismatch");
+                    self.state
+                        .insert_snapshot(digest, db, outcome.state_root)
+                        .await;
+                }
                 self.state.prune_mempool(&block.txs).await;
                 let _ = self.finalized.unbounded_send((self.node, digest));
                 // Marshal waits for the application to acknowledge processing before advancing the
