@@ -125,10 +125,6 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// When a peer is blocked (sent invalid data), only that peer is removed
     /// from the target set.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the send fails.
     pub async fn fetch_targeted(&mut self, key: K, targets: NonEmptyVec<P>) {
         self.sender
             .send(Message::Fetch(vec![FetchRequest {
@@ -142,10 +138,6 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Send fetch requests for multiple keys, each with their own targets.
     ///
     /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the send fails.
     pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, NonEmptyVec<P>)>) {
         self.sender
             .send(Message::Fetch(

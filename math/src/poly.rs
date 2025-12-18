@@ -81,12 +81,7 @@ impl<K> Poly<K> {
     /// polynomial.
     pub fn translate<L>(&self, f: impl Fn(&K) -> L) -> Poly<L> {
         Poly {
-            coeffs: self
-                .coeffs
-                .iter()
-                .map(f)
-                .try_collect()
-                .expect("iterator source is non-empty vec"),
+            coeffs: self.coeffs.map(f),
         }
     }
 
@@ -293,12 +288,7 @@ impl<K: Additive> Neg for Poly<K> {
 
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: self
-                .coeffs
-                .into_iter()
-                .map(Neg::neg)
-                .try_collect::<NonEmptyVec<_>>()
-                .expect("iterator source is non-empty vec"),
+            coeffs: self.coeffs.map_into(Neg::neg),
         }
     }
 }
@@ -501,12 +491,11 @@ mod fuzz {
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            // Get at least one coefficient first to guarantee non-empty
-            let mut coeffs = NonEmptyVec::new(F::arbitrary(u)?);
-            let extra = u.arbitrary_len::<F>()?;
-            for coeff in u.arbitrary_iter::<F>()?.take(extra) {
-                coeffs.push(coeff?);
-            }
+            let size = u.arbitrary_len::<F>()?.max(1);
+            let coeffs = non_empty_vec![@u
+                .arbitrary_iter::<F>()?
+                .take(size)
+                .collect::<Result<Vec<_>, _>>()?];
             Ok(Self { coeffs })
         }
     }

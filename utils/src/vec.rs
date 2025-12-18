@@ -37,10 +37,10 @@ impl<T> NonEmptyVec<T> {
 
     /// Creates a [`NonEmptyVec`] from a [`Vec`] without checking if it's empty.
     ///
-    /// # Safety
+    /// # Panics
     ///
-    /// The caller must ensure that the vector is not empty.
-    pub const fn from_vec_unchecked(vec: Vec<T>) -> Self {
+    /// Methods on the returned `NonEmptyVec` will panic if the vector is empty.
+    pub const fn from_unchecked(vec: Vec<T>) -> Self {
         Self(vec)
     }
 
@@ -82,6 +82,16 @@ impl<T> NonEmptyVec<T> {
     /// Unlike [`slice::last_mut`], this doesn't return an `Option`.
     pub fn last_mut(&mut self) -> &mut T {
         self.0.last_mut().unwrap()
+    }
+
+    /// Maps each element to a new value, preserving the non-empty guarantee.
+    pub fn map<U, F: FnMut(&T) -> U>(&self, f: F) -> NonEmptyVec<U> {
+        NonEmptyVec(self.0.iter().map(f).collect())
+    }
+
+    /// Consumes the vector and maps each element to a new value.
+    pub fn map_into<U, F: FnMut(T) -> U>(self, f: F) -> NonEmptyVec<U> {
+        NonEmptyVec(self.0.into_iter().map(f).collect())
     }
 
     /// Appends an element to the back of the vector.
@@ -369,6 +379,7 @@ impl<T: Read> Read for NonEmptyVec<T> {
 /// | `non_empty_vec![elem; N]` | const `usize` | Compile-time (N must be const and > 0) |
 /// | `non_empty_vec![elem; NZUsize!(N)]` | [`NZUsize!`] | Runtime (panics if N == 0) |
 /// | `non_empty_vec![elem; @n]` | [`NonZeroUsize`] | Type-safe (n is already non-zero) |
+/// | `non_empty_vec![@v]` | - | Unchecked (caller must ensure v is non-empty) |
 ///
 /// The `@` marker is required for runtime [`NonZeroUsize`] values to distinguish
 /// them from const `usize` values, since declarative macros cannot inspect types.
@@ -396,6 +407,11 @@ impl<T: Read> Read for NonEmptyVec<T> {
 /// let n = NZUsize!(2);
 /// let v = non_empty_vec![42; @n];
 /// assert_eq!(v.len().get(), 2);
+///
+/// // Vec form: wrap an existing Vec (caller must ensure non-empty)
+/// let vec = vec![1, 2, 3];
+/// let v = non_empty_vec![@vec];
+/// assert_eq!(v.len().get(), 3);
 /// ```
 ///
 /// # Compile Errors
@@ -417,20 +433,23 @@ impl<T: Read> Read for NonEmptyVec<T> {
 /// ```
 #[macro_export]
 macro_rules! non_empty_vec {
+    (@$vec:expr) => {{
+        $crate::vec::NonEmptyVec::from_unchecked($vec)
+    }};
     ($elem:expr; NZUsize!($n:expr)) => {{
-        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; $crate::NZUsize!($n).get()])
+        $crate::vec::NonEmptyVec::from_unchecked(vec![$elem; $crate::NZUsize!($n).get()])
     }};
     ($elem:expr; @$n:expr) => {{
         let n: core::num::NonZeroUsize = $n;
-        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; n.get()])
+        $crate::vec::NonEmptyVec::from_unchecked(vec![$elem; n.get()])
     }};
     ($elem:expr; $n:expr) => {{
         const N: usize = $n;
         const _: () = assert!(N > 0, "count must be greater than 0");
-        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$elem; N])
+        $crate::vec::NonEmptyVec::from_unchecked(vec![$elem; N])
     }};
     ($first:expr $(, $rest:expr)* $(,)?) => {
-        $crate::vec::NonEmptyVec::from_vec_unchecked(vec![$first $(, $rest)*])
+        $crate::vec::NonEmptyVec::from_unchecked(vec![$first $(, $rest)*])
     };
 }
 
@@ -495,6 +514,12 @@ mod tests {
         let v = non_empty_vec![7; @n];
         assert_eq!(v.len().get(), 4);
         assert!(v.iter().all(|&x| x == 7));
+
+        // Vec wrap syntax
+        let vec = vec![1, 2, 3];
+        let v = non_empty_vec![@vec];
+        assert_eq!(v.len().get(), 3);
+        assert_eq!(&*v, &[1, 2, 3]);
     }
 
     #[test]
@@ -688,6 +713,23 @@ mod tests {
         let v = non_empty_vec![1, 2, 3];
         let vec: Vec<i32> = v.into_vec();
         assert_eq!(vec, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_map() {
+        let v = non_empty_vec![1, 2, 3];
+        let doubled = v.map(|x| x * 2);
+        assert_eq!(&*doubled, &[2, 4, 6]);
+
+        // Original unchanged
+        assert_eq!(&*v, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_map_into() {
+        let v = non_empty_vec![1, 2, 3];
+        let doubled = v.map_into(|x| x * 2);
+        assert_eq!(&*doubled, &[2, 4, 6]);
     }
 
     #[test]
