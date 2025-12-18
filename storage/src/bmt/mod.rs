@@ -43,7 +43,7 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
@@ -122,7 +122,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Create the first level
-        let mut levels = NonEmptyVec::new(NonEmptyVec::from_vec_unchecked(leaves));
+        let mut levels = non_empty_vec![non_empty_vec![@leaves]];
 
         // Construct the tree level-by-level
         let mut current_level = levels.last();
@@ -145,7 +145,7 @@ impl<H: Hasher> Tree<H> {
             }
 
             // Add the computed level to the tree
-            levels.push(NonEmptyVec::from_vec_unchecked(next_level));
+            levels.push(non_empty_vec![@next_level]);
             current_level = levels.last();
         }
         Self { empty, levels }
