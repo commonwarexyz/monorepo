@@ -152,7 +152,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             vote_sender
                 .send(
                     Recipients::One(victim.clone()),
-                    Vote::Notarize(notarize_a).encode().into(),
+                    Vote::Notarize(notarize_a).encode(),
                     true,
                 )
                 .await
@@ -172,7 +172,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             vote_sender
                 .send(
                     Recipients::Some(non_victims),
-                    Vote::Notarize(notarize_b).encode().into(),
+                    Vote::Notarize(notarize_b).encode(),
                     true,
                 )
                 .await

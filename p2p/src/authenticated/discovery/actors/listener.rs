@@ -329,8 +329,8 @@ mod tests {
             };
 
             // Wait for some message or drop.
-            let buf = vec![0u8; 1];
-            let _ = stream.recv(buf).await;
+            let mut buf = [0u8; 1];
+            let _ = stream.recv(&mut buf[..]).await;
             drop((sink, stream));
 
             // Additional attempts should be rate limited immediately.
@@ -338,8 +338,8 @@ mod tests {
                 let (sink, mut stream) = context.dial(address).await.expect("dial");
 
                 // Wait for some message or drop.
-                let buf = vec![0u8; 1];
-                let _ = stream.recv(buf).await;
+                let mut buf = [0u8; 1];
+                let _ = stream.recv(&mut buf[..]).await;
                 drop((sink, stream));
             }
 
@@ -472,8 +472,8 @@ mod tests {
             };
 
             // Wait for some message or drop
-            let buf = vec![0u8; 1];
-            let _ = stream.recv(buf).await;
+            let mut buf = [0u8; 1];
+            let _ = stream.recv(&mut buf[..]).await;
             drop((sink, stream));
 
             // Check metrics - should be blocked because it's a private IP

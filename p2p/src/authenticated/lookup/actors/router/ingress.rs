@@ -3,7 +3,7 @@ use crate::{
     utils::limited::Connected,
     Channel, Recipients,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
 use commonware_utils::channels::ring;
 use futures::channel::oneshot;
@@ -74,7 +74,7 @@ impl<P: PublicKey> Messenger<P> {
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        message: Bytes,
+        mut message: impl Buf + Send,
         priority: bool,
     ) -> Vec<P> {
         let (sender, receiver) = oneshot::channel();
@@ -82,7 +82,7 @@ impl<P: PublicKey> Messenger<P> {
             .send(Message::Content {
                 recipients,
                 channel,
-                message,
+                message: message.copy_to_bytes(message.remaining()),
                 priority,
                 success: sender,
             })

@@ -71,7 +71,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hash
                     }
 
                     // Send invalid message
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -87,7 +87,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hash
                     }
 
                     // Send invalid message
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

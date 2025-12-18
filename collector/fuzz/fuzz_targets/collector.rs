@@ -231,7 +231,7 @@ impl CheckedSender for MockCheckedSender {
 
     async fn send(
         self,
-        _message: bytes::Bytes,
+        _message: impl bytes::Buf + Send,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])

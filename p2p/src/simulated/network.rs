@@ -775,17 +775,18 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<P>,
-        message: Bytes,
+        mut message: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
         // Check message size
-        if message.len() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.len()));
+        if message.remaining() > self.max_size as usize {
+            return Err(Error::MessageTooLarge(message.remaining()));
         }
 
         // Send message
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
+        let message = message.copy_to_bytes(message.remaining());
         channel
             .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
             .map_err(|_| Error::NetworkClosed)?;
@@ -972,9 +973,12 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 
     async fn send(
         self,
-        message: Bytes,
+        mut message: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        // Convert to Bytes here since forwarder needs to inspect the message
+        let message = message.copy_to_bytes(message.remaining());
+
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
             return Ok(Vec::new());

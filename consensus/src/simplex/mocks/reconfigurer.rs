@@ -67,7 +67,7 @@ where
 
                     // Sign and broadcast
                     let n = Notarize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -79,7 +79,7 @@ where
 
                     // Sign and broadcast
                     let f = Finalize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Nullify(nullify) => {
@@ -89,7 +89,7 @@ where
                     let new_round = (new_epoch, old_round.view()).into();
 
                     let n = Nullify::sign(&self.scheme, &self.namespace, new_round).unwrap();
-                    let msg = Vote::<S, H::Digest>::Nullify(n).encode().into();
+                    let msg = Vote::<S, H::Digest>::Nullify(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }

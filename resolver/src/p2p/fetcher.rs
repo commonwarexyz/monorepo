@@ -573,7 +573,7 @@ where
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
-    use bytes::Bytes;
+    use bytes::Buf;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -610,7 +610,7 @@ mod tests {
 
         async fn send(
             self,
-            message: Bytes,
+            message: impl Buf + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             self.sender.send(self.recipients, message, priority).await
@@ -627,7 +627,7 @@ mod tests {
         async fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
-            _message: Bytes,
+            _message: impl Buf + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             Ok(vec![])
@@ -664,7 +664,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            _message: Bytes,
+            _message: impl Buf + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             match recipients {
