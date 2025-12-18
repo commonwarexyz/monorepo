@@ -57,38 +57,39 @@ impl Ingress {
         }
     }
 
-    /// Resolve this ingress address to a socket address.
+    /// Resolve this ingress address to socket addresses.
     ///
-    /// For `Socket` variants, returns the address directly.
-    /// For `Dns` variants, performs DNS resolution and returns the first resolved IP.
-    pub async fn resolve(&self, resolver: &impl Resolver) -> Result<SocketAddr, RuntimeError> {
+    /// For `Socket` variants, returns a single-element iterator.
+    /// For `Dns` variants, performs DNS resolution and returns all resolved addresses.
+    pub async fn resolve(
+        &self,
+        resolver: &impl Resolver,
+    ) -> Result<impl Iterator<Item = SocketAddr>, RuntimeError> {
         match self {
-            Self::Socket(addr) => Ok(*addr),
+            Self::Socket(addr) => Ok(vec![*addr].into_iter()),
             Self::Dns { host, port } => {
                 let ips = resolver.resolve(host.as_str()).await?;
-                let ip = ips
-                    .first()
-                    .ok_or_else(|| RuntimeError::ResolveFailed(host.to_string()))?;
-                Ok(SocketAddr::new(*ip, *port))
+                if ips.is_empty() {
+                    return Err(RuntimeError::ResolveFailed(host.to_string()));
+                }
+                let port = *port;
+                Ok(ips
+                    .into_iter()
+                    .map(move |ip| SocketAddr::new(ip, port))
+                    .collect::<Vec<_>>()
+                    .into_iter())
             }
         }
     }
 
-    /// Resolve and filter by private IP policy.
-    ///
-    /// Returns `None` if:
-    /// - DNS resolution fails
-    /// - The resolved IP is private and `allow_private_ips` is false
+    /// [`resolve`](Self::resolve) and filter by private IP policy.
     pub async fn resolve_filtered(
         &self,
         resolver: &impl Resolver,
         allow_private_ips: bool,
-    ) -> Option<SocketAddr> {
-        let addr = self.resolve(resolver).await.ok()?;
-        if !allow_private_ips && !IpAddrExt::is_global(&addr.ip()) {
-            return None;
-        }
-        Some(addr)
+    ) -> Option<impl Iterator<Item = SocketAddr>> {
+        let addrs = self.resolve(resolver).await.ok()?;
+        Some(addrs.filter(move |addr| allow_private_ips || IpAddrExt::is_global(&addr.ip())))
     }
 }
 

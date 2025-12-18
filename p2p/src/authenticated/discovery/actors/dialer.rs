@@ -106,7 +106,10 @@ impl<E: Spawner + Clock + Network + Resolver + Rng + CryptoRng + Metrics, C: Sig
             let allow_private_ips = self.allow_private_ips;
             move |context| async move {
                 // Resolve ingress to socket address (filtered by private IP policy)
-                let Some(address) = ingress.resolve_filtered(&context, allow_private_ips).await
+                let Some(address) = ingress
+                    .resolve_filtered(&context, allow_private_ips)
+                    .await
+                    .and_then(|mut addrs| addrs.next())
                 else {
                     debug!(?ingress, "failed to resolve or private IP filtered");
                     return;
