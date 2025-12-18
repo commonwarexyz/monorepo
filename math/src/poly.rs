@@ -491,11 +491,12 @@ mod fuzz {
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            let size = u.arbitrary_len::<F>()?.max(1);
-            let coeffs = non_empty_vec![@u
-                .arbitrary_iter::<F>()?
-                .take(size)
-                .collect::<Result<Vec<_>, _>>()?];
+            let first: F = u.arbitrary()?;
+            let rest: Vec<F> = u.arbitrary()?;
+            let coeffs = iter::once(first)
+                .chain(rest)
+                .try_collect()
+                .expect("has at least one element");
             Ok(Self { coeffs })
         }
     }
