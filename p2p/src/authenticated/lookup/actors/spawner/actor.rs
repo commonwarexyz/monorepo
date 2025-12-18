@@ -9,9 +9,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Sink, Spawner, Stream,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
@@ -23,7 +21,6 @@ pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, Si: Sink, St: S
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
-    allowed_ping_rate: Quota,
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
@@ -64,7 +61,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, Si: Sink, St: Stream, C: Pu
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
-                allowed_ping_rate: cfg.allowed_ping_rate,
                 receiver,
                 connections,
                 sent_messages,
@@ -125,7 +121,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, Si: Sink, St: Stream, C: Pu
                                     context,
                                     peer::Config {
                                         ping_frequency: self.ping_frequency,
-                                        allowed_ping_rate: self.allowed_ping_rate,
                                         sent_messages,
                                         received_messages,
                                         rate_limited,

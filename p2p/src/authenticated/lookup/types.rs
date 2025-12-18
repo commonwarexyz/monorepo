@@ -10,18 +10,18 @@ use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
-/// Prefix that identifies the message as a Ping message.
-pub const PING_MESSAGE_PREFIX: u8 = 0;
-
 /// Prefix that identifies the message as a Data message.
-pub const DATA_MESSAGE_PREFIX: u8 = 1;
+pub const DATA_PREFIX: u8 = 0;
+
+/// Prefix that identifies the message as a Ping message.
+pub const PING_PREFIX: u8 = 1;
 
 /// The messages that can be sent between peers.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
-    Ping,
     Data(Data),
+    Ping,
 }
 
 impl From<Data> for Message {
@@ -33,8 +33,8 @@ impl From<Data> for Message {
 impl EncodeSize for Message {
     fn encode_size(&self) -> usize {
         (match self {
-            Self::Ping => 0, // Ping has no payload
             Self::Data(data) => data.encode_size(),
+            Self::Ping => 0, // Ping has no payload
         }) + 1 // 1 bytes for Message discriminant
     }
 }
@@ -42,12 +42,12 @@ impl EncodeSize for Message {
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Ping => {
-                PING_MESSAGE_PREFIX.write(buf); // Discriminant for Ping
-            }
             Self::Data(data) => {
-                DATA_MESSAGE_PREFIX.write(buf); // Discriminant for Data
+                DATA_PREFIX.write(buf); // Discriminant for Data
                 data.write(buf);
+            }
+            Self::Ping => {
+                PING_PREFIX.write(buf); // Discriminant for Ping
             }
         }
     }
@@ -59,15 +59,12 @@ impl Read for Message {
     fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
-            PING_MESSAGE_PREFIX => Ok(Self::Ping),
-            DATA_MESSAGE_PREFIX => {
+            DATA_PREFIX => {
                 let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
                 Ok(Self::Data(data))
             }
-            _ => Err(Error::Invalid(
-                "p2p::authenticated::lookup::Message",
-                "Invalid type",
-            )),
+            PING_PREFIX => Ok(Self::Ping),
+            other => Err(Error::InvalidEnum(other)),
         }
     }
 }

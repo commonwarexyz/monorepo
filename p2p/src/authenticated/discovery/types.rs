@@ -30,12 +30,14 @@ pub enum Error {
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 0;
-/// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = 2;
+const DATA_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant Greeting.
+const GREETING_PREFIX: u8 = 1;
+/// Prefix byte used to identify a [Payload] with variant BitVec.
+const BIT_VEC_PREFIX: u8 = 2;
+/// Prefix byte used to identify a [Payload] with variant Peers.
+const PEERS_PREFIX: u8 = 3;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
@@ -58,6 +60,16 @@ pub struct PayloadConfig {
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
+    /// Arbitrary data sent between peers.
+    Data(Data),
+
+    /// A greeting message containing the peer's own information.
+    ///
+    /// This must be the first message sent after connection establishment.
+    /// The connection will be terminated if this message is not received first
+    /// or if it is received more than once.
+    Greeting(Info<C>),
+
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
@@ -65,17 +77,15 @@ pub enum Payload<C: PublicKey> {
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
-
-    /// Arbitrary data sent between peers.
-    Data(Data),
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
+            Self::Data(data) => data.encode_size(),
+            Self::Greeting(info) => info.encode_size(),
             Self::BitVec(bit_vec) => bit_vec.encode_size(),
             Self::Peers(peers) => peers.encode_size(),
-            Self::Data(data) => data.encode_size(),
         }) + 1
     }
 }
@@ -83,6 +93,14 @@ impl<C: PublicKey> EncodeSize for Payload<C> {
 impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::Data(data) => {
+                DATA_PREFIX.write(buf);
+                data.write(buf);
+            }
+            Self::Greeting(info) => {
+                GREETING_PREFIX.write(buf);
+                info.write(buf);
+            }
             Self::BitVec(bit_vec) => {
                 BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
@@ -90,10 +108,6 @@ impl<C: PublicKey> Write for Payload<C> {
             Self::Peers(peers) => {
                 PEERS_PREFIX.write(buf);
                 peers.write(buf);
-            }
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf);
-                data.write(buf);
             }
         }
     }
@@ -111,6 +125,14 @@ impl<C: PublicKey> Read for Payload<C> {
 
         let payload_type = <u8>::read(buf)?;
         match payload_type {
+            DATA_PREFIX => {
+                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
+                Ok(Self::Data(data))
+            }
+            GREETING_PREFIX => {
+                let info = Info::<C>::read(buf)?;
+                Ok(Self::Greeting(info))
+            }
             BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
                 Ok(Self::BitVec(bit_vec))
@@ -119,14 +141,7 @@ impl<C: PublicKey> Read for Payload<C> {
                 let peers = Vec::<Info<C>>::read_cfg(buf, &(RangeCfg::new(..=*max_peers), ()))?;
                 Ok(Self::Peers(peers))
             }
-            DATA_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Self::Data(data))
-            }
-            _ => Err(CodecError::Invalid(
-                "p2p::authenticated::discovery::Payload",
-                "Invalid type",
-            )),
+            other => Err(CodecError::InvalidEnum(other)),
         }
     }
 }
@@ -138,11 +153,12 @@ where
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.int_in_range(0..=2)?;
+        let choice = u.int_in_range(0..=3)?;
         match choice {
-            0 => Ok(Self::BitVec(u.arbitrary()?)),
-            1 => Ok(Self::Peers(u.arbitrary()?)),
-            2 => Ok(Self::Data(u.arbitrary()?)),
+            0 => Ok(Self::Data(u.arbitrary()?)),
+            1 => Ok(Self::Greeting(u.arbitrary()?)),
+            2 => Ok(Self::BitVec(u.arbitrary()?)),
+            3 => Ok(Self::Peers(u.arbitrary()?)),
             _ => unreachable!(),
         }
     }
@@ -430,6 +446,18 @@ mod tests {
             max_data_length: 100,
         };
 
+        // Test Greeting
+        let original = signed_peer_info();
+        let encoded = Payload::Greeting(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Greeting(info)) => info,
+            _ => panic!("Expected Greeting payload"),
+        };
+        assert_eq!(original.ingress, decoded.ingress);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.public_key, decoded.public_key);
+        assert_eq!(original.signature, decoded.signature);
+
         // Test BitVec
         let original = BitVec {
             index: 1234,
@@ -476,7 +504,8 @@ mod tests {
             max_peers: 10,
             max_data_length: 100,
         };
-        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        // Type byte 4 is invalid (Data=0, Greeting=1, BitVec=2, Peers=3)
+        let invalid_payload = [4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
