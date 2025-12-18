@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     utils::limited::{Connected, LimitedSender},
-    Channel, Message, Recipients,
+    Channel, LimitedSender as LimitedSenderTrait, Message, Recipients,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
@@ -932,19 +932,59 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> std::fmt::Debug for SplitSend
 
 impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for SplitSender<P, E, F> {
     type PublicKey = P;
-    type Checked<'a> = <Sender<P, E> as crate::LimitedSender>::Checked<'a>;
+    type Checked<'a> = SplitCheckedSender<'a, P, E, F>;
 
     async fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
-        // Route recipients via forwarder
-        let routed_recipients = (self.forwarder)(self.replica, &recipients, &Bytes::new());
+        // Defer forwarder call to send() time when message is available.
+        // Do a preliminary rate limit check with the original recipients.
+        // The actual routing may differ based on message content.
+        let _ = self.inner.check(recipients.clone()).await?;
+        Ok(SplitCheckedSender {
+            inner: &mut self.inner,
+            replica: self.replica,
+            forwarder: self.forwarder.clone(),
+            recipients,
+        })
+    }
+}
+
+/// A checked sender for [`SplitSender`] that defers the forwarder call to send time.
+///
+/// This is necessary because [`SplitForwarder`] may examine message content to determine
+/// routing, but the message is not available at [`LimitedSender::check`] time.
+pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
+    inner: &'a mut Sender<P, E>,
+    replica: SplitOrigin,
+    forwarder: F,
+    recipients: Recipients<P>,
+}
+
+impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
+    for SplitCheckedSender<'a, P, E, F>
+{
+    type PublicKey = P;
+    type Error = Error;
+
+    async fn send(
+        self,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        // Apply forwarder with actual message content
+        let routed_recipients = (self.forwarder)(self.replica, &self.recipients, &message);
         let Some(routed_recipients) = routed_recipients else {
-            // If the forwarder returns None, drop the message
-            return Err(SystemTime::now());
+            // Forwarder decided to drop this message
+            return Ok(Vec::new());
         };
-        self.inner.check(routed_recipients).await
+
+        // Check rate limit and send with routed recipients
+        match self.inner.check(routed_recipients).await {
+            Ok(checked) => checked.send(message, priority).await,
+            Err(_) => Ok(Vec::new()), // All routed recipients are rate-limited
+        }
     }
 }
 
