@@ -131,7 +131,10 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
+        namespaces.insert(
+            public,
+            (Scheme::certificate_verifier(&namespace, public), namespace),
+        );
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }
@@ -183,11 +186,11 @@ fn main() {
                         };
 
                         // Verify signature
-                        let Some((verifier, namespace)) = namespaces.get(&incoming.network) else {
+                        let Some((verifier, _namespace)) = namespaces.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(&mut ctx, verifier, namespace) {
+                        if !incoming.finalization.verify(&mut ctx, verifier) {
                             let _ = response.send(false);
                             continue;
                         }

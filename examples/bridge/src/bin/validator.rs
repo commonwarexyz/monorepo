@@ -50,6 +50,11 @@ fn main() {
         .arg(Arg::new("identity").long("identity").required(true))
         .arg(Arg::new("share").long("share").required(true))
         .arg(Arg::new("other-public").long("other-public").required(true))
+        .arg(
+            Arg::new("other-namespace")
+                .long("other-namespace")
+                .required(true),
+        )
         .get_matches();
 
     // Create logger
@@ -145,6 +150,12 @@ fn main() {
     let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
         .expect("Other identity not well-formed");
 
+    // Configure other namespace
+    let other_namespace = matches
+        .get_one::<String>("other-namespace")
+        .expect("Please provide other namespace");
+    let other_namespace = from_hex(other_namespace).expect("Other namespace not well-formed");
+
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg);
@@ -223,6 +234,7 @@ fn main() {
             application::Config {
                 indexer,
                 namespace: consensus_namespace.clone(),
+                other_namespace,
                 identity,
                 other_public,
                 hasher: Sha256::default(),
@@ -245,7 +257,6 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: Epoch::zero(),
-                namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

@@ -29,7 +29,6 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
-    namespace: Vec<u8>,
     public: <MinSig as Variant>::Public,
     other_certificate_verifier: Scheme,
     hasher: H,
@@ -44,14 +43,21 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
             Self {
                 context,
                 indexer: config.indexer,
-                namespace: config.namespace,
                 public: *config.identity.public(),
-                other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
+                other_certificate_verifier: Scheme::certificate_verifier(
+                    &config.other_namespace,
+                    config.other_public,
+                ),
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(config.participants, config.identity, config.share)
-                .expect("share must be in participants"),
+            Scheme::signer(
+                &config.namespace,
+                config.participants,
+                config.identity,
+                config.share,
+            )
+            .expect("share must be in participants"),
             Mailbox::new(sender),
         )
     }
@@ -105,11 +111,8 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(
-                                    &mut self.context,
-                                    &self.other_certificate_verifier,
-                                    &self.namespace
-                                ),
+                                finalization
+                                    .verify(&mut self.context, &self.other_certificate_verifier),
                                 "indexer is corrupt"
                             );
 
@@ -182,11 +185,8 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result = finalization.verify(
-                                &mut self.context,
-                                &self.other_certificate_verifier,
-                                &self.namespace,
-                            );
+                            let result = finalization
+                                .verify(&mut self.context, &self.other_certificate_verifier);
                             let _ = response.send(result);
                         }
                     }
