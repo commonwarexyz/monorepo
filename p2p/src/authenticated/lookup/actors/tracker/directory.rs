@@ -237,11 +237,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// Checks eligibility (peer set membership), egress IP validity, and connection status.
+    /// Checks eligibility (peer set membership) and connection status.
     pub fn acceptable(&self, peer: &C) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|r| r.acceptable(self.allow_private_ips))
+        self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
