@@ -185,15 +185,15 @@ pub struct CheckedSender<'a, S: UnlimitedSender> {
     recipients: Recipients<S::PublicKey>,
 }
 
-impl<S: UnlimitedSender> CheckedSender<'_, S> {
-    /// Modify the [`Recipients`] to send to.
+impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
+    /// Extracts the inner [`UnlimitedSender`] reference.
     ///
     /// # Warning
     ///
-    /// Rate limiting has already been applied to the original recipients. Any modifications
-    /// to the recipients will not be reflected in the rate limiter.
-    pub(crate) fn modify_recipients(&mut self, recipients: Recipients<S::PublicKey>) {
-        self.recipients = recipients;
+    /// Rate limiting has already been applied to the original recipients. Any
+    /// messages sent via the extracted sender will bypass the rate limiter.
+    pub(crate) fn into_inner(self) -> &'a mut S {
+        self.sender
     }
 }
 

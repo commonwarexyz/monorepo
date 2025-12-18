@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-    Channel, Message, Recipients,
+    Channel, Message, Recipients, UnlimitedSender as _,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
@@ -971,7 +971,7 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     type Error = Error;
 
     async fn send(
-        mut self,
+        self,
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
@@ -980,14 +980,16 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
             return Ok(Vec::new());
         };
 
-        // Update recipients in checked and send
+        // Extract the inner sender and send directly with the new recipients
         //
         // While SplitForwarder does not enforce any relationship between the original recipients
         // and the new recipients, it is typically some subset of the original recipients. This
         // means we may over-rate limit some recipients (who are never actually sent a message here) but
         // we prefer this to not providing feedback at all (we would have to skip check entirely).
-        self.checked.modify_recipients(recipients);
-        self.checked.send(message, priority).await
+        self.checked
+            .into_inner()
+            .send(recipients, message, priority)
+            .await
     }
 }
 
