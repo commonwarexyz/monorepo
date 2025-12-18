@@ -20,6 +20,9 @@ pub struct Config<H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
+    /// Namespace for domain separation.
+    pub namespace: Vec<u8>,
+
     /// Participants active in consensus.
     pub participants: Set<PublicKey>,
 
