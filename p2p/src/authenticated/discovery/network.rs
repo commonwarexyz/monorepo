@@ -145,9 +145,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
                 max_peer_set_size: self.cfg.max_peer_set_size,
-                allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
             },

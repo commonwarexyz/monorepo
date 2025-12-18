@@ -13,9 +13,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Sink, Spawner, Stream,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
@@ -27,9 +25,7 @@ pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Str
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
-    allowed_bit_vec_rate: Quota,
     max_peer_set_size: u64,
-    allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
@@ -73,9 +69,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 max_peer_set_size: cfg.max_peer_set_size,
-                allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
                 receiver,
@@ -151,9 +145,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                        allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                         max_peer_set_size: self.max_peer_set_size,
-                                        allowed_peers_rate: self.allowed_peers_rate,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
                                         info_verifier,
                                     },
