@@ -1,6 +1,5 @@
 use crate::{authenticated::discovery::types::Info, Ingress};
 use commonware_cryptography::PublicKey;
-use commonware_utils::IpAddrExt;
 use tracing::trace;
 
 /// Represents information known about a peer's address.
@@ -219,11 +218,9 @@ impl<C: PublicKey> Record<C> {
     /// - We have the ingress address of the peer
     /// - It is not ourselves or blocked
     /// - We are not already connected or reserved
-    /// - The ingress address is valid (not DNS when disabled)
-    /// - The ingress IP is global (or private IPs are allowed) for Socket addresses
+    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     ///
     /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
-    #[allow(unstable_name_collisions)]
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
@@ -233,16 +230,7 @@ impl<C: PublicKey> Record<C> {
             Address::Discovered(info, _) => &info.ingress,
             _ => return false,
         };
-        if !ingress.is_valid(allow_dns) {
-            return false;
-        }
-        // For Socket addresses, check if private IPs are allowed
-        if let Some(ip) = ingress.ip() {
-            if !allow_private_ips && !ip.is_global() {
-                return false;
-            }
-        }
-        true
+        ingress.is_valid(allow_private_ips, allow_dns)
     }
 
     /// Returns `true` if the peer is listenable.

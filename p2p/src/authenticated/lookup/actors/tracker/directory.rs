@@ -729,7 +729,7 @@ mod tests {
                 "Private peer should be tracked for peer set consistency"
             );
 
-            // Only public peer should be dialable (private egress IP not allowed)
+            // Only public peer should be dialable (private ingress IP not allowed)
             let dialable = directory.dialable();
             assert_eq!(dialable.len(), 1);
             assert_eq!(dialable[0], pk_public);

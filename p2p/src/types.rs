@@ -43,13 +43,17 @@ impl Ingress {
         }
     }
 
-    /// Returns whether this ingress address is valid given the `allow_dns` configuration.
+    /// Returns whether this ingress address is allowed given the configuration.
     ///
-    /// - `Socket` addresses are always valid.
-    /// - `Dns` addresses are valid only if `allow_dns` is `true`.
-    pub const fn is_valid(&self, allow_dns: bool) -> bool {
+    /// - `Socket` addresses must have a global IP (or `allow_private_ips` must be true).
+    /// - `Dns` addresses are allowed only if `allow_dns` is `true`.
+    ///
+    /// Note: For `Dns` addresses, private IP checks are performed after resolution in
+    /// [`resolve_filtered`](Self::resolve_filtered).
+    #[allow(unstable_name_collisions)]
+    pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
-            Self::Socket(_) => true,
+            Self::Socket(addr) => allow_private_ips || addr.ip().is_global(),
             Self::Dns { .. } => allow_dns,
         }
     }
@@ -427,21 +431,35 @@ mod tests {
     }
 
     #[test]
-    fn test_ingress_is_valid() {
-        let socket = Ingress::Socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
+    fn test_ingress_is_allowed() {
+        let public_socket =
+            Ingress::Socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
+        let private_socket = Ingress::Socket(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
         let dns = Ingress::Dns {
             host: hostname!("example.com"),
             port: 8080,
         };
 
-        // Socket is always valid regardless of allow_dns
-        assert!(socket.is_valid(false));
-        assert!(socket.is_valid(true));
+        // Public socket is allowed regardless of allow_private_ips
+        assert!(public_socket.is_valid(false, false));
+        assert!(public_socket.is_valid(false, true));
+        assert!(public_socket.is_valid(true, false));
+        assert!(public_socket.is_valid(true, true));
 
-        // DNS is invalid when disabled
-        assert!(!dns.is_valid(false));
-        // DNS is valid when enabled
-        assert!(dns.is_valid(true));
+        // Private socket is only allowed when allow_private_ips=true
+        assert!(!private_socket.is_valid(false, false));
+        assert!(!private_socket.is_valid(false, true));
+        assert!(private_socket.is_valid(true, false));
+        assert!(private_socket.is_valid(true, true));
+
+        // DNS is allowed only when allow_dns=true (private IP check happens after resolution)
+        assert!(!dns.is_valid(false, false));
+        assert!(dns.is_valid(false, true));
+        assert!(!dns.is_valid(true, false));
+        assert!(dns.is_valid(true, true));
     }
 
     #[cfg(feature = "arbitrary")]

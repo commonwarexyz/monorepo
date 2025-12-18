@@ -154,18 +154,16 @@ impl Record {
     /// - We have a known address of the peer
     /// - It is not ourselves or blocked
     /// - We are not already connected or reserved
-    /// - The ingress address is valid (not DNS when disabled)
-    /// - The egress IP is global (or private IPs are allowed)
-    #[allow(unstable_name_collisions)]
+    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
-        match &self.address {
-            Address::Known(addr) => {
-                self.status == Status::Inert
-                    && addr.ingress().is_valid(allow_dns)
-                    && (allow_private_ips || addr.egress_ip().is_global())
-            }
-            _ => false,
+        if self.status != Status::Inert {
+            return false;
         }
+        let ingress = match &self.address {
+            Address::Known(addr) => addr.ingress(),
+            _ => return false,
+        };
+        ingress.is_valid(allow_private_ips, allow_dns)
     }
 
     /// Returns `true` if the peer is listenable.
@@ -429,6 +427,67 @@ mod tests {
         assert!(
             record_private.allowed(true),
             "Private IPs allowed when flag is true"
+        );
+    }
+
+    #[test]
+    fn test_dialable_checks_ingress_ip() {
+        use crate::Ingress;
+        use std::net::IpAddr;
+
+        // Public ingress, public egress - dialable
+        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        let record_public = Record::known(PeerAddress::Symmetric(public_socket));
+        assert!(record_public.dialable(false, true));
+
+        // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
+        let private_ingress =
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let public_egress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 9090);
+        let asymmetric_private_ingress = PeerAddress::Asymmetric {
+            ingress: Ingress::Socket(private_ingress),
+            egress: public_egress,
+        };
+        let record_private_ingress = Record::known(asymmetric_private_ingress);
+        assert!(
+            !record_private_ingress.dialable(false, true),
+            "Should NOT be dialable when ingress Socket IP is private"
+        );
+        assert!(
+            record_private_ingress.dialable(true, true),
+            "Should be dialable when allow_private_ips=true"
+        );
+
+        // Public ingress (Socket), private egress - dialable (egress not checked for dialing)
+        let public_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 8080);
+        let private_egress =
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 9090);
+        let asymmetric_private_egress = PeerAddress::Asymmetric {
+            ingress: Ingress::Socket(public_ingress),
+            egress: private_egress,
+        };
+        let record_private_egress = Record::known(asymmetric_private_egress);
+        assert!(
+            record_private_egress.dialable(false, true),
+            "Should be dialable - egress IP is not checked for dialing"
+        );
+
+        // DNS ingress (no IP to check) - dialable (DNS private check happens at dial time)
+        let dns_ingress = PeerAddress::Asymmetric {
+            ingress: Ingress::Dns {
+                host: commonware_utils::hostname!("example.com"),
+                port: 8080,
+            },
+            egress: public_egress,
+        };
+        let record_dns = Record::known(dns_ingress);
+        assert!(
+            record_dns.dialable(false, true),
+            "DNS ingress should be dialable (private check happens at resolution)"
+        );
+        assert!(
+            !record_dns.dialable(false, false),
+            "DNS ingress should NOT be dialable when allow_dns=false"
         );
     }
 }
