@@ -88,7 +88,7 @@
         <h2><code>conformance</code></h2>
         <p>Detecting as many of these breaking changes as possible <i>before</i> they land in the hands of our users is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of your implementation against a known-good reference, you can catch breaking changes before they make it into your trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
 
-        <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." All that it takes is implementing the following trait on types that you'd like to constrain:</p>
+        <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." Manually creating cases for every mechanism in a project is both difficult and brittle - <code>conformance</code> opts for automation. All that it takes is implementing the following trait on types that you'd like to constrain:</p>
         <pre>
             <code class="language-rust">
 pub trait Conformance: Send + Sync {
@@ -142,11 +142,11 @@ hash = "dd8bf4b8ca06978d565c0aef2c2b8823c7b3fdcb065a4d1c1b33fe76597c52c6"
         <p>In our codebase today, <code>conformance</code> covers:</p>
         <ul>
             <li>Wire formats (<code>codec</code>)</li>
-            <li>Database formats (<code>storage</code>)</li>
-            <li>Cryptographic mechanism semantics (<code>cryptography</code>)</li>
+            <li>Database operation semantics (on-disk contents, read/write order, etc.) (<code>storage</code>)</li>
+            <li>Cryptographic mechanism semantics (operation order, input/output consistency, etc.) (<code>cryptography</code>)</li>
         </ul>
         <p>With more primitives to follow suit. Each time a breaking change to the conformance specification is introduced, our CI fails, and we are forced to explicitly acknowledge the change by updating the conformance commitments and adding a "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-format">breaking-format</a>" or "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-api">breaking-api</a>" label to the change. This process not only helps us catch bugs early but also serves as a trail of breadcrumbs for us to use while authoring releases that include intentional breakages.</p>
-        <p>Alongside our other testing strategies (<a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that we deliver high-quality software that meets the stability needs of our users.</p>
+        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that we deliver high-quality software that meets the stability needs of our users.</p>
     </div>
 
     <div id="footer-placeholder"></div>
