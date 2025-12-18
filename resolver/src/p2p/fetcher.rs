@@ -230,30 +230,25 @@ where
     /// Get eligible peers for a key in priority order.
     ///
     /// If `shuffle` is true, the peers are shuffled (used for retries to try different peers).
-    fn get_eligible_peers(&self, key: &Key) -> Vec<P> {
+    fn get_eligible_peers(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
         let targets = self.targets.get(key);
 
         // Prepare participant iterator
         let participant_iter = self.participants.iter();
 
         // Collect eligible peers
-        let eligible: Vec<P> = participant_iter
+        let mut eligible: Vec<P> = participant_iter
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
             .filter(|(p, _)| !self.excluded.contains(p)) // not blocked
             .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
             .map(|(p, _)| p.clone())
             .collect();
 
-        eligible
-    }
-
-    /// Get eligible peers for a key, optionally shuffled.
-    fn get_eligible_peers_shuffled(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
-        let mut peers = self.get_eligible_peers(key);
+        // Shuffle if requested
         if shuffle {
-            peers.shuffle(&mut self.context);
+            eligible.shuffle(&mut self.context);
         }
-        peers
+        eligible
     }
 
     /// Attempts to send a fetch request for a pending key.
@@ -280,7 +275,7 @@ where
         // Try pending keys until one succeeds
         for (key, retry) in pending_keys {
             // Get eligible peers for this key
-            let peers = self.get_eligible_peers_shuffled(&key, retry);
+            let peers = self.get_eligible_peers(&key, retry);
 
             // Skip if no eligible peers
             if peers.is_empty() {
@@ -1560,7 +1555,7 @@ mod tests {
             }
 
             // Get eligible peers - should be ordered by priority (fastest first)
-            let peers = fetcher.get_eligible_peers(&MockKey(1));
+            let peers = fetcher.get_eligible_peers(&MockKey(1), false);
 
             // Verify we have 3 peers (excluding self)
             assert_eq!(peers.len(), 3);
@@ -1587,7 +1582,7 @@ mod tests {
             // by calling multiple times and checking for any different order
             let mut found_different_order = false;
             for _ in 0..10 {
-                let shuffled = fetcher.get_eligible_peers_shuffled(&MockKey(1), true);
+                let shuffled = fetcher.get_eligible_peers(&MockKey(1), true);
                 if shuffled != peers {
                     found_different_order = true;
                     break;
