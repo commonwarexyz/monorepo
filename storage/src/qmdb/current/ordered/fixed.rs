@@ -1,5 +1,11 @@
-//! An _ordered_ variant of a [crate::qmdb::current] authenticated database that maintains the
-//! lexicographic-next active key of each active key, allowing for exclusion proofs.
+//! An _ordered_ variant of a [crate::qmdb::current] authenticated database optimized for fixed-size
+//! values
+//!
+//! This variant maintains the lexicographic-next active key for each active key, enabling exclusion
+//! proofs (proving a key is currently inactive). Use [super::super::unordered::fixed] if exclusion
+//! proofs are not needed.
+//!
+//! See [Db] for the main database type and [ExclusionProof] for proving key inactivity.
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},

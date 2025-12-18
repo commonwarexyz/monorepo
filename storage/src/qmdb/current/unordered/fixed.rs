@@ -1,3 +1,11 @@
+//! An _unordered_ variant of a [crate::qmdb::current] authenticated database optimized for
+//! fixed-size values.
+//!
+//! This variant does not maintain key ordering, so it cannot generate exclusion proofs. Use
+//! [super::super::ordered::fixed] if exclusion proofs are required.
+//!
+//! See [Db] for the main database type.
+
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
     mmr::{

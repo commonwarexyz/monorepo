@@ -1,3 +1,9 @@
+//! Proof types for [crate::qmdb::current] authenticated databases.
+//!
+//! This module provides:
+//! - [RangeProof]: Proves a range of operations exist in the database.
+//! - [OperationProof]: Proves a specific operation is active in the database.
+
 use crate::{
     bitmap::CleanBitMap,
     journal::contiguous::Contiguous,

@@ -1,5 +1,9 @@
-//! [crate::qmdb::current] variants that do not maintain an ordering over active keys, and hence do
-//! not support exclusion proofs. Use the [super::ordered] variants if exclusion proofs are
-//! required.
+//! _Unordered_ variants of a [crate::qmdb::current] authenticated database.
+//!
+//! These variants do not maintain key ordering, so they cannot generate exclusion proofs. Use
+//! the [super::ordered] variants if exclusion proofs are required.
+//!
+//! Variants:
+//! - [fixed]: Variant optimized for values of fixed size.
 
 pub mod fixed;
