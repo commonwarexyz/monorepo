@@ -98,7 +98,9 @@ where
         child.state_root = outcome.state_root;
 
         let digest = digest_for_block(&child);
-        self.state.insert_snapshot(digest, db, child.state_root).await;
+        self.state
+            .insert_snapshot(digest, db, child.state_root)
+            .await;
         Some(child)
     }
 }
@@ -141,7 +143,9 @@ where
         }
 
         let digest = digest_for_block(&block);
-        self.state.insert_snapshot(digest, db, block.state_root).await;
+        self.state
+            .insert_snapshot(digest, db, block.state_root)
+            .await;
         true
     }
 }

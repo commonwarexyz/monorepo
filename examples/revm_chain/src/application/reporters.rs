@@ -16,12 +16,11 @@ use crate::{
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
     marshal::Update,
-    Block as _,
     simplex::{
         signing_scheme::{bls12381_threshold, bls12381_threshold::Seedable as _},
         types::Activity,
     },
-    Reporter,
+    Block as _, Reporter,
 };
 use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_utils::acknowledgement::Acknowledgement as _;

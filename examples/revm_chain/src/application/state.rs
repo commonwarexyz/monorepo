@@ -115,7 +115,10 @@ impl Shared {
 
     pub(crate) async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
         let inner = self.inner.lock().await;
-        inner.snapshots.get(&digest).map(|snapshot| snapshot.state_root)
+        inner
+            .snapshots
+            .get(&digest)
+            .map(|snapshot| snapshot.state_root)
     }
 
     pub(crate) async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
@@ -141,11 +144,20 @@ impl Shared {
         inner.snapshots.get(parent).cloned()
     }
 
-    pub(crate) async fn insert_snapshot(&self, digest: ConsensusDigest, db: InMemoryDB, root: StateRoot) {
+    pub(crate) async fn insert_snapshot(
+        &self,
+        digest: ConsensusDigest,
+        db: InMemoryDB,
+        root: StateRoot,
+    ) {
         let mut inner = self.inner.lock().await;
-        inner
-            .snapshots
-            .insert(digest, ExecutionSnapshot { db, state_root: root });
+        inner.snapshots.insert(
+            digest,
+            ExecutionSnapshot {
+                db,
+                state_root: root,
+            },
+        );
     }
 
     pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {
