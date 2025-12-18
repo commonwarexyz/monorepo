@@ -121,8 +121,6 @@ where
     provider: P,
     // Epoch length (in blocks)
     epoch_length: u64,
-    // Unique application namespace
-    namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
@@ -225,7 +223,6 @@ where
                 mailbox,
                 provider: config.provider,
                 epoch_length: config.epoch_length,
-                namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
@@ -616,7 +613,7 @@ where
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &scheme, &self.namespace)
+                                        || !finalization.verify(&mut self.context, &scheme)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -656,7 +653,7 @@ where
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &scheme, &self.namespace)
+                                        || !notarization.verify(&mut self.context, &scheme)
                                     {
                                         let _ = response.send(false);
                                         continue;
