@@ -327,7 +327,6 @@ mod tests {
         discovery::{
             actors::{router, tracker},
             channels::Channels,
-            types::InfoVerifier,
         },
         mailbox::UnboundedMailbox,
         Mailbox,
@@ -346,13 +345,9 @@ mod tests {
         time::Duration,
     };
 
-    const NAMESPACE: &[u8] = b"test_peer_actor";
+    const STREAM_NAMESPACE: &[u8] = b"test_peer_actor";
+    const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
     const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-
-    fn default_info_verifier(me: PublicKey) -> InfoVerifier<PublicKey> {
-        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
-        types::Info::verifier(me, 10, Duration::from_secs(60), ip_namespace)
-    }
 
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {
@@ -364,7 +359,7 @@ mod tests {
             max_peer_set_size: 128,
             allowed_peers_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(10)),
             peer_gossip_max_count: 10,
-            info_verifier: default_info_verifier(me),
+            info_verifier: types::Info::verifier(me, 10, Duration::from_secs(60), IP_NAMESPACE.to_vec()),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
             rate_limited: Family::<metrics::Message, Counter>::default(),
@@ -374,21 +369,12 @@ mod tests {
     fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
         StreamConfig {
             signing_key: key,
-            namespace: NAMESPACE.to_vec(),
+            namespace: STREAM_NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
             synchrony_bound: Duration::from_secs(10),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
         }
-    }
-
-    fn signed_peer_info(
-        signer: &PrivateKey,
-        socket: SocketAddr,
-        timestamp: u64,
-    ) -> types::Info<PublicKey> {
-        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
-        types::Info::sign(signer, &ip_namespace, socket, timestamp)
     }
 
     fn create_channels() -> Channels<PublicKey> {
@@ -454,8 +440,9 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let greeting = signed_peer_info(
+            let greeting = types::Info::sign(
                 &local_key,
+                IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -552,8 +539,9 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let greeting = signed_peer_info(
+            let greeting = types::Info::sign(
                 &local_key,
+                IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -656,8 +644,9 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let greeting = signed_peer_info(
+            let greeting = types::Info::sign(
                 &local_key,
+                IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -670,8 +659,9 @@ mod tests {
             let channels = create_channels();
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
-            let mut wrong_greeting = signed_peer_info(
+            let mut wrong_greeting = types::Info::sign(
                 &local_key,
+                IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
