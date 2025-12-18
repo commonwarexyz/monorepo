@@ -1,5 +1,9 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
+use crate::{
+    authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
+    types::Address,
+    Ingress,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
@@ -7,12 +11,12 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect,
+    IpAddrExt, TryCollect,
 };
 use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
 };
 use tracing::{debug, warn};
 
@@ -20,6 +24,9 @@ use tracing::{debug, warn};
 pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Whether DNS-based ingress addresses are allowed.
+    pub allow_dns: bool,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -36,6 +43,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Whether DNS-based ingress addresses are allowed.
+    allow_dns: bool,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -72,6 +82,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Self {
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
+            allow_dns: cfg.allow_dns,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -105,7 +116,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Map<C, SocketAddr>) -> Option<Vec<C>> {
+    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<Vec<C>> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -120,17 +131,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Create and store new peer set
+        // Create and store new peer set (all peers are tracked regardless of address validity)
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(*addr);
+                    entry.update(addr.clone());
                     entry
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    entry.insert(Record::known(*addr))
+                    entry.insert(Record::known(addr.clone()))
                 }
             };
             record.increment();
@@ -170,9 +181,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
-        let socket = self.peers.get(peer)?.socket()?;
-        self.reserve(Metadata::Dialer(peer.clone(), socket))
+    pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
+        let ingress = self.peers.get(peer)?.ingress()?;
+        let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
+        Some((reservation, ingress))
     }
 
     /// Attempt to reserve a peer for the listener.
@@ -201,11 +213,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .expect("HashMap keys are unique")
     }
 
-    /// Returns true if the peer is able to be connected to.
-    pub fn allowed(&self, peer: &C) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|r| r.allowed(self.allow_private_ips))
+    /// Returns true if the peer is eligible for connection.
+    ///
+    /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.
+    /// This does NOT check IP validity - that is done separately for dialing (ingress)
+    /// and accepting (egress).
+    pub fn eligible(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
@@ -214,28 +228,33 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips))
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
         result
     }
 
-    /// Returns true if the peer is listenable.
-    pub fn listenable(&self, peer: &C) -> bool {
+    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    ///
+    /// Checks eligibility (peer set membership), egress IP match, and connection status.
+    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
         self.peers
             .get(peer)
-            .is_some_and(|r| r.listenable(self.allow_private_ips))
+            .is_some_and(|r| r.acceptable(source_ip))
     }
 
-    /// Return all registered IP addresses.
-    pub fn registered(&self) -> HashSet<IpAddr> {
-        // Using `.allowed()` here excludes any peers that are still connected but no longer
-        // part of a peer set (and will be dropped shortly).
+    /// Return egress IPs we should listen for (accept incoming connections from).
+    ///
+    /// Only includes IPs from peers that are:
+    /// - Eligible (in a peer set, not blocked, not ourselves)
+    /// - Have a valid egress IP (global, or private IPs are allowed)
+    pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .values()
-            .filter(|r| r.allowed(self.allow_private_ips))
-            .filter_map(|r| r.socket().map(|s| s.ip()))
+            .filter(|r| r.eligible())
+            .filter_map(|r| r.egress_ip())
+            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 
@@ -247,8 +266,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
-        // Not reservable
-        if !self.allowed(peer) {
+        // Not reservable (must be in a peer set)
+        if !self.eligible(peer) {
             return None;
         }
 
@@ -296,13 +315,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::{
-        lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
+    use crate::{
+        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
+        types::Address,
+        Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Quota, Runner};
-    use commonware_utils::NZU32;
+    use commonware_utils::{hostname, NZU32};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn addr(socket: SocketAddr) -> Address {
+        Address::Symmetric(socket)
+    }
 
     #[test]
     fn test_add_set_return_value() {
@@ -312,6 +337,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            allow_dns: true,
             max_sets: 1,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -329,7 +355,7 @@ mod tests {
             let deleted = directory
                 .add_set(
                     0,
-                    [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                    [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                         .try_into()
                         .unwrap(),
                 )
@@ -342,7 +368,7 @@ mod tests {
             let deleted = directory
                 .add_set(
                     1,
-                    [(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]
+                    [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
                         .try_into()
                         .unwrap(),
                 )
@@ -351,13 +377,13 @@ mod tests {
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
             let deleted = directory
-                .add_set(2, [(pk_3.clone(), addr_3)].try_into().unwrap())
+                .add_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
             let deleted = directory
-                .add_set(3, [(pk_3.clone(), addr_3)].try_into().unwrap())
+                .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
@@ -372,6 +398,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -389,47 +416,60 @@ mod tests {
 
             directory.add_set(
                 0,
-                [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
                     .unwrap(),
             );
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
-            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
-            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_1))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            // Update address
-            directory.add_set(1, [(pk_1.clone(), addr_4)].try_into().unwrap());
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
-            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
-            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            directory.add_set(1, [(pk_1.clone(), addr(addr_4))].try_into().unwrap());
+            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_4))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            // Ignore update to me
-            directory.add_set(2, [(my_pk.clone(), addr_3)].try_into().unwrap());
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
-            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
-            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            directory.add_set(2, [(my_pk.clone(), addr(addr_3))].try_into().unwrap());
+            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_4))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            // Ensure tracking works for static peers
             let deleted = directory
-                .add_set(3, [(my_pk.clone(), my_addr)].try_into().unwrap())
+                .add_set(3, [(my_pk.clone(), addr(my_addr))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
-            // Ensure tracking works for dynamic peers
             let deleted = directory
-                .add_set(4, [(my_pk.clone(), addr_3)].try_into().unwrap())
+                .add_set(4, [(my_pk.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
 
-            // Attempt to add an old peer set
             let deleted = directory.add_set(
                 0,
-                [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
                     .unwrap(),
             );
@@ -445,6 +485,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -456,30 +497,254 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr_1)].try_into().unwrap());
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
                 record.blocked(),
                 "Peer should be blocked after call to block"
             );
-            assert_eq!(
-                record.socket(),
-                None,
-                "Blocked peer should not have a socket"
+            assert!(
+                record.ingress().is_none(),
+                "Blocked peer should not have an ingress"
             );
 
-            directory.add_set(1, [(pk_1.clone(), addr_2)].try_into().unwrap());
+            directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
                 record.blocked(),
                 "Blocked peer should remain blocked after update"
             );
-            assert_eq!(
-                record.socket(),
-                None,
-                "Blocked peer should not regain its socket"
+            assert!(
+                record.ingress().is_none(),
+                "Blocked peer should not regain its ingress"
             );
+        });
+    }
+
+    #[test]
+    fn test_asymmetric_addresses() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+        };
+
+        // Create asymmetric address where ingress differs from egress
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let ingress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+        let asymmetric_addr = Address::Asymmetric {
+            ingress: Ingress::Socket(ingress_socket),
+            egress: egress_socket,
+        };
+
+        // Create another peer with DNS-based ingress
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let egress_socket_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 9090);
+        let dns_addr = Address::Asymmetric {
+            ingress: Ingress::Dns {
+                host: hostname!("node.example.com"),
+                port: 8080,
+            },
+            egress: egress_socket_2,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            // Add set with asymmetric addresses
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_1.clone(), asymmetric_addr.clone()),
+                        (pk_2.clone(), dns_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Verify peer 1 has correct ingress and egress
+            let record_1 = directory.peers.get(&pk_1).unwrap();
+            assert_eq!(
+                record_1.ingress(),
+                Some(Ingress::Socket(ingress_socket)),
+                "Ingress should match the asymmetric address's ingress"
+            );
+            assert_eq!(
+                record_1.egress_ip(),
+                Some(egress_socket.ip()),
+                "Egress IP should be from the egress socket"
+            );
+
+            // Verify peer 2 has DNS ingress and correct egress
+            let record_2 = directory.peers.get(&pk_2).unwrap();
+            assert_eq!(
+                record_2.ingress(),
+                Some(Ingress::Dns {
+                    host: hostname!("node.example.com"),
+                    port: 8080
+                }),
+                "Ingress should be DNS address"
+            );
+            assert_eq!(
+                record_2.egress_ip(),
+                Some(egress_socket_2.ip()),
+                "Egress IP should be from the egress socket"
+            );
+
+            // Verify registered() returns egress IPs for IP filtering
+            let registered = directory.listenable();
+            assert!(
+                registered.contains(&egress_socket.ip()),
+                "Registered should contain peer 1's egress IP"
+            );
+            assert!(
+                registered.contains(&egress_socket_2.ip()),
+                "Registered should contain peer 2's egress IP"
+            );
+            assert!(
+                !registered.contains(&ingress_socket.ip()),
+                "Registered should NOT contain peer 1's ingress IP"
+            );
+        });
+    }
+
+    #[test]
+    fn test_dns_addresses_tracked_but_not_dialable_when_disabled() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+
+        // DNS is disabled
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+        };
+
+        // Create peers with different address types
+        let pk_socket = ed25519::PrivateKey::from_seed(1).public_key();
+        let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let socket_peer_addr = Address::Symmetric(socket_addr);
+
+        let pk_dns = ed25519::PrivateKey::from_seed(2).public_key();
+        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+        let dns_peer_addr = Address::Asymmetric {
+            ingress: Ingress::Dns {
+                host: hostname!("node.example.com"),
+                port: 8080,
+            },
+            egress: egress_socket,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Add set with both socket and DNS addresses
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_socket.clone(), socket_peer_addr.clone()),
+                        (pk_dns.clone(), dns_peer_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Both peers should be tracked (for peer set consistency)
+            assert!(
+                directory.peers.contains_key(&pk_socket),
+                "Socket peer should be tracked"
+            );
+            assert!(
+                directory.peers.contains_key(&pk_dns),
+                "DNS peer should be tracked for peer set consistency"
+            );
+
+            // Only socket peer should be dialable (DNS ingress invalid when disabled)
+            let dialable = directory.dialable();
+            assert_eq!(dialable.len(), 1);
+            assert_eq!(dialable[0], pk_socket);
+        });
+    }
+
+    #[test]
+    fn test_private_egress_ip_tracked_but_not_dialable_or_registered() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+
+        // Private IPs are NOT allowed
+        let config = super::Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+        };
+
+        // Create peer with public egress IP
+        let pk_public = ed25519::PrivateKey::from_seed(1).public_key();
+        let public_addr =
+            Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
+
+        // Create peer with private egress IP
+        let pk_private = ed25519::PrivateKey::from_seed(2).public_key();
+        let private_addr = Address::Symmetric(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Add set with both public and private egress IPs
+            let deleted = directory
+                .add_set(
+                    0,
+                    [
+                        (pk_public.clone(), public_addr.clone()),
+                        (pk_private.clone(), private_addr.clone()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(deleted.is_empty());
+
+            // Both peers should be tracked (for peer set consistency)
+            assert!(
+                directory.peers.contains_key(&pk_public),
+                "Public peer should be tracked"
+            );
+            assert!(
+                directory.peers.contains_key(&pk_private),
+                "Private peer should be tracked for peer set consistency"
+            );
+
+            // Only public peer should be dialable (private ingress IP not allowed)
+            let dialable = directory.dialable();
+            assert_eq!(dialable.len(), 1);
+            assert_eq!(dialable[0], pk_public);
+
+            // Verify registered() only returns public IP (private IP excluded from filter)
+            let registered = directory.listenable();
+            assert!(registered.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
+            assert!(!registered.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
     }
 }

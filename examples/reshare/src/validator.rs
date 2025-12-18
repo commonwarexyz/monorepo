@@ -74,7 +74,11 @@ pub async fn run<S, L>(
         &p2p_namespace,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
-        config.bootstrappers.clone().into_iter().collect::<Vec<_>>(),
+        config
+            .bootstrappers
+            .iter()
+            .map(|(k, v)| (k.clone(), (*v).into()))
+            .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;

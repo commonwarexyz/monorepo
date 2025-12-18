@@ -108,7 +108,7 @@ fn main() {
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
                 .expect("Could not parse bootstrapper socket");
-            bootstrappers.push((key, bootstrapper_socket));
+            bootstrappers.push((key, bootstrapper_socket.into()));
         }
 
         // Configure network

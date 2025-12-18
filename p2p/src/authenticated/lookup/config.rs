@@ -24,6 +24,12 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Whether or not to allow DNS-based ingress addresses.
+    ///
+    /// When dialing a DNS-based address, the hostname is resolved and a random IP
+    /// is selected from the results (shuffled for each dial attempt).
+    pub allow_dns: bool,
+
     /// Whether or not to attempt handshakes on incoming connections
     /// from unregistered IP addresses.
     pub attempt_unregistered_handshakes: bool,
@@ -106,6 +112,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: false,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -137,6 +144,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: true,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -163,6 +171,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: true,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,

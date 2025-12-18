@@ -1,8 +1,11 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::discovery::{
-    actors::tracker::ingress::Releaser,
-    metrics,
-    types::{self, Info},
+use crate::{
+    authenticated::discovery::{
+        actors::tracker::ingress::Releaser,
+        metrics,
+        types::{self, Info},
+    },
+    Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -13,13 +16,18 @@ use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
     ops::Deref,
 };
 use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
+    /// Whether private IPs are connectable.
+    pub allow_private_ips: bool,
+
+    /// Whether DNS-based ingress addresses are allowed.
+    pub allow_dns: bool,
+
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
@@ -36,6 +44,12 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
+    /// Whether private IPs are connectable.
+    allow_private_ips: bool,
+
+    /// Whether DNS-based ingress addresses are allowed.
+    allow_dns: bool,
+
     /// The maximum number of peer sets to track.
     max_sets: usize,
 
@@ -66,15 +80,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
-        bootstrappers: Vec<(C, SocketAddr)>,
+        bootstrappers: Vec<(C, Ingress)>,
         myself: Info<C>,
         cfg: Config,
         releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
-        for (peer, socket) in bootstrappers {
-            peers.insert(peer, Record::bootstrapper(socket));
+        for (peer, ingress) in bootstrappers {
+            peers.insert(peer, Record::bootstrapper(ingress));
         }
 
         // Add myself to the list of peers.
@@ -89,6 +103,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         Self {
             context,
+            allow_private_ips: cfg.allow_private_ips,
+            allow_dns: cfg.allow_dns,
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             peers,
@@ -111,8 +127,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
-        if let Metadata::Dialer(_, socket) = metadata {
-            record.dial_failure(socket);
+        if let Metadata::Dialer(_, ingress) = &metadata {
+            record.dial_failure(ingress);
         }
 
         let want = record.want(self.dial_fail_limit);
@@ -230,8 +246,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
-        let socket = self.peers.get(peer)?.socket()?;
-        self.reserve(Metadata::Dialer(peer.clone(), socket))
+        let ingress = self.peers.get(peer)?.ingress()?.clone();
+        self.reserve(Metadata::Dialer(peer.clone(), ingress))
     }
 
     /// Attempt to reserve a peer for the listener.
@@ -314,27 +330,29 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(peers)
     }
 
-    /// Returns true if the peer is able to be connected to.
-    pub fn allowed(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.allowed())
+    /// Returns true if the peer is eligible for connection.
+    ///
+    /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
+    pub fn eligible(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable())
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
         result
     }
 
-    /// Returns true if the peer is listenable.
-    pub fn listenable(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.listenable())
+    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    pub fn acceptable(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     // --------- Helpers ----------
@@ -345,8 +363,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
-        // Not reservable
-        if !self.allowed(peer) {
+        // Not reservable (must be in a peer set)
+        if !self.eligible(peer) {
             return None;
         }
 

@@ -1,23 +1,24 @@
 use super::Reservation;
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::Metadata},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+use crate::{
+    authenticated::{
+        lookup::actors::{peer, tracker::Metadata},
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    },
+    types::Address,
+    Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::{Map, Set};
 use futures::channel::{mpsc, oneshot};
-use std::net::SocketAddr;
+use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register {
-        index: u64,
-        peers: Map<C, SocketAddr>,
-    },
+    Register { index: u64, peers: Map<C, Address> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -58,24 +59,27 @@ pub enum Message<C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
+    /// The tracker will respond with an [`Option<(Reservation<C>, Ingress)>`], which will be
+    /// `None` if the reservation cannot be granted (e.g., if the peer is already connected,
+    /// blocked or already has an active reservation).
     Dial {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<C>>>,
+        /// Sender to respond with the reservation and ingress address.
+        reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
     },
 
     // ---------- Used by listener ----------
-    /// Check if we should listen to a peer.
-    Listenable {
+    /// Check if a peer is acceptable (can accept an incoming connection from them).
+    Acceptable {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The sender to respond with the listenable status.
+        /// The IP address the peer connected from.
+        source_ip: IpAddr,
+
+        /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
     },
 
@@ -114,7 +118,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Dial` message to the tracker.
-    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
+    pub async fn dial(&mut self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Dial {
             public_key,
@@ -124,11 +128,12 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
         rx.await.unwrap()
     }
 
-    /// Send a `Listenable` message to the tracker.
-    pub async fn listenable(&mut self, public_key: C) -> bool {
+    /// Send an `Acceptable` message to the tracker.
+    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Listenable {
+        self.send(Message::Acceptable {
             public_key,
+            source_ip,
             responder: tx,
         })
         .unwrap();
@@ -182,7 +187,7 @@ impl<C: PublicKey> Oracle<C> {
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
-    type Peers = Map<C, SocketAddr>;
+    type Peers = Map<C, Address>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -191,8 +196,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index`.
-    ///   Each element is a tuple containing the public key and the socket address of the peer.
-    ///   The peer must be dialable at and dial from the given socket address.
+    ///   Each element contains the public key and address specification of the peer.
     async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }

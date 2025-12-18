@@ -74,6 +74,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // General initialization
         let directory_cfg = directory::Config {
+            allow_private_ips: cfg.allow_private_ips,
+            allow_dns: cfg.allow_dns,
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
@@ -96,7 +98,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         // Create peer validator
         let info_verifier = Info::verifier(
             cfg.crypto.public_key(),
-            cfg.allow_private_ips,
             cfg.peer_gossip_max_count,
             cfg.synchrony_bound,
             ip_namespace,
@@ -187,7 +188,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 mut peer,
             } => {
                 // Kill if peer is not authorized
-                if !self.directory.allowed(&public_key) {
+                if !self.directory.eligible(&public_key) {
                     peer.kill().await;
                     return;
                 }
@@ -204,7 +205,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 mut peer,
             } => {
                 // Kill if peer is not authorized
-                if !self.directory.allowed(&public_key) {
+                if !self.directory.eligible(&public_key) {
                     peer.kill().await;
                     return;
                 }
@@ -245,11 +246,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 let _ = reservation.send(self.directory.dial(&public_key));
             }
-            Message::Listenable {
+            Message::Acceptable {
                 public_key,
                 responder,
             } => {
-                let _ = responder.send(self.directory.listenable(&public_key));
+                let _ = responder.send(self.directory.acceptable(&public_key));
             }
             Message::Listen {
                 public_key,
@@ -284,9 +285,7 @@ mod tests {
             },
             Mailbox,
         },
-        Blocker,
-        Manager,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
+        Blocker, Ingress, Manager,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -311,9 +310,10 @@ mod tests {
         Config {
             crypto,
             namespace: b"test_tracker_actor_namespace".to_vec(),
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).into(),
             bootstrappers,
             allow_private_ips: true,
+            allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
@@ -340,7 +340,8 @@ mod tests {
         make_sig_invalid: bool,
     ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let mut signature = signer.sign(ip_namespace, &(socket, timestamp).encode());
+        let ingress: Ingress = socket.into();
+        let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
             let mut sig_bytes = signature.encode();
@@ -349,7 +350,7 @@ mod tests {
         }
 
         Info {
-            socket,
+            ingress,
             timestamp,
             public_key: peer_info_pk,
             signature,
@@ -494,7 +495,7 @@ mod tests {
                     assert_eq!(infos.len(), 1);
                     let tracker_info = &infos[0];
                     assert_eq!(tracker_info.public_key, tracker_pk);
-                    assert_eq!(tracker_info.socket, cfg.address);
+                    assert_eq!(tracker_info.ingress, cfg.address);
                     assert!(tracker_info.verify(&ip_namespace));
                 }
                 _ => panic!("Expected Peers message with tracker info"),
@@ -508,8 +509,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9999);
-            let cfg_with_boot =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_with_boot = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
@@ -716,7 +719,7 @@ mod tests {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
                     assert_eq!(received_pk2_info.public_key, pk2);
-                    assert_eq!(received_pk2_info.socket, pk2_addr);
+                    assert_eq!(received_pk2_info.ingress, Ingress::Socket(pk2_addr));
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
                 _ => panic!("pk1 did not receive expected Info for pk2",),
@@ -821,9 +824,9 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             // None listenable because not registered
-            assert!(!mailbox.listenable(peer_pk.clone()).await);
-            assert!(!mailbox.listenable(peer_pk2.clone()).await);
-            assert!(!mailbox.listenable(peer_pk3.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
             oracle
                 .update(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
@@ -831,11 +834,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
-            assert!(!mailbox.listenable(peer_pk).await);
+            assert!(!mailbox.acceptable(peer_pk).await);
             // Listenable because registered
-            assert!(mailbox.listenable(peer_pk2).await);
+            assert!(mailbox.acceptable(peer_pk2).await);
             // Not listenable because not registered
-            assert!(!mailbox.listenable(peer_pk3).await);
+            assert!(!mailbox.acceptable(peer_pk3).await);
         });
     }
 
@@ -860,12 +863,12 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.listenable(peer_pk.clone()).await);
+            assert!(mailbox.acceptable(peer_pk.clone()).await);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.listenable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await);
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());
@@ -884,8 +887,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
@@ -900,8 +905,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr.into())],
+            );
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
@@ -914,7 +921,7 @@ mod tests {
                         addr,
                     ) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, boot_addr);
+                        assert_eq!(*addr, Ingress::Socket(boot_addr));
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }
@@ -1051,7 +1058,7 @@ mod tests {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
-                    assert_eq!(infos[0].socket, peer1_addr);
+                    assert_eq!(infos[0].ingress, peer1_addr.into());
                 }
                 _ => panic!("Expected Peers message from tracker"),
             }

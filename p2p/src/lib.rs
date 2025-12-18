@@ -18,7 +18,10 @@ use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime
 
 pub mod authenticated;
 pub mod simulated;
+pub mod types;
 pub mod utils;
+
+pub use types::{Address, Ingress};
 
 /// Tuple representing a message received from a given public key.
 ///

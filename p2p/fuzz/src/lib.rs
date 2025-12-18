@@ -7,7 +7,7 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Blocker, Channel, Manager, Receiver, Recipients, Sender,
+    Address, Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     deterministic::{self, Context},
@@ -227,7 +227,7 @@ impl NetworkScheme for Discovery {
         let bootstrappers = if peer.id > 0 {
             vec![(
                 peer.topo.peers[0].public_key.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.topo.base_port).into(),
             )]
         } else {
             Vec::new()
@@ -326,7 +326,7 @@ impl NetworkScheme for Lookup {
             .topo
             .peers
             .iter()
-            .map(|p| (p.public_key.clone(), p.address))
+            .map(|p| (p.public_key.clone(), p.address.into()))
             .collect();
 
         // Register multiple peer sets to seed the network
@@ -376,11 +376,11 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Map<_, _> = peer_ids
+        let peer_list: Map<_, Address> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
-                (p.public_key.clone(), p.address)
+                (p.public_key.clone(), p.address.into())
             })
             .try_collect()
             .expect("public keys are unique");

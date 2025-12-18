@@ -1,9 +1,9 @@
 //! Tracker
 
-use crate::authenticated::discovery::config::Bootstrapper;
+use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 mod actor;
 mod directory;
@@ -23,9 +23,10 @@ pub use reservation::Reservation;
 pub struct Config<C: Signer> {
     pub crypto: C,
     pub namespace: Vec<u8>,
-    pub address: SocketAddr,
+    pub address: Ingress,
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub allow_private_ips: bool,
+    pub allow_dns: bool,
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: u64,

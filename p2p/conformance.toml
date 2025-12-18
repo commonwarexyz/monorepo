@@ -8,12 +8,20 @@ hash = "6e3772525660cd57a4223330b548ab47656d68ab0bfb8014d4efbeb9c1646508"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Info<PublicKey>>"]
 n_cases = 65536
-hash = "4cf9d3e1505ac252c6986b26e021041126990979e5093b215c5552cbc22b790e"
+hash = "37457ac4dfe77e8021f89721d9ec60ebcf8334faa9e591116a3ce52b63ea0799"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Payload<PublicKey>>"]
 n_cases = 65536
-hash = "c6da67f9d277623f62da4e03b05facb3d476260bebad2aaf57d0f9d75f7a8636"
+hash = "11d648c15d815169a7d101edb2f9e97e491e1dfe976e00755054578d3388c625"
 
 ["commonware_p2p::authenticated::lookup::types::tests::conformance::CodecConformance<Message>"]
 n_cases = 65536
 hash = "eb759619caf694dd7b9864e62c0952b9180da43badb47b90b5d47ce0c73d2175"
+
+["commonware_p2p::types::tests::conformance::CodecConformance<Address>"]
+n_cases = 65536
+hash = "7839d952c09aea96d40dcfd33b3219babe805bd0b8aa7d80b30f65041cf43a8c"
+
+["commonware_p2p::types::tests::conformance::CodecConformance<Ingress>"]
+n_cases = 65536
+hash = "e773b0aaebf079d380a4652b17c063f7a936f0da853d28e4a88ccb55a82574f2"
