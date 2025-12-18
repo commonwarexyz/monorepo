@@ -1,7 +1,7 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
 use crate::{Recipients, UnlimitedSender};
-use bytes::Bytes;
+use bytes::Buf;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
 use commonware_utils::channels::ring;
@@ -203,7 +203,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 
     async fn send(
         self,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         self.sender.send(self.recipients, message, priority).await
@@ -251,7 +251,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: Bytes,
+            mut message: impl Buf + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             let sent_to = match &recipients {
@@ -259,6 +259,7 @@ mod tests {
                 Recipients::Some(pks) => pks.clone(),
                 Recipients::All => Vec::new(),
             };
+            let message = message.copy_to_bytes(message.remaining());
             self.sent.lock().await.push((recipients, message, priority));
             Ok(sent_to)
         }

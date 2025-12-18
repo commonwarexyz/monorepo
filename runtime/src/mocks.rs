@@ -167,12 +167,12 @@ mod tests {
         executor.start(|_| async move {
             sink.send(data.as_slice()).await.unwrap();
             sink.send(data2.as_slice()).await.unwrap();
-            let mut buf = vec![0u8; 5];
+            let mut buf = [0u8; 5];
             stream.recv(&mut buf[..]).await.unwrap();
             assert_eq!(&buf[..], b"hello");
             stream.recv(&mut buf[..]).await.unwrap();
             assert_eq!(&buf[..], b" worl");
-            let mut buf = vec![0u8; 1];
+            let mut buf = [0u8; 1];
             stream.recv(&mut buf[..]).await.unwrap();
             assert_eq!(&buf[..], b"d");
         });
@@ -240,8 +240,9 @@ mod tests {
 
             // Spawn a task to initiate recv's where the first one will succeed and then will drop.
             let handle = context.clone().spawn(|_| async move {
-                let _ = stream.recv(vec![0; 5]).await;
-                let _ = stream.recv(vec![0; 5]).await;
+                let mut buf = [0u8; 5];
+                let _ = stream.recv(&mut buf[..]).await;
+                let _ = stream.recv(&mut buf[..]).await;
             });
 
             // Give the async task a moment to start
@@ -277,8 +278,9 @@ mod tests {
         // The timeout should return first.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let mut buf = [0u8; 5];
             select! {
-                v = stream.recv(vec![0;5]) => {
+                v = stream.recv(&mut buf[..]) => {
                     panic!("unexpected value: {v:?}");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

@@ -10,7 +10,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
@@ -66,7 +66,7 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -126,7 +126,7 @@ pub trait CheckedSender: Send {
     /// receive the message.
     fn send(
         self,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -157,7 +157,7 @@ pub trait Sender: LimitedSender {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> impl Future<
         Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,
