@@ -6,7 +6,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
     },
     mmr::{
         mem::{Clean, Dirty, State},
@@ -19,7 +20,7 @@ use crate::{
         store::LogStore,
         Error, FloorHelper,
     },
-    AuthenticatedBitMap,
+    AuthenticatedBitMap, Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -307,7 +308,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: PersistableContiguous<Item = Operation<K, V, U>>,
+    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,

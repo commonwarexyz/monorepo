@@ -10,8 +10,9 @@ use commonware_storage::{
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
     },
-    store::{StoreDeletable, StorePersistable},
+    store::StoreDeletable,
     translator::EightCap,
+    Persistable,
 };
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -19,6 +20,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod generate;
 pub mod init;
+
+pub type Digest = <Sha256 as Hasher>::Digest;
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
@@ -120,34 +123,31 @@ async fn gen_random_kv<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + StoreDeletable
-        + LogStorePrunable,
-    A::Error: std::fmt::Debug,
+    A: Persistable + StoreDeletable<Key = Digest, Value = Vec<u8>> + LogStorePrunable,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        db.update(k, v).await.unwrap();
+        assert!(db.update(k, v).await.is_ok());
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            db.delete(rand_key).await.unwrap();
+            assert!(db.delete(rand_key).await.is_ok());
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        db.update(rand_key, v).await.unwrap();
+        assert!(db.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
-            db.commit().await.unwrap();
+            assert!(db.commit().await.is_ok());
         }
     }
-    db.commit().await.unwrap();
-    db.prune(db.inactivity_floor_loc()).await.unwrap();
+    assert!(db.commit().await.is_ok());
+    assert!(db.prune(db.inactivity_floor_loc()).await.is_ok());
 
     db
 }
@@ -159,10 +159,7 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + Batchable
-        + LogStorePrunable,
-    A::Error: std::fmt::Debug,
+    A: Persistable + Batchable<Key = Digest, Value = Vec<u8>> + LogStorePrunable<Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -170,32 +167,32 @@ where
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        batch.update(k, v).await.unwrap();
+        assert!(batch.update(k, v).await.is_ok());
     }
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
+    assert!(db.write_batch(iter).await.is_ok());
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            batch.delete(rand_key).await.unwrap();
+            assert!(batch.delete(rand_key).await.is_ok());
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        batch.update(rand_key, v).await.unwrap();
+        assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             let iter = batch.into_iter();
-            db.write_batch(iter).await.unwrap();
-            db.commit().await.unwrap();
+            assert!(db.write_batch(iter).await.is_ok());
+            assert!(db.commit().await.is_ok());
             batch = db.start_batch();
         }
     }
 
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
-    db.prune(db.inactivity_floor_loc()).await.unwrap();
+    assert!(db.write_batch(iter).await.is_ok());
+    assert!(db.commit().await.is_ok());
+    assert!(db.prune(db.inactivity_floor_loc()).await.is_ok());
 
     db
 }

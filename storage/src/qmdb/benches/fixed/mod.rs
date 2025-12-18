@@ -20,8 +20,9 @@ use commonware_storage::{
         store::{Batchable, Config as SConfig, Store},
         Error,
     },
-    store::{StoreDeletable, StorePersistable},
+    store::StoreDeletable,
     translator::EightCap,
+    Persistable,
 };
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -29,6 +30,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod generate;
 pub mod init;
+
+pub type Digest = <Sha256 as Hasher>::Digest;
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
@@ -241,11 +244,7 @@ async fn gen_random_kv<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: StorePersistable<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-            Error = Error,
-        > + StoreDeletable,
+    A: Persistable<Error = Error> + StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -282,8 +281,7 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + Batchable,
+    A: Persistable + Batchable<Key = Digest, Value = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -291,32 +289,32 @@ where
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(k, v).await.unwrap();
+        assert!(batch.update(k, v).await.is_ok());
     }
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
+    assert!(db.write_batch(iter).await.is_ok());
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            batch.delete(rand_key).await.unwrap();
+            assert!(batch.delete(rand_key).await.is_ok());
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(rand_key, v).await.unwrap();
+        assert!(batch.update(rand_key, v).await.is_ok());
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
-                db.write_batch(iter).await.unwrap();
-                db.commit().await.unwrap();
+                assert!(db.write_batch(iter).await.is_ok());
+                assert!(db.commit().await.is_ok());
                 batch = db.start_batch();
             }
         }
     }
 
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
+    assert!(db.write_batch(iter).await.is_ok());
+    assert!(db.commit().await.is_ok());
     db
 }

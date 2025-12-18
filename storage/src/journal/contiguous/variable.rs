@@ -5,11 +5,12 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, MutableContiguous, PersistableContiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous},
         segmented::variable,
         Error,
     },
     mmr::Location,
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
@@ -843,7 +844,9 @@ impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: Codec> Persistable for Journal<E, V> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         Self::commit(self).await
     }

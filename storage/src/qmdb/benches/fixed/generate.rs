@@ -4,9 +4,8 @@
 use crate::fixed::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, get_store, Variant, VARIANTS,
+    get_current_unordered_fixed, get_store, Digest, Variant, VARIANTS,
 };
-use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -15,8 +14,10 @@ use commonware_storage::{
     qmdb::{
         any::AnyExt,
         store::{Batchable, LogStorePrunable},
+        Error,
     },
-    store::StorePersistable,
+    store::StoreDeletable,
+    Persistable,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -154,11 +155,12 @@ async fn test_db<A>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, commonware_storage::qmdb::Error>
+) -> Result<Duration, Error>
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+    A: Persistable<Error = Error>
         + Batchable
-        + LogStorePrunable,
+        + LogStorePrunable
+        + StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
 {
     let start = Instant::now();
     let mut db = if use_batch {

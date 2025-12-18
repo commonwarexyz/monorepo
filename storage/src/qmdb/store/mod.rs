@@ -100,6 +100,7 @@ use crate::{
         update_key, Error, FloorHelper,
     },
     translator::Translator,
+    Persistable,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Digest;
@@ -562,15 +563,25 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
+impl<E, K, V, T> Persistable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {

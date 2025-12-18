@@ -14,6 +14,7 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Persistable,
 };
 use commonware_codec::CodecFixed;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -40,6 +41,7 @@ pub use ext::AnyExt;
 /// Extension trait for "Any" QMDBs in a clean (merkleized) state.
 pub trait CleanAny:
     CleanStore<Dirty: DirtyAny<Key = Self::Key, Value = Self::Value, Clean = Self>>
+    + Persistable<Error = Error>
 {
     /// The key type for this database.
     type Key: Array;
@@ -54,17 +56,8 @@ pub trait CleanAny:
         metadata: Option<Self::Value>,
     ) -> impl Future<Output = Result<Range<Location>, Error>>;
 
-    /// Sync all database state to disk.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-
     /// Prune historical operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
-    /// Close the db. Uncommitted operations will be lost or rolled back on restart.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Destroy the db, removing all data from disk.
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Extension trait for "Any" QMDBs in a dirty (deferred merkleization) state.

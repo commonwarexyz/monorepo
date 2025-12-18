@@ -42,8 +42,8 @@ pub trait StoreMut: Store {
         }
     }
 
-    /// Creates a new key-value pair in the db.
-    /// Returns true if the key was created, false if it already existed.
+    /// Creates a new key-value pair in the db. Returns true if the key was created, false if it
+    /// already existed. The key is not modified if it already existed.
     fn create(
         &mut self,
         key: Self::Key,
@@ -66,13 +66,4 @@ pub trait StoreDeletable: StoreMut {
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
     fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
-}
-
-/// A mutable key-value store that can be persisted.
-pub trait StorePersistable: StoreMut {
-    /// Commit the store to disk, ensuring all changes are durably persisted.
-    fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
-
-    /// Destroy the store, removing all persisted data.
-    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }

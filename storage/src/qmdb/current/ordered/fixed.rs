@@ -788,19 +788,35 @@ impl<
         self.commit(metadata).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }
+}
 
-    async fn close(self) -> Result<(), Error> {
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::Persistable for Db<E, K, V, H, T, N, Clean<DigestOf<H>>>
+{
+    type Error = Error;
+
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
         self.close().await
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
     }
 }

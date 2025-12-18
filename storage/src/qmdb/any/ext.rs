@@ -11,7 +11,8 @@ use crate::{
         store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
-    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+    store::{Store as StoreTrait, StoreDeletable, StoreMut},
+    Persistable,
 };
 
 /// An extension wrapper for [CleanAny] databases that provides a traditional mutable key-value
@@ -106,15 +107,25 @@ where
     }
 }
 
-impl<A> StorePersistable for AnyExt<A>
+impl<A> Persistable for AnyExt<A>
 where
     A: CleanAny,
 {
+    type Error = Error;
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        self.ensure_clean().await?;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.sync().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
         // Merkleize before commit
         self.ensure_clean().await?;
         match self.inner.as_mut().expect("wrapper should never be empty") {
-            State::Clean(clean) => clean.commit(None).await.map(|_| ()),
+            State::Clean(clean) => CleanAny::commit(clean, None).await.map(|_| ()),
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
     }
@@ -126,6 +137,10 @@ where
             State::Clean(clean) => clean.destroy().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.close().await
     }
 }
 

@@ -1,5 +1,8 @@
 use crate::{
-    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+    journal::{
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
+    },
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -14,14 +17,14 @@ use crate::{
         store::Batchable,
         update_key, update_known_loc, Error, Index,
     },
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use core::ops::Range;
 use futures::future::try_join_all;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Range};
 
 pub mod fixed;
 pub mod sync;
@@ -320,15 +323,25 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
+    > Persistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -340,7 +353,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
     > CleanAny for Db<E, C, I, H, Update<K, V>>
@@ -353,24 +366,12 @@ where
         self.get(key).await
     }
 
-    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
     }
 }
 
@@ -491,7 +492,7 @@ pub(super) mod test {
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
-        let range = db.commit(Some(metadata)).await.unwrap();
+        let range = CleanAny::commit(&mut db, Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
@@ -511,7 +512,7 @@ pub(super) mod test {
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
             let mut clean_db = db.merkleize().await.unwrap();
-            clean_db.commit(None).await.unwrap();
+            CleanAny::commit(&mut clean_db, None).await.unwrap();
             db = clean_db.into_dirty();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
@@ -521,7 +522,7 @@ pub(super) mod test {
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
@@ -593,7 +594,7 @@ pub(super) mod test {
 
         // Commit + sync with pruning raises inactivity floor.
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -671,7 +672,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion + initial commit.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let mut db = db.into_dirty();
 
         // Make sure create won't modify active keys.
@@ -691,7 +692,7 @@ pub(super) mod test {
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
 
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let mut db = db.into_dirty();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
         assert_eq!(db.op_count(), 13); // only commit should remain.
@@ -707,7 +708,7 @@ pub(super) mod test {
 
         // Make sure closing/reopening gets us back to the same state.
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         assert_eq!(db.op_count(), 14);
         let root = db.root();
         let db = reopen_db(context.clone()).await;
@@ -724,7 +725,7 @@ pub(super) mod test {
 
         // Make sure last_commit is updated by changing the metadata back to None.
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 23);
@@ -736,7 +737,7 @@ pub(super) mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
 
         assert!(db.root() != root);
 
@@ -785,7 +786,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         let root = db.root();
         let op_count = db.op_count();
@@ -836,7 +837,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let db = reopen_db(context.clone()).await;
         assert!(db.op_count() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -900,7 +901,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let db = reopen_db(context.clone()).await;
         assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
@@ -931,7 +932,9 @@ pub(super) mod test {
                 map.insert(k, v);
             }
             let mut clean_db = db.merkleize().await.unwrap();
-            clean_db.commit(Some(metadata_value.clone())).await.unwrap();
+            CleanAny::commit(&mut clean_db, Some(metadata_value.clone()))
+                .await
+                .unwrap();
             db = clean_db.into_dirty();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
@@ -939,7 +942,7 @@ pub(super) mod test {
 
         db.delete(k).await.unwrap();
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

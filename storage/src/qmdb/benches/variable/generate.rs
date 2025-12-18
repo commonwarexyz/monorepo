@@ -2,10 +2,9 @@
 //! that supports variable-size values.
 
 use crate::variable::{
-    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_store, Variant,
-    VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_store, Digest,
+    Variant, VARIANTS,
 };
-use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -15,7 +14,8 @@ use commonware_storage::{
         store::{Batchable, LogStorePrunable},
         Error,
     },
-    store::{StoreDeletable, StorePersistable},
+    store::StoreDeletable,
+    Persistable,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -106,10 +106,10 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+    A: Persistable<Error = Error>
         + Batchable
-        + StoreDeletable
-        + LogStorePrunable,
+        + StoreDeletable<Key = Digest, Value = Vec<u8>, Error = Error>
+        + LogStorePrunable<Value = Vec<u8>>,
 {
     let start = Instant::now();
     let db = if use_batch {

@@ -1,6 +1,9 @@
 use crate::{
     index::{Cursor as _, Ordered as Index},
-    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+    journal::{
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
+    },
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -15,6 +18,7 @@ use crate::{
         store::Batchable,
         update_known_loc, Error,
     },
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -797,15 +801,25 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
+    > Persistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -869,7 +883,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
     > CleanAny for Db<E, C, I, H, Update<K, V>>
@@ -886,20 +900,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
     }
 }
 
@@ -1053,7 +1055,7 @@ mod test {
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
-        let range = db.commit(Some(metadata)).await.unwrap();
+        let range = CleanAny::commit(&mut db, Some(metadata)).await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.op_count(), 2); // floor op added
@@ -1069,7 +1071,7 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            db.commit(None).await.unwrap();
+            CleanAny::commit(&mut db, None).await.unwrap();
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
         }
 
@@ -1135,7 +1137,7 @@ mod test {
         assert_eq!(db.op_count(), 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let mut db = db.into_dirty();
 
         // Make sure create won't modify active keys.
@@ -1149,7 +1151,7 @@ mod test {
         assert!(db.get(&key2).await.unwrap().is_none());
 
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let root = db.root();
 
         // Multiple deletions of the same key should be a no-op.
@@ -1168,7 +1170,7 @@ mod test {
 
         // Make sure closing/reopening gets us back to the same state.
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
         let op_count = db.op_count();
         let root = db.root();
         let db = reopen_db(context.clone()).await;
@@ -1184,7 +1186,7 @@ mod test {
         db.update(key1.clone(), val2).await.unwrap();
 
         let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
@@ -1196,7 +1198,7 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit(None).await.unwrap();
+        CleanAny::commit(&mut db, None).await.unwrap();
 
         assert!(db.root() != root);
 
