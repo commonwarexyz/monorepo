@@ -201,11 +201,17 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         }
                     };
 
-                    // Handle greeting protocol
+                    // Update metrics
+                    let metric = match &msg {
+                        types::Payload::Greeting(_) => &metrics::Message::new_greeting(&peer),
+                        types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
+                        types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
+                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
+                    };
+                    self.received_messages.get_or_create(metric).inc();
+
+                    // Ensure we start with a greeting message and then never receive another
                     if let types::Payload::Greeting(info) = msg {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_greeting(&peer))
-                            .inc();
                         if greeting_received {
                             debug!(?peer, "received duplicate greeting");
                             return Err(Error::DuplicateGreeting);
@@ -216,29 +222,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         self.info_verifier.validate(&context, std::slice::from_ref(&info)).map_err(Error::Types)?;
                         tracker.peers(vec![info]);
                         continue;
-                    }
-
-                    // Require greeting before any other message
-                    if !greeting_received {
-                        let metric = match &msg {
-                            types::Payload::Greeting(_) => unreachable!(),
-                            types::Payload::BitVec(_) => metrics::Message::new_bit_vec(&peer),
-                            types::Payload::Peers(_) => metrics::Message::new_peers(&peer),
-                            types::Payload::Data(data) => metrics::Message::new_data(&peer, data.channel),
-                        };
-                        self.received_messages.get_or_create(&metric).inc();
+                    } else if !greeting_received {
                         debug!(?peer, "expected greeting as first message");
                         return Err(Error::MissingGreeting);
                     }
-
-                    // Update metrics
-                    let metric = match &msg {
-                        types::Payload::Greeting(_) => unreachable!(),
-                        types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
-                        types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
-                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
-                    };
-                    self.received_messages.get_or_create(metric).inc();
 
                     // Wait until rate limiter allows us to process the message
                     let rate_limiter = match &msg {
