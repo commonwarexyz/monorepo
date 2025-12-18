@@ -35,12 +35,16 @@ impl<T> NonEmptyVec<T> {
         Self(vec![first])
     }
 
-    /// Creates a [`NonEmptyVec`] from a [`Vec`] without checking if it's empty.
+    /// Creates a [`NonEmptyVec`] from a [`Vec`] without returning a `Result`.
     ///
     /// # Panics
     ///
-    /// Methods on the returned `NonEmptyVec` will panic if the vector is empty.
-    pub const fn from_unchecked(vec: Vec<T>) -> Self {
+    /// Panics if the vector is empty.
+    pub fn from_unchecked(vec: Vec<T>) -> Self {
+        assert!(
+            !vec.is_empty(),
+            "NonEmptyVec::from_unchecked: vector is empty"
+        );
         Self(vec)
     }
 
@@ -391,7 +395,7 @@ impl<'a, T: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for NonEmptyVec<T
 /// | `non_empty_vec![elem; N]` | const `usize` | Compile-time (N must be const and > 0) |
 /// | `non_empty_vec![elem; NZUsize!(N)]` | [`NZUsize!`] | Runtime (panics if N == 0) |
 /// | `non_empty_vec![elem; @n]` | [`NonZeroUsize`] | Type-safe (n is already non-zero) |
-/// | `non_empty_vec![@v]` | - | Unchecked (caller must ensure v is non-empty) |
+/// | `non_empty_vec![@v]` | - | Runtime (panics if v is empty) |
 ///
 /// The `@` marker is required for runtime [`NonZeroUsize`] values to distinguish
 /// them from const `usize` values, since declarative macros cannot inspect types.
@@ -478,6 +482,12 @@ mod tests {
         assert_eq!(v.len().get(), 1);
         assert_eq!(v.first(), &42);
         assert_eq!(v.last(), &42);
+    }
+
+    #[test]
+    #[should_panic(expected = "vector is empty")]
+    fn test_from_unchecked_panics_on_empty() {
+        let _: NonEmptyVec<i32> = NonEmptyVec::from_unchecked(vec![]);
     }
 
     #[test]
