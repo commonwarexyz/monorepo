@@ -275,14 +275,14 @@ where
         let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
         for (key, retry) in pending_keys {
-            let peers = self.get_eligible_peers(&key, retry);
-
             // Skip keys with no eligible peers
+            let peers = self.get_eligible_peers(&key, retry);
             if peers.is_empty() {
                 self.requests_created.inc(Status::Dropped);
                 continue;
             }
 
+            // Mark that an eligible peer was found
             self.requests_created.inc(Status::Success);
             found_eligible_peers = true;
 
