@@ -228,7 +228,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         // Verify the greeting is from the expected peer
                         if info.public_key != peer {
                             debug!(?peer, greeting_pk = ?info.public_key, "greeting public key mismatch");
-                            return Err(Error::GreetingPublicKeyMismatch);
+                            return Err(Error::GreetingMismatch);
                         }
 
                         // Verify the greeting info is valid
@@ -359,7 +359,12 @@ mod tests {
             max_peer_set_size: 128,
             allowed_peers_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(10)),
             peer_gossip_max_count: 10,
-            info_verifier: types::Info::verifier(me, 10, Duration::from_secs(60), IP_NAMESPACE.to_vec()),
+            info_verifier: types::Info::verifier(
+                me,
+                10,
+                Duration::from_secs(60),
+                IP_NAMESPACE.to_vec(),
+            ),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
             rate_limited: Family::<metrics::Message, Counter>::default(),
@@ -672,7 +677,7 @@ mod tests {
                 .await
                 .expect("send failed");
 
-            // Run peer actor and expect GreetingPublicKeyMismatch error
+            // Run peer actor and expect GreetingMismatch error
             let result = peer_actor
                 .run(
                     local_pk,
@@ -684,8 +689,8 @@ mod tests {
                 .await;
 
             assert!(
-                matches!(result, Err(Error::GreetingPublicKeyMismatch)),
-                "Expected GreetingPublicKeyMismatch error, got: {result:?}"
+                matches!(result, Err(Error::GreetingMismatch)),
+                "Expected GreetingMismatch error, got: {result:?}"
             );
         });
     }

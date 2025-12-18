@@ -54,5 +54,5 @@ pub enum Error {
     #[error("duplicate greeting")]
     DuplicateGreeting,
     #[error("greeting public key mismatch")]
-    GreetingPublicKeyMismatch,
+    GreetingMismatch,
 }
