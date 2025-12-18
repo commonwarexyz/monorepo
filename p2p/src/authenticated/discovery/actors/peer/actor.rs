@@ -218,6 +218,12 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         }
                         greeting_received = true;
 
+                        // Verify the greeting is from the expected peer
+                        if info.public_key != peer {
+                            debug!(?peer, greeting_pk = ?info.public_key, "greeting public key mismatch");
+                            return Err(Error::GreetingPublicKeyMismatch);
+                        }
+
                         // Verify the greeting info is valid
                         self.info_verifier.validate(&context, std::slice::from_ref(&info)).map_err(Error::Types)?;
 
