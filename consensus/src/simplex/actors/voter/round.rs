@@ -118,6 +118,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
+    /// Returns the proposal if we should attempt to certify it.
+    ///
+    /// Returns `None` if the proposal should not be certified for any reason, for example if it
+    /// already has a certification request or does not have enough information to make the request.
     pub fn should_certify(&mut self) -> Option<Proposal<D>> {
         // Ignore any requests where we cannot certify or have already requested certification.
         if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
@@ -127,10 +131,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal().cloned()
     }
 
+    /// Sets the handle for the certification request.
     pub fn set_certify_handle(&mut self, handle: Aborter) {
         self.certify_handle = Some(handle);
     }
 
+    /// Clears the handle for the certification request.
     pub fn unset_certify_handle(&mut self) {
         self.certify_handle = None;
     }

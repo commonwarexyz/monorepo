@@ -135,8 +135,8 @@ enum Waiter<D: Digest, P: PublicKey> {
 pub enum CertifyFn<D: Digest> {
     /// Always certify.
     Always,
-    /// Certify sometimes, but not always.
-    /// The behavior is to certify 9 views in a row, then reject for 2 views in a row.
+    /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
+    /// (but deterministically) 82% of the time, depending on the last byte of the payload.
     Sometimes,
     /// A custom predicate function.
     Custom(Box<dyn Fn(D) -> bool + Send + 'static>),

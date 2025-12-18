@@ -434,7 +434,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
             .unwrap_or(false)
     }
 
-    /// Attempt to mark certification as in-flight; returns `false` to avoid duplicate requests.
+    /// Attempt to mark certification as in-flight; returns `None` to avoid duplicate requests.
     pub fn try_certify(&mut self, view: View) -> Option<(Rnd, Proposal<D>)> {
         let proposal = self
             .views
@@ -443,6 +443,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         Some((proposal.round, proposal))
     }
 
+    /// Store the abort handle for an in-flight certification request.
     pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {
             return;
@@ -450,6 +451,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         round.set_certify_handle(handle);
     }
 
+    /// Clear the certification handle, allowing certification to be retried.
     pub fn retry_certification(&mut self, view: View) {
         let Some(round) = self.views.get_mut(&view) else {
             return;
@@ -541,22 +543,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         }
     }
 
-    /// Returns the certificate for the parent of the proposal at the given view.
-    pub fn parent_certificate(&mut self, view: View) -> Option<Certificate<S, D>> {
-        let parent = {
-            let view = self.views.get(&view)?.proposal()?.parent;
-            self.views.get(&view)?
-        };
-
-        if let Some(f) = parent.finalization().cloned() {
-            return Some(Certificate::Finalization(f));
-        }
-        if let Some(n) = parent.notarization().cloned() {
-            return Some(Certificate::Notarization(n));
-        }
-        None
-    }
-
     /// Returns the payload of the proposal's parent if:
     /// - It is less-than the proposal view.
     /// - It is greater-than-or-equal-to the last finalized view.
@@ -583,6 +569,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         // - notarized and certified
         // - finalized
         self.is_certified(parent).copied()
+    }
+
+    /// Returns the certificate for the parent of the proposal at the given view.
+    pub fn parent_certificate(&mut self, view: View) -> Option<Certificate<S, D>> {
+        let parent = {
+            let view = self.views.get(&view)?.proposal()?.parent;
+            self.views.get(&view)?
+        };
+
+        if let Some(f) = parent.finalization().cloned() {
+            return Some(Certificate::Finalization(f));
+        }
+        if let Some(n) = parent.notarization().cloned() {
+            return Some(Certificate::Notarization(n));
+        }
+        None
     }
 }
 

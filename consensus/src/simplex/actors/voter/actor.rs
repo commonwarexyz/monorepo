@@ -57,15 +57,15 @@ enum Resolved {
 
 /// An outstanding request to the automaton.
 struct Request<V: Viewable, R>(
-    /// Attached context for the pending item.
+    /// Attached context for the pending item. Must yield a view.
     V,
     /// Oneshot receiver that the automaton is expected to respond over.
     oneshot::Receiver<R>,
 );
 
-impl<V: Viewable, R> Request<V, R> {
-    pub fn is_for_view(&self, view: View) -> bool {
-        self.0.view() == view
+impl<V: Viewable, R> Viewable for Request<V, R> {
+    fn view(&self) -> View {
+        self.0.view()
     }
 }
 
@@ -327,6 +327,16 @@ impl<
         Some(Request(context, receiver))
     }
 
+    /// Returns a request to certify a proposal if it should be requested.
+    ///
+    /// Returns `None` if the proposal should not be certified for any reason, for example if it
+    /// already has a certification request or does not have enough information to make the request.
+    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
+        let (round, proposal) = self.state.try_certify(view)?;
+        let receiver = self.automaton.certify(proposal.payload).await;
+        Some(Request(round, receiver))
+    }
+
     /// Handle a timeout.
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -357,38 +367,6 @@ impl<
         // we must've already broadcast and persisted it).
         if let Some(certificate) = entry {
             self.broadcast_certificate(certificate_sender, certificate)
-                .await;
-        }
-    }
-
-    /// Returns a request to certify a proposal if it should be requested.
-    ///
-    /// Returns `None` if the proposal should not be certified for any reason, for example if it
-    /// already has a certification request or does not have enough information to make the request.
-    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        let (round, proposal) = self.state.try_certify(view)?;
-        let receiver = self.automaton.certify(proposal.payload).await;
-        Some(Request(round, receiver))
-    }
-
-    /// Handles the certification of a proposal.
-    ///
-    /// The certification may succeed, in which case the proposal can be used in future views—
-    /// or fail, in which case we should nullify the view as fast as possible.
-    async fn certified(&mut self, view: View, success: bool) {
-        let Some(notarization) = self.state.certified(view, success) else {
-            return;
-        };
-
-        // Persist certification result for recovery
-        let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
-        self.append_journal(view, artifact.clone()).await;
-        self.sync_journal(view).await;
-
-        // Inform listeners of successful certification
-        if success {
-            self.reporter
-                .report(Activity::Certification(notarization))
                 .await;
         }
     }
@@ -441,6 +419,28 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
+    }
+
+    /// Handles the certification of a proposal.
+    ///
+    /// The certification may succeed, in which case the proposal can be used in future views—
+    /// or fail, in which case we should nullify the view as fast as possible.
+    async fn handle_certification(&mut self, view: View, success: bool) {
+        let Some(notarization) = self.state.certified(view, success) else {
+            return;
+        };
+
+        // Persist certification result for recovery
+        let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
+        self.append_journal(view, artifact.clone()).await;
+        self.sync_journal(view).await;
+
+        // Inform listeners of successful certification
+        if success {
+            self.reporter
+                .report(Activity::Certification(notarization))
+                .await;
+        }
     }
 
     /// Persists our finalize vote to the journal for crash recovery.
@@ -765,7 +765,7 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        self.certified(round.view(), success).await;
+                        self.handle_certification(round.view(), success).await;
                     }
                 }
             }
@@ -806,12 +806,12 @@ impl<
         loop {
             // Drop any pending items if we have moved to a new view
             if let Some(ref pp) = pending_propose {
-                if !pp.is_for_view(self.state.current_view()) {
+                if pp.view() != self.state.current_view() {
                     pending_propose = None;
                 }
             }
             if let Some(ref pv) = pending_verify {
-                if !pv.is_for_view(self.state.current_view()) {
+                if pv.view() != self.state.current_view() {
                     pending_verify = None;
                 }
             }
@@ -826,7 +826,7 @@ impl<
                 pending_verify = self.try_verify().await;
             }
 
-            // Drain pending certifications triggered by notarizations
+            // Attempt to certify any views that we have notarizations for
             let candidates = take(&mut self.certification_candidates)
                 .range(self.state.last_finalized().next()..)
                 .copied()
@@ -919,6 +919,7 @@ impl<
                             self.state.verified(view);
                         },
                         Ok(false) => {
+                            // Verification failed for current view proposal, treat as immediate timeout
                             debug!(round = ?context.round, "proposal failed verification");
                             self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
                                 .await;
@@ -938,14 +939,12 @@ impl<
                     view = round.view();
                     match certified {
                         Ok(certified) => {
-                            self.certified(view, certified).await;
+                            self.handle_certification(view, certified).await;
                         }
                         Err(err) => {
-                            debug!(
-                                ?err,
-                                ?round,
-                                "failed to certify proposal"
-                            );
+                            // The application did not explicitly respond whether certification succeeded.
+                            // Retry the certification request.
+                            debug!(?err, ?round, "failed to certify proposal");
                             self.state.retry_certification(view);
                             self.certification_candidates.insert(view);
                         }
