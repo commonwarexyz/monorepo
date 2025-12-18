@@ -491,12 +491,12 @@ mod fuzz {
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            // Get at least one coefficient first to guarantee non-empty
-            let mut coeffs = NonEmptyVec::new(F::arbitrary(u)?);
-            let extra = u.arbitrary_len::<F>()?;
-            for coeff in u.arbitrary_iter::<F>()?.take(extra) {
-                coeffs.push(coeff?);
-            }
+            let size = u.arbitrary_len::<F>()?.max(1);
+            let coeffs = NonEmptyVec::from_vec_unchecked(
+                u.arbitrary_iter::<F>()?
+                    .take(size)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
             Ok(Self { coeffs })
         }
     }
