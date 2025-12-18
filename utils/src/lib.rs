@@ -617,4 +617,75 @@ mod tests {
         let d2 = NonZeroDuration::new(Duration::from_millis(200)).unwrap();
         assert!(d1 < d2);
     }
+
+    /// Verify HashMap memory behavior with different value sizes.
+    ///
+    /// This test documents that HashMap<u64, u32> does NOT use less memory than
+    /// HashMap<u64, u64> due to alignment padding. When the key is u64 (8-byte aligned),
+    /// a u32 value gets 4 bytes of trailing padding, resulting in identical entry sizes.
+    ///
+    /// For actual memory savings, consider:
+    /// - Using u32 keys with u32 values: (u32, u32) = 8 bytes vs (u32, u64) = 16 bytes
+    /// - Using a dense array/Vec for sequential u64 keys instead of HashMap
+    #[test]
+    fn test_hashmap_memory_usage_u32_vs_u64_values() {
+        use std::mem::{align_of, size_of};
+
+        // HashMap stores entries as (K, V) pairs in contiguous memory.
+        // Due to alignment requirements, entries are padded to the alignment of the
+        // largest field (the u64 key).
+
+        // Size of entry with u32 value - padded to 8-byte alignment
+        let entry_size_u64_u32 = size_of::<(u64, u32)>();
+        // Size of entry with u64 value
+        let entry_size_u64_u64 = size_of::<(u64, u64)>();
+
+        // Both are 16 bytes due to alignment padding
+        // (u64, u32): 8 bytes key + 4 bytes value + 4 bytes padding = 16 bytes
+        // (u64, u64): 8 bytes key + 8 bytes value = 16 bytes
+        assert_eq!(
+            entry_size_u64_u32, 16,
+            "Entry (u64, u32) should be 16 bytes (including 4 bytes padding)"
+        );
+        assert_eq!(
+            entry_size_u64_u64, 16,
+            "Entry (u64, u64) should be 16 bytes"
+        );
+        assert_eq!(
+            entry_size_u64_u32, entry_size_u64_u64,
+            "Due to alignment, (u64, u32) and (u64, u64) entries use the same memory"
+        );
+
+        // Verify alignment is driven by the u64 key
+        assert_eq!(align_of::<(u64, u32)>(), 8);
+        assert_eq!(align_of::<(u64, u64)>(), 8);
+
+        // Contrast with u32 keys where the smaller value DOES save memory
+        let entry_size_u32_u32 = size_of::<(u32, u32)>();
+        let entry_size_u32_u64 = size_of::<(u32, u64)>();
+
+        // (u32, u32): 4 bytes key + 4 bytes value = 8 bytes
+        // (u32, u64): 4 bytes padding + 8 bytes value + 4 bytes key = 16 bytes
+        // (Rust reorders fields for optimal packing, but alignment still dominates)
+        assert_eq!(entry_size_u32_u32, 8, "Entry (u32, u32) should be 8 bytes");
+        assert_eq!(
+            entry_size_u32_u64, 16,
+            "Entry (u32, u64) should be 16 bytes"
+        );
+        assert!(
+            entry_size_u32_u32 < entry_size_u32_u64,
+            "With u32 keys, u32 values DO save memory: {} < {}",
+            entry_size_u32_u32,
+            entry_size_u32_u64
+        );
+
+        // For completeness, verify individual type sizes
+        assert_eq!(size_of::<u32>(), 4);
+        assert_eq!(size_of::<u64>(), 8);
+
+        eprintln!("Entry (u64, u32) = {entry_size_u64_u32} bytes (4 bytes wasted to padding)");
+        eprintln!("Entry (u64, u64) = {entry_size_u64_u64} bytes");
+        eprintln!("Entry (u32, u32) = {entry_size_u32_u32} bytes");
+        eprintln!("Entry (u32, u64) = {entry_size_u32_u64} bytes");
+    }
 }
