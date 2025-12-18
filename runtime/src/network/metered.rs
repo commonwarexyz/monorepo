@@ -1,6 +1,5 @@
 use crate::{SinkOf, StreamOf};
-use bytes::Buf;
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -71,10 +70,11 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
-        let buf = self.inner.recv(buf).await?;
-        self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
-        Ok(buf)
+    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), crate::Error> {
+        let size = buf.remaining_mut();
+        self.inner.recv(buf).await?;
+        self.metrics.inbound_bandwidth.inc_by(size as u64);
+        Ok(())
     }
 }
 
@@ -217,8 +217,9 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let buf = stream.recv(vec![0; MSG_SIZE as usize]).await.unwrap();
-            sink.send(buf.as_ref()).await.unwrap();
+            let mut buf = vec![0; MSG_SIZE as usize];
+            stream.recv(&mut buf[..]).await.unwrap();
+            sink.send(&buf[..]).await.unwrap();
         });
 
         // Send and receive data as client
@@ -228,12 +229,10 @@ mod tests {
         let msg = vec![42u8; MSG_SIZE as usize];
         client_sink.send(msg.as_slice()).await.unwrap();
 
-        let response = client_stream
-            .recv(vec![0; MSG_SIZE as usize])
-            .await
-            .unwrap();
+        let mut response = vec![0u8; MSG_SIZE as usize];
+        client_stream.recv(&mut response[..]).await.unwrap();
         assert_eq!(response.len(), MSG_SIZE as usize);
-        assert_eq!(response.as_ref(), msg);
+        assert_eq!(&response[..], &msg[..]);
 
         // Wait for server to complete
         server.await.unwrap();

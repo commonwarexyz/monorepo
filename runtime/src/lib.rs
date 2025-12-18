@@ -22,7 +22,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
@@ -488,10 +488,7 @@ pub trait Stream: Sync + Send + 'static {
     /// # Warning
     ///
     /// If the stream returns an error, partially read data may be discarded.
-    fn recv(
-        &mut self,
-        buf: impl Into<StableBuf> + Send,
-    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
+    fn recv(&mut self, buf: impl BufMut + Send) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -2733,7 +2730,8 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let byte = stream.recv(vec![0; 1]).await?;
+                    let mut byte = [0u8; 1];
+                    stream.recv(&mut byte[..]).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -2766,8 +2764,9 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read.into()).map_err(|_| Error::ReadFailed)
+                let mut read = vec![0; content_length];
+                stream.recv(&mut read[..]).await?;
+                String::from_utf8(read).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
