@@ -81,12 +81,7 @@ impl<K> Poly<K> {
     /// polynomial.
     pub fn translate<L>(&self, f: impl Fn(&K) -> L) -> Poly<L> {
         Poly {
-            coeffs: self
-                .coeffs
-                .iter()
-                .map(f)
-                .try_collect()
-                .expect("iterator source is non-empty vec"),
+            coeffs: self.coeffs.map(f),
         }
     }
 
@@ -293,12 +288,7 @@ impl<K: Additive> Neg for Poly<K> {
 
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: self
-                .coeffs
-                .into_iter()
-                .map(Neg::neg)
-                .try_collect::<NonEmptyVec<_>>()
-                .expect("iterator source is non-empty vec"),
+            coeffs: self.coeffs.map_into(Neg::neg),
         }
     }
 }

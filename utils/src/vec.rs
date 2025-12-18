@@ -84,6 +84,16 @@ impl<T> NonEmptyVec<T> {
         self.0.last_mut().unwrap()
     }
 
+    /// Maps each element to a new value, preserving the non-empty guarantee.
+    pub fn map<U, F: FnMut(&T) -> U>(&self, f: F) -> NonEmptyVec<U> {
+        NonEmptyVec(self.0.iter().map(f).collect())
+    }
+
+    /// Consumes the vector and maps each element to a new value.
+    pub fn map_into<U, F: FnMut(T) -> U>(self, f: F) -> NonEmptyVec<U> {
+        NonEmptyVec(self.0.into_iter().map(f).collect())
+    }
+
     /// Appends an element to the back of the vector.
     pub fn push(&mut self, value: T) {
         self.0.push(value);
@@ -688,6 +698,23 @@ mod tests {
         let v = non_empty_vec![1, 2, 3];
         let vec: Vec<i32> = v.into_vec();
         assert_eq!(vec, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_map() {
+        let v = non_empty_vec![1, 2, 3];
+        let doubled = v.map(|x| x * 2);
+        assert_eq!(&*doubled, &[2, 4, 6]);
+
+        // Original unchanged
+        assert_eq!(&*v, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_map_into() {
+        let v = non_empty_vec![1, 2, 3];
+        let doubled = v.map_into(|x| x * 2);
+        assert_eq!(&*doubled, &[2, 4, 6]);
     }
 
     #[test]
