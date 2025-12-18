@@ -285,7 +285,6 @@ where
 
             // Try each peer in order until one succeeds
             for peer in peers {
-
                 // Record request before sending
                 let now = self.context.current();
                 let deadline = now.checked_add(self.timeout).expect("time overflowed");
@@ -295,9 +294,13 @@ where
                     Err(not_until) => {
                         earliest_next_try =
                             earliest_next_try.map_or(Some(not_until), |e| Some(e.min(not_until)));
+                        // Look for another peer
                         continue;
                     }
                 };
+
+                // Mark that at least one peer was not rate-limited
+                all_rate_limited = false;
 
                 // Try to send
                 let id = self.next_id();
@@ -324,18 +327,14 @@ where
                     }
                     Ok(_) => {
                         // Empty result - peer dropped message, try next
-                        all_rate_limited = false;
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, "send returned empty");
-                        continue;
                     }
                     Err(err) => {
                         // Send error - not rate-limited, just failed
-                        all_rate_limited = false;
                         self.requests_sent.inc(Status::Failure);
                         debug!(?err, ?peer, "send failed");
                         self.update_performance(&peer, self.timeout);
-                        continue;
                     }
                 }
             }
@@ -347,9 +346,9 @@ where
             }
         }
 
-        // No keys could be fetched, set waiter to retry as soon as possible
-        self.waiter = earliest_next_try
-            .or_else(|| Some(self.context.current().saturating_add(self.retry_timeout)))
+        // No keys could be fetched, set waiter to retry as soon as possible.
+        self.waiter =
+            earliest_next_try.or_else(|| Some(self.context.now().saturating_add(Duration::MAX)));
     }
 
     /// Retains only the fetches with keys greater than the given key.
