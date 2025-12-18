@@ -250,35 +250,38 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
-                    let skip_rate_limit = match &msg {
-                        types::Payload::BitVec(_) if !first_bit_vec_received => {
-                            first_bit_vec_received = true;
-                            true
-                        }
-                        types::Payload::Peers(_) if !first_peers_received => {
-                            first_peers_received = true;
-                            true
-                        }
-                        _ => false,
-                    };
-                    if !skip_rate_limit {
-                        let rate_limiter = match &msg {
-                            types::Payload::Data(data) => {
-                                match rate_limits.get(&data.channel) {
-                                    Some(rate_limit) => rate_limit,
-                                    None => {
-                                        debug!(?peer, channel = data.channel, "invalid channel");
-                                        self.received_messages
-                                            .get_or_create(&metrics::Message::new_invalid(&peer))
-                                            .inc();
-                                        return Err(Error::InvalidChannel);
-                                    }
+                    let rate_limiter = match &msg {
+                        types::Payload::Data(data) => {
+                            match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => Some(rate_limit),
+                                None => {
+                                    debug!(?peer, channel = data.channel, "invalid channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::InvalidChannel);
                                 }
                             }
-                            types::Payload::Greeting(_) => unreachable!(),
-                            types::Payload::BitVec(_) => &bit_vec_rate_limiter,
-                            types::Payload::Peers(_) => &peers_rate_limiter,
-                        };
+                        }
+                        types::Payload::Greeting(_) => unreachable!(),
+                        types::Payload::BitVec(_) => {
+                            if first_bit_vec_received {
+                                Some(&bit_vec_rate_limiter)
+                            } else {
+                                first_bit_vec_received = true;
+                                None
+                            }
+                        }
+                        types::Payload::Peers(_) => {
+                            if first_peers_received {
+                                Some(&peers_rate_limiter)
+                            } else {
+                                first_peers_received = true;
+                                None
+                            }
+                        }
+                    };
+                    if let Some(rate_limiter) = rate_limiter {
                         if let Err(wait_until) = rate_limiter.check() {
                             self.rate_limited.get_or_create(metric).inc();
                             let wait_duration = wait_until.wait_time_from(context.now());
