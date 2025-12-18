@@ -208,16 +208,6 @@ impl<T> NonEmptyVec<T> {
     pub fn into_vec(self) -> Vec<T> {
         self.0
     }
-
-    /// Returns an iterator over the elements.
-    pub fn iter(&self) -> core::slice::Iter<'_, T> {
-        self.0.iter()
-    }
-
-    /// Returns a mutable iterator over the elements.
-    pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
-        self.0.iter_mut()
-    }
 }
 
 impl<T> Deref for NonEmptyVec<T> {
