@@ -40,12 +40,16 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), Error> {
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
+        // Create an intermediate buffer to capture data for auditing
+        let len = buf.remaining_mut();
+        let mut temp = vec![0u8; len];
+
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
 
-        self.inner.recv(buf).await.inspect_err(|e| {
+        self.inner.recv(&mut temp[..]).await.inspect_err(|e| {
             self.auditor.event(b"recv_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -54,8 +58,10 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            // TODO: Write buf
+            hasher.update(&temp);
         });
+
+        buf.put_slice(&temp);
         Ok(())
     }
 }

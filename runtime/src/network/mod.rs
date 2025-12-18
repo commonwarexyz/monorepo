@@ -159,9 +159,7 @@ mod tests {
                     .recv(&mut read[..])
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(&read[..])
-                    .await
-                    .expect("Failed to send chunk");
+                sink.send(&read[..]).await.expect("Failed to send chunk");
             }
         });
 
@@ -178,9 +176,7 @@ mod tests {
 
             // Send and verify data in chunks
             for _ in 0..NUM_CHUNKS {
-                sink.send(&pattern[..])
-                    .await
-                    .expect("Failed to send chunk");
+                sink.send(&pattern[..]).await.expect("Failed to send chunk");
                 let mut read = vec![0; CHUNK_SIZE];
                 stream
                     .recv(&mut read[..])
