@@ -76,9 +76,8 @@ pub async fn run<S, L>(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         config
             .bootstrappers
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (k, v.into()))
+            .iter()
+            .map(|(k, v)| (k.clone(), (*v).into()))
             .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
