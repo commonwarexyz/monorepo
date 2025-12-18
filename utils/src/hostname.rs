@@ -142,14 +142,14 @@ impl TryFrom<&str> for Hostname {
 impl CodecWrite for Hostname {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.0.as_bytes().to_vec().write(buf);
+        self.0.as_bytes().write(buf);
     }
 }
 
 impl EncodeSize for Hostname {
     #[inline]
     fn encode_size(&self) -> usize {
-        self.0.as_bytes().to_vec().encode_size()
+        self.0.as_bytes().encode_size()
     }
 }
 
