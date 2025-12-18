@@ -178,7 +178,9 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             .context
             .with_label("receiver")
             .spawn(move |context| async move {
-                let rate = Quota::with_period(self.gossip_bit_vec_frequency).unwrap();
+                // Use half the gossip frequency for rate limiting to allow for timing
+                // jitter at message boundaries.
+                let rate = Quota::with_period(self.gossip_bit_vec_frequency / 2).unwrap();
                 let bit_vec_rate_limiter =
                     RateLimiter::direct_with_clock(rate, context.clone());
                 let peers_rate_limiter =

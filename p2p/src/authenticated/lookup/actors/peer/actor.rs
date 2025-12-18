@@ -97,7 +97,9 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
-        let ping_rate = Quota::with_period(self.ping_frequency).unwrap();
+        // Use half the ping frequency for rate limiting to allow for timing
+        // jitter at message boundaries.
+        let ping_rate = Quota::with_period(self.ping_frequency / 2).unwrap();
         let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
