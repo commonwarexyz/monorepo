@@ -40,7 +40,7 @@ impl<V> SeedReporter<V> {
         }
     }
 
-    fn seed_hash_from_seed(seed: impl commonware_codec::Encode) -> B256 {
+    fn hash_seed(seed: impl commonware_codec::Encode) -> B256 {
         keccak256(seed.encode())
     }
 }
@@ -57,7 +57,7 @@ where
                 self.state
                     .set_seed(
                         notarization.proposal.payload,
-                        Self::seed_hash_from_seed(notarization.seed()),
+                        Self::hash_seed(notarization.seed()),
                     )
                     .await;
             }
@@ -65,7 +65,7 @@ where
                 self.state
                     .set_seed(
                         finalization.proposal.payload,
-                        Self::seed_hash_from_seed(finalization.seed()),
+                        Self::hash_seed(finalization.seed()),
                     )
                     .await;
             }
