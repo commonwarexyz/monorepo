@@ -22,7 +22,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Recipients, Sender,
+    Blocker, CheckedSender, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
@@ -211,6 +211,11 @@ where
                     continue;
                 }
 
+                let Ok(checked) = orchestrator_sender.check(Recipients::One(from.clone())).await else {
+                    debug!(%their_epoch, ?from, "recipient rate-limited, cannot respond yet.");
+                    continue;
+                };
+
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
@@ -226,8 +231,7 @@ where
                 );
 
                 // Send the request to the orchestrator. This operation is best-effort.
-                if orchestrator_sender.send(
-                    Recipients::One(from),
+                if checked.send(
                     our_epoch.encode().freeze(),
                     true
                 ).await.is_err() {
