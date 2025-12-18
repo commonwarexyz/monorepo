@@ -37,9 +37,9 @@ impl<T> NonEmptyVec<T> {
 
     /// Creates a [`NonEmptyVec`] from a [`Vec`] without checking if it's empty.
     ///
-    /// # Safety
+    /// # Panics
     ///
-    /// The caller must ensure that the vector is not empty.
+    /// Methods on the returned `NonEmptyVec` will panic if the vector is empty.
     pub const fn from_vec_unchecked(vec: Vec<T>) -> Self {
         Self(vec)
     }
