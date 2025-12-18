@@ -285,8 +285,6 @@ where
 
             // Try each peer in order until one succeeds
             for peer in peers {
-                // Generate request ID
-                let id = self.next_id();
 
                 // Record request before sending
                 let now = self.context.current();
@@ -302,6 +300,7 @@ where
                 };
 
                 // Try to send
+                let id = self.next_id();
                 let message = wire::Message {
                     id,
                     payload: wire::Payload::Request(key.clone()),

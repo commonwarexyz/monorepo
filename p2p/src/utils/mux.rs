@@ -328,7 +328,7 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
             .check(recipients)
             .await
             .map(|checked| CheckedGlobalSender {
-                subchannel: 0,
+                subchannel: None,
                 inner: checked,
             })
     }
@@ -336,14 +336,14 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
 
 /// A checked sender for a [GlobalSender].
 pub struct CheckedGlobalSender<'a, S: Sender> {
-    subchannel: Channel,
+    subchannel: Option<Channel>,
     inner: S::Checked<'a>,
 }
 
 impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
     /// Set the subchannel for this sender.
     pub const fn with_subchannel(mut self, subchannel: Channel) -> Self {
-        self.subchannel = subchannel;
+        self.subchannel = Some(subchannel);
         self
     }
 }
@@ -357,7 +357,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        let subchannel = UInt(self.subchannel);
+        let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut buf = BytesMut::with_capacity(subchannel.encode_size() + message.len());
         subchannel.write(&mut buf);
         buf.put_slice(&message);
