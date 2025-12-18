@@ -284,10 +284,8 @@ mod tests {
                 types,
             },
             Mailbox,
-        }, // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
-        Blocker,
-        Ingress,
-        Manager,
+        },
+        Blocker, Ingress, Manager,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
