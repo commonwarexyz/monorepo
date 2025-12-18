@@ -186,10 +186,12 @@ pub struct CheckedSender<'a, S: UnlimitedSender> {
 }
 
 impl<S: UnlimitedSender> CheckedSender<'_, S> {
-    /// Modify the recipients to send to.
+    /// Modify the [`Recipients`] to send to.
     ///
-    /// This is useful for some testing scenarios where the message sent determines the set
-    /// of recipients.
+    /// # Warning
+    ///
+    /// Rate limiting has already been applied to the original recipients. Any modifications
+    /// to the recipients will not be reflected in the rate limiter.
     pub(crate) fn modify_recipients(&mut self, recipients: Recipients<S::PublicKey>) {
         self.recipients = recipients;
     }
