@@ -7,15 +7,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
-    ops::{Deref, DerefMut, Index, IndexMut},
-    slice::SliceIndex,
+    ops::{Deref, DerefMut},
 };
 use thiserror::Error;
-
-#[cfg(not(feature = "std"))]
-type VecIntoIter<T> = alloc::vec::IntoIter<T>;
-#[cfg(feature = "std")]
-type VecIntoIter<T> = std::vec::IntoIter<T>;
 
 /// Errors that can occur when creating a [`NonEmptyVec`].
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -236,20 +230,6 @@ impl<T> AsRef<Vec<T>> for NonEmptyVec<T> {
     }
 }
 
-impl<T, I: SliceIndex<[T]>> Index<I> for NonEmptyVec<T> {
-    type Output = I::Output;
-
-    fn index(&self, index: I) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
-impl<T, I: SliceIndex<[T]>> IndexMut<I> for NonEmptyVec<T> {
-    fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        &mut self.0[index]
-    }
-}
-
 impl<T> From<NonEmptyVec<T>> for Vec<T> {
     fn from(vec: NonEmptyVec<T>) -> Self {
         vec.0
@@ -311,7 +291,7 @@ impl<T> TryFromIterator<T> for NonEmptyVec<T> {
 
 impl<T> IntoIterator for NonEmptyVec<T> {
     type Item = T;
-    type IntoIter = VecIntoIter<T>;
+    type IntoIter = <Vec<T> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -414,7 +394,7 @@ impl<'a, T: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for NonEmptyVec<T
 /// let v = non_empty_vec![42; @n];
 /// assert_eq!(v.len().get(), 2);
 ///
-/// // Vec form: wrap an existing Vec (caller must ensure non-empty)
+/// // Vec form: wrap an existing Vec (panics if empty)
 /// let vec = vec![1, 2, 3];
 /// let v = non_empty_vec![@vec];
 /// assert_eq!(v.len().get(), 3);
