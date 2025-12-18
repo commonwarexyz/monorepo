@@ -10,8 +10,8 @@
 //! The deterministic simulation queries this state through `crate::application::NodeHandle`.
 
 use crate::{
-    consensus::{digest_for_block, ConsensusDigest},
     types::{Block, StateRoot, Tx, TxId},
+    ConsensusDigest,
 };
 use alloy_evm::revm::{
     database::InMemoryDB,
@@ -19,6 +19,7 @@ use alloy_evm::revm::{
     state::AccountInfo,
     Database as _,
 };
+use commonware_cryptography::Committable as _;
 use futures::lock::Mutex;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,7 +53,7 @@ impl Shared {
             state_root: StateRoot(B256::ZERO),
             txs: Vec::new(),
         };
-        let genesis_digest = digest_for_block(&genesis_block);
+        let genesis_digest = genesis_block.commitment();
 
         let mut db = InMemoryDB::default();
         for (address, balance) in genesis_alloc {

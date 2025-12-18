@@ -6,8 +6,8 @@
 
 use super::state::Shared;
 use crate::{
-    consensus::ConsensusDigest,
     types::{StateRoot, Tx},
+    ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
 

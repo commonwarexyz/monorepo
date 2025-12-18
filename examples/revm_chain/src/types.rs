@@ -3,7 +3,7 @@
 //! The example uses `commonware-codec` for deterministic, bounded decoding of untrusted bytes.
 //!
 //! - `BlockId` is `keccak256(Encode(Block))`.
-//! - Consensus orders `ConsensusDigest = sha256(BlockId)` (see `crate::consensus::digest_for_block`).
+//! - Consensus orders `ConsensusDigest = sha256(BlockId)` (the block's `Committable`).
 //! - `StateRoot` is a 32-byte rolling commitment (see `crate::commitment`).
 
 use alloy_evm::revm::primitives::{keccak256, Address, Bytes, B256, U256};
@@ -183,25 +183,25 @@ pub fn block_id(block: &Block) -> BlockId {
     BlockId(keccak256(block.encode()))
 }
 
-fn digest_for_block_id(id: &BlockId) -> crate::consensus::ConsensusDigest {
+fn digest_for_block_id(id: &BlockId) -> crate::ConsensusDigest {
     let mut hasher = Sha256::default();
     hasher.update(id.0.as_slice());
     hasher.finalize()
 }
 
 impl Digestible for Block {
-    type Digest = crate::consensus::ConsensusDigest;
+    type Digest = crate::ConsensusDigest;
 
     fn digest(&self) -> Self::Digest {
-        crate::consensus::digest_for_block(self)
+        digest_for_block_id(&self.id())
     }
 }
 
 impl Committable for Block {
-    type Commitment = crate::consensus::ConsensusDigest;
+    type Commitment = crate::ConsensusDigest;
 
     fn commitment(&self) -> Self::Commitment {
-        crate::consensus::digest_for_block(self)
+        digest_for_block_id(&self.id())
     }
 }
 

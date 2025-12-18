@@ -9,9 +9,9 @@
 
 use super::state::Shared;
 use crate::{
-    consensus::{digest_for_block, ConsensusDigest, PublicKey},
     execution::{evm_env, execute_txs},
     types::{Block, TxId},
+    ConsensusDigest, PublicKey,
 };
 use alloy_evm::revm::primitives::B256;
 use commonware_consensus::{
@@ -19,6 +19,7 @@ use commonware_consensus::{
     simplex::{signing_scheme::Scheme, types::Context},
     Application, VerifyingApplication,
 };
+use commonware_cryptography::Committable as _;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt as _;
 use rand::Rng;
@@ -73,7 +74,7 @@ where
             }
         }
 
-        let parent_digest = digest_for_block(&parent);
+        let parent_digest = parent.commitment();
         let parent_snapshot = self.state.parent_snapshot(&parent_digest).await?;
         let seed_hash = self.state.seed_for_parent(&parent_digest).await;
         let prevrandao = seed_hash.unwrap_or_else(|| B256::from(parent_digest.0));
@@ -97,7 +98,7 @@ where
         .ok()?;
         child.state_root = outcome.state_root;
 
-        let digest = digest_for_block(&child);
+        let digest = child.commitment();
         self.state
             .insert_snapshot(digest, db, child.state_root)
             .await;
@@ -124,7 +125,7 @@ where
             None => return false,
         };
 
-        let parent_digest = digest_for_block(&parent);
+        let parent_digest = parent.commitment();
         let Some(parent_snapshot) = self.state.parent_snapshot(&parent_digest).await else {
             return false;
         };
@@ -142,7 +143,7 @@ where
             return false;
         }
 
-        let digest = digest_for_block(&block);
+        let digest = block.commitment();
         self.state
             .insert_snapshot(digest, db, block.state_root)
             .await;

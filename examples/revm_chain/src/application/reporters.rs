@@ -9,9 +9,9 @@
 
 use super::state::Shared;
 use crate::{
-    consensus::{digest_for_block, ConsensusDigest, FinalizationEvent},
     execution::{evm_env, execute_txs},
     types::Block,
+    ConsensusDigest, FinalizationEvent,
 };
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
@@ -22,7 +22,7 @@ use commonware_consensus::{
     },
     Block as _, Reporter,
 };
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable as _};
 use commonware_utils::acknowledgement::Acknowledgement as _;
 use futures::channel::mpsc;
 use std::marker::PhantomData;
@@ -103,7 +103,7 @@ impl Reporter for FinalizedReporter {
         match update {
             Update::Tip(_, _) => {}
             Update::Block(block, ack) => {
-                let digest = digest_for_block(&block);
+                let digest = block.commitment();
                 if self.state.query_state_root(digest).await.is_none() {
                     let parent_digest = block.parent();
                     let parent_snapshot = self

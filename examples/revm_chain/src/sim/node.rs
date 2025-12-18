@@ -8,7 +8,7 @@ use super::{
     demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
     CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
-use crate::{application, consensus};
+use crate::{application, FinalizationEvent};
 use anyhow::Context as _;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -69,7 +69,7 @@ struct NodeInit<'a> {
     scheme: ThresholdScheme,
     quota: Quota,
     buffer_pool: PoolRef,
-    finalized_tx: mpsc::UnboundedSender<consensus::FinalizationEvent>,
+    finalized_tx: mpsc::UnboundedSender<FinalizationEvent>,
     demo: &'a demo::DemoTransfer,
 }
 
@@ -95,13 +95,13 @@ pub(super) async fn start_all_nodes(
     demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(
     Vec<application::NodeHandle>,
-    mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
+    mpsc::UnboundedReceiver<FinalizationEvent>,
 )> {
     // Per-channel rate limit used by the simulated P2P transport in this example.
     let quota = Quota::per_second(NZU32!(1_000));
     let buffer_pool = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
-    let (finalized_tx, finalized_rx) = mpsc::unbounded::<consensus::FinalizationEvent>();
+    let (finalized_tx, finalized_rx) = mpsc::unbounded::<FinalizationEvent>();
     let mut nodes = Vec::with_capacity(participants.len());
 
     for (i, pk) in participants.iter().cloned().enumerate() {

@@ -6,13 +6,13 @@
 //! - the expected balances for the injected transfer.
 
 use super::{demo, ConsensusDigest};
-use crate::{application::NodeHandle, consensus};
+use crate::{application::NodeHandle, FinalizationEvent};
 use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
 
 /// Wait until each node has observed `blocks` finalizations and return the common head digest.
 pub(super) async fn wait_for_finalized_head(
-    finalized_rx: &mut mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
+    finalized_rx: &mut mpsc::UnboundedReceiver<FinalizationEvent>,
     nodes: usize,
     blocks: u64,
 ) -> anyhow::Result<ConsensusDigest> {
