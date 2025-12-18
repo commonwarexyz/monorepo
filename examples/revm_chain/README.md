@@ -6,7 +6,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 
 ## What This Demonstrates
 
-- Threshold-simplex orders opaque 32-byte digests; full blocks are delivered out-of-band over `commonware_p2p::simulated`.
+- Threshold-simplex orders opaque 32-byte digests; full blocks are disseminated and backfilled by `commonware_consensus::marshal` over `commonware_p2p::simulated`.
 - Blocks carry a batch of EVM transactions plus an advertised 32-byte `state_root` commitment.
 - Validators re-execute proposed blocks with `alloy-evm` / `revm` and reject proposals whose `state_root` mismatches.
 - State is kept in REVM's in-memory DB (`alloy_evm::revm::database::InMemoryDB`) behind the `Database + DatabaseCommit` seam.
@@ -18,8 +18,8 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 
 ## Components
 
-- `src/consensus/`: glue implementing Simplex `Automaton` / `Relay` / `Reporter` over a mailbox.
-- `src/application/`: block store, proposal/verification logic, out-of-band block gossip, and query handle.
+- `src/consensus/`: consensus digest types and the `digest_for_block` mapping.
+- `src/application/`: proposal/verification logic (marshaled), shared state (mempool + DB snapshots), reporters, and query handle.
 - `src/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
 - `src/commitment.rs`: canonical `StateChanges` encoding and rolling `StateRoot` commitment.
 - `src/sim/`: deterministic, single-process simulation harness (N nodes, simulated P2P).
@@ -36,15 +36,16 @@ This example is intentionally "digest-first":
 
 1. Genesis: the application creates the genesis block and prefunds accounts in the EVM DB.
 2. Propose: when Simplex asks a leader to propose, the application builds a child block, executes
-   its txs, stores the block + resulting DB snapshot locally, and returns only the digest to Simplex.
-3. Broadcast: the full block bytes are broadcast out-of-band (separate from consensus messages).
-4. Verify: validators decode the block, check parent linkage, re-execute it on the parent snapshot,
-   and accept only if the computed `state_root` matches the advertised `state_root`.
-5. Finalize: once the digest finalizes, the simulation records it and stops after the configured
+   its txs, stores the block + resulting DB snapshot locally, and returns the full block to the
+   `commonware_consensus::application::marshaled::Marshaled` wrapper (consensus still orders only
+   the block commitment digest).
+3. Disseminate: marshal broadcasts the full block and serves backfill requests for missing ancestors.
+4. Verify: validators re-execute the block on the parent snapshot and accept only if the computed
+   `state_root` matches the advertised `state_root` (the wrapper notifies marshal on success).
+5. Finalize: marshal delivers finalized blocks to the node, the simulation records the digest, and stops after the configured
    number of finalizations per node.
 
-The main glue points are implemented in `src/consensus/ingress.rs` (mailbox traits) and
-`src/application/actor.rs` (genesis/propose/verify/broadcast + finalization reporting).
+The main glue points are `src/sim/node.rs` (wiring) and `src/application/` (application logic).
 
 ### Seed Lifecycle
 
@@ -80,7 +81,7 @@ cargo test -p commonware-revm-chain
 
 ## Notes and Next Steps
 
-- This is intentionally minimal and does not implement an Ethereum trie or block syncing; `state_root` is a rolling commitment over per-tx state deltas.
+- This is intentionally minimal and does not implement an Ethereum trie; `state_root` is a rolling commitment over per-tx state deltas.
 - Transactions are built directly as EVM call environments (no signature/fee market modeling); gas price is set to 0.
 - The demo block stream is minimal (a single transfer is injected early); extend `src/application/` to add more tx generation.
 - A future persistent backend can be implemented by adapting a Commonware storage primitive to the `Database` / `DatabaseCommit` seam (note the async/sync impedance mismatch).
