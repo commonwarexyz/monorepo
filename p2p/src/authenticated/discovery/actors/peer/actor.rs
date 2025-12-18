@@ -44,14 +44,14 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<Data>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
-                mailbox: control_sender.clone(),
+                mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
@@ -65,7 +65,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
-            control_sender,
             Relay::new(low_sender, high_sender),
         )
     }
@@ -102,6 +101,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub async fn run<O: Sink, I: Stream>(
         mut self,
         peer: C,
+        greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
@@ -115,6 +115,15 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+
+        // Send greeting first before any other messages
+        Self::send(
+            &mut conn_sender,
+            &self.sent_messages,
+            metrics::Message::new_greeting(&peer),
+            types::Payload::Greeting(greeting),
+        )
+        .await?;
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
@@ -143,8 +152,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             None => return Err(Error::PeerDisconnected),
                         };
                         let (metric, payload) = match msg {
-                            Message::Greeting(info) =>
-                                (metrics::Message::new_greeting(&peer), types::Payload::Greeting(info)),
                             Message::BitVec(bit_vec) =>
                                 (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                             Message::Peers(peers) =>

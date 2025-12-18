@@ -185,20 +185,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Connect {
                 public_key,
                 dialer,
-                mut peer,
+                responder,
             } => {
-                // Kill if peer is not authorized
+                // Return None if peer is not authorized
                 if !self.directory.eligible(&public_key) {
-                    peer.kill().await;
+                    let _ = responder.send(None);
                     return;
                 }
 
                 // Mark the record as connected
                 self.directory.connect(&public_key, dialer);
 
-                // Send greeting with our own info
+                // Return greeting with our own info
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
-                let _ = peer.greeting(info).await;
+                let _ = responder.send(Some(info));
             }
             Message::Construct {
                 public_key,
@@ -362,22 +362,17 @@ mod tests {
     async fn connect_to_peer(
         mailbox: &mut UnboundedMailbox<Message<PublicKey>>,
         peer: &PublicKey,
-        peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
-        peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
     ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
             .listen(peer.clone())
             .await
             .expect("reservation failed");
         let dialer = false;
-        mailbox
-            .connect(peer.clone(), dialer, peer_mailbox.clone())
-            .await;
-        let response = peer_receiver
-            .next()
-            .await
-            .expect("no response after initialization");
-        assert!(matches!(response, peer::Message::Greeting(_)));
+        let greeting = mailbox.connect(peer.clone(), dialer).await;
+        assert!(
+            greeting.is_some(),
+            "expected greeting info for authorized peer"
+        );
         res
     }
 
@@ -436,29 +431,26 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_unauthorized_peer_is_killed() {
+    fn test_connect_unauthorized_peer_returns_none() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
 
-            // Connect as listener
-            mailbox
-                .connect(unauth_pk.clone(), false, peer_mailbox.clone())
-                .await;
+            // Connect as listener - should return None for unauthorized peer
+            let result = mailbox.connect(unauth_pk.clone(), false).await;
             assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
-                "Unauthorized peer should be killed on Connect"
+                result.is_none(),
+                "Unauthorized peer should get None on Connect"
             );
 
-            // Connect as dialer
-            mailbox.connect(unauth_pk, true, peer_mailbox).await;
+            // Connect as dialer - should return None for unauthorized peer
+            let result = mailbox.connect(unauth_pk, true).await;
             assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
-                "Unauthorized peer should be killed on Connect"
+                result.is_none(),
+                "Unauthorized peer should get None on Connect"
             );
         });
     }
@@ -483,21 +475,15 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
-            mailbox
-                .connect(auth_pk.clone(), false, peer_mailbox.clone())
-                .await;
+            let tracker_info = mailbox
+                .connect(auth_pk.clone(), false)
+                .await
+                .expect("Expected greeting info for authorized peer");
 
-            match peer_receiver.next().await {
-                Some(peer::Message::Greeting(tracker_info)) => {
-                    assert_eq!(tracker_info.public_key, tracker_pk);
-                    assert_eq!(tracker_info.ingress, cfg.address);
-                    assert!(tracker_info.verify(&ip_namespace));
-                }
-                _ => panic!("Expected Greeting message with tracker info"),
-            }
+            assert_eq!(tracker_info.public_key, tracker_pk);
+            assert_eq!(tracker_info.ingress, cfg.address);
+            assert!(tracker_info.verify(&ip_namespace));
         });
     }
 
@@ -558,13 +544,7 @@ mod tests {
                 bits: BitMap::ones(1),
             };
 
-            let _r1 = connect_to_peer(
-                &mut mailbox,
-                &pk1,
-                &peer_mailbox_pk1,
-                &mut peer_receiver_pk1,
-            )
-            .await;
+            let _r1 = connect_to_peer(&mut mailbox, &pk1).await;
 
             // Peer lets us know it received a bit vector
             mailbox.bit_vec(bit_vec_unknown_idx, peer_mailbox_pk1.clone());
@@ -693,14 +673,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
-            let (peer_mailbox_s2, mut peer_receiver_s2) = Mailbox::new(1);
             mailbox.peers(vec![pk2_info.clone()]);
             context.sleep(Duration::from_millis(10)).await;
 
-            let _r1 =
-                connect_to_peer(&mut mailbox, &pk1, &peer_mailbox_s1, &mut peer_receiver_s1).await;
-            let _r2 =
-                connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
+            let _r1 = connect_to_peer(&mut mailbox, &pk1).await;
+            let _r2 = connect_to_peer(&mut mailbox, &pk2).await;
 
             // Act as if pk1 received a bit vector where pk2 is not known.
             let mut bv = BitMap::zeroes(set1.len() as u64);
@@ -761,13 +738,10 @@ mod tests {
             );
 
             let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
-            let _r1 =
-                connect_to_peer(&mut mailbox, &pk1, &peer_mailbox_s1, &mut peer_receiver_s1).await;
+            let _r1 = connect_to_peer(&mut mailbox, &pk1).await;
 
             // Connect to pk2
-            let (peer_mailbox_s2, mut peer_receiver_s2) = Mailbox::new(1);
-            let _r2 =
-                connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
+            let _r2 = connect_to_peer(&mut mailbox, &pk2).await;
 
             mailbox.peers(vec![pk2_info_initial.clone()]);
             context.sleep(Duration::from_millis(10)).await;
@@ -998,8 +972,7 @@ mod tests {
             oracle.update(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let _r1 =
-                connect_to_peer(&mut mailbox, &peer1_pk, &peer_mailbox1, &mut peer_receiver1).await;
+            let _r1 = connect_to_peer(&mut mailbox, &peer1_pk).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             let bit_vec0 = match peer_receiver1.next().await {
@@ -1081,8 +1054,7 @@ mod tests {
 
             // Peer2 is in set1 (still active)
             let (peer_mailbox2, mut peer_receiver2) = Mailbox::new(1);
-            let _r2 =
-                connect_to_peer(&mut mailbox, &peer2_pk, &peer_mailbox2, &mut peer_receiver2).await;
+            let _r2 = connect_to_peer(&mut mailbox, &peer2_pk).await;
 
             // Run this several times since the bitvec given may have index 1 or 2.
             let mut indices = HashSet::new();

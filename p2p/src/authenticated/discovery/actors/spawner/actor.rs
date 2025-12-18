@@ -132,9 +132,18 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
+                                // Get greeting from tracker (returns None if not eligible)
+                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
+                                else {
+                                    debug!(?peer, "peer not eligible");
+                                    connections.dec();
+                                    drop(reservation);
+                                    return;
+                                };
+
                                 // Create peer
                                 debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                let (peer_actor, messenger) = peer::Actor::new(
                                     context,
                                     peer::Config {
                                         sent_messages,
@@ -153,12 +162,9 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                 // Register peer with the router
                                 let channels = router.ready(peer.clone(), messenger).await;
 
-                                // Register peer with tracker
-                                tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
-
-                                // Run peer
+                                // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor
-                                    .run(peer.clone(), connection, tracker, channels)
+                                    .run(peer.clone(), greeting, connection, tracker, channels)
                                     .await;
                                 connections.dec();
 

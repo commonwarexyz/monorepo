@@ -1,9 +1,8 @@
 use super::Reservation;
+// Re-export for use in peer actor
+pub use crate::authenticated::discovery::actors::peer;
 use crate::authenticated::{
-    discovery::{
-        actors::{peer, tracker::Metadata},
-        types,
-    },
+    discovery::{actors::tracker::Metadata, types},
     mailbox::UnboundedMailbox,
     Mailbox,
 };
@@ -39,9 +38,10 @@ pub enum Message<C: PublicKey> {
     Block { public_key: C },
 
     // ---------- Used by peer ----------
-    /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Greeting] message (containing solely the local node's information) should
-    /// be sent to the peer.
+    /// Notify the tracker that a peer has been successfully connected.
+    ///
+    /// The tracker responds with the greeting info that must be sent to the peer
+    /// before any other messages.
     Connect {
         /// The public key of the peer.
         public_key: C,
@@ -49,8 +49,8 @@ pub enum Message<C: PublicKey> {
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
-        /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        /// One-shot channel to return the greeting info (or None if peer is not eligible).
+        responder: oneshot::Sender<Option<types::Info<C>>>,
     },
 
     /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
@@ -134,14 +134,18 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
-    /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
+    /// Send a `Connect` message to the tracker and receive the greeting info.
+    ///
+    /// Returns `Some(info)` if the peer is eligible, `None` otherwise.
+    pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
+        let (tx, rx) = oneshot::channel();
         self.send(Message::Connect {
             public_key,
             dialer,
-            peer,
+            responder: tx,
         })
         .unwrap();
+        rx.await.unwrap()
     }
 
     /// Send a `Construct` message to the tracker.
