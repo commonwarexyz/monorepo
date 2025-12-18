@@ -383,36 +383,12 @@ mod tests {
     }
 
     fn signed_peer_info(
-        signer: &mut PrivateKey,
+        signer: &PrivateKey,
         socket: SocketAddr,
         timestamp: u64,
     ) -> types::Info<PublicKey> {
-        let ingress: crate::Ingress = socket.into();
         let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
-        let signature = signer.sign(&ip_namespace, &(ingress.clone(), timestamp).encode());
-        types::Info {
-            ingress,
-            timestamp,
-            public_key: signer.public_key(),
-            signature,
-        }
-    }
-
-    fn signed_peer_info_with_pk(
-        signer: &mut PrivateKey,
-        socket: SocketAddr,
-        timestamp: u64,
-        public_key: PublicKey,
-    ) -> types::Info<PublicKey> {
-        let ingress: crate::Ingress = socket.into();
-        let ip_namespace = commonware_utils::union(NAMESPACE, b"_IP");
-        let signature = signer.sign(&ip_namespace, &(ingress.clone(), timestamp).encode());
-        types::Info {
-            ingress,
-            timestamp,
-            public_key,
-            signature,
-        }
+        types::Info::sign(signer, &ip_namespace, socket, timestamp)
     }
 
     fn create_channels() -> Channels<PublicKey> {
@@ -478,9 +454,8 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let mut local_signer = local_key.clone();
             let greeting = signed_peer_info(
-                &mut local_signer,
+                &local_key,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -577,9 +552,8 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let mut local_signer = local_key.clone();
             let greeting = signed_peer_info(
-                &mut local_signer,
+                &local_key,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -682,9 +656,8 @@ mod tests {
             );
 
             // Create greeting info for the peer actor to send
-            let mut local_signer = local_key.clone();
             let greeting = signed_peer_info(
-                &mut local_signer,
+                &local_key,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
             );
@@ -697,12 +670,12 @@ mod tests {
             let channels = create_channels();
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
-            let wrong_greeting = signed_peer_info_with_pk(
-                &mut local_signer,
+            let mut wrong_greeting = signed_peer_info(
+                &local_key,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                wrong_pk,
             );
+            wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
             local_sender
                 .send(&greeting_payload.encode())
