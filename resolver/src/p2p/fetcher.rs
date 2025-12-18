@@ -288,8 +288,6 @@ where
 
             // Try each peer until one succeeds
             for peer in peers {
-                let now = self.context.current();
-
                 // Check rate limit (consumes a token if not rate-limited)
                 let checked = match sender.check(Recipients::One(peer.clone())).await {
                     Ok(checked) => checked,
@@ -312,6 +310,7 @@ where
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
+                        let now = self.context.current();
                         let deadline = now.checked_add(self.timeout).expect("time overflowed");
                         self.active.put(id, deadline);
                         self.requests.insert(
