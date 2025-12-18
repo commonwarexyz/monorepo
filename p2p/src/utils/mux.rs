@@ -510,12 +510,13 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
-
-    type Pk = commonware_cryptography::ed25519::PublicKey;
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -528,7 +529,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
+    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -542,12 +543,16 @@ mod tests {
     }
 
     /// Create a public key from a seed.
-    fn pk(seed: u64) -> Pk {
+    fn pk(seed: u64) -> PublicKey {
         PrivateKey::from_seed(seed).public_key()
     }
 
     /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk, deterministic::Context>, a: Pk, b: Pk) {
+    async fn link_bidirectional(
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        a: PublicKey,
+        b: PublicKey,
+    ) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
@@ -555,11 +560,11 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         seed: u64,
     ) -> (
-        Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        PublicKey,
+        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -575,13 +580,13 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer_with_backup_and_global_sender(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         seed: u64,
     ) -> (
-        Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
-        mpsc::Receiver<BackupResponse<Pk>>,
-        GlobalSender<simulated::Sender<Pk, deterministic::Context>>,
+        PublicKey,
+        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        mpsc::Receiver<BackupResponse<PublicKey>>,
+        GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -612,7 +617,10 @@ mod tests {
     }
 
     /// Wait for `n` messages to be received on the receiver.
-    async fn expect_n_messages(rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>, n: usize) {
+    async fn expect_n_messages(
+        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
+        n: usize,
+    ) {
         let mut count = 0;
         loop {
             select! {
@@ -631,8 +639,8 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver + backup receiver.
     async fn expect_n_messages_with_backup(
-        rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>,
-        backup_rx: &mut mpsc::Receiver<BackupResponse<Pk>>,
+        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
+        backup_rx: &mut mpsc::Receiver<BackupResponse<PublicKey>>,
         n: usize,
         n_backup: usize,
     ) {

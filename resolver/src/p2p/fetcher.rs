@@ -576,7 +576,10 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer,
+    };
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
@@ -620,7 +623,7 @@ mod tests {
     struct FailMockSenderInner;
 
     impl UnlimitedSender for FailMockSenderInner {
-        type PublicKey = Ed25519PublicKey;
+        type PublicKey = PublicKey;
         type Error = MockError;
 
         async fn send(
@@ -638,7 +641,7 @@ mod tests {
     struct FailMockSender(FailMockSenderInner);
 
     impl LimitedSender for FailMockSender {
-        type PublicKey = Ed25519PublicKey;
+        type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, FailMockSenderInner>;
 
         async fn check<'a>(
@@ -657,7 +660,7 @@ mod tests {
     struct SuccessMockSenderInner;
 
     impl UnlimitedSender for SuccessMockSenderInner {
-        type PublicKey = Ed25519PublicKey;
+        type PublicKey = PublicKey;
         type Error = MockError;
 
         async fn send(
@@ -678,7 +681,7 @@ mod tests {
     struct SuccessMockSender(SuccessMockSenderInner);
 
     impl LimitedSender for SuccessMockSender {
-        type PublicKey = Ed25519PublicKey;
+        type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
         async fn check<'a>(
@@ -696,7 +699,7 @@ mod tests {
     #[derive(Clone)]
     struct LimitedMockSender<E: Clock> {
         inner: SuccessMockSenderInner,
-        rate_limiter: Arc<RwLock<KeyedRateLimiter<Ed25519PublicKey, E>>>,
+        rate_limiter: Arc<RwLock<KeyedRateLimiter<PublicKey, E>>>,
     }
 
     impl<E: Clock> LimitedMockSender<E> {
@@ -711,7 +714,7 @@ mod tests {
     }
 
     impl<E: Clock> LimitedSender for LimitedMockSender<E> {
-        type PublicKey = Ed25519PublicKey;
+        type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
         async fn check<'a>(
@@ -737,10 +740,10 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher<S: Sender<PublicKey = Ed25519PublicKey>>(
+    fn create_test_fetcher<S: Sender<PublicKey = PublicKey>>(
         context: Context,
-    ) -> Fetcher<Context, Ed25519PublicKey, MockKey, S> {
-        let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+    ) -> Fetcher<Context, PublicKey, MockKey, S> {
+        let public_key = PrivateKey::from_seed(0).public_key();
         let config = Config {
             me: Some(public_key),
             initial: Duration::from_millis(100),
@@ -753,12 +756,12 @@ mod tests {
     }
 
     /// Helper to add an active request directly for testing
-    fn add_test_active<S: Sender<PublicKey = Ed25519PublicKey>>(
-        fetcher: &mut Fetcher<Context, Ed25519PublicKey, MockKey, S>,
+    fn add_test_active<S: Sender<PublicKey = PublicKey>>(
+        fetcher: &mut Fetcher<Context, PublicKey, MockKey, S>,
         id: ID,
         key: MockKey,
     ) {
-        let peer = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+        let peer = PrivateKey::from_seed(1).public_key();
         let now = fetcher.context.current();
         let deadline = now + Duration::from_secs(5);
         fetcher.active.put(id, deadline);
@@ -1101,8 +1104,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let dummy_peer =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let dummy_peer = PrivateKey::from_seed(1).public_key();
 
             // Add key to active state
             add_test_active(&mut fetcher, 100, MockKey(10));
@@ -1124,8 +1126,8 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
             fetcher.reconcile(&[peer1.clone(), peer2]);
@@ -1148,7 +1150,7 @@ mod tests {
             let initial_blocked = fetcher.len_blocked();
 
             // Block a peer
-            let peer = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
             fetcher.block(peer);
 
             // The count should potentially increase (depends on requester implementation)
@@ -1284,10 +1286,8 @@ mod tests {
     fn test_waiter_after_empty() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let other_public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let other_public_key = PrivateKey::from_seed(1).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
                 initial: Duration::from_millis(100),
@@ -1331,11 +1331,9 @@ mod tests {
     fn test_waiter_cleared_on_target_modification() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let blocked_peer =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(99).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let blocked_peer = PrivateKey::from_seed(99).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
                 initial: Duration::from_millis(100),
@@ -1386,9 +1384,9 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Initially no targets
             assert!(fetcher.targets.is_empty());
@@ -1435,8 +1433,8 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
 
             // cancel() clears targets for key
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
@@ -1482,9 +1480,9 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Add targets for multiple keys with various peers
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
@@ -1538,11 +1536,10 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context.clone());
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let peer3 = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
@@ -1562,10 +1559,9 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
@@ -1606,11 +1602,10 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.clone());
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Add only peer1 and peer2 to the peer set (peer3 is not in the peer set)
             fetcher.reconcile(&[public_key, peer1, peer2]);
@@ -1643,8 +1638,8 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
 
             // Add targets
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2]);
@@ -1670,10 +1665,9 @@ mod tests {
     fn test_skips_keys_with_rate_limited_targets() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
                 initial: Duration::from_millis(100),
@@ -1734,11 +1728,10 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
-            let peer3 = commonware_cryptography::ed25519::PrivateKey::from_seed(3).public_key();
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Add peers with initial performance (100ms)
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
