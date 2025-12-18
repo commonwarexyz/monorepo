@@ -20,7 +20,6 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
-    allowed_ping_rate: Quota,
 
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<Data>,
@@ -41,7 +40,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
-                allowed_ping_rate: cfg.allowed_ping_rate,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -99,16 +97,16 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
-        let ping_rate_limiter =
-            RateLimiter::direct_with_clock(self.allowed_ping_rate, self.context.clone());
+        let ping_rate = Quota::with_period(self.ping_frequency).unwrap();
+        let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                // Set the initial deadline to now to start pinging immediately
-                let mut deadline = context.current();
+                // Set the initial deadlin (no need to send right away)
+                let mut deadline = context.current() + self.ping_frequency;
 
                 // Enter into the main loop
                 select_loop! {
