@@ -75,7 +75,8 @@ pub struct Config<C: Signer> {
 
     /// Frequency at which we send ping messages to peers.
     ///
-    /// This also determines the rate limit for incoming ping messages (one per this frequency).
+    /// This also determines the rate limit for incoming ping messages (one per half this
+    /// frequency to account for jitter).
     pub ping_frequency: Duration,
 
     /// Average frequency at which we make a single dial attempt across all peers.

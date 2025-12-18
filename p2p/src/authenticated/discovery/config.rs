@@ -113,7 +113,7 @@ pub struct Config<C: Signer> {
     /// and should be sent more often than the read_timeout.
     ///
     /// This also determines the rate limit for incoming BitVec and Peers messages
-    /// (one per this frequency).
+    /// (one per half this frequency to account for jitter).
     pub gossip_bit_vec_frequency: Duration,
 
     /// Maximum number of peers we will send or consider valid when receiving in a single message.
