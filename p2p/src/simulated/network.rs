@@ -760,7 +760,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 ///
 /// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
 #[derive(Clone)]
-pub struct UnrestrictedSender<P: PublicKey> {
+pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
@@ -768,7 +768,7 @@ pub struct UnrestrictedSender<P: PublicKey> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
+impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -798,7 +798,7 @@ impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
-    limited_sender: LimitedSender<E, UnrestrictedSender<P>, ConnectedPeerProvider<P, E>>,
+    limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
@@ -856,7 +856,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             }
         });
 
-        let unlimited_sender = UnrestrictedSender {
+        let unlimited_sender = UnlimitedSender {
             me,
             channel,
             max_size,
@@ -892,7 +892,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     type PublicKey = P;
     type Checked<'a>
-        = crate::utils::limited::CheckedSender<'a, UnrestrictedSender<P>>
+        = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
     where
         Self: 'a;
 
@@ -932,10 +932,7 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> std::fmt::Debug for SplitSend
 
 impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for SplitSender<P, E, F> {
     type PublicKey = P;
-    type Checked<'a>
-        = <Sender<P, E> as crate::LimitedSender>::Checked<'a>
-    where
-        Self: 'a;
+    type Checked<'a> = <Sender<P, E> as crate::LimitedSender>::Checked<'a>;
 
     async fn check(
         &mut self,

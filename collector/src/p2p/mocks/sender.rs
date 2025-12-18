@@ -32,10 +32,7 @@ impl<P: PublicKey> LimitedSender for Failing<P> {
     type PublicKey = P;
     type Checked<'a> = CheckedFailing<P>;
 
-    async fn check<'a>(
-        &'a mut self,
-        _recipients: Recipients<P>,
-    ) -> Result<Self::Checked<'a>, SystemTime> {
+    async fn check(&mut self, _recipients: Recipients<P>) -> Result<Self::Checked<'_>, SystemTime> {
         Ok(CheckedFailing {
             _phantom: std::marker::PhantomData,
         })

@@ -14,13 +14,13 @@ use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 /// supports sending arbitrary bytes to a set of recipients over
 /// a pre-defined [`Channel`].
 #[derive(Debug, Clone)]
-pub struct UnrestrictedSender<P: PublicKey> {
+pub struct UnlimitedSender<P: PublicKey> {
     channel: Channel,
     max_size: usize,
     messenger: Messenger<P>,
 }
 
-impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
+impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -44,13 +44,7 @@ impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
 #[derive(Clone)]
 pub struct Sender<P: PublicKey, C: Clock> {
-    limited_sender: LimitedSender<C, UnrestrictedSender<P>, Messenger<P>>,
-}
-
-impl<P: PublicKey, C: Clock> Debug for Sender<P, C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sender").finish()
-    }
+    limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
 
 impl<P: PublicKey, C: Clock> Sender<P, C> {
@@ -61,7 +55,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
         clock: C,
         quota: Quota,
     ) -> Self {
-        let master_sender = UnrestrictedSender {
+        let master_sender = UnlimitedSender {
             channel,
             max_size,
             messenger: messenger.clone(),
@@ -78,7 +72,7 @@ where
 {
     type PublicKey = P;
     type Checked<'a>
-        = CheckedSender<'a, UnrestrictedSender<P>>
+        = CheckedSender<'a, UnlimitedSender<P>>
     where
         Self: 'a;
 

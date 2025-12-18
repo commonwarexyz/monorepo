@@ -236,10 +236,10 @@ impl<S: Sender> LimitedSender for SubSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn check<'a>(
-        &'a mut self,
+    async fn check(
+        &mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> Result<Self::Checked<'a>, SystemTime> {
+    ) -> Result<Self::Checked<'_>, SystemTime> {
         self.inner
             .check(recipients)
             .await
@@ -320,10 +320,10 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn check<'a>(
-        &'a mut self,
+    async fn check(
+        &mut self,
         recipients: Recipients<Self::PublicKey>,
-    ) -> Result<Self::Checked<'a>, SystemTime> {
+    ) -> Result<Self::Checked<'_>, SystemTime> {
         self.inner
             .check(recipients)
             .await

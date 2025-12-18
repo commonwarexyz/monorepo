@@ -9,8 +9,8 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap_limited, WrappedLimitedSender},
-    Blocker, LimitedSender, Manager, Receiver, Recipients,
+    utils::codec::{wrap, WrappedSender},
+    Blocker, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -47,7 +47,7 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: LimitedSender<PublicKey = P>,
+    NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
@@ -102,7 +102,7 @@ impl<
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
-        NetS: LimitedSender<PublicKey = P>,
+        NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {
@@ -160,7 +160,7 @@ impl<
         let peer_set_subscription = &mut self.manager.subscribe().await;
 
         // Wrap channel
-        let (mut sender, mut receiver) = wrap_limited((), network.0, network.1);
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         loop {
             // Update metrics
@@ -360,7 +360,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedLimitedSender<NetS, wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
