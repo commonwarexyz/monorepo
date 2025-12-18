@@ -369,6 +369,18 @@ impl<T: Read> Read for NonEmptyVec<T> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a, T: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for NonEmptyVec<T> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let first: T = u.arbitrary()?;
+        let rest: Vec<T> = u.arbitrary()?;
+        let mut vec = Vec::with_capacity(1 + rest.len());
+        vec.push(first);
+        vec.extend(rest);
+        Ok(Self(vec))
+    }
+}
+
 /// Creates a [`NonEmptyVec`] containing the given elements.
 ///
 /// # Forms
