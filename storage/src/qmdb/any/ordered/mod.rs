@@ -1,22 +1,23 @@
 use crate::{
     index::{Cursor as _, Ordered as Index},
-    journal::{
-        contiguous::{Contiguous, MutableContiguous},
-        Error as JournalError,
-    },
+    journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::{
-        mem::{Dirty, State},
-        Location,
-    },
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
-            CleanAny, DirtyAny, ValueEncoding,
+            ValueEncoding,
         },
         delete_known_loc,
         operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
+    },
+};
+#[cfg(any(test, feature = "test-traits"))]
+use crate::{
+    qmdb::{
+        any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+        Durable, Merkleized,
     },
     Persistable,
 };
@@ -24,6 +25,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+#[cfg(any(test, feature = "test-traits"))]
 use core::ops::Range;
 use futures::{
     future::try_join_all,
@@ -59,13 +61,14 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: State<DigestOf<H>>,
-    > Db<E, C, I, H, Update<K, V>, S>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
     async fn get_update_op(
-        log: &AuthenticatedLog<E, C, H, S>,
+        log: &AuthenticatedLog<E, C, H, M>,
         loc: Location,
     ) -> Result<Update<K, V>, Error> {
         match log.read(loc).await? {
@@ -264,8 +267,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: State<DigestOf<H>>,
-    > Db<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -431,7 +433,7 @@ where
         // For either a new key or an update of existing key, we inactivate exactly one previous
         // operation. A new key inactivates a previous span, and an update of existing key
         // inactivates a previous value.
-        self.steps += 1;
+        self.durable_state.steps += 1;
 
         Ok(())
     }
@@ -480,7 +482,7 @@ where
         };
 
         // Creating a new key involves inactivating a previous span, requiring we increment `steps`.
-        self.steps += 1;
+        self.durable_state.steps += 1;
 
         Ok(true)
     }
@@ -535,7 +537,7 @@ where
         self.active_keys -= 1;
         let op = Operation::Delete(key.clone());
         self.log.append(op).await?;
-        self.steps += 1;
+        self.durable_state.steps += 1;
 
         if self.is_empty() {
             // This was the last key in the DB so there is no span to update.
@@ -563,7 +565,7 @@ where
             next_key,
         });
         self.log.append(op).await?;
-        self.steps += 1;
+        self.durable_state.steps += 1;
 
         Ok(())
     }
@@ -661,7 +663,7 @@ where
 
                 // Each delete reduces the active key count by one and inactivates that key.
                 self.active_keys -= 1;
-                self.steps += 1;
+                self.durable_state.steps += 1;
             }
         }
 
@@ -721,7 +723,7 @@ where
             callback(true, Some(loc));
 
             // Each update of an existing key inactivates its previous location.
-            self.steps += 1;
+            self.durable_state.steps += 1;
             already_updated.insert(key);
         }
 
@@ -763,7 +765,7 @@ where
             callback(true, Some(*prev_loc));
 
             // Each key whose next-key value is updated inactivates its previous location.
-            self.steps += 1;
+            self.durable_state.steps += 1;
         }
 
         if possible_next.is_empty() || possible_previous.is_empty() {
@@ -790,7 +792,7 @@ where
             callback(true, Some(*prev_loc));
 
             // Each key whose next-key value is updated inactivates its previous location.
-            self.steps += 1;
+            self.durable_state.steps += 1;
         }
 
         Ok(())
@@ -801,36 +803,12 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Persistable for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-{
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await.map(|_| ())
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -850,7 +828,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Updatable for Db<E, C, I, H, Update<K, V>>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -866,75 +844,11 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Deletable for Db<E, C, I, H, Update<K, V>>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > CleanAny for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
-    }
-
-    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > DirtyAny for Db<E, C, I, H, Update<K, V>, Dirty>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
-    }
-
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
         self.delete(key).await
     }
 }
@@ -977,7 +891,7 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .expect("possible_previous should not be empty")
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -995,14 +909,117 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> UnmerkleizedDurableAny
+    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized())
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+
+    async fn commit(
+        self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+
+    async fn commit(
+        self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized())
+    }
+
+    fn steps(&self) -> u64 {
+        self.durable_state.steps
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        kv::{Deletable as _, Updatable as _},
+        kv::{Deletable as _, Gettable as _, Updatable as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{DirtyStore as _, LogStore as _},
+            store::{LogStore as _, MerkleizedStore},
         },
         translator::TwoCap,
     };
@@ -1022,6 +1039,20 @@ mod test {
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
     type VariableDb = variable::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
+    /// A type alias for a variable db with Digest keys (for generic tests).
+    type DigestVariableDb = variable::Db<Context, Digest, Digest, Sha256, TwoCap>;
+
+    /// Helper trait for testing Any databases that cycle through all four states.
+    trait TestableAnyDb<V>:
+        CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
+
+    impl<T, V> TestableAnyDb<V> for T where
+        T: CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_fixed_db(context: Context) -> FixedDb {
         FixedDb::init(context, fixed_db_config("partition"))
@@ -1036,13 +1067,18 @@ mod test {
             .unwrap()
     }
 
-    async fn test_ordered_any_db_empty<D>(
+    /// Return a variable db with Digest keys for generic tests.
+    async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
+        DigestVariableDb::init(context, variable_db_config("digest_partition"))
+            .await
+            .unwrap()
+    }
+
+    async fn test_ordered_any_db_empty<D: TestableAnyDb<Digest>>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-    ) where
-        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
-    {
+    ) {
         assert_eq!(db.op_count(), 1);
         assert!(db.get_metadata().await.unwrap().is_none());
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -1052,15 +1088,17 @@ mod test {
         let d1 = FixedBytes::from([1u8; 4]);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         db.update(d1, d2).await.unwrap();
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 1);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
-        let range = db.commit(Some(metadata)).await.unwrap();
+        let db = db.into_mutable();
+        let (db, range) = db.commit(Some(metadata)).await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.op_count(), 2); // floor op added
@@ -1069,18 +1107,30 @@ mod test {
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+        let mut db = db.into_mutable();
         for _ in 1..100 {
-            db.commit(None).await.unwrap();
-            assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
+            let (durable_db, _) = db.commit(None).await.unwrap();
+            let clean_db = durable_db.into_merkleized().await.unwrap();
+            assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
+            db = clean_db.into_mutable();
         }
 
-        db.destroy().await.unwrap();
+        db.commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap()
+            .destroy()
+            .await
+            .unwrap();
     }
 
     #[test_traced("WARN")]
@@ -1101,13 +1151,11 @@ mod test {
         });
     }
 
-    async fn test_ordered_any_db_basic<D>(
+    async fn test_ordered_any_db_basic<D: TestableAnyDb<Digest>>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-    ) where
-        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
-    {
+    ) {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
         let key1 = FixedBytes::from([1u8; 4]);
@@ -1118,7 +1166,7 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         assert!(db.create(key1.clone(), val1).await.unwrap());
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
@@ -1141,9 +1189,8 @@ mod test {
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
         assert_eq!(db.op_count(), 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
-        let mut db = db.into_dirty();
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(key1.clone(), val1).await.unwrap());
@@ -1155,18 +1202,21 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
-        let root = db.root();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         // Multiple deletions of the same key should be a no-op.
         let prev_op_count = db.op_count();
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
+        // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
         assert!(!db.delete(key1.clone()).await.unwrap());
         assert_eq!(db.op_count(), prev_op_count);
-        let db = db.merkleize().await.unwrap();
-        assert_eq!(db.root(), root);
-        let mut db = db.into_dirty();
 
         // Deletions of non-existent keys should be a no-op.
         let key3 = FixedBytes::from([6u8; 4]);
@@ -1174,14 +1224,20 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
         let op_count = db.op_count();
         let root = db.root();
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
         db.update(key1.clone(), val1).await.unwrap();
@@ -1190,20 +1246,34 @@ mod test {
         db.update(key2.clone(), val1).await.unwrap();
         db.update(key1.clone(), val2).await.unwrap();
 
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
         let root = db.root();
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit(None).await.unwrap();
+        let db = db.into_mutable();
+        let mut db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         assert!(db.root() != root);
 
@@ -1233,12 +1303,19 @@ mod test {
         });
     }
 
+    // Test that merkleization state changes don't reset `steps`.
+    #[test_traced("DEBUG")]
+    fn test_any_ordered_variable_db_steps_not_reset() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_digest_variable_db(context).await;
+            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
+        });
+    }
+
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
-    async fn test_ordered_any_update_collision_edge_case<D>(db: D)
-    where
-        D: CleanAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
-    {
+    async fn test_ordered_any_update_collision_edge_case<D: TestableAnyDb<Digest>>(db: D) {
         // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
         // collisions.
         let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
@@ -1247,7 +1324,7 @@ mod test {
         let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 0u8, 0u8]);
         let val = Sha256::fill(1u8);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         db.update(key1.clone(), val).await.unwrap();
         db.update(key2.clone(), val).await.unwrap();
         db.update(key3.clone(), val).await.unwrap();
@@ -1256,8 +1333,8 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let db = db.merkleize().await.unwrap();
-        db.destroy().await.unwrap();
+        let db = db.commit(None).await.unwrap().0;
+        db.into_merkleized().await.unwrap().destroy().await.unwrap();
     }
 
     #[test_traced("WARN")]
@@ -1284,7 +1361,7 @@ mod test {
     fn test_ordered_any_update_batch_create_between_collisions() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let mut db = open_variable_db(context.clone()).await;
+            let mut db = open_variable_db(context.clone()).await.into_mutable();
 
             // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
             // collisions.
@@ -1295,17 +1372,18 @@ mod test {
 
             db.update(key1.clone(), val).await.unwrap();
             db.update(key3.clone(), val).await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert!(db.get(&key2).await.unwrap().is_none());
             assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
             // Batch-insert the middle key.
+            let mut db = db.into_mutable();
             let mut batch = db.start_batch();
             batch.update(key2.clone(), val).await.unwrap();
             db.write_batch(batch.into_iter()).await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
@@ -1318,7 +1396,8 @@ mod test {
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key1);
 
-            db.destroy().await.unwrap();
+            let db = db.into_mutable().commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1329,20 +1408,20 @@ mod test {
     fn test_ordered_any_batch_create_with_cycling_next_key() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let mut db = open_fixed_db(context.clone()).await;
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
 
             let mid_key = FixedBytes::from([0xAAu8; 4]);
             let val = Sha256::fill(1u8);
-
             db.create(mid_key.clone(), val).await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
 
             // Batch-insert a preceeding non-translated-colliding key.
             let preceeding_key = FixedBytes::from([0x55u8; 4]);
+            let mut db = db.into_mutable();
             let mut batch = db.start_batch();
             assert!(batch.create(preceeding_key.clone(), val).await.unwrap());
             db.write_batch(batch.into_iter()).await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
 
             assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
@@ -1352,7 +1431,8 @@ mod test {
             let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, preceeding_key);
 
-            db.destroy().await.unwrap();
+            let db = db.into_mutable().commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1362,7 +1442,7 @@ mod test {
     fn test_ordered_any_batch_delete_middle_key() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let mut db = open_fixed_db(context.clone()).await;
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
 
             let key_a = FixedBytes::from([0x11u8; 4]);
             let key_b = FixedBytes::from([0x22u8; 4]);
@@ -1373,7 +1453,7 @@ mod test {
             db.create(key_a.clone(), val).await.unwrap();
             db.create(key_b.clone(), val).await.unwrap();
             db.create(key_c.clone(), val).await.unwrap();
-            db.commit(None).await.unwrap();
+            let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             // Verify initial spans
             let span_a = db.get_span(&key_a).await.unwrap().unwrap();
@@ -1387,7 +1467,7 @@ mod test {
             let mut batch = db.start_batch();
             batch.delete(key_b.clone()).await.unwrap();
             db.write_batch(batch.into_iter()).await.unwrap();
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             // Verify B is deleted
             assert!(db.get(&key_b).await.unwrap().is_none());
@@ -1418,10 +1498,10 @@ mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.clone()).await;
+            let mut db = open_variable_db(context.clone()).await.into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
-            db.commit(None).await.unwrap();
+            let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
             batch.delete(key1.clone()).await.unwrap();
@@ -1435,13 +1515,14 @@ mod test {
             assert_eq!(span2.1.next_key, key3);
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key2);
-            db.destroy().await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.clone()).await;
+            let mut db = open_variable_db(context.clone()).await.into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
-            db.commit(None).await.unwrap();
+            let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
             batch.create(key2.clone(), val2).await.unwrap();
@@ -1455,7 +1536,8 @@ mod test {
             assert_eq!(span1.1.next_key, key2);
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
-            db.destroy().await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1463,14 +1545,14 @@ mod test {
     fn test_ordered_any_stream_range() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let mut db = open_fixed_db(context.clone()).await;
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
 
             let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x05]);
             let val = Sha256::fill(1u8);
 
             // Test the single-bucket case.
             db.create(key1.clone(), val).await.unwrap();
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
             {
@@ -1514,10 +1596,11 @@ mod test {
             let key2_2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x11]);
             let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
 
+            let mut db = db.into_mutable();
             db.create(key2_1.clone(), val).await.unwrap();
             db.create(key2_2.clone(), val).await.unwrap();
             db.create(key3.clone(), val).await.unwrap();
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
             {
@@ -1573,7 +1656,8 @@ mod test {
                 assert!(stream.next().await.is_none());
             }
 
-            db.destroy().await.unwrap();
+            let db = db.into_mutable().commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 }

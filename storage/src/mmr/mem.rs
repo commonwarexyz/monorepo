@@ -200,6 +200,11 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
     /// panic otherwise. Use `get_node` instead if you require a non-panicking getter.
     ///
+    /// # Warning
+    ///
+    /// If the requested digest is for an unmerkleized node (only possible in the Dirty state) a
+    /// dummy digest will be returned.
+    ///
     /// # Panics
     ///
     /// Panics if the requested node does not exist for any reason such as the node is pruned or

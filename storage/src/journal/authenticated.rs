@@ -110,7 +110,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -321,7 +321,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -588,7 +588,7 @@ where
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     type Error = JournalError;

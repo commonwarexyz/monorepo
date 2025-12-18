@@ -14,27 +14,6 @@ pub mod segmented;
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
-impl<E, Op> crate::qmdb::sync::Journal for contiguous::fixed::Journal<E, Op>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize,
-{
-    type Op = Op;
-    type Error = Error;
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
-    }
-
-    async fn size(&self) -> u64 {
-        Self::size(self)
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await.map(|_| ())
-    }
-}
-
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
