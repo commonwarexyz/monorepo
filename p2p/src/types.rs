@@ -72,10 +72,9 @@ impl Ingress {
                 if ips.is_empty() {
                     return Err(RuntimeError::ResolveFailed(host.to_string()));
                 }
-                let port = *port;
                 Ok(ips
                     .into_iter()
-                    .map(move |ip| SocketAddr::new(ip, port))
+                    .map(move |ip| SocketAddr::new(ip, *port))
                     .collect::<Vec<_>>()
                     .into_iter())
             }
