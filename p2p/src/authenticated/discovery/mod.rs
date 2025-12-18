@@ -225,7 +225,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Ingress, Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -1139,7 +1139,7 @@ mod tests {
                 let bootstrappers = if i > 0 {
                     vec![(
                         addresses[0].clone(),
-                        crate::Ingress::Dns {
+                        Ingress::Dns {
                             host: hostname!("boot.local"),
                             port: base_port,
                         },
@@ -1267,7 +1267,7 @@ mod tests {
                 socket1,
                 vec![(
                     peer0.public_key(),
-                    crate::Ingress::Dns {
+                    Ingress::Dns {
                         host: hostname!("boot.local"),
                         port: base_port,
                     },
@@ -1380,7 +1380,7 @@ mod tests {
                 let bootstrappers = if i > 0 {
                     vec![(
                         addresses[0].clone(),
-                        crate::Ingress::Dns {
+                        Ingress::Dns {
                             host: hostname!("boot.local"),
                             port: base_port,
                         },
@@ -1505,7 +1505,7 @@ mod tests {
             // Create peer 1 with allow_private_ips=false using DNS bootstrapper
             let bootstrappers = vec![(
                 peer0.public_key(),
-                crate::Ingress::Dns {
+                Ingress::Dns {
                     host: hostname!("boot.local"),
                     port: base_port,
                 },
@@ -1585,7 +1585,7 @@ mod tests {
                 // Create peer 0 with peer 1 as DNS bootstrapper
                 let bootstrappers0 = vec![(
                     peer1.public_key(),
-                    crate::Ingress::Dns {
+                    Ingress::Dns {
                         host: hostname!("peer-1.local"),
                         port: base_port + 1,
                     },
@@ -1603,7 +1603,7 @@ mod tests {
                 // Create peer 1 with peer 0 as DNS bootstrapper
                 let bootstrappers1 = vec![(
                     peer0.public_key(),
-                    crate::Ingress::Dns {
+                    Ingress::Dns {
                         host: hostname!("peer-0.local"),
                         port: base_port,
                     },

@@ -487,8 +487,8 @@ mod tests {
 
     #[test]
     fn test_dialable_checks_ingress_ip() {
-        use crate::Ingress;
         use std::net::IpAddr;
+        use Ingress;
 
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));

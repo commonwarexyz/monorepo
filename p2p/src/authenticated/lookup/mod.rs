@@ -169,7 +169,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -1054,13 +1054,13 @@ mod tests {
             }
 
             // Create peer addresses with DNS ingress
-            let peers: Vec<(_, crate::Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = peers_and_sks
                 .iter()
                 .map(|(_, pk, socket, _, host)| {
                     (
                         pk.clone(),
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: host.clone(),
                                 port: socket.port(),
                             },
@@ -1179,17 +1179,17 @@ mod tests {
             }
 
             // Create peer addresses - peers 0,1 use Symmetric, peers 2,3 use DNS Asymmetric
-            let peers: Vec<(_, crate::Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = peers_and_sks
                 .iter()
                 .enumerate()
                 .map(|(i, (_, pk, socket))| {
                     let addr = if i < 2 {
                         // Peers 0, 1: Symmetric socket address
-                        crate::Address::Symmetric(*socket)
+                        Address::Symmetric(*socket)
                     } else {
                         // Peers 2, 3: Asymmetric with DNS ingress
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: hostname!(&format!("peer-{i}.local")),
                                 port: socket.port(),
                             },
@@ -1309,9 +1309,9 @@ mod tests {
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
 
             // Peer 0 knows about peer 1 with a socket address
-            let peers0: Vec<(_, crate::Address)> = vec![
-                (peer0.public_key(), crate::Address::Symmetric(socket0)),
-                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+            let peers0: Vec<(_, Address)> = vec![
+                (peer0.public_key(), Address::Symmetric(socket0)),
+                (peer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0.update(0, peers0.try_into().unwrap()).await;
 
@@ -1325,18 +1325,18 @@ mod tests {
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
 
             // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
-            let peers1: Vec<(_, crate::Address)> = vec![
+            let peers1: Vec<(_, Address)> = vec![
                 (
                     peer0.public_key(),
-                    crate::Address::Asymmetric {
-                        ingress: crate::Ingress::Dns {
+                    Address::Asymmetric {
+                        ingress: Ingress::Dns {
                             host: hostname!("peer-0.local"),
                             port: socket0.port(),
                         },
                         egress: socket0,
                     },
                 ),
-                (peer1.public_key(), crate::Address::Symmetric(socket1)),
+                (peer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle1.update(0, peers1.try_into().unwrap()).await;
 
@@ -1405,11 +1405,11 @@ mod tests {
                 context.resolver_register("peer-1.local", Some(all_ips1));
 
                 // Create peer addresses - both peers use DNS with mixed IPs
-                let peers: Vec<(_, crate::Address)> = vec![
+                let peers: Vec<(_, Address)> = vec![
                     (
                         peer0.public_key(),
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: hostname!("peer-0.local"),
                                 port: base_port,
                             },
@@ -1418,8 +1418,8 @@ mod tests {
                     ),
                     (
                         peer1.public_key(),
-                        crate::Address::Asymmetric {
-                            ingress: crate::Ingress::Dns {
+                        Address::Asymmetric {
+                            ingress: Ingress::Dns {
                                 host: hostname!("peer-1.local"),
                                 port: base_port + 1,
                             },

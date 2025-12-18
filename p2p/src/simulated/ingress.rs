@@ -1,5 +1,5 @@
 use super::{Error, Receiver, Sender};
-use crate::Channel;
+use crate::{Address, Channel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
@@ -290,11 +290,11 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [crate::Address]es.
+/// Implementation of [crate::Manager] for peers with [Address]es.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 ///
-/// # Note on [crate::Address]
+/// # Note on [Address]
 ///
 /// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
@@ -320,7 +320,7 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
 
 impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
     type PublicKey = P;
-    type Peers = Map<Self::PublicKey, crate::Address>;
+    type Peers = Map<Self::PublicKey, Address>;
 
     async fn update(&mut self, id: u64, peers: Self::Peers) {
         // Ignore all addresses (simulated network doesn't use them)
