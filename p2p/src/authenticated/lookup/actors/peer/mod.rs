@@ -2,7 +2,6 @@
 
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
-use commonware_runtime::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use thiserror::Error;
 
@@ -15,7 +14,6 @@ pub use ingress::Message;
 pub struct Config {
     pub mailbox_size: usize,
     pub ping_frequency: std::time::Duration,
-    pub allowed_ping_rate: Quota,
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
     pub rate_limited: Family<metrics::Message, Counter>,

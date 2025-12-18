@@ -15,6 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -26,8 +27,6 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
-    allowed_bit_vec_rate: Quota,
-    allowed_peers_rate: Quota,
     info_verifier: InfoVerifier<C>,
 
     max_bit_vec: u64,
@@ -53,8 +52,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                 context,
                 mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
-                allowed_peers_rate: cfg.allowed_peers_rate,
                 info_verifier: cfg.info_verifier,
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
@@ -182,11 +179,17 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             .context
             .with_label("receiver")
             .spawn(move |context| async move {
+                // Use half the gossip frequency for rate limiting to allow for timing
+                // jitter at message boundaries.
+                let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
+                let rate = Quota::with_period(half).unwrap();
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
+                    RateLimiter::direct_with_clock(rate, context.clone());
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
+                    RateLimiter::direct_with_clock(rate, context.clone());
                 let mut greeting_received = false;
+                let mut first_bit_vec_received = false;
+                let mut first_peers_received = false;
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
@@ -243,11 +246,15 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                     }
 
                     // Wait until rate limiter allows us to process the message
+                    //
+                    // We skip rate limiting for the first BitVec and first Peers message
+                    // because they are expected immediately after the greeting exchange
+                    // (we send BitVec right after our greeting, and they respond with Peers).
                     let rate_limiter = match &msg {
                         types::Payload::Data(data) => {
                             match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => rate_limit,
-                                None => { // Treat unknown channels as invalid
+                                Some(rate_limit) => Some(rate_limit),
+                                None => {
                                     debug!(?peer, channel = data.channel, "invalid channel");
                                     self.received_messages
                                         .get_or_create(&metrics::Message::new_invalid(&peer))
@@ -257,15 +264,29 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             }
                         }
                         types::Payload::Greeting(_) => unreachable!(),
-                        types::Payload::BitVec(_) => &bit_vec_rate_limiter,
-                        types::Payload::Peers(_) => &peers_rate_limiter,
+                        types::Payload::BitVec(_) => {
+                            if first_bit_vec_received {
+                                Some(&bit_vec_rate_limiter)
+                            } else {
+                                first_bit_vec_received = true;
+                                None
+                            }
+                        }
+                        types::Payload::Peers(_) => {
+                            if first_peers_received {
+                                Some(&peers_rate_limiter)
+                            } else {
+                                first_peers_received = true;
+                                None
+                            }
+                        }
                     };
-                    if let Err(wait_until) = rate_limiter.check() {
-                        self.rate_limited
-                            .get_or_create(metric)
-                            .inc();
-                        let wait_duration = wait_until.wait_time_from(context.now());
-                        context.sleep(wait_duration).await;
+                    if let Some(rate_limiter) = rate_limiter {
+                        if let Err(wait_until) = rate_limiter.check() {
+                            self.rate_limited.get_or_create(metric).inc();
+                            let wait_duration = wait_until.wait_time_from(context.now());
+                            context.sleep(wait_duration).await;
+                        }
                     }
 
 
@@ -353,11 +374,7 @@ mod tests {
         Config {
             mailbox_size: 10,
             gossip_bit_vec_frequency: Duration::from_secs(30),
-            allowed_bit_vec_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(
-                10
-            )),
             max_peer_set_size: 128,
-            allowed_peers_rate: commonware_runtime::Quota::per_second(commonware_utils::NZU32!(10)),
             peer_gossip_max_count: 10,
             info_verifier: types::Info::verifier(
                 me,
