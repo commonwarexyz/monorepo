@@ -188,7 +188,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 mut peer,
             } => {
                 // Kill if peer is not authorized
-                if !self.directory.allowed(&public_key) {
+                if !self.directory.eligible(&public_key) {
                     peer.kill().await;
                     return;
                 }
@@ -205,7 +205,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 mut peer,
             } => {
                 // Kill if peer is not authorized
-                if !self.directory.allowed(&public_key) {
+                if !self.directory.eligible(&public_key) {
                     peer.kill().await;
                     return;
                 }
@@ -246,11 +246,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 let _ = reservation.send(self.directory.dial(&public_key));
             }
-            Message::Listenable {
+            Message::Acceptable {
                 public_key,
                 responder,
             } => {
-                let _ = responder.send(self.directory.listenable(&public_key));
+                let _ = responder.send(self.directory.acceptable(&public_key));
             }
             Message::Listen {
                 public_key,
@@ -826,9 +826,9 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             // None listenable because not registered
-            assert!(!mailbox.listenable(peer_pk.clone()).await);
-            assert!(!mailbox.listenable(peer_pk2.clone()).await);
-            assert!(!mailbox.listenable(peer_pk3.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
             oracle
                 .update(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
@@ -836,11 +836,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
-            assert!(!mailbox.listenable(peer_pk).await);
+            assert!(!mailbox.acceptable(peer_pk).await);
             // Listenable because registered
-            assert!(mailbox.listenable(peer_pk2).await);
+            assert!(mailbox.acceptable(peer_pk2).await);
             // Not listenable because not registered
-            assert!(!mailbox.listenable(peer_pk3).await);
+            assert!(!mailbox.acceptable(peer_pk3).await);
         });
     }
 
@@ -865,12 +865,12 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.listenable(peer_pk.clone()).await);
+            assert!(mailbox.acceptable(peer_pk.clone()).await);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.listenable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await);
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());

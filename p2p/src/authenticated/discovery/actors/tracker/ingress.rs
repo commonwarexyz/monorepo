@@ -103,12 +103,12 @@ pub enum Message<C: PublicKey> {
     },
 
     // ---------- Used by listener ----------
-    /// Check if we should listen to a peer.
-    Listenable {
+    /// Check if a peer is acceptable (can accept an incoming connection from them).
+    Acceptable {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The sender to respond with the listenable status.
+        /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
     },
 
@@ -177,10 +177,10 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
         rx.await.unwrap()
     }
 
-    /// Send a `Listenable` message to the tracker.
-    pub async fn listenable(&mut self, public_key: C) -> bool {
+    /// Send an `Acceptable` message to the tracker.
+    pub async fn acceptable(&mut self, public_key: C) -> bool {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Listenable {
+        self.send(Message::Acceptable {
             public_key,
             responder: tx,
         })

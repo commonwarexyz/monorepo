@@ -166,13 +166,24 @@ impl Record {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if the peer is listenable.
+    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// A record is listenable if:
-    /// - The peer is allowed
-    /// - We are not already connected
-    pub fn listenable(&self, allow_private_ips: bool) -> bool {
-        self.allowed(allow_private_ips) && self.status == Status::Inert
+    /// A peer is acceptable if:
+    /// - The peer is eligible (in a peer set, not blocked, not ourselves)
+    /// - The egress IP is valid (global, or private IPs are allowed)
+    /// - We are not already connected or reserved
+    ///
+    /// Note: Egress is checked here because IP filtering may be disabled
+    /// (when `attempt_unregistered_handshakes` is enabled).
+    #[allow(unstable_name_collisions)]
+    pub fn acceptable(&self, allow_private_ips: bool) -> bool {
+        if !self.eligible() || self.status != Status::Inert {
+            return false;
+        }
+        match &self.address {
+            Address::Known(addr) => allow_private_ips || addr.egress_ip().is_global(),
+            _ => false,
+        }
     }
 
     /// Return the ingress address for dialing, if known.
@@ -204,15 +215,19 @@ impl Record {
         self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
     }
 
-    /// Returns `true` if the record is allowed to be used for connection.
-    #[allow(unstable_name_collisions)]
-    pub fn allowed(&self, allow_private_ips: bool) -> bool {
+    /// Returns `true` if this peer is eligible for connection.
+    ///
+    /// A peer is eligible if:
+    /// - It is not blocked or ourselves
+    /// - It is part of at least one peer set (or is persistent)
+    ///
+    /// This is the base check for reserving a connection. IP validity is checked
+    /// separately: ingress validity for dialing (in `dialable()`), egress validity
+    /// for the IP filter (in `Directory::eligible_egress_ips()`).
+    pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Blocked | Address::Myself => false,
-            Address::Known(addr) => {
-                (self.sets > 0 || self.persistent)
-                    && (allow_private_ips || addr.egress_ip().is_global())
-            }
+            Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
 }
@@ -240,7 +255,7 @@ mod tests {
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(!record.deletable());
-        assert!(!record.allowed(false));
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -401,33 +416,69 @@ mod tests {
     }
 
     #[test]
-    fn test_allowed_logic_detailed() {
+    fn test_eligible_logic() {
+        // Blocked and Myself are never eligible
         let mut record_blocked = Record::known(test_address());
         record_blocked.block();
-        assert!(!record_blocked.allowed(false));
-        assert!(!Record::myself().allowed(false));
+        assert!(!record_blocked.eligible());
+        assert!(!Record::myself().eligible());
 
+        // Known records are only eligible when in a peer set
         let mut record_known = Record::known(test_address());
-        assert!(!record_known.allowed(false));
-        assert!(!record_known.allowed(true));
+        assert!(!record_known.eligible(), "Not eligible when sets=0");
         record_known.increment();
-        assert!(record_known.allowed(false));
-        assert!(record_known.allowed(true));
+        assert!(record_known.eligible(), "Eligible when sets>0");
         record_known.decrement();
-        assert!(!record_known.allowed(false));
-        assert!(!record_known.allowed(true));
+        assert!(!record_known.eligible(), "Not eligible when sets=0 again");
+    }
 
+    #[test]
+    fn test_acceptable_checks_egress_ip() {
+        use crate::Ingress;
+        use std::net::IpAddr;
+
+        // Public egress - acceptable
+        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        let mut record_public = Record::known(PeerAddress::Symmetric(public_socket));
+        record_public.increment();
+        assert!(record_public.acceptable(false), "Public egress is acceptable");
+
+        // Private egress - not acceptable when allow_private_ips=false
         let private_socket = SocketAddr::from(([10, 0, 0, 1], 8080));
         let mut record_private = Record::known(PeerAddress::Symmetric(private_socket));
         record_private.increment();
         assert!(
-            !record_private.allowed(false),
-            "Private IPs not allowed by default"
+            !record_private.acceptable(false),
+            "Private egress is not acceptable by default"
         );
         assert!(
-            record_private.allowed(true),
-            "Private IPs allowed when flag is true"
+            record_private.acceptable(true),
+            "Private egress is acceptable when allow_private_ips=true"
         );
+
+        // Asymmetric: private ingress, public egress - acceptable (egress is public)
+        let private_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let public_egress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 9090);
+        let asymmetric = PeerAddress::Asymmetric {
+            ingress: Ingress::Socket(private_ingress),
+            egress: public_egress,
+        };
+        let mut record_asymmetric = Record::known(asymmetric);
+        record_asymmetric.increment();
+        assert!(
+            record_asymmetric.acceptable(false),
+            "Acceptable when egress is public (ingress doesn't matter for accepting)"
+        );
+
+        // Not eligible (sets=0) - not acceptable
+        let record_not_eligible = Record::known(PeerAddress::Symmetric(public_socket));
+        assert!(!record_not_eligible.acceptable(false), "Not acceptable when not eligible");
+
+        // Already reserved - not acceptable
+        let mut record_reserved = Record::known(PeerAddress::Symmetric(public_socket));
+        record_reserved.increment();
+        record_reserved.reserve();
+        assert!(!record_reserved.acceptable(false), "Not acceptable when reserved");
     }
 
     #[test]

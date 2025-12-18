@@ -94,7 +94,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
     ) {
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.listenable(peer),
+            |peer| tracker.acceptable(peer),
             stream_cfg,
             stream,
             sink,
@@ -282,7 +282,7 @@ mod tests {
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
-                        tracker::Message::Listenable { responder, .. } => {
+                        tracker::Message::Acceptable { responder, .. } => {
                             let _ = responder.send(true);
                         }
                         tracker::Message::Listen { reservation, .. } => {

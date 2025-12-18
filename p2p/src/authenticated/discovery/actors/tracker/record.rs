@@ -233,13 +233,13 @@ impl<C: PublicKey> Record<C> {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if the peer is listenable.
+    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// A record is listenable if:
-    /// - The peer is allowed
-    /// - We are not already connected
-    pub fn listenable(&self) -> bool {
-        self.allowed() && self.status == Status::Inert
+    /// A peer is acceptable if:
+    /// - The peer is eligible (in a peer set, not blocked, not ourselves)
+    /// - We are not already connected or reserved
+    pub fn acceptable(&self) -> bool {
+        self.eligible() && self.status == Status::Inert
     }
 
     /// Return the ingress address of the peer, if known.
@@ -297,8 +297,12 @@ impl<C: PublicKey> Record<C> {
         self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
     }
 
-    /// Returns `true` if the record is allowed to be used for connection.
-    pub const fn allowed(&self) -> bool {
+    /// Returns `true` if this peer is eligible for connection.
+    ///
+    /// A peer is eligible if:
+    /// - It is not blocked or ourselves
+    /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
+    pub const fn eligible(&self) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
@@ -369,7 +373,7 @@ mod tests {
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for unknown peer");
         assert!(record.deletable());
-        assert!(!record.allowed());
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -391,7 +395,7 @@ mod tests {
         assert!(!record.reserved());
         assert!(!record.want(0), "Should not want info for myself");
         assert!(!record.deletable());
-        assert!(!record.allowed());
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -409,7 +413,7 @@ mod tests {
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for bootstrapper");
         assert!(!record.deletable());
-        assert!(record.allowed());
+        assert!(record.eligible());
     }
 
     #[test]
@@ -912,33 +916,33 @@ mod tests {
     }
 
     #[test]
-    fn test_allowed_logic_detailed() {
+    fn test_eligible_logic() {
         let peer_info = create_peer_info::<PrivateKey>(16, test_socket(), 100);
 
         // Blocked and Myself are never allowed
         let mut record_blocked = Record::<PublicKey>::unknown();
         record_blocked.block();
-        assert!(!record_blocked.allowed());
-        assert!(!Record::myself(peer_info.clone()).allowed());
+        assert!(!record_blocked.eligible());
+        assert!(!Record::myself(peer_info.clone()).eligible());
 
         // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
-        assert!(Record::<PublicKey>::bootstrapper(test_socket()).allowed());
+        assert!(Record::<PublicKey>::bootstrapper(test_socket()).eligible());
         let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(record_pers.update(peer_info.clone()));
-        assert!(record_pers.allowed());
+        assert!(record_pers.eligible());
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
         let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.allowed()); // sets = 0, !persistent
+        assert!(!record_unknown.eligible()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
-        assert!(record_unknown.allowed()); // sets > 0
+        assert!(record_unknown.eligible()); // sets > 0
         record_unknown.decrement(); // sets = 0
-        assert!(!record_unknown.allowed());
+        assert!(!record_unknown.eligible());
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
-        assert!(!record_disc.allowed()); // sets = 0, !persistent
+        assert!(!record_disc.eligible()); // sets = 0, !persistent
         record_disc.increment(); // sets = 1
-        assert!(record_disc.allowed()); // sets > 0
+        assert!(record_disc.eligible()); // sets > 0
     }
 }
