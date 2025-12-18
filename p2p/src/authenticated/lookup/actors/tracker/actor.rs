@@ -187,9 +187,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Acceptable {
                 public_key,
+                source_ip,
                 responder,
             } => {
-                let _ = responder.send(self.directory.acceptable(&public_key));
+                let _ = responder.send(self.directory.acceptable(&public_key, source_ip));
             }
             Message::Listen {
                 public_key,
@@ -377,10 +378,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (peer_signer, peer_pk) = new_signer_and_pk(1);
-            let peer_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 1001);
             let (_peer_signer2, peer_pk2) = new_signer_and_pk(2);
-            let peer_addr2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
+            let peer_addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 1002);
             let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
+            let peer_addr3 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 1003);
             let (cfg_initial, _) = default_test_config(peer_signer);
             let TestHarness {
                 mut mailbox,
@@ -388,10 +390,10 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
-            // None listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
+            // None acceptable because not registered
+            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
+            assert!(!mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
+            assert!(!mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await);
 
             oracle
                 .update(
@@ -406,12 +408,14 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            // Not listenable because self
-            assert!(!mailbox.acceptable(peer_pk).await);
-            // Listenable because registered
-            assert!(mailbox.acceptable(peer_pk2).await);
-            // Not listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk3).await);
+            // Not acceptable because self
+            assert!(!mailbox.acceptable(peer_pk, peer_addr.ip()).await);
+            // Acceptable because registered with correct IP
+            assert!(mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
+            // Not acceptable with wrong IP
+            assert!(!mailbox.acceptable(peer_pk2, peer_addr.ip()).await);
+            // Not acceptable because not registered
+            assert!(!mailbox.acceptable(peer_pk3, peer_addr3.ip()).await);
         });
     }
 
@@ -437,12 +441,12 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.acceptable(peer_pk.clone()).await);
+            assert!(mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());

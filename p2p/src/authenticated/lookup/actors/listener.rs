@@ -113,9 +113,10 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
+        let source_ip = address.ip();
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer),
+            |peer| tracker.acceptable(peer, source_ip),
             stream_cfg,
             stream,
             sink,

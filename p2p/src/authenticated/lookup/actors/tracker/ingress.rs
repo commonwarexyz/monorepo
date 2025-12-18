@@ -11,6 +11,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::{Map, Set};
 use futures::channel::{mpsc, oneshot};
+use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -78,6 +79,9 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to check.
         public_key: C,
 
+        /// The IP address the peer connected from.
+        source_ip: IpAddr,
+
         /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
     },
@@ -128,10 +132,11 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send an `Acceptable` message to the tracker.
-    pub async fn acceptable(&mut self, public_key: C) -> bool {
+    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Acceptable {
             public_key,
+            source_ip,
             responder: tx,
         })
         .unwrap();
