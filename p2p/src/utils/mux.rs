@@ -8,7 +8,7 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 
-use crate::{Channel, Message, Receiver, Recipients, Sender};
+use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
 use commonware_macros::select_loop;
@@ -17,7 +17,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
 
@@ -232,19 +232,18 @@ pub struct SubSender<S: Sender> {
     subchannel: Channel,
 }
 
-impl<S: Sender> Sender for SubSender<S> {
-    type Error = S::Error;
+impl<S: Sender> LimitedSender for SubSender<S> {
     type PublicKey = S::PublicKey;
+    type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn send(
-        &mut self,
-        recipients: Recipients<S::PublicKey>,
-        payload: Bytes,
-        priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
+    async fn check<'a>(
+        &'a mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'a>, SystemTime> {
         self.inner
-            .send(self.subchannel, recipients, payload, priority)
+            .check(recipients)
             .await
+            .map(|checked| checked.with_subchannel(self.subchannel))
     }
 }
 
@@ -304,12 +303,65 @@ impl<S: Sender> GlobalSender<S> {
         recipients: Recipients<S::PublicKey>,
         payload: Bytes,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
-        let subchannel = UInt(subchannel);
-        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + payload.len());
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
+        match self.check(recipients).await {
+            Ok(checked) => {
+                checked
+                    .with_subchannel(subchannel)
+                    .send(payload, priority)
+                    .await
+            }
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+impl<S: Sender> LimitedSender for GlobalSender<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a> = CheckedGlobalSender<'a, S>;
+
+    async fn check<'a>(
+        &'a mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'a>, SystemTime> {
+        self.inner
+            .check(recipients)
+            .await
+            .map(|checked| CheckedGlobalSender {
+                subchannel: 0,
+                inner: checked,
+            })
+    }
+}
+
+/// A checked sender for a [GlobalSender].
+pub struct CheckedGlobalSender<'a, S: Sender> {
+    subchannel: Channel,
+    inner: S::Checked<'a>,
+}
+
+impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
+    /// Set the subchannel for this sender.
+    pub const fn with_subchannel(mut self, subchannel: Channel) -> Self {
+        self.subchannel = subchannel;
+        self
+    }
+}
+
+impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
+    type PublicKey = S::PublicKey;
+    type Error = <S::Checked<'a> as CheckedSender>::Error;
+
+    async fn send(
+        self,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        let subchannel = UInt(self.subchannel);
+        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + message.len());
         subchannel.write(&mut buf);
-        buf.put_slice(&payload);
-        self.inner.send(recipients, buf.freeze(), priority).await
+        buf.put_slice(&message);
+        self.inner.send(buf.freeze(), priority).await
     }
 }
 

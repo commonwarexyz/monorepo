@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     utils::limited::{Connected, LimitedSender},
-    Channel, CheckedSender as _, Message, Recipients,
+    Channel, Message, Recipients,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
@@ -760,7 +760,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 ///
 /// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
 #[derive(Clone)]
-pub struct UnlimitedSender<P: PublicKey> {
+pub struct UnrestrictedSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
@@ -768,17 +768,7 @@ pub struct UnlimitedSender<P: PublicKey> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: PublicKey> Debug for UnlimitedSender<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnlimitedSender")
-            .field("me", &self.me)
-            .field("channel", &self.channel)
-            .field("max_size", &self.max_size)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
+impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -808,7 +798,7 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
-    limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
+    limited_sender: LimitedSender<E, UnrestrictedSender<P>, ConnectedPeerProvider<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
@@ -866,7 +856,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             }
         });
 
-        let unlimited_sender = UnlimitedSender {
+        let unlimited_sender = UnrestrictedSender {
             me,
             channel,
             max_size,
@@ -899,27 +889,10 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Sender for Sender<P, E> {
-    type Error = Error;
-    type PublicKey = P;
-
-    async fn send(
-        &mut self,
-        recipients: Recipients<P>,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<Vec<P>, Error> {
-        // Check rate limits first, then send
-        match self.limited_sender.check(recipients).await {
-            Ok(checked_sender) => checked_sender.send(message, priority).await,
-            Err(_) => Ok(Vec::new()), // All recipients rate-limited
-        }
-    }
-}
-
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
+    type PublicKey = P;
     type Checked<'a>
-        = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
+        = crate::utils::limited::CheckedSender<'a, UnrestrictedSender<P>>
     where
         Self: 'a;
 
@@ -957,22 +930,24 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> std::fmt::Debug for SplitSend
     }
 }
 
-impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::Sender for SplitSender<P, E, F> {
-    type Error = Error;
+impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for SplitSender<P, E, F> {
     type PublicKey = P;
+    type Checked<'a>
+        = <Sender<P, E> as crate::LimitedSender>::Checked<'a>
+    where
+        Self: 'a;
 
-    async fn send(
+    async fn check(
         &mut self,
-        recipients: Recipients<P>,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<Vec<P>, Error> {
-        let recipients = (self.forwarder)(self.replica, &recipients, &message);
-        let Some(recipients) = recipients else {
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        // Route recipients via forwarder
+        let routed_recipients = (self.forwarder)(self.replica, &recipients, &Bytes::new());
+        let Some(routed_recipients) = routed_recipients else {
             // If the forwarder returns None, drop the message
-            return Ok(Vec::new());
+            return Err(SystemTime::now());
         };
-        self.inner.send(recipients, message, priority).await
+        self.inner.check(routed_recipients).await
     }
 }
 

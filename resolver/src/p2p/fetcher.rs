@@ -570,7 +570,7 @@ mod tests {
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Signer};
-    use commonware_p2p::{CheckedSender as _, Recipients, Sender};
+    use commonware_p2p::{Recipients, UnrestrictedSender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
@@ -590,12 +590,12 @@ mod tests {
     impl std::error::Error for MockError {}
 
     #[derive(Debug)]
-    struct CheckedSender<'a, S: Sender> {
+    struct CheckedSender<'a, S: UnrestrictedSender> {
         sender: &'a mut S,
         recipients: Recipients<S::PublicKey>,
     }
 
-    impl<'a, S: Sender> commonware_p2p::CheckedSender for CheckedSender<'a, S> {
+    impl<'a, S: UnrestrictedSender> commonware_p2p::CheckedSender for CheckedSender<'a, S> {
         type PublicKey = S::PublicKey;
         type Error = S::Error;
 
@@ -611,7 +611,7 @@ mod tests {
     #[derive(Default, Clone, Debug)]
     struct FailMockSenderInner;
 
-    impl Sender for FailMockSenderInner {
+    impl UnrestrictedSender for FailMockSenderInner {
         type PublicKey = Ed25519PublicKey;
         type Error = MockError;
 
@@ -629,24 +629,8 @@ mod tests {
     #[derive(Default, Clone, Debug)]
     struct FailMockSender(FailMockSenderInner);
 
-    impl Sender for FailMockSender {
-        type PublicKey = Ed25519PublicKey;
-        type Error = MockError;
-
-        async fn send(
-            &mut self,
-            recipients: Recipients<Self::PublicKey>,
-            message: Bytes,
-            priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            match self.check(recipients).await {
-                Ok(checked) => checked.send(message, priority).await,
-                Err(_) => Ok(vec![]),
-            }
-        }
-    }
-
     impl LimitedSender for FailMockSender {
+        type PublicKey = Ed25519PublicKey;
         type Checked<'a> = CheckedSender<'a, FailMockSenderInner>;
 
         async fn check<'a>(
@@ -664,7 +648,7 @@ mod tests {
     #[derive(Default, Clone, Debug)]
     struct SuccessMockSenderInner;
 
-    impl Sender for SuccessMockSenderInner {
+    impl UnrestrictedSender for SuccessMockSenderInner {
         type PublicKey = Ed25519PublicKey;
         type Error = MockError;
 
@@ -685,24 +669,8 @@ mod tests {
     #[derive(Default, Clone, Debug)]
     struct SuccessMockSender(SuccessMockSenderInner);
 
-    impl Sender for SuccessMockSender {
-        type PublicKey = Ed25519PublicKey;
-        type Error = MockError;
-
-        async fn send(
-            &mut self,
-            recipients: Recipients<Self::PublicKey>,
-            message: Bytes,
-            priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            match self.check(recipients).await {
-                Ok(checked) => checked.send(message, priority).await,
-                Err(_) => Ok(vec![]),
-            }
-        }
-    }
-
     impl LimitedSender for SuccessMockSender {
+        type PublicKey = Ed25519PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
         async fn check<'a>(

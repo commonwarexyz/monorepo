@@ -1,9 +1,8 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use std::time::SystemTime;
-
 use crate::{CheckedSender, LimitedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
+use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
@@ -66,7 +65,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         let encoded = message.encode();
         self.sender
             .send(recipients, encoded.freeze(), priority)

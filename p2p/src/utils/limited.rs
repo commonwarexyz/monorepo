@@ -1,6 +1,6 @@
-//! Rate-limited [`Sender`] wrapper.
+//! Rate-limited [`UnrestrictedSender`] wrapper.
 
-use crate::{Recipients, Sender};
+use crate::{Recipients, UnrestrictedSender};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
@@ -24,11 +24,11 @@ pub trait Connected: Clone + Send + Sync + 'static {
     fn subscribe(&mut self) -> impl Future<Output = ring::Receiver<Vec<Self::PublicKey>>> + Send;
 }
 
-/// A wrapper around a [`Sender`] that provides rate limiting with retry-time feedback.
+/// A wrapper around a [`UnrestrictedSender`] that provides rate limiting with retry-time feedback.
 pub struct LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnrestrictedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
@@ -41,7 +41,7 @@ where
 impl<E, S, P> Clone for LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnrestrictedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn clone(&self) -> Self {
@@ -58,7 +58,7 @@ where
 impl<E, S, P> fmt::Debug for LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnrestrictedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,7 +71,7 @@ where
 impl<E, S, P> LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnrestrictedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
@@ -175,17 +175,17 @@ where
     )
 }
 
-/// An exclusive reference to an [`Sender`] with a pre-checked list of
+/// An exclusive reference to an [`UnrestrictedSender`] with a pre-checked list of
 /// recipients that are not currently rate-limited.
 ///
 /// A [`CheckedSender`] can only be acquired via [`LimitedSender::check`].
 #[derive(Debug)]
-pub struct CheckedSender<'a, S: Sender> {
+pub struct CheckedSender<'a, S: UnrestrictedSender> {
     sender: &'a mut S,
     recipients: Recipients<S::PublicKey>,
 }
 
-impl<'a, S: Sender> crate::CheckedSender for CheckedSender<'a, S> {
+impl<'a, S: UnrestrictedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = S::Error;
 
@@ -232,7 +232,7 @@ mod tests {
         }
     }
 
-    impl Sender for MockSender {
+    impl UnrestrictedSender for MockSender {
         type Error = MockError;
         type PublicKey = PublicKey;
 

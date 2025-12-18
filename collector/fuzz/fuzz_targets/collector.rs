@@ -15,7 +15,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{deterministic, Clock, Runner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -23,7 +23,10 @@ use futures::{
 };
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 
 const MAX_LEN: usize = 1_000_000;
 const MAX_OPERATIONS: usize = 256;
@@ -208,13 +211,26 @@ struct MockSender;
 #[error("mock send error")]
 struct MockSendError;
 
-impl Sender for MockSender {
+impl LimitedSender for MockSender {
+    type PublicKey = PublicKey;
+    type Checked<'a> = MockCheckedSender;
+
+    async fn check(
+        &mut self,
+        _recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        Ok(MockCheckedSender)
+    }
+}
+
+struct MockCheckedSender;
+
+impl CheckedSender for MockCheckedSender {
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
     async fn send(
-        &mut self,
-        _recipients: Recipients<Self::PublicKey>,
+        self,
         _message: bytes::Bytes,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {

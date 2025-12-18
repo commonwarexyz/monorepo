@@ -2,7 +2,7 @@ use super::Error;
 use crate::{
     authenticated::lookup::actors::router::{self, Messenger},
     utils::limited::{CheckedSender, LimitedSender},
-    Channel, CheckedSender as _, Message, Recipients,
+    Channel, Message, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -14,13 +14,13 @@ use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 /// supports sending arbitrary bytes to a set of recipients over
 /// a pre-defined [`Channel`].
 #[derive(Debug, Clone)]
-pub struct UnlimitedSender<P: PublicKey> {
+pub struct UnrestrictedSender<P: PublicKey> {
     channel: Channel,
     max_size: usize,
     messenger: Messenger<P>,
 }
 
-impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
+impl<P: PublicKey> crate::UnrestrictedSender for UnrestrictedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -44,7 +44,7 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
 #[derive(Clone)]
 pub struct Sender<P: PublicKey, C: Clock> {
-    limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
+    limited_sender: LimitedSender<C, UnrestrictedSender<P>, Messenger<P>>,
 }
 
 impl<P: PublicKey, C: Clock> Debug for Sender<P, C> {
@@ -61,7 +61,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
         clock: C,
         quota: Quota,
     ) -> Self {
-        let master_sender = UnlimitedSender {
+        let master_sender = UnrestrictedSender {
             channel,
             max_size,
             messenger: messenger.clone(),
@@ -76,8 +76,9 @@ where
     P: PublicKey,
     C: Clock + Clone + Send + 'static,
 {
+    type PublicKey = P;
     type Checked<'a>
-        = CheckedSender<'a, UnlimitedSender<P>>
+        = CheckedSender<'a, UnrestrictedSender<P>>
     where
         Self: 'a;
 
@@ -86,27 +87,6 @@ where
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
-    }
-}
-
-impl<P, C> crate::Sender for Sender<P, C>
-where
-    P: PublicKey,
-    C: Clock + Clone + Send + 'static,
-{
-    type Error = Error;
-    type PublicKey = P;
-
-    async fn send(
-        &mut self,
-        recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        match self.limited_sender.check(recipients).await {
-            Ok(checked_sender) => checked_sender.send(message, priority).await,
-            Err(_) => Ok(Vec::new()),
-        }
     }
 }
 
