@@ -1,6 +1,5 @@
 use crate::Error;
-use bytes::Buf;
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -39,19 +38,33 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
-        if buf.is_empty() {
-            return Ok(buf);
-        }
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
+        let read_fut = async {
+            let mut read = 0;
+            let len = buf.remaining_mut();
+            while read < len {
+                let n = self
+                    .stream
+                    .read_buf(&mut buf)
+                    .await
+                    .map_err(|_| Error::RecvFailed)?;
+
+                if n == 0 {
+                    return Err(Error::Closed);
+                }
+
+                read += n;
+            }
+            Ok(())
+        };
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf.as_mut()))
+        timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::RecvFailed)?;
 
-        Ok(buf)
+        Ok(())
     }
 }
 

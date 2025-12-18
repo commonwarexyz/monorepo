@@ -1,6 +1,5 @@
 use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
-use bytes::Buf;
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -41,12 +40,12 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
+    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
 
-        let buf = self.inner.recv(buf).await.inspect_err(|e| {
+        self.inner.recv(buf).await.inspect_err(|e| {
             self.auditor.event(b"recv_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -55,9 +54,9 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(buf.as_ref());
+            // TODO: Write buf
         });
-        Ok(buf)
+        Ok(())
     }
 }
 
@@ -258,8 +257,9 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
-                assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
+                let mut buf = vec![0; CLIENT_MSG.len()];
+                stream.recv(&mut buf[..]).await.unwrap();
+                assert_eq!(&buf[..], CLIENT_MSG.as_bytes());
 
                 // Send response
                 sink.send(SERVER_MSG.as_bytes()).await.unwrap();
@@ -279,8 +279,9 @@ mod tests {
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
 
                 // Receive response
-                let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
-                assert_eq!(buf.as_ref(), SERVER_MSG.as_bytes());
+                let mut buf = vec![0; SERVER_MSG.len()];
+                stream.recv(&mut buf[..]).await.unwrap();
+                assert_eq!(&buf[..], SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
         }
