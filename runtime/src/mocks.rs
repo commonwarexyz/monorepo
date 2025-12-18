@@ -46,7 +46,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
+    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -55,10 +55,7 @@ impl SinkTrait for Sink {
                 return Err(Error::Closed);
             }
 
-            let total_size = buf.remaining();
-            let current_len = channel.buffer.len();
-            channel.buffer.resize(total_size + current_len, 0);
-            buf.copy_to_slice(&mut channel.buffer[current_len..]);
+            channel.buffer.put(buf);
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
