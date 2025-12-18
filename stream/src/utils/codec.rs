@@ -1,8 +1,13 @@
 use crate::Error;
-use bytes::{BufMut as _, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
+use commonware_codec::{
+    varint::{Decoder, UInt},
+    EncodeSize as _, Write as _,
+};
 use commonware_runtime::{Sink, Stream};
+use commonware_utils::StableBuf;
 
-/// Sends data to the sink with a 4-byte length prefix.
+/// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
@@ -15,22 +20,31 @@ pub async fn send_frame<S: Sink>(
         return Err(Error::SendTooLarge(n));
     }
 
-    // Prefix `buf` with its length and send it
-    let mut prefixed_buf = BytesMut::with_capacity(4 + buf.len());
-    let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
-    prefixed_buf.put_u32(len);
+    // Prefix `buf` with its varint-encoded length and send it
+    let len = UInt(n as u32);
+    let mut prefixed_buf = BytesMut::with_capacity(len.encode_size() + buf.len());
+    len.write(&mut prefixed_buf);
     prefixed_buf.extend_from_slice(buf);
     sink.send(prefixed_buf).await.map_err(Error::SendFailed)
 }
 
-/// Receives data from the stream with a 4-byte length prefix.
-/// Returns an error if the message is too large or the stream is closed.
+/// Receives data from the stream with a varint length prefix.
+/// Returns an error if the message is too large, the varint is invalid, or the
+/// stream is closed.
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<Bytes, Error> {
-    // Read the first 4 bytes to get the length of the message
-    let len_buf = stream.recv(vec![0; 4]).await.map_err(Error::RecvFailed)?;
+    // Read and decode the varint length prefix byte-by-byte
+    let mut decoder = Decoder::<u32>::new();
+    let mut buf = StableBuf::from(vec![0u8; 1]);
+    let len = loop {
+        buf = stream.recv(buf).await.map_err(Error::RecvFailed)?;
+        match decoder.feed(buf[0]) {
+            Ok(Some(len)) => break len as usize,
+            Ok(None) => continue,
+            Err(_) => return Err(Error::InvalidVarint),
+        }
+    };
 
     // Validate frame size
-    let len = u32::from_be_bytes(len_buf.as_ref()[..4].try_into().unwrap()) as usize;
     if len > max_message_size as usize {
         return Err(Error::RecvTooLarge(len));
     }
