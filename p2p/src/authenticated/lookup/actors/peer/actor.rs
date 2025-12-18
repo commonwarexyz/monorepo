@@ -205,10 +205,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                     }
 
                     match msg {
-                        types::Message::Ping => {
-                            // We ignore ping messages, they are only used to keep
-                            // the connection alive
-                        }
                         types::Message::Data(data) => {
                             // Send message to client
                             //
@@ -218,6 +214,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
                                 |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
                             );
+                        }
+                        types::Message::Ping => {
+                            // We ignore ping messages, they are only used to keep
+                            // the connection alive
                         }
                     }
                 }

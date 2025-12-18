@@ -210,10 +210,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
                     // Update metrics
                     let metric = match &msg {
+                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
                         types::Payload::Greeting(_) => &metrics::Message::new_greeting(&peer),
                         types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
                         types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
-                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
                     };
                     self.received_messages.get_or_create(metric).inc();
 
@@ -244,9 +244,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
                     // Wait until rate limiter allows us to process the message
                     let rate_limiter = match &msg {
-                        types::Payload::Greeting(_) => unreachable!(),
-                        types::Payload::BitVec(_) => &bit_vec_rate_limiter,
-                        types::Payload::Peers(_) => &peers_rate_limiter,
                         types::Payload::Data(data) => {
                             match rate_limits.get(&data.channel) {
                                 Some(rate_limit) => rate_limit,
@@ -259,6 +256,9 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                                 }
                             }
                         }
+                        types::Payload::Greeting(_) => unreachable!(),
+                        types::Payload::BitVec(_) => &bit_vec_rate_limiter,
+                        types::Payload::Peers(_) => &peers_rate_limiter,
                     };
                     if let Err(wait_until) = rate_limiter.check() {
                         self.rate_limited
@@ -270,6 +270,16 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
 
                     match msg {
+                        types::Payload::Data(data) => {
+                            // Send message to client
+                            //
+                            // If the channel handler is closed, we log an error but don't
+                            // close the peer (as other channels may still be open).
+                            let sender = senders.get_mut(&data.channel).unwrap();
+                            let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
+                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
+                            );
+                        }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
@@ -281,16 +291,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
                             // Send peers to tracker
                             tracker.peers(peers);
-                        }
-                        types::Payload::Data(data) => {
-                            // Send message to client
-                            //
-                            // If the channel handler is closed, we log an error but don't
-                            // close the peer (as other channels may still be open).
-                            let sender = senders.get_mut(&data.channel).unwrap();
-                            let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
-                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
-                            );
                         }
                     }
                 }
