@@ -449,6 +449,18 @@ mod tests {
             max_data_length: 100,
         };
 
+        // Test Greeting
+        let original = signed_peer_info();
+        let encoded = Payload::Greeting(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Greeting(info)) => info,
+            _ => panic!("Expected Greeting payload"),
+        };
+        assert_eq!(original.ingress, decoded.ingress);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.public_key, decoded.public_key);
+        assert_eq!(original.signature, decoded.signature);
+
         // Test BitVec
         let original = BitVec {
             index: 1234,
@@ -495,7 +507,8 @@ mod tests {
             max_peers: 10,
             max_data_length: 100,
         };
-        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        // Type byte 4 is invalid (Greeting=0, BitVec=1, Peers=2, Data=3)
+        let invalid_payload = [4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
