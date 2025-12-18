@@ -134,7 +134,7 @@ impl Read for Ingress {
                 let port = u16::read(buf)?;
                 Ok(Self::Dns { host, port })
             }
-            _ => Err(CodecError::Invalid("Ingress", "Invalid prefix")),
+            other => Err(CodecError::InvalidEnum(other)),
         }
     }
 }
@@ -228,7 +228,7 @@ impl Read for Address {
                 let egress = SocketAddr::read(buf)?;
                 Ok(Self::Asymmetric { ingress, egress })
             }
-            _ => Err(CodecError::Invalid("Address", "Invalid prefix")),
+            other => Err(CodecError::InvalidEnum(other)),
         }
     }
 }
