@@ -218,8 +218,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         }
                         greeting_received = true;
 
-                        // Validate and forward greeting info to tracker
+                        // Verify the greeting info is valid
                         self.info_verifier.validate(&context, std::slice::from_ref(&info)).map_err(Error::Types)?;
+
+                        // Send greeting info to tracker
                         tracker.peers(vec![info]);
                         continue;
                     } else if !greeting_received {
