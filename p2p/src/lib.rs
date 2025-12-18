@@ -37,14 +37,99 @@ pub enum Recipients<P: PublicKey> {
     One(P),
 }
 
-/// Interface for sending messages to a set of recipients.
-pub trait Sender: Debug + Clone + Send + Sync + 'static {
-    /// Error that can occur when sending a message.
-    type Error: Debug + StdError + Send + Sync;
-
+/// Interface for sending messages to a set of recipients without rate-limiting restrictions.
+pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
 
+    /// Error that can occur when sending a message.
+    type Error: Debug + StdError + Send + Sync;
+
+    /// Sends a message to a set of recipients.
+    ///
+    /// # Offline Recipients
+    ///
+    /// If a recipient is offline at the time a message is sent, the message
+    /// will be dropped. It is up to the application to handle retries (if
+    /// necessary).
+    ///
+    /// # Returns
+    ///
+    /// A vector of recipients that the message was sent to, or an error if the
+    /// message could not be sent (e.g., too large).
+    ///
+    /// Note: a successful send does not guarantee that the recipient will
+    /// receive the message.
+    fn send(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+        message: Bytes,
+        priority: bool,
+    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
+}
+
+/// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
+/// filtering out any that are currently rate-limited.
+pub trait LimitedSender: Clone + Send + Sync + 'static {
+    /// Public key type used to identify recipients.
+    type PublicKey: PublicKey;
+
+    /// The type of [`CheckedSender`] returned after checking recipients.
+    type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+    where
+        Self: 'a;
+
+    /// Checks which recipients are within their rate limit and returns a
+    /// [`CheckedSender`] for sending to them.
+    ///
+    /// # Rate Limiting
+    ///
+    /// Recipients that exceed their rate limit will be filtered out. The
+    /// returned [`CheckedSender`] will only send to non-limited recipients.
+    ///
+    /// # Returns
+    ///
+    /// A [`CheckedSender`] containing only the recipients that are not
+    /// currently rate-limited, or an error with the earliest instant at which
+    /// all recipients will be available if all are rate-limited.
+    fn check<'a>(
+        &'a mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>> + Send;
+}
+
+/// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
+pub trait CheckedSender: Send {
+    /// Public key type used to identify [`Recipients`].
+    type PublicKey: PublicKey;
+
+    /// Error that can occur when sending a message.
+    type Error: Debug + StdError + Send + Sync;
+
+    /// Sends a message to the pre-checked recipients.
+    ///
+    /// # Offline Recipients
+    ///
+    /// If a recipient is offline at the time a message is sent, the message
+    /// will be dropped. It is up to the application to handle retries (if
+    /// necessary).
+    ///
+    /// # Returns
+    ///
+    /// A vector of recipients that the message was sent to, or an error if the
+    /// message could not be sent (e.g., too large).
+    ///
+    /// Note: a successful send does not guarantee that the recipient will
+    /// receive the message.
+    fn send(
+        self,
+        message: Bytes,
+        priority: bool,
+    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
+}
+
+/// Interface for sending messages to a set of recipients.
+pub trait Sender: LimitedSender {
     /// Sends a message to a set of recipients.
     ///
     /// # Offline Recipients
@@ -71,68 +156,20 @@ pub trait Sender: Debug + Clone + Send + Sync + 'static {
         recipients: Recipients<Self::PublicKey>,
         message: Bytes,
         priority: bool,
-    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,
+    > + Send {
+        async move {
+            match self.check(recipients).await {
+                Ok(checked_sender) => checked_sender.send(message, priority).await,
+                Err(_) => Ok(Vec::new()),
+            }
+        }
+    }
 }
 
-/// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
-/// filtering out any that are currently rate-limited.
-pub trait LimitedSender: Clone + Send + Sync + 'static {
-    /// Public key type used to identify recipients.
-    type PublicKey: PublicKey;
-
-    /// The type of [`CheckedSender`] returned after checking recipients.
-    type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
-    where
-        Self: 'a;
-
-    /// Checks which recipients are within their rate limit and returns a
-    /// [`CheckedSender`] for sending to them.
-    ///
-    /// # Rate Limiting
-    ///
-    /// Recipients that exceed their rate limit will be filtered out. The
-    /// returned [`CheckedSender`] will only send to non-limited recipients.
-    ///
-    /// # Returns
-    ///
-    /// A [`CheckedSender`] containing only the recipients that are not
-    /// currently rate-limited, or an error with the earliest instant at which
-    /// all recipients will be available if all are rate-limited.
-    fn check<'a>(
-        &'a mut self,
-        recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>>;
-}
-
-/// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
-pub trait CheckedSender {
-    /// Public key type used to identify [`Recipients`].
-    type PublicKey: PublicKey;
-
-    /// Error that can occur when sending a message.
-    type Error: Debug + StdError + Send + Sync;
-
-    /// Sends a message to the pre-checked recipients.
-    ///
-    /// # Offline Recipients
-    ///
-    /// If a recipient is offline at the time a message is sent, the message
-    /// will be dropped. It is up to the application to handle retries (if
-    /// necessary).
-    ///
-    /// # Returns
-    ///
-    /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
-    ///
-    /// Note: a successful send does not guarantee that the recipient will
-    /// receive the message.
-    fn send(
-        self,
-        message: Bytes,
-        priority: bool,
-    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>>;
-}
+// Blanket implementation of `Sender` for all `LimitedSender`s.
+impl<S: LimitedSender> Sender for S {}
 
 /// Interface for receiving messages from arbitrary recipients.
 pub trait Receiver: Debug + Send + 'static {

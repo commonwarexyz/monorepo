@@ -8,7 +8,7 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 
-use crate::{Channel, Message, Receiver, Recipients, Sender};
+use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
 use commonware_macros::select_loop;
@@ -17,7 +17,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
 
@@ -232,19 +232,18 @@ pub struct SubSender<S: Sender> {
     subchannel: Channel,
 }
 
-impl<S: Sender> Sender for SubSender<S> {
-    type Error = S::Error;
+impl<S: Sender> LimitedSender for SubSender<S> {
     type PublicKey = S::PublicKey;
+    type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn send(
+    async fn check(
         &mut self,
-        recipients: Recipients<S::PublicKey>,
-        payload: Bytes,
-        priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
         self.inner
-            .send(self.subchannel, recipients, payload, priority)
+            .check(recipients)
             .await
+            .map(|checked| checked.with_subchannel(self.subchannel))
     }
 }
 
@@ -304,12 +303,65 @@ impl<S: Sender> GlobalSender<S> {
         recipients: Recipients<S::PublicKey>,
         payload: Bytes,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
-        let subchannel = UInt(subchannel);
-        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + payload.len());
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
+        match self.check(recipients).await {
+            Ok(checked) => {
+                checked
+                    .with_subchannel(subchannel)
+                    .send(payload, priority)
+                    .await
+            }
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+impl<S: Sender> LimitedSender for GlobalSender<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a> = CheckedGlobalSender<'a, S>;
+
+    async fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        self.inner
+            .check(recipients)
+            .await
+            .map(|checked| CheckedGlobalSender {
+                subchannel: None,
+                inner: checked,
+            })
+    }
+}
+
+/// A checked sender for a [GlobalSender].
+pub struct CheckedGlobalSender<'a, S: Sender> {
+    subchannel: Option<Channel>,
+    inner: S::Checked<'a>,
+}
+
+impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
+    /// Set the subchannel for this sender.
+    pub const fn with_subchannel(mut self, subchannel: Channel) -> Self {
+        self.subchannel = Some(subchannel);
+        self
+    }
+}
+
+impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
+    type PublicKey = S::PublicKey;
+    type Error = <S::Checked<'a> as CheckedSender>::Error;
+
+    async fn send(
+        self,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        let subchannel = UInt(self.subchannel.expect("subchannel not set"));
+        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + message.len());
         subchannel.write(&mut buf);
-        buf.put_slice(&payload);
-        self.inner.send(recipients, buf.freeze(), priority).await
+        buf.put_slice(&message);
+        self.inner.send(buf.freeze(), priority).await
     }
 }
 
@@ -458,12 +510,13 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
-
-    type Pk = commonware_cryptography::ed25519::PublicKey;
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -476,7 +529,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<Pk, deterministic::Context> {
+    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -490,12 +543,16 @@ mod tests {
     }
 
     /// Create a public key from a seed.
-    fn pk(seed: u64) -> Pk {
+    fn pk(seed: u64) -> PublicKey {
         PrivateKey::from_seed(seed).public_key()
     }
 
     /// Link two peers bidirectionally.
-    async fn link_bidirectional(oracle: &mut Oracle<Pk, deterministic::Context>, a: Pk, b: Pk) {
+    async fn link_bidirectional(
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        a: PublicKey,
+        b: PublicKey,
+    ) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
@@ -503,11 +560,11 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         seed: u64,
     ) -> (
-        Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        PublicKey,
+        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -523,13 +580,13 @@ mod tests {
     /// Create a peer and register it with the oracle.
     async fn create_peer_with_backup_and_global_sender(
         context: &deterministic::Context,
-        oracle: &mut Oracle<Pk, deterministic::Context>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         seed: u64,
     ) -> (
-        Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
-        mpsc::Receiver<BackupResponse<Pk>>,
-        GlobalSender<simulated::Sender<Pk, deterministic::Context>>,
+        PublicKey,
+        MuxHandle<impl Sender<PublicKey = PublicKey>, impl Receiver<PublicKey = PublicKey>>,
+        mpsc::Receiver<BackupResponse<PublicKey>>,
+        GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -560,7 +617,10 @@ mod tests {
     }
 
     /// Wait for `n` messages to be received on the receiver.
-    async fn expect_n_messages(rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>, n: usize) {
+    async fn expect_n_messages(
+        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
+        n: usize,
+    ) {
         let mut count = 0;
         loop {
             select! {
@@ -579,8 +639,8 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver + backup receiver.
     async fn expect_n_messages_with_backup(
-        rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>,
-        backup_rx: &mut mpsc::Receiver<BackupResponse<Pk>>,
+        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
+        backup_rx: &mut mpsc::Receiver<BackupResponse<PublicKey>>,
         n: usize,
         n_backup: usize,
     ) {

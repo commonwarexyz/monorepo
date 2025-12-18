@@ -15,12 +15,9 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{
-    utils::{requester, StaticManager},
-    Blocker, Receiver, Sender,
-};
+use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
@@ -42,7 +39,6 @@ pub struct Actor<
     namespace: Vec<u8>,
     mailbox_size: usize,
     fetch_timeout: Duration,
-    fetch_rate_per_peer: Quota,
 
     state: State<S, D>,
 
@@ -68,7 +64,6 @@ impl<
                 namespace: cfg.namespace,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
 
                 state: State::new(cfg.fetch_concurrent),
 
@@ -111,12 +106,9 @@ impl<
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    me,
-                    rate_limit: self.fetch_rate_per_peer,
-                    initial: self.fetch_timeout / 2,
-                    timeout: self.fetch_timeout,
-                },
+                me,
+                initial: self.fetch_timeout / 2,
+                timeout: self.fetch_timeout,
                 fetch_retry_timeout: self.fetch_timeout,
                 priority_requests: true,
                 priority_responses: false,

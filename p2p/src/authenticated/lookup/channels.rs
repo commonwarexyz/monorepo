@@ -2,7 +2,7 @@ use super::Error;
 use crate::{
     authenticated::lookup::actors::router::{self, Messenger},
     utils::limited::{CheckedSender, LimitedSender},
-    Channel, CheckedSender as _, Message, Recipients,
+    Channel, Message, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -20,7 +20,7 @@ pub struct UnlimitedSender<P: PublicKey> {
     messenger: Messenger<P>,
 }
 
-impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
+impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -45,12 +45,6 @@ impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
 #[derive(Clone)]
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
-}
-
-impl<P: PublicKey, C: Clock> Debug for Sender<P, C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sender").finish()
-    }
 }
 
 impl<P: PublicKey, C: Clock> Sender<P, C> {
@@ -87,27 +81,6 @@ where
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
-    }
-}
-
-impl<P, C> crate::Sender for Sender<P, C>
-where
-    P: PublicKey,
-    C: Clock + Clone + Send + 'static,
-{
-    type Error = Error;
-    type PublicKey = P;
-
-    async fn send(
-        &mut self,
-        recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        match self.limited_sender.check(recipients).await {
-            Ok(checked_sender) => checked_sender.send(message, priority).await,
-            Err(_) => Ok(Vec::new()),
-        }
     }
 }
 

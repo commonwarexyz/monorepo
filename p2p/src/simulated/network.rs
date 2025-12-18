@@ -7,8 +7,8 @@ use super::{
     Error,
 };
 use crate::{
-    utils::limited::{Connected, LimitedSender},
-    Channel, CheckedSender as _, Message, Recipients,
+    utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+    Channel, Message, Recipients, UnlimitedSender as _,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
@@ -768,17 +768,7 @@ pub struct UnlimitedSender<P: PublicKey> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: PublicKey> Debug for UnlimitedSender<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnlimitedSender")
-            .field("me", &self.me)
-            .field("channel", &self.channel)
-            .field("max_size", &self.max_size)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<P: PublicKey> crate::Sender for UnlimitedSender<P> {
+impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -899,24 +889,6 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Sender for Sender<P, E> {
-    type Error = Error;
-    type PublicKey = P;
-
-    async fn send(
-        &mut self,
-        recipients: Recipients<P>,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<Vec<P>, Error> {
-        // Check rate limits first, then send
-        match self.limited_sender.check(recipients).await {
-            Ok(checked_sender) => checked_sender.send(message, priority).await,
-            Err(_) => Ok(Vec::new()), // All recipients rate-limited
-        }
-    }
-}
-
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     type PublicKey = P;
     type Checked<'a>
@@ -958,22 +930,66 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> std::fmt::Debug for SplitSend
     }
 }
 
-impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::Sender for SplitSender<P, E, F> {
-    type Error = Error;
+impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for SplitSender<P, E, F> {
     type PublicKey = P;
+    type Checked<'a> = SplitCheckedSender<'a, P, E, F>;
+
+    async fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        Ok(SplitCheckedSender {
+            // Perform a rate limit check with the entire set of original recipients although
+            // the forwarder may filter these (based on message content) during send.
+            checked: self.inner.limited_sender.check(recipients.clone()).await?,
+            replica: self.replica,
+            forwarder: self.forwarder.clone(),
+            recipients,
+
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
+/// A checked sender for [`SplitSender`] that defers the forwarder call to send time.
+///
+/// This is necessary because [`SplitForwarder`] may examine message content to determine
+/// routing, but the message is not available at [`LimitedSender::check`] time.
+pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
+    checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
+    replica: SplitOrigin,
+    forwarder: F,
+    recipients: Recipients<P>,
+
+    _phantom: std::marker::PhantomData<E>,
+}
+
+impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
+    for SplitCheckedSender<'a, P, E, F>
+{
+    type PublicKey = P;
+    type Error = Error;
 
     async fn send(
-        &mut self,
-        recipients: Recipients<P>,
+        self,
         message: Bytes,
         priority: bool,
-    ) -> Result<Vec<P>, Error> {
-        let recipients = (self.forwarder)(self.replica, &recipients, &message);
-        let Some(recipients) = recipients else {
-            // If the forwarder returns None, drop the message
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        // Determine the set of recipients that will receive the message
+        let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
             return Ok(Vec::new());
         };
-        self.inner.send(recipients, message, priority).await
+
+        // Extract the inner sender and send directly with the new recipients
+        //
+        // While SplitForwarder does not enforce any relationship between the original recipients
+        // and the new recipients, it is typically some subset of the original recipients. This
+        // means we may over-rate limit some recipients (who are never actually sent a message here) but
+        // we prefer this to not providing feedback at all (we would have to skip check entirely).
+        self.checked
+            .into_inner()
+            .send(recipients, message, priority)
+            .await
     }
 }
 

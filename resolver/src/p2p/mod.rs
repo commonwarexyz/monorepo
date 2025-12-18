@@ -7,10 +7,9 @@
 //! initiation and cancellation of fetch requests via the `Resolver` interface.
 //!
 //! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
-//! to other peers and processing their responses. It uses [commonware_p2p::utils::requester] to
-//! select peers based on performance, retrying with another peer if one fails or provides invalid
-//! data. Requests persist until canceled or fulfilled, delivering data to the `Consumer` for
-//! verification.
+//! to other peers and processing their responses. It selects peers based on performance, retrying
+//! with another peer if one fails or provides invalid data. Requests persist until canceled or
+//! fulfilled, delivering data to the `Consumer` for verification.
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
 //! and returns `true` if valid, completing the fetch, or `false` to retry.
@@ -38,7 +37,7 @@
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
-//! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
+//! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
 use commonware_utils::Span;
@@ -117,6 +116,23 @@ mod tests {
             Receiver<PublicKey>,
         )>,
     ) {
+        setup_network_and_peers_with_rate_limit(context, peer_seeds, Quota::per_second(RATE_LIMIT))
+            .await
+    }
+
+    async fn setup_network_and_peers_with_rate_limit(
+        context: &deterministic::Context,
+        peer_seeds: &[u64],
+        rate_limit: Quota,
+    ) -> (
+        Oracle<PublicKey, deterministic::Context>,
+        Vec<PrivateKey>,
+        Vec<PublicKey>,
+        Vec<(
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        )>,
+    ) {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -139,7 +155,7 @@ mod tests {
         for peer in &peers {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register(0, Quota::per_second(RATE_LIMIT))
+                .register(0, rate_limit)
                 .await
                 .unwrap();
             connections.push((sender, receiver));
@@ -186,12 +202,9 @@ mod tests {
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
-                requester_config: commonware_p2p::utils::requester::Config {
-                    me: Some(public_key),
-                    rate_limit: Quota::per_second(RATE_LIMIT),
-                    initial: INITIAL_DURATION,
-                    timeout: TIMEOUT,
-                },
+                me: Some(public_key),
+                initial: INITIAL_DURATION,
+                timeout: TIMEOUT,
                 fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                 priority_requests: false,
                 priority_responses: false,
@@ -1397,6 +1410,276 @@ mod tests {
                     assert_eq!(value, Bytes::from("data for key 6"));
                 }
                 Event::Failed(_) => unreachable!(),
+            }
+        });
+    }
+
+    /// Tests that when a peer is rate-limited, the fetcher spills over to another peer.
+    /// With 2 peers and rate limit of 1/sec each, 2 requests issued simultaneously should
+    /// both complete immediately (one to each peer) without waiting for rate limit reset.
+    #[test_traced]
+    fn test_rate_limit_spillover() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|context| async move {
+            // Use a very restrictive rate limit: 1 request per second per peer
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2, 3],
+                    Quota::per_second(NZU32!(1)),
+                )
+                .await;
+
+            // Add links between peer 1 and both peer 2 and peer 3
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Both peer 2 and peer 3 have the same data
+            let mut prod2 = Producer::default();
+            let mut prod3 = Producer::default();
+            prod2.insert(Key(0), Bytes::from("data for key 0"));
+            prod2.insert(Key(1), Bytes::from("data for key 1"));
+            prod3.insert(Key(0), Bytes::from("data for key 0"));
+            prod3.insert(Key(1), Bytes::from("data for key 1"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Set up peer 1 (the requester)
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            // Set up peer 2 (has data)
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Set up peer 3 (also has data)
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+            let start = context.current();
+
+            // Issue 2 fetch requests rapidly
+            // With rate limit of 1/sec per peer and 2 peers, both should complete
+            // immediately via spill-over (one request to each peer)
+            mailbox1.fetch(Key(0)).await;
+            mailbox1.fetch(Key(1)).await;
+
+            // Collect results
+            let mut results = HashMap::new();
+            for _ in 0..2 {
+                let event = cons_out1.next().await.unwrap();
+                match event {
+                    Event::Success(key, value) => {
+                        results.insert(key.clone(), value);
+                    }
+                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
+                }
+            }
+
+            // Verify both keys were fetched successfully
+            assert_eq!(results.len(), 2);
+            assert_eq!(
+                results.get(&Key(0)).unwrap(),
+                &Bytes::from("data for key 0")
+            );
+            assert_eq!(
+                results.get(&Key(1)).unwrap(),
+                &Bytes::from("data for key 1")
+            );
+
+            // Verify it completed quickly (well under 1 second) - proves spill-over worked
+            // Without spill-over, the second request would wait ~1 second for rate limit reset
+            let elapsed = context.current().duration_since(start).unwrap();
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "Expected quick completion via spill-over, but took {elapsed:?}"
+            );
+        });
+    }
+
+    /// Tests that rate limiting causes retries to eventually succeed after the rate limit resets.
+    /// This test uses a single peer with a restrictive rate limit and verifies that
+    /// fetches eventually complete after waiting for the rate limit to reset.
+    #[test_traced]
+    fn test_rate_limit_retry_after_reset() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|context| async move {
+            // Use a restrictive rate limit: 1 request per second
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2],
+                    Quota::per_second(NZU32!(1)),
+                )
+                .await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Peer 2 has data for multiple keys
+            let mut prod2 = Producer::default();
+            prod2.insert(Key(1), Bytes::from("data for key 1"));
+            prod2.insert(Key(2), Bytes::from("data for key 2"));
+            prod2.insert(Key(3), Bytes::from("data for key 3"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+            let start = context.current();
+
+            // Issue 3 fetch requests to a single peer with rate limit of 1/sec
+            // Only 1 can be sent immediately, the others must wait for rate limit reset
+            mailbox1.fetch(Key(1)).await;
+            mailbox1.fetch(Key(2)).await;
+            mailbox1.fetch(Key(3)).await;
+
+            // All 3 should eventually succeed (after rate limit resets)
+            let mut results = HashMap::new();
+            for _ in 0..3 {
+                let event = cons_out1.next().await.unwrap();
+                match event {
+                    Event::Success(key, value) => {
+                        results.insert(key.clone(), value);
+                    }
+                    Event::Failed(key) => panic!("Fetch failed for key {key:?}"),
+                }
+            }
+
+            assert_eq!(results.len(), 3);
+            for i in 1..=3 {
+                assert_eq!(
+                    results.get(&Key(i)).unwrap(),
+                    &Bytes::from(format!("data for key {}", i))
+                );
+            }
+
+            // Verify it took significant time due to rate limiting
+            // With 3 requests at 1/sec to a single peer, requests 2 and 3 must wait
+            // for rate limit resets (~1 second each), so total should be > 2 seconds
+            let elapsed = context.current().duration_since(start).unwrap();
+            assert!(
+                elapsed > Duration::from_secs(2),
+                "Expected rate limiting to cause delay > 2s, but took {elapsed:?}"
+            );
+        });
+    }
+
+    /// Tests that the resolver never sends fetch requests to itself (me exclusion).
+    /// Even when the local peer has the data in its producer, it should fetch from
+    /// another peer instead.
+    #[test_traced]
+    fn test_self_exclusion() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("shared data");
+
+            // Both peers have the data - peer 1 (requester) and peer 2
+            let mut prod1 = Producer::default();
+            prod1.insert(key.clone(), data.clone());
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Set up peer 1 with `me` set - it has the data but should NOT fetch from itself
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                prod1, // peer 1 has the data
+            )
+            .await;
+
+            // Set up peer 2 - also has the data
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Fetch the key - should get it from peer 2, not from self
+            mailbox1.fetch(key.clone()).await;
+
+            // Should succeed (from peer 2)
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, data);
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }

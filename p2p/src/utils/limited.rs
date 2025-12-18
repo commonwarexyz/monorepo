@@ -1,6 +1,6 @@
-//! Rate-limited [`Sender`] wrapper.
+//! Rate-limited [`UnlimitedSender`] wrapper.
 
-use crate::{Recipients, Sender};
+use crate::{Recipients, UnlimitedSender};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
@@ -24,11 +24,11 @@ pub trait Connected: Clone + Send + Sync + 'static {
     fn subscribe(&mut self) -> impl Future<Output = ring::Receiver<Vec<Self::PublicKey>>> + Send;
 }
 
-/// A wrapper around a [`Sender`] that provides rate limiting with retry-time feedback.
+/// A wrapper around a [`UnlimitedSender`] that provides rate limiting with retry-time feedback.
 pub struct LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnlimitedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
@@ -41,7 +41,7 @@ where
 impl<E, S, P> Clone for LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnlimitedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn clone(&self) -> Self {
@@ -58,7 +58,7 @@ where
 impl<E, S, P> fmt::Debug for LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnlimitedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,7 +71,7 @@ where
 impl<E, S, P> LimitedSender<E, S, P>
 where
     E: Clock,
-    S: Sender,
+    S: UnlimitedSender,
     P: Connected<PublicKey = S::PublicKey>,
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
@@ -175,17 +175,29 @@ where
     )
 }
 
-/// An exclusive reference to an [`Sender`] with a pre-checked list of
+/// An exclusive reference to an [`UnlimitedSender`] with a pre-checked list of
 /// recipients that are not currently rate-limited.
 ///
 /// A [`CheckedSender`] can only be acquired via [`LimitedSender::check`].
 #[derive(Debug)]
-pub struct CheckedSender<'a, S: Sender> {
+pub struct CheckedSender<'a, S: UnlimitedSender> {
     sender: &'a mut S,
     recipients: Recipients<S::PublicKey>,
 }
 
-impl<'a, S: Sender> crate::CheckedSender for CheckedSender<'a, S> {
+impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
+    /// Extracts the inner [`UnlimitedSender`] reference.
+    ///
+    /// # Warning
+    ///
+    /// Rate limiting has already been applied to the original recipients. Any
+    /// messages sent via the extracted sender will bypass the rate limiter.
+    pub(crate) fn into_inner(self) -> &'a mut S {
+        self.sender
+    }
+}
+
+impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = S::Error;
 
@@ -232,7 +244,7 @@ mod tests {
         }
     }
 
-    impl Sender for MockSender {
+    impl UnlimitedSender for MockSender {
         type Error = MockError;
         type PublicKey = PublicKey;
 
