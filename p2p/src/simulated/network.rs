@@ -7,8 +7,8 @@ use super::{
     Error,
 };
 use crate::{
-    utils::limited::{Connected, LimitedSender},
-    Channel, LimitedSender as LimitedSenderTrait, Message, Recipients,
+    utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+    Channel, Message, Recipients,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
@@ -938,15 +938,15 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
-        // Defer forwarder call to send() time when message is available.
-        // Do a preliminary rate limit check with the original recipients.
-        // The actual routing may differ based on message content.
-        let _ = self.inner.check(recipients.clone()).await?;
         Ok(SplitCheckedSender {
-            inner: &mut self.inner,
+            // Perform a rate limit check with the entire set of original recipients although
+            // the forwarder may filter these (based on message content) during send.
+            checked: self.inner.limited_sender.check(recipients.clone()).await?,
             replica: self.replica,
             forwarder: self.forwarder.clone(),
             recipients,
+
+            _phantom: std::marker::PhantomData,
         })
     }
 }
@@ -956,10 +956,12 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 /// This is necessary because [`SplitForwarder`] may examine message content to determine
 /// routing, but the message is not available at [`LimitedSender::check`] time.
 pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
-    inner: &'a mut Sender<P, E>,
+    checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
     replica: SplitOrigin,
     forwarder: F,
     recipients: Recipients<P>,
+
+    _phantom: std::marker::PhantomData<E>,
 }
 
 impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
@@ -969,22 +971,23 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     type Error = Error;
 
     async fn send(
-        self,
+        mut self,
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        // Apply forwarder with actual message content
-        let routed_recipients = (self.forwarder)(self.replica, &self.recipients, &message);
-        let Some(routed_recipients) = routed_recipients else {
-            // Forwarder decided to drop this message
+        // Determine the set of recipients that will receive the message
+        let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
             return Ok(Vec::new());
         };
 
-        // Check rate limit and send with routed recipients
-        match self.inner.check(routed_recipients).await {
-            Ok(checked) => checked.send(message, priority).await,
-            Err(_) => Ok(Vec::new()), // All routed recipients are rate-limited
-        }
+        // Update recipients in checked and send
+        //
+        // While SplitForwarder does not enforce any relationship between the original recipients
+        // and the new recipients, it is typically some subset of the original recipients. This
+        // means we may over-rate limit some recipients (who are never actually sent a message here) but
+        // we prefer this to not providing feedback at all (we would have to skip check entirely).
+        self.checked.modify_recipients(recipients);
+        self.checked.send(message, priority).await
     }
 }
 
