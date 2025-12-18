@@ -580,9 +580,10 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
-        Runner as _,
+        KeyedRateLimiter, Quota, Runner as _, RwLock,
     };
-    use std::{fmt, time::Duration};
+    use commonware_utils::NZU32;
+    use std::{fmt, sync::Arc, time::Duration};
 
     // Mock error type for testing
     #[derive(Debug)]
@@ -686,6 +687,51 @@ mod tests {
         ) -> Result<Self::Checked<'a>, SystemTime> {
             Ok(CheckedSender {
                 sender: &mut self.0,
+                recipients,
+            })
+        }
+    }
+
+    // Mock sender that rate-limits per peer
+    #[derive(Clone)]
+    struct LimitedMockSender<E: Clock> {
+        inner: SuccessMockSenderInner,
+        rate_limiter: Arc<RwLock<KeyedRateLimiter<Ed25519PublicKey, E>>>,
+    }
+
+    impl<E: Clock> LimitedMockSender<E> {
+        fn new(quota: Quota, clock: E) -> Self {
+            Self {
+                inner: SuccessMockSenderInner,
+                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::hashmap_with_clock(
+                    quota, clock,
+                ))),
+            }
+        }
+    }
+
+    impl<E: Clock> LimitedSender for LimitedMockSender<E> {
+        type PublicKey = Ed25519PublicKey;
+        type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
+
+        async fn check<'a>(
+            &'a mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'a>, SystemTime> {
+            let peer = match &recipients {
+                Recipients::One(p) => p,
+                _ => unimplemented!(),
+            };
+
+            {
+                let rate_limiter = self.rate_limiter.write().await;
+                if let Err(not_until) = rate_limiter.check_key(peer) {
+                    return Err(not_until.earliest_possible());
+                }
+            }
+
+            Ok(CheckedSender {
+                sender: &mut self.inner,
                 recipients,
             })
         }
@@ -1617,6 +1663,69 @@ mod tests {
             // clear_targets() remaining key
             fetcher.clear_targets(&MockKey(2));
             assert!(fetcher.targets.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_skips_keys_with_rate_limited_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, LimitedMockSender<Context>> =
+                Fetcher::new(context.clone(), config);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let quota = Quota::per_second(NZU32!(1));
+            let mut sender = WrappedSender::new(LimitedMockSender::new(quota, context.clone()));
+
+            // Add three keys with different targets:
+            // - MockKey(1) targeted to peer1
+            // - MockKey(2) targeted to peer1 (same peer, will be rate-limited after first)
+            // - MockKey(3) targeted to peer2
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            fetcher.add_targets(MockKey(3), [peer2.clone()]);
+            fetcher.add_ready(MockKey(1));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(2));
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.add_ready(MockKey(3));
+
+            // First fetch: should pick MockKey(1) targeting peer1
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(!fetcher.pending.contains(&MockKey(1))); // MockKey(1) was fetched
+
+            // Second fetch: MockKey(2) is blocked (peer1 rate-limited), should skip to MockKey(3)
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(fetcher.pending.contains(&MockKey(2))); // MockKey(2) is still pending
+            assert!(!fetcher.pending.contains(&MockKey(3))); // MockKey(3) was fetched
+
+            // Third fetch: only MockKey(2) remains, but peer1 is still rate-limited
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 2); // No change
+            assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
+            assert!(fetcher.waiter.is_some()); // Waiter set
+
+            // Wait for rate limit to reset
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Now MockKey(2) can be fetched
+            fetcher.fetch(&mut sender).await;
+            assert_eq!(fetcher.len_active(), 3);
+            assert_eq!(fetcher.len_pending(), 0);
         });
     }
 
