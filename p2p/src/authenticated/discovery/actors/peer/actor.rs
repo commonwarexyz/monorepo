@@ -333,7 +333,10 @@ mod tests {
         Mailbox,
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer,
+    };
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
     use commonware_stream::{self, Config as StreamConfig};
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
@@ -342,8 +345,6 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
     };
-
-    type PublicKey = commonware_cryptography::ed25519::PublicKey;
 
     const NAMESPACE: &[u8] = b"test_peer_actor";
     const MAX_MESSAGE_SIZE: usize = 64 * 1024;
