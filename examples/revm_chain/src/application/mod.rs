@@ -1,18 +1,13 @@
 //! Chain application logic (block production and verification).
 
-mod actor;
-mod block_sync;
+mod app;
 mod handle;
-mod message;
-mod store;
+mod reporters;
+mod state;
 
-pub use actor::Application;
 pub use handle::Handle;
-pub(crate) use message::ApplicationRequest;
 
-#[derive(Clone, Copy, Debug)]
-/// Decoding limits for blocks exchanged out-of-band.
-pub struct BlockCodecCfg {
-    pub max_txs: usize,
-    pub max_calldata_bytes: usize,
-}
+pub(crate) use app::RevmApplication;
+pub(crate) use reporters::{FinalizedReporter, SeedReporter};
+pub(crate) use state::Shared;
+

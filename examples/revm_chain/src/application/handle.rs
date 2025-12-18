@@ -1,81 +1,40 @@
-//! Handle for interacting with the application actor.
+//! Handle for interacting with the application state.
 //!
-//! The handle is used by the deterministic simulation harness to:
-//! - inject out-of-band blocks, and
+//! The deterministic simulation harness uses this handle to:
+//! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 
-use super::ApplicationRequest;
+use super::state::Shared;
 use crate::{
-    consensus::{ConsensusDigest, PublicKey},
-    types::StateRoot,
+    consensus::ConsensusDigest,
+    types::{StateRoot, Tx},
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
-use bytes::Bytes;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt as _,
-};
 
 #[derive(Clone)]
-/// Handle to a running application actor.
 pub struct Handle {
-    sender: mpsc::Sender<ApplicationRequest>,
+    state: Shared,
 }
 
 impl Handle {
-    pub(crate) const fn new(sender: mpsc::Sender<ApplicationRequest>) -> Self {
-        Self { sender }
+    pub(crate) const fn new(state: Shared) -> Self {
+        Self { state }
     }
 
-    /// Deliver an encoded block from `from` to this node's application.
-    pub async fn deliver_block(&self, from: PublicKey, bytes: Bytes) {
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(ApplicationRequest::BlockReceived { from, bytes })
-            .await;
+    pub async fn submit_tx(&self, tx: Tx) -> bool {
+        self.state.submit_tx(tx).await
     }
 
-    /// Submit a transaction into this node's mempool.
-    pub async fn submit_tx(&self, tx: crate::Tx) -> bool {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(ApplicationRequest::SubmitTx { tx, response })
-            .await;
-        receiver.await.unwrap_or(false)
-    }
-
-    /// Query an account balance at `digest`.
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(ApplicationRequest::QueryBalance {
-                digest,
-                address,
-                response,
-            })
-            .await;
-        receiver.await.unwrap_or(None)
+        self.state.query_balance(digest, address).await
     }
 
-    /// Query the `state_root` commitment at `digest`.
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(ApplicationRequest::QueryStateRoot { digest, response })
-            .await;
-        receiver.await.unwrap_or(None)
+        self.state.query_state_root(digest).await
     }
 
-    /// Query the stored consensus seed hash at `digest`.
     pub async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
-        let (response, receiver) = oneshot::channel();
-        let mut sender = self.sender.clone();
-        let _ = sender
-            .send(ApplicationRequest::QuerySeed { digest, response })
-            .await;
-        receiver.await.unwrap_or(None)
+        self.state.query_seed(digest).await
     }
 }
+

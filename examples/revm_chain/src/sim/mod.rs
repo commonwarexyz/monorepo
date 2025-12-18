@@ -25,6 +25,7 @@ pub(super) const CHANNEL_VOTES: u64 = 0;
 pub(super) const CHANNEL_CERTS: u64 = 1;
 pub(super) const CHANNEL_RESOLVER: u64 = 2;
 pub(super) const CHANNEL_BLOCKS: u64 = 3;
+pub(super) const CHANNEL_BACKFILL: u64 = 4;
 pub(super) const BLOCK_CODEC_MAX_TXS: usize = 64;
 pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;
 pub(super) const P2P_LINK_LATENCY_MS: u64 = 5;
