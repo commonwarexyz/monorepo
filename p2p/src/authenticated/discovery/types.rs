@@ -35,12 +35,14 @@ pub enum Error {
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
+/// Prefix byte used to identify a [Payload] with variant Greeting.
+const GREETING_PREFIX: u8 = 0;
 /// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 0;
+const BIT_VEC_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 1;
+const PEERS_PREFIX: u8 = 2;
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = 2;
+const DATA_PREFIX: u8 = 3;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
@@ -63,6 +65,13 @@ pub struct PayloadConfig {
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
+    /// Initial greeting message containing the sender's peer information.
+    ///
+    /// This is sent exactly once when a connection is established to introduce
+    /// the peer. Unlike `Peers`, this is rate-limited separately to prevent
+    /// the greeting from consuming quota meant for subsequent peer updates.
+    Greeting(Info<C>),
+
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
@@ -78,6 +87,7 @@ pub enum Payload<C: PublicKey> {
 impl<C: PublicKey> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
+            Self::Greeting(info) => info.encode_size(),
             Self::BitVec(bit_vec) => bit_vec.encode_size(),
             Self::Peers(peers) => peers.encode_size(),
             Self::Data(data) => data.encode_size(),
@@ -88,6 +98,10 @@ impl<C: PublicKey> EncodeSize for Payload<C> {
 impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::Greeting(info) => {
+                GREETING_PREFIX.write(buf);
+                info.write(buf);
+            }
             Self::BitVec(bit_vec) => {
                 BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
@@ -116,6 +130,10 @@ impl<C: PublicKey> Read for Payload<C> {
 
         let payload_type = <u8>::read(buf)?;
         match payload_type {
+            GREETING_PREFIX => {
+                let info = Info::<C>::read(buf)?;
+                Ok(Self::Greeting(info))
+            }
             BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
                 Ok(Self::BitVec(bit_vec))
@@ -143,11 +161,12 @@ where
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.int_in_range(0..=2)?;
+        let choice = u.int_in_range(0..=3)?;
         match choice {
-            0 => Ok(Self::BitVec(u.arbitrary()?)),
-            1 => Ok(Self::Peers(u.arbitrary()?)),
-            2 => Ok(Self::Data(u.arbitrary()?)),
+            0 => Ok(Self::Greeting(u.arbitrary()?)),
+            1 => Ok(Self::BitVec(u.arbitrary()?)),
+            2 => Ok(Self::Peers(u.arbitrary()?)),
+            3 => Ok(Self::Data(u.arbitrary()?)),
             _ => unreachable!(),
         }
     }
@@ -346,6 +365,34 @@ impl<C: PublicKey> InfoVerifier<C> {
         }
     }
 
+    /// Validate a single peer info entry.
+    fn validate_info(&self, clock: &impl Clock, info: &Info<C>) -> Result<(), Error> {
+        // Check if IP is allowed
+        #[allow(unstable_name_collisions)]
+        if !self.allow_private_ips && !info.socket.ip().is_global() {
+            return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+        }
+
+        // Check if peer is us
+        if info.public_key == self.me {
+            return Err(Error::ReceivedSelf);
+        }
+
+        // Check if timestamp is too far into the future
+        if Duration::from_millis(info.timestamp)
+            > clock.current().epoch().saturating_add(self.synchrony_bound)
+        {
+            return Err(Error::SynchronyBound);
+        }
+
+        // Check if signature is valid
+        if !info.verify(self.ip_namespace.as_ref()) {
+            return Err(Error::InvalidSignature);
+        }
+
+        Ok(())
+    }
+
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
@@ -359,31 +406,17 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
-            // Check if IP is allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
-            // Check if peer is us
-            if info.public_key == self.me {
-                return Err(Error::ReceivedSelf);
-            }
-
-            // Check if timestamp is too far into the future
-            if Duration::from_millis(info.timestamp)
-                > clock.current().epoch().saturating_add(self.synchrony_bound)
-            {
-                return Err(Error::SynchronyBound);
-            }
-
-            // Check if signature is valid
-            if !info.verify(self.ip_namespace.as_ref()) {
-                return Err(Error::InvalidSignature);
-            }
+            self.validate_info(clock, info)?;
         }
 
         Ok(())
+    }
+
+    /// Handle an incoming greeting message.
+    ///
+    /// Returns an error if the info can be considered malformed.
+    pub fn validate_greeting(&self, clock: &impl Clock, info: &Info<C>) -> Result<(), Error> {
+        self.validate_info(clock, info)
     }
 }
 
@@ -448,6 +481,18 @@ mod tests {
             max_data_length: 100,
         };
 
+        // Test Greeting
+        let original = signed_peer_info();
+        let encoded = Payload::Greeting(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Greeting(g)) => g,
+            _ => panic!(),
+        };
+        assert_eq!(original.socket, decoded.socket);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.public_key, decoded.public_key);
+        assert_eq!(original.signature, decoded.signature);
+
         // Test BitVec
         let original = BitVec {
             index: 1234,
@@ -494,7 +539,8 @@ mod tests {
             max_peers: 10,
             max_data_length: 100,
         };
-        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        // Prefix 4 is invalid (valid prefixes are 0-3)
+        let invalid_payload = [4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }

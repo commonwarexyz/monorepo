@@ -143,6 +143,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             None => return Err(Error::PeerDisconnected),
                         };
                         let (metric, payload) = match msg {
+                            Message::Greeting(info) =>
+                                (metrics::Message::new_greeting(&peer), types::Payload::Greeting(info)),
                             Message::BitVec(bit_vec) =>
                                 (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                             Message::Peers(peers) =>
@@ -177,6 +179,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                     RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
+
+                // Track whether we've received a greeting (should only receive once)
+                let mut greeting_received = false;
+
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
@@ -200,19 +206,22 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 
                     // Update metrics
                     let metric = match &msg {
-                        types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
-                        types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
-                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
+                        types::Payload::Greeting(_) => metrics::Message::new_greeting(&peer),
+                        types::Payload::BitVec(_) => metrics::Message::new_bit_vec(&peer),
+                        types::Payload::Peers(_) => metrics::Message::new_peers(&peer),
+                        types::Payload::Data(data) => metrics::Message::new_data(&peer, data.channel),
                     };
-                    self.received_messages.get_or_create(metric).inc();
+                    self.received_messages.get_or_create(&metric).inc();
 
                     // Wait until rate limiter allows us to process the message
+                    // Note: Greeting is not rate-limited since it should only be received once
                     let rate_limiter = match &msg {
-                        types::Payload::BitVec(_) => &bit_vec_rate_limiter,
-                        types::Payload::Peers(_) => &peers_rate_limiter,
+                        types::Payload::Greeting(_) => None,
+                        types::Payload::BitVec(_) => Some(&bit_vec_rate_limiter),
+                        types::Payload::Peers(_) => Some(&peers_rate_limiter),
                         types::Payload::Data(data) => {
                             match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => rate_limit,
+                                Some(rate_limit) => Some(rate_limit),
                                 None => { // Treat unknown channels as invalid
                                     debug!(?peer, channel = data.channel, "invalid channel");
                                     self.received_messages
@@ -223,16 +232,32 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             }
                         }
                     };
-                    if let Err(wait_until) = rate_limiter.check() {
-                        self.rate_limited
-                            .get_or_create(metric)
-                            .inc();
-                        let wait_duration = wait_until.wait_time_from(context.now());
-                        context.sleep(wait_duration).await;
+                    if let Some(rate_limiter) = rate_limiter {
+                        if let Err(wait_until) = rate_limiter.check() {
+                            self.rate_limited
+                                .get_or_create(&metric)
+                                .inc();
+                            let wait_duration = wait_until.wait_time_from(context.now());
+                            context.sleep(wait_duration).await;
+                        }
                     }
 
 
                     match msg {
+                        types::Payload::Greeting(info) => {
+                            // Ensure we only process greeting once
+                            if greeting_received {
+                                debug!(?peer, "duplicate greeting received");
+                                continue;
+                            }
+                            greeting_received = true;
+
+                            // Verify greeting info is valid
+                            self.info_verifier.validate_greeting(&context, &info).map_err(Error::Types)?;
+
+                            // Send greeting info to tracker
+                            tracker.peers(vec![info]);
+                        }
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
                             tracker.bit_vec(bit_vec, self.mailbox.clone());

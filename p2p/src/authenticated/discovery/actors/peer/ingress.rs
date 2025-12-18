@@ -4,6 +4,9 @@ use commonware_cryptography::PublicKey;
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
 pub enum Message<C: PublicKey> {
+    /// Send a greeting message containing our [types::Info] to the peer.
+    Greeting(types::Info<C>),
+
     /// Send a bit vector to the peer.
     BitVec(types::BitVec),
 
@@ -15,6 +18,10 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> Mailbox<Message<C>> {
+    pub async fn greeting(&mut self, info: types::Info<C>) {
+        let _ = self.send(Message::Greeting(info)).await;
+    }
+
     pub async fn bit_vec(&mut self, bit_vec: types::BitVec) {
         let _ = self.send(Message::BitVec(bit_vec)).await;
     }
