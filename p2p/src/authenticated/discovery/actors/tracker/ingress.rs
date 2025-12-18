@@ -1,8 +1,9 @@
 use super::Reservation;
-// Re-export for use in peer actor
-pub use crate::authenticated::discovery::actors::peer;
 use crate::authenticated::{
-    discovery::{actors::tracker::Metadata, types},
+    discovery::{
+        actors::{peer, tracker::Metadata},
+        types,
+    },
     mailbox::UnboundedMailbox,
     Mailbox,
 };
