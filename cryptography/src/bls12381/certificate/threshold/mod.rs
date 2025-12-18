@@ -401,6 +401,7 @@ mod macros {
     ///   and verification. For simple protocols, `Vec<u8>` or `Bytes` can be used directly.
     ///   For protocols with multiple message types a custom struct can pre-compute all variants.
     ///
+    /// # TODO: fix these docs
     /// # Example
     /// ```ignore
     /// // For simple protocols with a single namespace:
