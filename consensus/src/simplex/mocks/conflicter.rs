@@ -61,12 +61,12 @@ where
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
                     let n = Notarize::<S, _>::sign(&self.scheme, proposal).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
                     let n = Notarize::<S, _>::sign(&self.scheme, notarize.proposal).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -75,12 +75,12 @@ where
                     let proposal =
                         Proposal::new(finalize.round(), finalize.proposal.parent, payload);
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize provided digest
                     let f = Finalize::<S, _>::sign(&self.scheme, finalize.proposal).unwrap();
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

@@ -550,7 +550,7 @@ where
                                         debug!(?commitment, "block missing on request");
                                         continue;
                                     };
-                                    let _ = response.send(block.encode().into());
+                                    let _ = response.send(block.encode().freeze());
                                 }
                                 Request::Finalized { height } => {
                                     // Get finalization
@@ -566,7 +566,7 @@ where
                                     };
 
                                     // Send finalization
-                                    let _ = response.send((finalization, block).encode().into());
+                                    let _ = response.send((finalization, block).encode().freeze());
                                 }
                                 Request::Notarized { round } => {
                                     // Get notarization
@@ -581,7 +581,7 @@ where
                                         debug!(?commitment, "block missing on request");
                                         continue;
                                     };
-                                    let _ = response.send((notarization, block).encode().into());
+                                    let _ = response.send((notarization, block).encode().freeze());
                                 }
                             }
                         },
