@@ -41,8 +41,6 @@ pub struct AttributableReporter<
     rng: E,
     /// Signing scheme for verification
     scheme: S,
-    /// Namespace for domain separation in verification
-    namespace: Vec<u8>,
     /// Inner reporter that receives filtered activities
     reporter: R,
     /// Whether to always verify peer activities
@@ -57,11 +55,10 @@ impl<
     > AttributableReporter<E, S, D, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub const fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, reporter: R, verify: bool) -> Self {
         Self {
             rng,
             scheme,
-            namespace,
             reporter,
             verify,
         }
@@ -79,10 +76,7 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify
-            && !activity.verified()
-            && !activity.verify(&mut self.rng, &self.scheme, &self.namespace)
-        {
+        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.scheme) {
             // Drop unverified peer activity
             return;
         }
@@ -174,25 +168,25 @@ mod tests {
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
         let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { verifier, .. } = ed25519::fixture(NAMESPACE, &mut rng, 4);
+
+        // Create a scheme with wrong namespace to generate invalid signatures
         let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+            schemes: wrong_schemes,
+            ..
+        } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
         let mock = MockReporter::new();
-        let mut reporter =
-            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
 
-        // Create an invalid activity (wrong namespace)
+        // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
-        let attestation = schemes[1]
-            .sign::<Sha256Digest>(
-                &[], // Invalid namespace
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+        let attestation = wrong_schemes[1]
+            .sign::<Sha256Digest>(Subject::Notarize {
+                proposal: &proposal,
+            })
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
@@ -210,9 +204,13 @@ mod tests {
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
         let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { verifier, .. } = ed25519::fixture(NAMESPACE, &mut rng, 4);
+
+        // Create a scheme with wrong namespace to generate invalid signatures
         let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+            schemes: wrong_schemes,
+            ..
+        } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -220,20 +218,16 @@ mod tests {
         let mut reporter = AttributableReporter::new(
             rng,
             verifier,
-            NAMESPACE.to_vec(),
             mock.clone(),
             false, // Disable verification
         );
 
-        // Create an invalid activity (wrong namespace)
+        // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
-        let attestation = schemes[1]
-            .sign::<Sha256Digest>(
-                &[], // Invalid namespace
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+        let attestation = wrong_schemes[1]
+            .sign::<Sha256Digest>(Subject::Notarize {
+                proposal: &proposal,
+            })
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
@@ -255,7 +249,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
+        } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -263,8 +257,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter =
-            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
 
         // Create a certificate from multiple validators
         let proposal = create_proposal(0, 1);
@@ -272,12 +265,9 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign::<Sha256Digest>(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign::<Sha256Digest>(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .expect("signing failed")
             })
             .collect();
@@ -306,7 +296,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
+        } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -314,18 +304,14 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter =
-            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
         let attestation = schemes[1]
-            .sign::<Sha256Digest>(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+            .sign::<Sha256Digest>(Subject::Notarize {
+                proposal: &proposal,
+            })
             .expect("signing failed");
 
         let notarize = Notarize {
@@ -346,23 +332,19 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(NAMESPACE, &mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
         let mock = MockReporter::new();
-        let mut reporter =
-            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
         let attestation = schemes[1]
-            .sign::<Sha256Digest>(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+            .sign::<Sha256Digest>(Subject::Notarize {
+                proposal: &proposal,
+            })
             .expect("signing failed");
 
         let notarize = Notarize {

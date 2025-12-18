@@ -19,7 +19,6 @@ use std::{collections::HashSet, sync::Arc};
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
-    pub namespace: Vec<u8>,
     pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
@@ -34,7 +33,6 @@ pub struct Equivocator<
     context: ContextCell<E>,
     scheme: S,
     elector: L::Elector,
-    namespace: Vec<u8>,
     epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
     hasher: H,
@@ -51,7 +49,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             epoch: cfg.epoch,
             relay: cfg.relay,
             hasher: cfg.hasher,
@@ -147,8 +144,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             self.relay.broadcast(me, (digest_b, payload_b.into())).await;
 
             // Notarize proposal A and send it to victim only
-            let notarize_a = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_a)
-                .expect("sign failed");
+            let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");
             vote_sender
                 .send(
                     Recipients::One(victim.clone()),
@@ -159,8 +155,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .expect("send failed");
 
             // Notarize proposal B and send it to everyone else
-            let notarize_b = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_b)
-                .expect("sign failed");
+            let notarize_b = Notarize::<S, _>::sign(&self.scheme, proposal_b).expect("sign failed");
             let non_victims: Vec<_> = self
                 .scheme
                 .participants()

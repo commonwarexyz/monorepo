@@ -36,7 +36,6 @@ pub struct Actor<
     blocker: Option<B>,
 
     epoch: Epoch,
-    namespace: Vec<u8>,
     mailbox_size: usize,
     fetch_timeout: Duration,
 
@@ -61,7 +60,6 @@ impl<
                 blocker: Some(cfg.blocker),
 
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
@@ -160,7 +158,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !notarization.verify(&mut self.context, &self.scheme) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -180,7 +178,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !finalization.verify(&mut self.context, &self.scheme) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -200,7 +198,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

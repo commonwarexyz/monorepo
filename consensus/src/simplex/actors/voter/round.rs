@@ -489,7 +489,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(namespace, &mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -516,7 +516,7 @@ mod tests {
         let notarization_votes: Vec<_> = schemes
             .iter()
             .skip(1)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
@@ -542,7 +542,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(namespace, &mut rng, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -569,7 +569,7 @@ mod tests {
         let finalization_votes: Vec<_> = schemes
             .iter()
             .skip(1)
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
             Finalization::from_finalizes(&verifier, finalization_votes.iter()).unwrap();
@@ -583,7 +583,7 @@ mod tests {
         let notarization_votes: Vec<_> = schemes
             .iter()
             .skip(1)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
@@ -605,7 +605,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(namespace, &mut rng, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -621,7 +621,7 @@ mod tests {
         // Add matching notarization certificate
         let notarization_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
@@ -633,10 +633,10 @@ mod tests {
     #[test]
     fn replay_message_sets_broadcast_flags() {
         let mut rng = StdRng::seed_from_u64(2029);
+        let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
-        let namespace = b"ns";
+        } = ed25519::fixture(namespace, &mut rng, 4);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
@@ -646,31 +646,28 @@ mod tests {
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([40u8; 32]));
 
         // Create notarization
-        let notarize_local =
-            Notarize::sign(&local_scheme, namespace, proposal.clone()).expect("notarize");
+        let notarize_local = Notarize::sign(&local_scheme, proposal.clone()).expect("notarize");
         let notarize_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
             Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
 
         // Create nullification
-        let nullify_local =
-            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round).expect("nullify");
+        let nullify_local = Nullify::sign::<Sha256Digest>(&local_scheme, round).expect("nullify");
         let nullify_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, round).expect("nullify"))
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
         let nullification =
             Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
 
         // Create finalize
-        let finalize_local =
-            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
+        let finalize_local = Finalize::sign(&local_scheme, proposal.clone()).expect("finalize");
         let finalize_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization =
             Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
@@ -703,8 +700,8 @@ mod tests {
     #[test]
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = StdRng::seed_from_u64(2029);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
         let namespace = b"ns";
+        let Fixture { schemes, .. } = ed25519::fixture(namespace, &mut rng, 4);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
@@ -714,7 +711,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
 
         // Create finalized vote
-        let finalize_local = Finalize::sign(&local_scheme, namespace, proposal).expect("finalize");
+        let finalize_local = Finalize::sign(&local_scheme, proposal).expect("finalize");
 
         // Replay finalize and verify nullify is blocked
         let mut round = Round::new(local_scheme, round_info, now);

@@ -15,7 +15,6 @@ pub struct Config<S: Scheme, B: Blocker> {
     pub blocker: B,
 
     pub epoch: Epoch,
-    pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub fetch_concurrent: usize,
     pub fetch_timeout: Duration,

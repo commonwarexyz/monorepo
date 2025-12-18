@@ -421,7 +421,7 @@ mod tests {
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -451,7 +451,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -473,7 +473,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -504,7 +503,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -671,7 +669,7 @@ mod tests {
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -701,7 +699,7 @@ mod tests {
                 schemes,
                 verifier,
                 ..
-            } = fixture(&mut context, n_active);
+            } = fixture(&namespace, &mut context, n_active);
 
             // Add observer (no share)
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
@@ -739,7 +737,6 @@ mod tests {
                     schemes[idx].clone()
                 };
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -770,7 +767,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -834,7 +830,7 @@ mod tests {
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -855,13 +851,12 @@ mod tests {
             participants,
             schemes,
             ..
-        } = fixture(&mut rng, n);
+        } = fixture(&namespace, &mut rng, n);
 
         loop {
             let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
-            let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
 
@@ -901,7 +896,6 @@ mod tests {
 
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -931,7 +925,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -1026,7 +1019,7 @@ mod tests {
     fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1055,7 +1048,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1088,7 +1081,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1119,7 +1111,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1207,7 +1198,6 @@ mod tests {
 
             // Configure engine
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1238,7 +1228,6 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -1282,7 +1271,7 @@ mod tests {
     fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1313,7 +1302,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1346,7 +1335,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1377,7 +1365,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1543,7 +1530,7 @@ mod tests {
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1572,7 +1559,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1594,7 +1581,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1635,7 +1621,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1728,7 +1713,7 @@ mod tests {
     fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1757,7 +1742,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1779,7 +1764,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1810,7 +1794,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1938,7 +1921,7 @@ mod tests {
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1967,7 +1950,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1989,7 +1972,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2020,7 +2002,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2138,7 +2119,7 @@ mod tests {
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2170,7 +2151,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2198,7 +2179,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2229,7 +2209,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2362,7 +2341,7 @@ mod tests {
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2394,7 +2373,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2415,7 +2394,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2427,7 +2405,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                     };
 
@@ -2462,7 +2439,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -2548,7 +2524,7 @@ mod tests {
     fn invalid<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2580,7 +2556,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2600,14 +2576,7 @@ mod tests {
                 let context = context.with_label(&format!("validator-{}", *validator));
 
                 // Byzantine node (idx 0) uses empty namespace to produce invalid signatures
-                let engine_namespace = if idx_scheme == 0 {
-                    vec![]
-                } else {
-                    namespace.clone()
-                };
-
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(), // Reporter always uses correct namespace
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2639,7 +2608,6 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: engine_namespace,
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2717,7 +2685,7 @@ mod tests {
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2749,7 +2717,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2770,7 +2738,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2783,7 +2750,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::impersonator::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                     };
 
                     let engine: mocks::impersonator::Impersonator<_, _, Sha256> =
@@ -2817,7 +2783,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -2887,7 +2852,7 @@ mod tests {
     fn equivocator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2919,7 +2884,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2941,7 +2906,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2954,7 +2918,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::equivocator::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
                         relay: relay.clone(),
@@ -2991,7 +2954,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3047,7 +3009,6 @@ mod tests {
 
             // Start engine
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3080,7 +3041,6 @@ mod tests {
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -3163,7 +3123,7 @@ mod tests {
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3195,7 +3155,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3216,7 +3176,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3229,7 +3188,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::reconfigurer::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                     };
                     let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
                         mocks::reconfigurer::Reconfigurer::new(
@@ -3262,7 +3220,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3332,7 +3289,7 @@ mod tests {
     fn nuller<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3364,7 +3321,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3385,7 +3342,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3397,7 +3353,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
@@ -3428,7 +3383,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3511,7 +3465,7 @@ mod tests {
     fn outdated<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3543,7 +3497,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3564,7 +3518,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3577,7 +3530,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                         view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
@@ -3608,7 +3560,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3673,7 +3624,7 @@ mod tests {
     fn run_1k<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3703,7 +3654,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3725,7 +3676,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -3756,7 +3706,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -3843,7 +3792,7 @@ mod tests {
     fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3869,7 +3818,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -3883,7 +3832,6 @@ mod tests {
             // Create engine
             let elector = L::default();
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3914,7 +3862,6 @@ mod tests {
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_millis(50),
                 notarization_timeout: Duration::from_millis(100),
                 nullify_retry: Duration::from_millis(250),
@@ -4010,7 +3957,7 @@ mod tests {
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         let n = 3;
@@ -4036,7 +3983,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4055,7 +4002,6 @@ mod tests {
                 let context = context.with_label(&format!("validator-{}", *validator));
 
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4069,7 +4015,6 @@ mod tests {
                 let attributable_reporter = scheme::reporter::AttributableReporter::new(
                     context.with_label("rng"),
                     schemes[idx].clone(),
-                    namespace.clone(),
                     mock_reporter.clone(),
                     true, // Enable verification
                 );
@@ -4098,7 +4043,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -4209,7 +4153,7 @@ mod tests {
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Scenario:
@@ -4265,7 +4209,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Create engines ==========
@@ -4285,7 +4229,6 @@ mod tests {
                     // Byzantine engines
                     let cfg = mocks::nullify_only::Config {
                         scheme: schemes[idx].clone(),
-                        namespace: namespace.clone(),
                     };
                     let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
                         mocks::nullify_only::NullifyOnly::new(
@@ -4299,7 +4242,6 @@ mod tests {
                 } else {
                     // Honest engines
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -4333,7 +4275,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(10),
                         notarization_timeout: Duration::from_secs(10),
                         nullify_retry: Duration::from_secs(10),
@@ -4356,20 +4297,20 @@ mod tests {
             // Helper: assemble finalization from explicit signer indices
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TFinalize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
                 TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNotarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
                 TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNullify::sign::<D>(&schemes[i], &namespace, round).unwrap())
+                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
                 TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
             };
@@ -4608,7 +4549,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, n);
+            } = bls12381_threshold::fixture::<V, _>(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4631,7 +4572,6 @@ mod tests {
 
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4667,7 +4607,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
                     nullify_retry: Duration::from_millis(500),
@@ -4693,7 +4632,7 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext = schemes[0].encrypt(&mut context, &namespace, target, *message);
+            let ciphertext = schemes[0].encrypt(&mut context, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
@@ -4734,7 +4673,7 @@ mod tests {
     ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -4763,7 +4702,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4785,7 +4724,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4816,7 +4754,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -4910,7 +4847,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -5129,7 +5065,7 @@ mod tests {
     fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         let faults = max_faults(n);
@@ -5156,7 +5092,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
@@ -5271,7 +5207,6 @@ mod tests {
                     let context = context.with_label(&label);
 
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -5306,7 +5241,6 @@ mod tests {
                         partition: label,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -5329,7 +5263,6 @@ mod tests {
                 let context = context.with_label(&label);
 
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.as_ref().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5362,7 +5295,6 @@ mod tests {
                     partition: label,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -5444,7 +5376,7 @@ mod tests {
     fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: Elector<S>,
     {
         for strategy in [
@@ -5466,7 +5398,9 @@ mod tests {
                     success_rate: 0.75,
                 },
             ] {
-                twins::<S, _, L>(0, 5, strategy, link, |context, n| fixture(context, n));
+                twins::<S, _, L>(0, 5, strategy, link, |namespace, context, n| {
+                    fixture(namespace, context, n)
+                });
             }
         }
     }

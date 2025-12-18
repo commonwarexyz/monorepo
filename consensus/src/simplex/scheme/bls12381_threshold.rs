@@ -8,10 +8,7 @@
 
 use crate::{
     simplex::{
-        scheme::{
-            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            seed_namespace_and_message, vote_namespace_and_message,
-        },
+        scheme::{seed_namespace, Namespace},
         types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Round, View},
@@ -33,7 +30,7 @@ use commonware_cryptography::{
         },
         tle,
     },
-    certificate::{self, Attestation, Verification},
+    certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
 use commonware_utils::ordered::Set;
@@ -57,16 +54,22 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
+        /// Pre-computed namespaces for domain separation.
+        namespace: Namespace,
     },
     Verifier {
         /// Participants in the committee.
         participants: Set<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
+        /// Pre-computed namespaces for domain separation.
+        namespace: Namespace,
     },
     CertificateVerifier {
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
+        /// Pre-computed namespaces for domain separation.
+        namespace: Namespace,
     },
 }
 
@@ -79,10 +82,16 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
+    /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(participants: Set<P>, polynomial: Sharing<V>, share: Share) -> Option<Self> {
+    pub fn signer(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+        share: Share,
+    ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -97,6 +106,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 participants,
                 polynomial,
                 share,
+                namespace: Namespace::new(namespace),
             })
         } else {
             None
@@ -109,9 +119,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -122,6 +133,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         Self::Verifier {
             participants,
             polynomial,
+            namespace: Namespace::new(namespace),
         }
     }
 
@@ -130,9 +142,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual votes or partial signatures.
     ///
+    /// * `namespace` - base namespace for domain separation
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub const fn certificate_verifier(identity: V::Public) -> Self {
-        Self::CertificateVerifier { identity }
+    pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
+        Self::CertificateVerifier {
+            identity,
+            namespace: Namespace::new(namespace),
+        }
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
@@ -170,6 +186,15 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
+    /// Returns the pre-computed namespaces.
+    const fn namespace(&self) -> &Namespace {
+        match self {
+            Self::Signer { namespace, .. } => namespace,
+            Self::Verifier { namespace, .. } => namespace,
+            Self::CertificateVerifier { namespace, .. } => namespace,
+        }
+    }
+
     /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
     ///
     /// The encrypted message can only be decrypted using the seed signature
@@ -178,11 +203,17 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn encrypt<R: Rng + CryptoRng>(
         &self,
         rng: &mut R,
-        namespace: &[u8],
         target: Round,
         message: impl Into<tle::Block>,
     ) -> tle::Ciphertext<V> {
-        encrypt(rng, *self.identity(), namespace, target, message)
+        let block = message.into();
+        let target_message = target.encode();
+        tle::encrypt(
+            rng,
+            *self.identity(),
+            (Some(self.namespace().seed.as_ref()), &target_message),
+            &block,
+        )
     }
 }
 
@@ -210,6 +241,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 /// scheme instances share a consistent ordering.
 #[cfg(feature = "mocks")]
 pub fn fixture<V, R>(
+    namespace: &[u8],
     rng: &mut R,
     n: u32,
 ) -> commonware_cryptography::certificate::mocks::Fixture<
@@ -220,6 +252,7 @@ where
     R: rand::RngCore + rand::CryptoRng,
 {
     commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+        namespace,
         rng,
         n,
         Scheme::signer,
@@ -290,13 +323,12 @@ impl<V: Variant> Seed<V> {
     }
 
     /// Verifies the threshold signature on this [Seed].
-    pub fn verify<P: PublicKey>(&self, scheme: &Scheme<P, V>, namespace: &[u8]) -> bool {
-        let seed_namespace = seed_namespace(namespace);
+    pub fn verify<P: PublicKey>(&self, scheme: &Scheme<P, V>) -> bool {
         let seed_message = self.round.encode();
 
         verify_message::<V>(
             scheme.identity(),
-            Some(&seed_namespace),
+            Some(scheme.namespace().seed.as_ref()),
             &seed_message,
             &self.signature,
         )
@@ -393,6 +425,18 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
     }
 }
 
+/// Extracts the seed message bytes from a Subject.
+///
+/// The seed message is the round encoded as bytes, used for per-view randomness.
+fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Bytes {
+    match subject {
+        Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
+            proposal.round.encode().freeze()
+        }
+        Subject::Nullify { round } => round.encode().freeze(),
+    }
+}
+
 impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
@@ -410,22 +454,18 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         self.participants()
     }
 
-    fn sign<D: Digest>(
-        &self,
-        namespace: &[u8],
-        subject: Subject<'_, D>,
-    ) -> Option<Attestation<Self>> {
+    fn sign<D: Digest>(&self, subject: Subject<'_, D>) -> Option<Attestation<Self>> {
         let share = self.share()?;
+        let ns = self.namespace();
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
+        let vote_namespace = subject.namespace(ns);
+        let vote_message = subject.message();
         let vote_signature =
-            partial_sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
-                .value;
+            partial_sign_message::<V>(share, Some(vote_namespace), vote_message.as_ref()).value;
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
+        let seed_message = seed_message_from_subject(&subject);
         let seed_signature =
-            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
-                .value;
+            partial_sign_message::<V>(share, Some(ns.seed.as_ref()), seed_message.as_ref()).value;
 
         let signature = Signature {
             vote_signature,
@@ -440,16 +480,17 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
     fn verify_attestation<D: Digest>(
         &self,
-        namespace: &[u8],
         subject: Subject<'_, D>,
         attestation: &Attestation<Self>,
     ) -> bool {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
+        let ns = self.namespace();
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
+        let vote_namespace = subject.namespace(ns);
+        let vote_message = subject.message();
+        let seed_message = seed_message_from_subject(&subject);
 
         let sig = aggregate_signatures::<V, _>(&[
             attestation.signature.vote_signature,
@@ -459,8 +500,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         aggregate_verify_multiple_messages::<V, _>(
             &evaluated,
             &[
-                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
-                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
+                (Some(vote_namespace), vote_message.as_ref()),
+                (Some(ns.seed.as_ref()), seed_message.as_ref()),
             ],
             &sig,
             1,
@@ -471,7 +512,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
     fn verify_attestations<R, D, I>(
         &self,
         _rng: &mut R,
-        namespace: &[u8],
         subject: Subject<'_, D>,
         attestations: I,
     ) -> Verification<Self>
@@ -480,6 +520,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
     {
+        let ns = self.namespace();
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
             .into_iter()
@@ -498,10 +539,11 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             .unzip();
 
         let polynomial = self.polynomial();
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
+        let vote_namespace = subject.namespace(ns);
+        let vote_message = subject.message();
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
-            Some(vote_namespace.as_ref()),
+            Some(vote_namespace),
             vote_message.as_ref(),
             vote_partials.iter(),
         ) {
@@ -510,10 +552,10 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             }
         }
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
+        let seed_message = seed_message_from_subject(&subject);
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
-            Some(seed_namespace.as_ref()),
+            Some(ns.seed.as_ref()),
             seed_message.as_ref(),
             seed_partials
                 .iter()
@@ -581,14 +623,15 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
         _rng: &mut R,
-        namespace: &[u8],
         subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
         let identity = self.identity();
+        let ns = self.namespace();
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
+        let vote_namespace = subject.namespace(ns);
+        let vote_message = subject.message();
+        let seed_message = seed_message_from_subject(&subject);
 
         let signature =
             aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);
@@ -596,8 +639,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         aggregate_verify_multiple_messages::<V, _>(
             identity,
             &[
-                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
-                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
+                (Some(vote_namespace), vote_message.as_ref()),
+                (Some(ns.seed.as_ref()), seed_message.as_ref()),
             ],
             &signature,
             1,
@@ -605,50 +648,24 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         .is_ok()
     }
 
-    fn verify_certificates<'a, R, D, I>(
-        &self,
-        _rng: &mut R,
-        namespace: &[u8],
-        certificates: I,
-    ) -> bool
+    fn verify_certificates<'a, R, D, I>(&self, _rng: &mut R, certificates: I) -> bool
     where
         R: Rng + CryptoRng,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {
         let identity = self.identity();
+        let ns = self.namespace();
 
         let mut seeds = HashMap::new();
         let mut messages = Vec::new();
         let mut signatures = Vec::new();
 
-        let notarize_namespace = notarize_namespace(namespace);
-        let nullify_namespace = nullify_namespace(namespace);
-        let finalize_namespace = finalize_namespace(namespace);
-        let seed_namespace = seed_namespace(namespace);
-
         for (context, certificate) in certificates {
-            match context {
-                Subject::Notarize { proposal } => {
-                    // Prepare notarize message
-                    let notarize_message = proposal.encode();
-                    let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
-                    messages.push(notarize_message);
-                }
-                Subject::Nullify { round } => {
-                    // Prepare nullify message
-                    let nullify_encoded = round.encode();
-                    let nullify_message =
-                        (Some(nullify_namespace.as_slice()), nullify_encoded.clone());
-                    messages.push(nullify_message);
-                }
-                Subject::Finalize { proposal } => {
-                    // Prepare finalize message
-                    let finalize_message = proposal.encode();
-                    let finalize_message = (Some(finalize_namespace.as_slice()), finalize_message);
-                    messages.push(finalize_message);
-                }
-            }
+            // Prepare vote message with context-specific namespace
+            let vote_namespace = context.namespace(ns);
+            let vote_message = context.message();
+            messages.push((Some(vote_namespace), vote_message));
             signatures.push(&certificate.vote_signature);
 
             // Seed signatures are per-view, so multiple certificates for the same view
@@ -660,14 +677,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                     return false;
                 }
             } else {
-                let seed_message = match context {
-                    Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
-                        proposal.round.encode()
-                    }
-                    Subject::Nullify { round } => round.encode(),
-                };
-
-                messages.push((Some(seed_namespace.as_slice()), seed_message));
+                let seed_message = seed_message_from_subject(&context);
+                messages.push((Some(ns.seed.as_ref()), seed_message));
                 signatures.push(&certificate.seed_signature);
                 seeds.insert(context.view(), &certificate.seed_signature);
             }
@@ -679,7 +690,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             identity,
             &messages
                 .iter()
-                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
+                .map(|(namespace, message)| (*namespace, message.as_ref()))
                 .collect::<Vec<_>>(),
             &signature,
             1,
@@ -733,7 +744,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<V, _>(&mut rng, n);
+        } = bls12381_threshold::fixture::<V, _>(NAMESPACE, &mut rng, n);
 
         (schemes, verifier)
     }
@@ -752,7 +763,12 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = 999;
-        Scheme::<V>::signer(participants.keys().clone(), polynomial, shares[0].clone());
+        Scheme::<V>::signer(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            shares[0].clone(),
+        );
     }
 
     #[test]
@@ -770,7 +786,12 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, shares) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::signer(participants.keys().clone(), polynomial, shares[0].clone());
+        Scheme::<V>::signer(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            shares[0].clone(),
+        );
     }
 
     #[test]
@@ -789,7 +810,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::verifier(participants.keys().clone(), polynomial);
+        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
     #[test]
@@ -810,15 +831,11 @@ mod tests {
 
         let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
         let notarize_vote = scheme
-            .sign(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+            .sign(Subject::Notarize {
+                proposal: &proposal,
+            })
             .unwrap();
         assert!(scheme.verify_attestation(
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -826,15 +843,11 @@ mod tests {
         ));
 
         let nullify_vote = scheme
-            .sign::<Sha256Digest>(
-                NAMESPACE,
-                Subject::Nullify {
-                    round: proposal.round,
-                },
-            )
+            .sign::<Sha256Digest>(Subject::Nullify {
+                round: proposal.round,
+            })
             .unwrap();
         assert!(scheme.verify_attestation::<Sha256Digest>(
-            NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
             },
@@ -842,15 +855,11 @@ mod tests {
         ));
 
         let finalize_vote = scheme
-            .sign(
-                NAMESPACE,
-                Subject::Finalize {
-                    proposal: &proposal,
-                },
-            )
+            .sign(Subject::Finalize {
+                proposal: &proposal,
+            })
             .unwrap();
         assert!(scheme.verify_attestation(
-            NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
             },
@@ -870,12 +879,9 @@ mod tests {
         let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         assert!(
             verifier
-                .sign(
-                    NAMESPACE,
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign(Subject::Notarize {
+                    proposal: &proposal,
+                })
                 .is_none(),
             "verifier should not produce signatures"
         );
@@ -891,15 +897,11 @@ mod tests {
         let (schemes, verifier) = setup_signers::<V>(4, 11);
         let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         let vote = schemes[1]
-            .sign(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+            .sign(Subject::Notarize {
+                proposal: &proposal,
+            })
             .unwrap();
         assert!(verifier.verify_attestation(
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -923,19 +925,15 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
 
         let verification = schemes[0].verify_attestations(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -947,7 +945,6 @@ mod tests {
         votes[0].signer = 999;
         let verification = schemes[0].verify_attestations(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -973,12 +970,9 @@ mod tests {
             .take(quorum - 1)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1002,12 +996,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Finalize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1016,7 +1007,6 @@ mod tests {
 
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
             },
@@ -1040,12 +1030,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1054,7 +1041,6 @@ mod tests {
 
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -1065,7 +1051,6 @@ mod tests {
         corrupted.vote_signature = corrupted.seed_signature;
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
             },
@@ -1089,12 +1074,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1123,12 +1105,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Finalize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1158,12 +1137,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Finalize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1172,7 +1148,7 @@ mod tests {
 
         let seed = Seed::new(proposal.round, certificate.seed_signature);
 
-        assert!(seed.verify(&schemes[0], NAMESPACE));
+        assert!(seed.verify(&schemes[0]));
 
         // Create an invalid seed with a mismatched round
         let invalid_seed = Seed::new(
@@ -1180,7 +1156,7 @@ mod tests {
             certificate.seed_signature,
         );
 
-        assert!(!invalid_seed.verify(&schemes[0], NAMESPACE));
+        assert!(!invalid_seed.verify(&schemes[0]));
     }
 
     #[test]
@@ -1197,7 +1173,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
@@ -1205,13 +1181,13 @@ mod tests {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let finalization = Finalization::from_finalizes(&schemes[0], &finalizes).unwrap();
 
         assert_eq!(notarization.seed(), finalization.seed());
-        assert!(notarization.seed().verify(&schemes[0], NAMESPACE));
+        assert!(notarization.seed().verify(&schemes[0]));
     }
 
     #[test]
@@ -1227,24 +1203,18 @@ mod tests {
 
         assert!(
             signer
-                .sign(
-                    NAMESPACE,
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign(Subject::Notarize {
+                    proposal: &proposal,
+                })
                 .is_some(),
             "signer should produce votes"
         );
 
         assert!(
             verifier
-                .sign(
-                    NAMESPACE,
-                    Subject::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign(Subject::Notarize {
+                    proposal: &proposal,
+                })
                 .is_none(),
             "verifier should not produce votes"
         );
@@ -1266,33 +1236,27 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Finalize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
 
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
-        let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
+        let certificate_verifier =
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
         assert!(
             certificate_verifier
-                .sign(
-                    NAMESPACE,
-                    Subject::Finalize {
-                        proposal: &proposal,
-                    },
-                )
+                .sign(Subject::Finalize {
+                    proposal: &proposal,
+                })
                 .is_none(),
             "certificate verifier should not produce votes"
         );
         assert!(certificate_verifier.verify_certificate(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
             },
@@ -1308,19 +1272,16 @@ mod tests {
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
-        let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
+        let certificate_verifier =
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
-            .sign(
-                NAMESPACE,
-                Subject::Finalize {
-                    proposal: &proposal,
-                },
-            )
+            .sign(Subject::Finalize {
+                proposal: &proposal,
+            })
             .unwrap();
 
         certificate_verifier.verify_attestation(
-            NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
             },
@@ -1350,12 +1311,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign(
-                        NAMESPACE,
-                        Subject::Notarize {
-                            proposal: &proposal,
-                        },
-                    )
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1382,12 +1340,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign::<Sha256Digest>(
-                        NAMESPACE,
-                        Subject::Nullify {
-                            round: proposal.round,
-                        },
-                    )
+                    .sign::<Sha256Digest>(Subject::Nullify {
+                        round: proposal.round,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1412,28 +1367,21 @@ mod tests {
 
         let proposal = sample_proposal(Epoch::new(0), View::new(23), 12);
         let vote = scheme
-            .sign(
-                NAMESPACE,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-            )
+            .sign(Subject::Notarize {
+                proposal: &proposal,
+            })
             .unwrap();
 
-        let notarize_namespace = notarize_namespace(NAMESPACE);
+        let notarize_ns = notarize_namespace(NAMESPACE);
         let notarize_message = proposal.encode();
-        let expected_message = partial_sign_message::<V>(
-            share,
-            Some(notarize_namespace.as_ref()),
-            notarize_message.as_ref(),
-        )
-        .value;
+        let expected_message =
+            partial_sign_message::<V>(share, Some(notarize_ns.as_ref()), notarize_message.as_ref())
+                .value;
 
-        let seed_namespace = seed_namespace(NAMESPACE);
+        let seed_ns = seed_namespace(NAMESPACE);
         let seed_message = proposal.round.encode();
         let expected_seed =
-            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
-                .value;
+            partial_sign_message::<V>(share, Some(seed_ns.as_ref()), seed_message.as_ref()).value;
 
         assert_eq!(vote.signer, share.index);
         assert_eq!(vote.signature.vote_signature, expected_message);
@@ -1456,12 +1404,9 @@ mod tests {
             .take(quorum)
             .map(|scheme| {
                 scheme
-                    .sign::<Sha256Digest>(
-                        NAMESPACE,
-                        Subject::Nullify {
-                            round: proposal.round,
-                        },
-                    )
+                    .sign::<Sha256Digest>(Subject::Nullify {
+                        round: proposal.round,
+                    })
                     .unwrap()
             })
             .collect();
@@ -1470,7 +1415,6 @@ mod tests {
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
             },
@@ -1481,7 +1425,6 @@ mod tests {
         corrupted.seed_signature = corrupted.vote_signature;
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
-            NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
             },
@@ -1506,17 +1449,17 @@ mod tests {
         let target = Round::new(Epoch::new(333), View::new(10));
 
         // Encrypt using the scheme
-        let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext = schemes[0].encrypt(&mut thread_rng(), target, *message);
 
         // Can also encrypt with the verifier scheme
-        let ciphertext_verifier = verifier.encrypt(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext_verifier = verifier.encrypt(&mut thread_rng(), target, *message);
 
         // Generate notarization for the target round to get the seed
         let proposal = sample_proposal(target.epoch(), target.view(), 14);
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();

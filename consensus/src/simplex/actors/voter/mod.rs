@@ -36,7 +36,6 @@ pub struct Config<
 
     pub partition: String,
     pub epoch: Epoch,
-    pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
@@ -82,7 +81,6 @@ mod tests {
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
-        namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
         count: u32,
     ) -> (
@@ -92,7 +90,7 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(count as usize)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let certificate = Notarization::from_notarizes(&schemes[0], &votes)
             .expect("notarization requires a quorum of votes");
@@ -101,7 +99,6 @@ mod tests {
 
     fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
-        namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
         count: u32,
     ) -> (
@@ -111,7 +108,7 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(count as usize)
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let certificate = Finalization::from_finalizes(&schemes[0], &votes)
             .expect("finalization requires a quorum of votes");
@@ -127,7 +124,7 @@ mod tests {
     fn stale_backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -151,13 +148,12 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Initialize voter actor
             let me = participants[0].clone();
             let elector = L::default();
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -186,7 +182,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
                 notarization_timeout: Duration::from_secs(5),
@@ -244,7 +239,7 @@ mod tests {
                 View::new(50),
                 payload,
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -289,7 +284,7 @@ mod tests {
                 View::new(49),
                 payload,
             );
-            let (_, notarization) = build_notarization(&schemes, &namespace, &proposal, quorum);
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization))
                 .await;
@@ -301,7 +296,7 @@ mod tests {
                 View::new(100),
                 payload,
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -362,7 +357,7 @@ mod tests {
     fn append_old_interesting_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -387,14 +382,13 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
             let me = participants[0].clone();
             let elector = L::default();
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
                 elector: elector.clone(),
@@ -421,7 +415,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{me}"),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_millis(1000),
@@ -492,7 +485,7 @@ mod tests {
                 lf_target.previous().unwrap(),
                 Sha256::hash(b"test"),
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -536,8 +529,7 @@ mod tests {
                 journal_floor_target.previous().unwrap(),
                 Sha256::hash(b"test2"),
             );
-            let (_, notarization_for_floor) =
-                build_notarization(&schemes, &namespace, &proposal_jft, quorum);
+            let (_, notarization_for_floor) = build_notarization(&schemes, &proposal_jft, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization_for_floor))
                 .await;
@@ -564,8 +556,7 @@ mod tests {
                 problematic_view.previous().unwrap(),
                 Sha256::hash(b"test3"),
             );
-            let (_, notarization_for_bft) =
-                build_notarization(&schemes, &namespace, &proposal_bft, quorum);
+            let (_, notarization_for_bft) = build_notarization(&schemes, &proposal_bft, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization_for_bft))
                 .await;
@@ -588,7 +579,7 @@ mod tests {
                 View::new(99),
                 Sha256::hash(b"test4"),
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -641,7 +632,7 @@ mod tests {
     fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -665,12 +656,11 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup application mock
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -699,7 +689,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -761,8 +750,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
-            let (_, expected_finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
             // Send finalization certificate via voter mailbox
             mailbox
@@ -823,7 +811,7 @@ mod tests {
     fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -847,12 +835,11 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup application mock
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -881,7 +868,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_certificate_conflicts_proposal_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -954,7 +940,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_b"),
             );
-            let (_, notarization_b) = build_notarization(&schemes, &namespace, &proposal_b, quorum);
+            let (_, notarization_b) = build_notarization(&schemes, &proposal_b, quorum);
 
             mailbox
                 .recovered(Certificate::Notarization(notarization_b.clone()))
@@ -1018,7 +1004,7 @@ mod tests {
     fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1040,11 +1026,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1072,7 +1057,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_proposal_conflicts_certificate_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1130,7 +1114,7 @@ mod tests {
             );
 
             // Send certificate for proposal A FIRST
-            let (_, notarization_a) = build_notarization(&schemes, &namespace, &proposal_a, quorum);
+            let (_, notarization_a) = build_notarization(&schemes, &proposal_a, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization_a.clone()))
                 .await;
@@ -1196,7 +1180,7 @@ mod tests {
     fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1218,11 +1202,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1250,7 +1233,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_certificate_verifies_proposal_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1309,7 +1291,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Send certificate for the SAME proposal
-            let (_, notarization) = build_notarization(&schemes, &namespace, &proposal, quorum);
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization.clone()))
                 .await;
@@ -1373,7 +1355,7 @@ mod tests {
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1398,7 +1380,7 @@ mod tests {
                 schemes,
                 verifier: _,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1426,7 +1408,6 @@ mod tests {
             actor.start();
 
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: leader_scheme.clone(),
                 elector: elector_config.clone(),
@@ -1444,7 +1425,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_leader".to_string(),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1503,8 +1483,7 @@ mod tests {
             let view1_proposal =
                 Proposal::new(view1_round, View::new(0), Sha256::hash(b"view1_payload"));
 
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &view1_proposal, quorum);
+            let (_, finalization) = build_finalization(&schemes, &view1_proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -1557,7 +1536,7 @@ mod tests {
 
             // Add a notarization certificate for conflicting proposal
             let (_, conflicting_notarization) =
-                build_notarization(&schemes, &namespace, &conflicting_proposal, quorum);
+                build_notarization(&schemes, &conflicting_proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(conflicting_notarization.clone()))
                 .await;
@@ -1591,7 +1570,7 @@ mod tests {
     fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1615,12 +1594,11 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup application mock
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1649,7 +1627,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1711,8 +1688,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
-            let (_, expected_finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
             // Send finalization certificate via voter mailbox
             mailbox
@@ -1741,7 +1717,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1819,7 +1794,7 @@ mod tests {
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -1845,12 +1820,11 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup application mock
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1879,7 +1853,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "finalization_from_resolver".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -1941,7 +1914,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"finalization_from_resolver"),
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization.clone()))
                 .await;
@@ -1982,7 +1955,7 @@ mod tests {
     fn no_resolver_boomerang<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2006,12 +1979,11 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Setup application mock
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -2040,7 +2012,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "no_resolver_boomerang".to_string(),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
@@ -2102,7 +2073,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"no_resolver_boomerang"),
             );
-            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox
                 .resolved(Certificate::Finalization(finalization.clone()))
                 .await;
@@ -2154,7 +2125,7 @@ mod tests {
     fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2179,14 +2150,13 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&namespace, &mut context, n);
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
             let me = participants[0].clone();
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
                 elector: elector.clone(),
@@ -2218,7 +2188,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_verify_fail_test_{me}"),
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 mailbox_size: 128,
                 // Use long timeouts to prove nullify comes immediately, not from timeout
                 leader_timeout: Duration::from_secs(10),
@@ -2270,7 +2239,7 @@ mod tests {
             let (target_view, leader) = loop {
                 // Send finalization to advance to next view
                 let (_, finalization) =
-                    build_finalization(&schemes, &namespace, &prev_proposal, quorum);
+                    build_finalization(&schemes, &prev_proposal, quorum);
                 mailbox
                     .resolved(Certificate::Finalization(finalization))
                     .await;

@@ -43,7 +43,6 @@ pub struct Actor<
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
     epoch: Epoch,
-    namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -114,7 +113,6 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
 
@@ -278,7 +276,6 @@ impl<
                             if !notarization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid notarization");
                                 self.blocker.block(sender).await;
@@ -305,7 +302,6 @@ impl<
                             if !nullification.verify::<_, D>(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid nullification");
                                 self.blocker.block(sender).await;
@@ -332,7 +328,6 @@ impl<
                             if !finalization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid finalization");
                                 self.blocker.block(sender).await;
@@ -416,12 +411,10 @@ impl<
             let mut selected = None;
             if let Some(round) = work.get_mut(&current) {
                 if round.ready_notarizes() {
-                    let (voters, failed) =
-                        round.verify_notarizes(&mut self.context, &self.namespace);
+                    let (voters, failed) = round.verify_notarizes(&mut self.context);
                     selected = Some((current, voters, failed));
                 } else if round.ready_nullifies() {
-                    let (voters, failed) =
-                        round.verify_nullifies(&mut self.context, &self.namespace);
+                    let (voters, failed) = round.verify_nullifies(&mut self.context);
                     selected = Some((current, voters, failed));
                 }
             }
@@ -434,8 +427,7 @@ impl<
                     })
                     .map(|(view, round)| (*view, round));
                 if let Some((view, round)) = potential {
-                    let (voters, failed) =
-                        round.verify_finalizes(&mut self.context, &self.namespace);
+                    let (voters, failed) = round.verify_finalizes(&mut self.context);
                     selected = Some((view, voters, failed));
                 }
             }
