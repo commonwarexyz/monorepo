@@ -204,7 +204,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
 
                 // Check whether the IP is private
                 let ip = address.ip();
-                if !self.allow_private_ips && !ip.is_global() {
+                if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
                     continue;
