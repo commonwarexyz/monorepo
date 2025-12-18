@@ -74,7 +74,7 @@ where
         }
 
         let parent_digest = digest_for_block(&parent);
-        let parent_state = self.state.parent_state(&parent_digest).await?;
+        let parent_snapshot = self.state.parent_snapshot(&parent_digest).await?;
         let seed_hash = self.state.seed_for_parent(&parent_digest).await;
         let prevrandao = seed_hash.unwrap_or_else(|| B256::from(parent_digest.0));
 
@@ -89,7 +89,7 @@ where
         };
 
         let (db, outcome) = execute_txs(
-            parent_state.db,
+            parent_snapshot.db,
             evm_env(child.height, child.prevrandao),
             parent.state_root,
             &child.txs,
@@ -98,7 +98,7 @@ where
         child.state_root = outcome.state_root;
 
         let digest = digest_for_block(&child);
-        self.state.insert_verified(digest, child.clone(), db).await;
+        self.state.insert_snapshot(digest, db, child.state_root).await;
         Some(child)
     }
 }
@@ -123,12 +123,12 @@ where
         };
 
         let parent_digest = digest_for_block(&parent);
-        let Some(parent_state) = self.state.parent_state(&parent_digest).await else {
+        let Some(parent_snapshot) = self.state.parent_snapshot(&parent_digest).await else {
             return false;
         };
 
         let (db, outcome) = match execute_txs(
-            parent_state.db,
+            parent_snapshot.db,
             evm_env(block.height, block.prevrandao),
             parent.state_root,
             &block.txs,
@@ -141,7 +141,7 @@ where
         }
 
         let digest = digest_for_block(&block);
-        self.state.insert_verified(digest, block, db).await;
+        self.state.insert_snapshot(digest, db, block.state_root).await;
         true
     }
 }

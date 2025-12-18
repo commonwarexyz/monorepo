@@ -33,14 +33,14 @@ pub(crate) struct Shared {
 
 struct State {
     mempool: BTreeMap<TxId, Tx>,
-    blocks: BTreeMap<ConsensusDigest, BlockState>,
+    snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
     seeds: BTreeMap<ConsensusDigest, B256>,
 }
 
 #[derive(Clone)]
-pub(crate) struct BlockState {
-    pub(crate) block: Block,
+pub(crate) struct ExecutionSnapshot {
     pub(crate) db: InMemoryDB,
+    pub(crate) state_root: StateRoot,
 }
 
 impl Shared {
@@ -66,12 +66,12 @@ impl Shared {
             );
         }
 
-        let mut blocks = BTreeMap::new();
-        blocks.insert(
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert(
             genesis_digest,
-            BlockState {
-                block: genesis_block.clone(),
+            ExecutionSnapshot {
                 db,
+                state_root: genesis_block.state_root,
             },
         );
 
@@ -81,7 +81,7 @@ impl Shared {
         Self {
             inner: Arc::new(Mutex::new(State {
                 mempool: BTreeMap::new(),
-                blocks,
+                snapshots,
                 seeds,
             })),
             genesis_block,
@@ -104,7 +104,7 @@ impl Shared {
     ) -> Option<U256> {
         let mut inner = self.inner.lock().await;
         inner
-            .blocks
+            .snapshots
             .get_mut(&digest)?
             .db
             .basic(address)
@@ -115,10 +115,7 @@ impl Shared {
 
     pub(crate) async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
         let inner = self.inner.lock().await;
-        inner
-            .blocks
-            .get(&digest)
-            .map(|state| state.block.state_root)
+        inner.snapshots.get(&digest).map(|snapshot| snapshot.state_root)
     }
 
     pub(crate) async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
@@ -136,19 +133,19 @@ impl Shared {
         inner.seeds.insert(digest, seed_hash);
     }
 
-    pub(crate) async fn parent_state(&self, parent: &ConsensusDigest) -> Option<BlockState> {
+    pub(crate) async fn parent_snapshot(
+        &self,
+        parent: &ConsensusDigest,
+    ) -> Option<ExecutionSnapshot> {
         let inner = self.inner.lock().await;
-        inner.blocks.get(parent).cloned()
+        inner.snapshots.get(parent).cloned()
     }
 
-    pub(crate) async fn insert_verified(
-        &self,
-        digest: ConsensusDigest,
-        block: Block,
-        db: InMemoryDB,
-    ) {
+    pub(crate) async fn insert_snapshot(&self, digest: ConsensusDigest, db: InMemoryDB, root: StateRoot) {
         let mut inner = self.inner.lock().await;
-        inner.blocks.insert(digest, BlockState { block, db });
+        inner
+            .snapshots
+            .insert(digest, ExecutionSnapshot { db, state_root: root });
     }
 
     pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {
