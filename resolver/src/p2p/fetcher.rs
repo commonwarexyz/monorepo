@@ -253,70 +253,55 @@ where
 
     /// Attempts to send a fetch request for a pending key.
     ///
-    /// Iterates through pending keys in priority order until one succeeds or all
-    /// peers have been tried. For each key, iterates through eligible peers in priority
-    /// order and attempts to send. If send returns empty (peer was rate-limited by Sender),
-    /// tries the next peer. If all peers fail, tries the next key.
+    /// Iterates through pending keys until a send succeeds. For each key, tries
+    /// eligible peers in priority order. On success, the key moves from pending
+    /// to active. On failure, the key remains pending for retry.
     ///
-    /// On send failure, the key is retried. Targets are not removed on send failure.
+    /// Sets `self.waiter` to control when the next fetch attempt should occur:
+    /// - Rate limit expiry time if any peer was rate-limited
+    /// - `retry_timeout` if peers exist but all sends failed
+    /// - `Duration::MAX` if no eligible peers (wait for external changes)
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
-        // Reset waiter
         self.waiter = None;
 
-        // Collect pending keys to iterate (we need to mutate self during iteration)
+        // Collect keys to try (need to clone since we mutate self during iteration)
         let pending_keys: Vec<(Key, bool)> = self
             .pending
             .iter()
             .map(|(k, (_, retry))| (k.clone(), *retry))
             .collect();
 
-        let mut earliest_next_try: Option<SystemTime> = None;
-        // Track if we found any eligible peers across all keys
-        let mut had_eligible_peers = false;
-
-        // Try pending keys until one succeeds
+        // Try each pending key until one succeeds
+        let mut earliest_rate_limit: Option<SystemTime> = None;
+        let mut found_eligible_peers = false;
         for (key, retry) in pending_keys {
-            // Get eligible peers for this key
             let peers = self.get_eligible_peers(&key, retry);
 
-            // Skip if no eligible peers
+            // Skip keys with no eligible peers
             if peers.is_empty() {
                 self.requests_created.inc(Status::Dropped);
                 continue;
             }
 
-            // Found eligible peers - request creation succeeded
             self.requests_created.inc(Status::Success);
-            had_eligible_peers = true;
+            found_eligible_peers = true;
 
-            // Track if this is an untargeted key (tries all eligible peers)
-            let is_untargeted = !self.targets.contains_key(&key);
-            // Track if all peers were rate-limited (sender.check errors)
-            let mut all_rate_limited = true;
-
-            // Try each peer in order until one succeeds
+            // Try each peer until one succeeds
             for peer in peers {
-                // Record request before sending
                 let now = self.context.current();
-                let deadline = now.checked_add(self.timeout).expect("time overflowed");
 
-                // Check if we can send to this peer. This call consumes a rate limit
-                // token if successful, meaning even if the subsequent send() fails,
-                // this peer will have consumed a rate limit token.
+                // Check rate limit (consumes a token if not rate-limited)
                 let checked = match sender.check(Recipients::One(peer.clone())).await {
                     Ok(checked) => checked,
                     Err(not_until) => {
-                        // Peer is rate-limited, track when we can retry
-                        earliest_next_try =
-                            earliest_next_try.map_or(Some(not_until), |e| Some(e.min(not_until)));
+                        // Peer is rate-limited, track earliest retry time
+                        earliest_rate_limit =
+                            Some(earliest_rate_limit.map_or(not_until, |t| t.min(not_until)));
                         continue;
                     }
                 };
 
-                // Mark that at least one peer was not rate-limited
-                all_rate_limited = false;
-
-                // Try to send
+                // Attempt send
                 let id = self.next_id();
                 let message = wire::Message {
                     id,
@@ -324,9 +309,10 @@ where
                 };
                 match checked.send(message, self.priority_requests).await {
                     Ok(sent) if !sent.is_empty() => {
-                        // Success - remove from pending and add to active
+                        // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
+                        let deadline = now.checked_add(self.timeout).expect("time overflowed");
                         self.active.put(id, deadline);
                         self.requests.insert(
                             id,
@@ -340,42 +326,31 @@ where
                         return;
                     }
                     Ok(_) => {
-                        // Empty result - peer dropped message, try next
+                        // Peer dropped message, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, "send returned empty");
                         self.update_performance(&peer, self.timeout);
                     }
                     Err(err) => {
-                        // Send error - not rate-limited, just failed
+                        // Send failed, try next peer
                         self.requests_sent.inc(Status::Failure);
                         debug!(?err, ?peer, "send failed");
                         self.update_performance(&peer, self.timeout);
                     }
                 }
             }
-
-            // If this untargeted key had all peers rate-limited, no other key will
-            // succeed either (rate limits are per-peer), so stop early
-            if is_untargeted && all_rate_limited {
-                break;
-            }
         }
 
-        // No keys could be fetched. Set waiter based on what we learned.
-        //
-        // Priority order for determining retry timing:
-        // 1. Rate limit info (earliest_next_try) - most accurate timing
-        // 2. retry_timeout - if peers exist but all sends failed
-        // 3. Duration::MAX - if no eligible peers exist (wait for external events
-        //    like reconcile() or add_targets() to change the situation)
-        self.waiter = earliest_next_try.or_else(|| {
-            if had_eligible_peers {
-                // Peers exist but all sends failed - retry after timeout
-                Some(self.context.current() + self.retry_timeout)
-            } else {
-                // No eligible peers - wait indefinitely for external changes
-                Some(self.context.current().saturating_add(Duration::MAX))
-            }
+        // Set waiter for next fetch attempt
+        self.waiter = Some(if let Some(rate_limit_time) = earliest_rate_limit {
+            // Use rate limit expiry time
+            rate_limit_time
+        } else if found_eligible_peers {
+            // Peers exist but all sends failed - use retry timeout
+            self.context.current() + self.retry_timeout
+        } else {
+            // No eligible peers - wait for external changes
+            self.context.current().saturating_add(Duration::MAX)
         });
     }
 
