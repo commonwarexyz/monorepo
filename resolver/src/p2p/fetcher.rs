@@ -580,9 +580,10 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{Context, Runner},
-        Runner as _,
+        KeyedRateLimiter, Quota, Runner as _, RwLock,
     };
-    use std::{fmt, time::Duration};
+    use commonware_utils::NZU32;
+    use std::{fmt, sync::Arc, time::Duration};
 
     // Mock error type for testing
     #[derive(Debug)]
@@ -693,25 +694,23 @@ mod tests {
 
     // Mock sender that rate-limits per peer
     #[derive(Clone)]
-    struct RateLimitedMockSender<E: Clock> {
+    struct LimitedMockSender<E: Clock> {
         inner: SuccessMockSenderInner,
-        rate_limiter: std::sync::Arc<
-            futures::lock::Mutex<commonware_runtime::KeyedRateLimiter<Ed25519PublicKey, E>>,
-        >,
+        rate_limiter: Arc<RwLock<KeyedRateLimiter<Ed25519PublicKey, E>>>,
     }
 
-    impl<E: Clock> RateLimitedMockSender<E> {
-        fn new(quota: commonware_runtime::Quota, clock: E) -> Self {
+    impl<E: Clock> LimitedMockSender<E> {
+        fn new(quota: Quota, clock: E) -> Self {
             Self {
                 inner: SuccessMockSenderInner,
-                rate_limiter: std::sync::Arc::new(futures::lock::Mutex::new(
-                    commonware_runtime::KeyedRateLimiter::hashmap_with_clock(quota, clock),
-                )),
+                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::hashmap_with_clock(
+                    quota, clock,
+                ))),
             }
         }
     }
 
-    impl<E: Clock> LimitedSender for RateLimitedMockSender<E> {
+    impl<E: Clock> LimitedSender for LimitedMockSender<E> {
         type PublicKey = Ed25519PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
@@ -724,11 +723,12 @@ mod tests {
                 _ => unimplemented!(),
             };
 
-            let rate_limiter = self.rate_limiter.lock().await;
-            if let Err(not_until) = rate_limiter.check_key(&peer) {
-                return Err(not_until.earliest_possible());
+            {
+                let rate_limiter = self.rate_limiter.write().await;
+                if let Err(not_until) = rate_limiter.check_key(&peer) {
+                    return Err(not_until.earliest_possible());
+                }
             }
-            drop(rate_limiter);
 
             Ok(CheckedSender {
                 sender: &mut self.inner,
@@ -1681,13 +1681,11 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, RateLimitedMockSender<Context>> =
+            let mut fetcher: Fetcher<_, _, MockKey, LimitedMockSender<Context>> =
                 Fetcher::new(context.clone(), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let quota =
-                commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(1).unwrap());
-            let mut sender =
-                WrappedSender::new(RateLimitedMockSender::new(quota, context.clone()));
+            let quota = Quota::per_second(NZU32!(1));
+            let mut sender = WrappedSender::new(LimitedMockSender::new(quota, context.clone()));
 
             // Add three keys with different targets:
             // - MockKey(1) targeted to peer1
