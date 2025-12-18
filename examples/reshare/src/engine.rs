@@ -217,7 +217,7 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let provider = Provider::new(config.signer.clone());
+        let provider = Provider::new(consensus_namespace.clone(), config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
@@ -232,7 +232,6 @@ where
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
@@ -257,7 +256,6 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

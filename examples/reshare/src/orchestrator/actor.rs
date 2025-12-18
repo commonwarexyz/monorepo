@@ -52,7 +52,6 @@ where
     pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
-    pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
 
@@ -83,7 +82,6 @@ where
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
     provider: Provider<S, C>,
 
-    namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
@@ -118,7 +116,6 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
-                namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
@@ -377,7 +374,6 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: 1024,
                 epoch,
-                namespace: self.namespace.clone(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

@@ -23,13 +23,15 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 #[derive(Clone)]
 pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
+    namespace: Vec<u8>,
     signer: C,
 }
 
 impl<S: Scheme, C: Signer> Provider<S, C> {
-    pub fn new(signer: C) -> Self {
+    pub fn new(namespace: Vec<u8>, signer: C) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
+            namespace,
             signer,
         }
     }
@@ -87,6 +89,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
         transition.share.as_ref().map_or_else(
             || {
                 ThresholdScheme::verifier(
+                    &self.namespace,
                     transition.dealers.clone(),
                     transition
                         .poly
@@ -96,6 +99,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
             },
             |share| {
                 ThresholdScheme::signer(
+                    &self.namespace,
                     transition.dealers.clone(),
                     transition
                         .poly
@@ -118,7 +122,11 @@ impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        EdScheme::signer(transition.dealers.clone(), self.signer.clone())
-            .unwrap_or_else(|| EdScheme::verifier(transition.dealers.clone()))
+        EdScheme::signer(
+            &self.namespace,
+            transition.dealers.clone(),
+            self.signer.clone(),
+        )
+        .unwrap_or_else(|| EdScheme::verifier(&self.namespace, transition.dealers.clone()))
     }
 }
