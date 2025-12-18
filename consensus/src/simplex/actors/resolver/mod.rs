@@ -6,7 +6,6 @@ use crate::types::Epoch;
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
-use commonware_runtime::Quota;
 pub use ingress::Mailbox;
 use std::time::Duration;
 
@@ -20,5 +19,4 @@ pub struct Config<S: Scheme, B: Blocker> {
     pub mailbox_size: usize,
     pub fetch_concurrent: usize,
     pub fetch_timeout: Duration,
-    pub fetch_rate_per_peer: Quota,
 }

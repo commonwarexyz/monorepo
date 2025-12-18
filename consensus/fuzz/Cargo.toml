@@ -12,7 +12,7 @@ cargo-fuzz = true
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
-commonware-consensus = { workspace = true, features = ["fuzz"] }
+commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
@@ -24,8 +24,8 @@ libfuzzer-sys.workspace = true
 rand.workspace = true
 
 [[bin]]
-name = "simplex_select_leader"
-path = "fuzz_targets/simplex_select_leader.rs"
+name = "simplex_elector"
+path = "fuzz_targets/simplex_elector.rs"
 test = false
 doc = false
 bench = false

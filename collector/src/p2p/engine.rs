@@ -156,7 +156,7 @@ where
                                 }
                                 Err(err) => {
                                     error!(?err, ?commitment, "failed to send message");
-                                    let _ = responder.send(Err(Error::SendFailed(err.into())));
+                                    let _ = responder.send(Err(Error::SendFailed(anyhow::anyhow!("{err:?}"))));
                                 }
                             }
                         },

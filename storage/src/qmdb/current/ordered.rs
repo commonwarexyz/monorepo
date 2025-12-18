@@ -25,6 +25,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
+use futures::stream::Stream;
 use std::num::NonZeroU64;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
@@ -149,6 +150,15 @@ impl<
     /// DB is empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location, Update<K, V>)>, Error> {
         self.any.get_span(key).await
+    }
+
+    /// Streams all active (key, value) pairs in the database in key order, starting from the first
+    /// active key greater than or equal to `start`.
+    pub async fn stream_range<'a>(
+        &'a self,
+        start: K,
+    ) -> Result<impl Stream<Item = Result<(K, V), Error>> + 'a, Error> {
+        self.any.stream_range(start).await
     }
 
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the

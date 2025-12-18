@@ -7,6 +7,7 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use commonware_codec::Encode;
+use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
@@ -171,12 +172,20 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => {
                 let config_path = args.config_path.clone();
-                validator::run::<EdScheme>(context, args, SaveFileOnUpdate::boxed(config_path))
-                    .await;
+                validator::run::<EdScheme, RoundRobin>(
+                    context,
+                    args,
+                    SaveFileOnUpdate::boxed(config_path),
+                )
+                .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args, ContinueOnUpdate::boxed())
-                    .await
+                validator::run::<ThresholdScheme<MinSig>, Random>(
+                    context,
+                    args,
+                    ContinueOnUpdate::boxed(),
+                )
+                .await
             }
         }
     });

@@ -126,7 +126,6 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
-        utils::requester,
         Manager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
@@ -202,12 +201,8 @@ mod tests {
             manager: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            requester_config: requester::Config {
-                me: Some(validator.clone()),
-                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-            },
+            initial: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,

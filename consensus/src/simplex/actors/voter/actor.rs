@@ -6,6 +6,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{batcher, resolver},
+        elector::Config as Elector,
         metrics::{self, Outbound},
         scheme::Scheme,
         types::{
@@ -51,6 +52,7 @@ enum Resolved {
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -58,7 +60,7 @@ pub struct Actor<
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
-    state: State<E, S, D>,
+    state: State<E, S, L, D>,
     blocker: B,
     automaton: A,
     relay: R,
@@ -81,14 +83,15 @@ pub struct Actor<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, B, D, A, R, F>
+    > Actor<E, S, L, B, D, A, R, F>
 {
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -122,6 +125,7 @@ impl<
             context.with_label("state"),
             StateConfig {
                 scheme: cfg.scheme,
+                elector: cfg.elector,
                 namespace: cfg.namespace.clone(),
                 epoch: cfg.epoch,
                 activity_timeout: cfg.activity_timeout,

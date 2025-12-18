@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex,
+    simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
@@ -205,6 +205,7 @@ fn main() {
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
+            elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
@@ -222,7 +223,6 @@ fn main() {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);

@@ -68,7 +68,6 @@ async-lock = "3.4.0"
 aws-config = "1.8.10"
 aws-sdk-ec2 = "1.187.0"
 axum = "0.8.1"
-bimap = "0.6.3"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
