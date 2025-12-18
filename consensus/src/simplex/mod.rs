@@ -2557,6 +2557,13 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&namespace, &mut context, n);
+
+            // Create scheme with wrong namespace for byzantine node (index 0)
+            let Fixture {
+                schemes: wrong_schemes,
+                ..
+            } = fixture(b"wrong-namespace", &mut context, n);
+
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2575,7 +2582,14 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", *validator));
 
-                // Byzantine node (idx 0) uses empty namespace to produce invalid signatures
+                // Byzantine node (idx 0) uses wrong namespace scheme to produce invalid signatures
+                // Honest nodes use correct namespace schemes
+                let scheme = if idx_scheme == 0 {
+                    wrong_schemes[idx_scheme].clone()
+                } else {
+                    schemes[idx_scheme].clone()
+                };
+
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
@@ -2599,7 +2613,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    scheme: schemes[idx_scheme].clone(),
+                    scheme,
                     elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
