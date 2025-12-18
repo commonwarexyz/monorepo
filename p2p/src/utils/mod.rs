@@ -6,8 +6,8 @@ use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
 pub mod codec;
+pub mod limited;
 pub mod mux;
-pub mod requester;
 
 /// A [Manager] over a static set of peers.
 #[derive(Debug, Clone)]

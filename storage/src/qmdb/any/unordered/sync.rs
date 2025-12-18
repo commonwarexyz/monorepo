@@ -1,15 +1,10 @@
+use super::fixed::{Db, Operation};
 use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{
-        self,
-        any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
-            FixedValue,
-        },
-    },
+    qmdb::{self, any::FixedValue},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -22,7 +17,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -267,14 +262,11 @@ mod tests {
         qmdb::{
             self,
             any::unordered::{
-                fixed::{
-                    test::{
-                        any_db_config, apply_ops, create_test_config, create_test_db,
-                        create_test_ops, AnyTest,
-                    },
-                    Any,
+                fixed::test::{
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest,
                 },
-                FixedOperation as Operation,
+                Update,
             },
             operation::Operation as _,
             store::CleanStore as _,
@@ -350,7 +342,7 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Operation::Update(Update(key, _)) => {
                         if let Some((op, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
@@ -409,7 +401,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Operation::Update(Update(key, value)));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -655,7 +647,7 @@ mod tests {
             }
             // Verify the last operation is present
             let (last_key, last_value) = match last_op[0] {
-                Operation::Update(key, value) => (key, value),
+                Operation::Update(Update(key, value)) => (key, value),
                 _ => unreachable!("last operation is not an update"),
             };
             assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
@@ -1305,7 +1297,7 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
+            let mut log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
                 fixed::Config {
                     partition: "sync_basic_log".into(),
@@ -1316,6 +1308,9 @@ mod tests {
             )
             .await
             .unwrap();
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .await
+                .unwrap();
 
             let mut synced_db: AnyTest = <AnyTest as qmdb::sync::Database>::from_sync_result(
                 context.clone(),
@@ -1329,10 +1324,10 @@ mod tests {
             .unwrap();
 
             // Verify database state
-            assert_eq!(synced_db.op_count(), 0);
+            assert_eq!(synced_db.op_count(), 1);
             assert_eq!(synced_db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(synced_db.op_count(), 0);
-            assert_eq!(synced_db.log.mmr.size(), 0);
+            assert_eq!(synced_db.op_count(), 1);
+            assert_eq!(synced_db.log.mmr.size(), 1);
 
             // Test that we can perform operations on the synced database
             let key1 = Sha256::hash(&1u64.to_be_bytes());
@@ -1408,7 +1403,7 @@ mod tests {
             }
 
             let db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     any_db_config("sync_basic"),
                     log,
@@ -1432,7 +1427,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(Update(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {
@@ -1454,101 +1449,6 @@ mod tests {
         });
     }
 
-    /// Test `from_sync_result` with an empty source database syncing to a non-empty target database
-    /// with different pruning boundaries.
-    #[test]
-    fn test_from_sync_result_empty_to_nonempty_different_pruning_boundaries() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate a source database
-            let mut source_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(200);
-            apply_ops(&mut source_db, ops.clone()).await;
-            source_db.commit(None).await.unwrap();
-
-            let total_ops = source_db.op_count();
-
-            // Test different pruning boundaries
-            for lower_bound in [0, 50, 100, 150] {
-                let upper_bound = std::cmp::min(lower_bound + 50, *total_ops );
-
-                // Create log with operations
-                let mut log = init_journal(
-                    context.clone().with_label("boundary_log"),
-                    fixed::Config {
-                        partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
-                        items_per_blob: NZU64!(1024),
-                        write_buffer: NZUsize!(64),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                    },
-                    lower_bound..upper_bound,
-                )
-                .await
-                .unwrap();
-                log.sync().await.unwrap();
-
-                for i in lower_bound..upper_bound {
-                    let op = source_db.log.read(Location::new_unchecked(i)).await.unwrap();
-                    log.append(op).await.unwrap();
-                }
-                log.sync().await.unwrap();
-
-                let pinned_nodes = nodes_to_pin(
-                    Position::try_from(Location::new_unchecked(lower_bound)).unwrap(),
-                )
-                    .map(|pos| source_db.log.mmr.get_node(pos));
-                let pinned_nodes = join_all(pinned_nodes).await;
-                let pinned_nodes = pinned_nodes
-                    .iter()
-                    .map(|node| node.as_ref().unwrap().unwrap())
-                    .collect::<Vec<_>>();
-
-                let db: AnyTest = <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
-                    context.clone(),
-                    create_test_config(context.next_u64()),
-                    log,
-                    Some(pinned_nodes),
-                    Location::new_unchecked(lower_bound)..Location::new_unchecked(upper_bound),
-                    1024,
-                )
-                .await
-                .unwrap();
-
-                // Verify database state
-                assert_eq!(db.op_count(), upper_bound);
-                assert_eq!(
-                    db.log.mmr.size(),
-                    Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
-                );
-                assert_eq!(db.op_count(), upper_bound);
-                assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(lower_bound));
-
-                // Verify state matches the source operations
-                let mut expected_kvs = HashMap::new();
-                let mut deleted_keys = HashSet::new();
-                for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Operation::Update(key, value) = op {
-                        expected_kvs.insert(*key, *value);
-                        deleted_keys.remove(key);
-                    } else if let Operation::Delete(key) = op {
-                        expected_kvs.remove(key);
-                        deleted_keys.insert(*key);
-                    }
-                }
-                for (key, value) in expected_kvs {
-                    assert_eq!(db.get(&key).await.unwrap().unwrap(), value,);
-                }
-                // Verify that deleted keys are absent
-                for key in deleted_keys {
-                    assert!(db.get(&key).await.unwrap().is_none());
-                }
-
-                db.destroy().await.unwrap();
-            }
-            source_db.destroy().await.unwrap();
-        });
-    }
-
     // Test `from_sync_result` where the database has some but not all of the operations in the target
     // database.
     #[test]
@@ -1560,7 +1460,7 @@ mod tests {
             // Create and populate two databases.
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(context.next_u64());
-            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config.clone())
+            let mut sync_db: AnyTest = Db::init(context.clone(), sync_db_config.clone())
                 .await
                 .unwrap();
             let original_ops = create_test_ops(NUM_OPS);
@@ -1606,7 +1506,7 @@ mod tests {
 
             // Re-open `sync_db`
             let sync_db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     sync_db_config,
                     journal,
@@ -1634,7 +1534,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(Update(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {
@@ -1662,7 +1562,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let db_config = create_test_config(context.next_u64());
-            let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
+            let mut db = Db::init(context.clone(), db_config.clone()).await.unwrap();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             db.commit(None).await.unwrap();
@@ -1691,7 +1591,7 @@ mod tests {
             mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     db_config,
                     journal,

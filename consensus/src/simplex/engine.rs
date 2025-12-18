@@ -1,6 +1,7 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
@@ -8,14 +9,14 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -24,7 +25,7 @@ pub struct Engine<
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F>,
@@ -35,17 +36,18 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, B, D, A, R, F>
+    > Engine<E, S, L, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -69,6 +71,7 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
+                elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -98,7 +101,6 @@ impl<
                 namespace: cfg.namespace,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
 

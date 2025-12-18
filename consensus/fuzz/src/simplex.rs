@@ -1,6 +1,7 @@
 use commonware_codec::Read;
-use commonware_consensus::simplex::scheme::{
-    bls12381_multisig, bls12381_threshold, ed25519, Scheme,
+use commonware_consensus::simplex::{
+    elector::{Config as ElectorConfig, RoundRobin},
+    scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -15,6 +16,7 @@ where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Elector: ElectorConfig<Self::Scheme> + Default;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
@@ -22,6 +24,7 @@ pub struct SimplexEd25519;
 
 impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         ed25519::fixture(context, n)
@@ -32,6 +35,7 @@ pub struct SimplexBls12381MultisigMinPk;
 
 impl Simplex for SimplexBls12381MultisigMinPk {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_multisig::fixture::<MinPk, _>(context, n)
@@ -42,6 +46,7 @@ pub struct SimplexBls12381MultisigMinSig;
 
 impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_multisig::fixture::<MinSig, _>(context, n)
@@ -52,6 +57,7 @@ pub struct SimplexBls12381MinPk;
 
 impl Simplex for SimplexBls12381MinPk {
     type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_threshold::fixture::<MinPk, _>(context, n)
@@ -62,6 +68,7 @@ pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
+    type Elector = RoundRobin;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls12381_threshold::fixture::<MinSig, _>(context, n)

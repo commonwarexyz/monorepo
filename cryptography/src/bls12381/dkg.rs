@@ -84,7 +84,9 @@
 //!
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
+//! - The list of dealers who distributed shares,
 //! - The list of players who received shares,
+//! - The set of players whose shares may have been revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
 //! ## Trusted Dealing Functions
@@ -333,8 +335,10 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
-    players: Set<P>,
     public: Sharing<V>,
+    dealers: Set<P>,
+    players: Set<P>,
+    revealed: Set<P>,
 }
 
 impl<V: Variant, P: Ord> Output<V, P> {
@@ -354,23 +358,41 @@ impl<V: Variant, P: Ord> Output<V, P> {
         &self.public
     }
 
+    /// Return the dealers who were selected in this round of the DKG.
+    pub const fn dealers(&self) -> &Set<P> {
+        &self.dealers
+    }
+
     /// Return the players who participated in this round of the DKG, and should have shares.
     pub const fn players(&self) -> &Set<P> {
         &self.players
+    }
+
+    /// Return the set of players whose shares may have been revealed.
+    ///
+    /// These are players who had more than `max_faults` reveals.
+    pub const fn revealed(&self) -> &Set<P> {
+        &self.revealed
     }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
-        self.summary.encode_size() + self.players.encode_size() + self.public.encode_size()
+        self.summary.encode_size()
+            + self.public.encode_size()
+            + self.dealers.encode_size()
+            + self.players.encode_size()
+            + self.revealed.encode_size()
     }
 }
 
 impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.summary.write(buf);
-        self.players.write(buf);
         self.public.write(buf);
+        self.dealers.write(buf);
+        self.players.write(buf);
+        self.revealed.write(buf);
     }
 }
 
@@ -379,12 +401,15 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_players: &Self::Cfg,
+        &max_participants: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
+        let max_participants_usize = max_participants.get() as usize;
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            public: Read::read_cfg(buf, &max_players)?,
+            public: Read::read_cfg(buf, &max_participants)?,
+            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
+            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals
         })
     }
 }
@@ -398,18 +423,38 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let summary = u.arbitrary()?;
         let public: Sharing<V> = u.arbitrary()?;
-        let num_players = public.required();
-        let players = Set::try_from(
+        let total = public.total().get() as usize;
+
+        let num_dealers = u.int_in_range(1..=total * 2)?;
+        let dealers = Set::try_from(
             u.arbitrary_iter::<P>()?
-                .take(num_players as usize)
+                .take(num_dealers)
                 .collect::<Result<Vec<_>, _>>()?,
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
+        let players = Set::try_from(
+            u.arbitrary_iter::<P>()?
+                .take(total)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+
+        let max_revealed = commonware_utils::max_faults(total as u32) as usize;
+        let revealed = Set::from_iter_dedup(
+            players
+                .iter()
+                .filter(|_| u.arbitrary::<bool>().unwrap_or(false))
+                .take(max_revealed)
+                .cloned(),
+        );
+
         Ok(Self {
             summary,
-            players,
             public,
+            dealers,
+            players,
+            revealed,
         })
     }
 }
@@ -420,12 +465,12 @@ where
 /// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
 pub struct Info<V: Variant, P: PublicKey> {
+    summary: Summary,
     round: u64,
     previous: Option<Output<V, P>>,
     mode: Mode,
     dealers: Set<P>,
     players: Set<P>,
-    summary: Summary,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for Info<V, P> {
@@ -568,12 +613,12 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             .commit(players.encode())
             .summarize();
         Ok(Self {
+            summary,
             round,
             previous,
             mode,
             dealers,
             players,
-            summary,
         })
     }
 
@@ -1265,6 +1310,39 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         selected: Map<P, DealerLog<V, P>>,
         concurrency: usize,
     ) -> Result<Self, Error> {
+        // Track players with too many reveals
+        let max_faults = info.players.max_faults();
+        let mut reveal_counts: BTreeMap<P, u32> = BTreeMap::new();
+        let mut revealed = Vec::new();
+        for log in selected.values() {
+            let Some(iter) = log.zip_players(&info.players) else {
+                continue;
+            };
+            for (player, result) in iter {
+                if !result.is_reveal() {
+                    continue;
+                }
+                let count = reveal_counts.entry(player.clone()).or_insert(0);
+                *count += 1;
+                if *count == max_faults + 1 {
+                    revealed.push(player.clone());
+                }
+            }
+        }
+        let revealed: Set<P> = revealed
+            .into_iter()
+            .try_collect()
+            .expect("players are unique");
+
+        // Extract dealers before consuming selected
+        let dealers: Set<P> = selected
+            .keys()
+            .iter()
+            .cloned()
+            .try_collect()
+            .expect("selected dealers are unique");
+
+        // Recover the public polynomial
         let (public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
                 .public()
@@ -1294,7 +1372,9 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         let output = Output {
             summary: info.summary,
             public: Sharing::new(info.mode, NZU32!(n), public),
+            dealers,
             players: info.players,
+            revealed,
         };
         Ok(Self { output, weights })
     }
@@ -1468,7 +1548,9 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     let output = Output {
         summary: Summary::random(&mut rng),
         public: Sharing::new(mode, n, Poly::commit(private)),
+        dealers: players.clone(),
         players,
+        revealed: Set::default(),
     };
     Ok((output, shares))
 }
@@ -1770,6 +1852,15 @@ mod test_plan {
             let keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
+
+            // Precompute mapping from public key to key index to avoid confusion
+            // between key indices and positions in sorted Sets.
+            let pk_to_key_idx: BTreeMap<ed25519::PublicKey, u32> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.public_key(), i as u32))
+                .collect();
+
             // The max_read_size needs to account for shifted polynomial degrees.
             // Find the maximum positive shift across all rounds.
             let max_shift = self
@@ -1894,12 +1985,9 @@ mod test_plan {
 
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
-                        if let Some(i_player) = players.index(player) {
-                            // Convert position to key index
-                            let player_key_idx = round.players[i_player as usize];
-                            if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                                priv_msg.share = Scalar::random(&mut rng);
-                            }
+                        let player_key_idx = pk_to_key_idx[player];
+                        if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
+                            priv_msg.share = Scalar::random(&mut rng);
                         }
                     }
                     assert_eq!(priv_msgs.len(), players.len());
@@ -1913,8 +2001,7 @@ mod test_plan {
                         let i_player = players
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
-                        // Convert position to key index for set lookups
-                        let player_key_idx = round.players[i_player as usize];
+                        let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[i_player as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
@@ -1987,7 +2074,8 @@ mod test_plan {
                 }
 
                 // Make sure that bad dealers are not selected.
-                if let Ok(selection) = select(&info, dealer_logs.clone()) {
+                let selection = select(&info, dealer_logs.clone());
+                if let Ok(ref selection) = selection {
                     let good_pks = selection
                         .iter_pairs()
                         .map(|(pk, _)| pk.clone())
@@ -2008,10 +2096,78 @@ mod test_plan {
                     continue;
                 }
                 let observer_output = observe_result?;
+                let selection = selection.expect("select should succeed if observe succeeded");
 
-                // Verify bad dealers were not selected
-                // (This is implicit - if a bad dealer was selected, the DKG would fail
-                // or produce incorrect results which we'd catch later)
+                // Compute expected dealers: good dealers up to required_commitments
+                // The select function iterates dealer_logs (BTreeMap) in public key order
+                let required_commitments = info.required_commitments() as usize;
+                let expected_dealers: Set<ed25519::PublicKey> = dealer_set
+                    .iter()
+                    .filter(|pk| {
+                        let i = keys.iter().position(|k| &k.public_key() == *pk).unwrap() as u32;
+                        !round.bad(previous_successful_round.is_some(), i)
+                    })
+                    .take(required_commitments)
+                    .cloned()
+                    .try_collect()
+                    .expect("dealers are unique");
+                let expected_dealer_indices: BTreeSet<u32> = expected_dealers
+                    .iter()
+                    .filter_map(|pk| {
+                        keys.iter()
+                            .position(|k| &k.public_key() == pk)
+                            .map(|i| i as u32)
+                    })
+                    .collect();
+                assert_eq!(
+                    observer_output.dealers(),
+                    &expected_dealers,
+                    "Output dealers should match expected good dealers"
+                );
+
+                // Map selected dealers to their key indices (for later use)
+                let selected_dealers: BTreeSet<u32> = selection
+                    .keys()
+                    .iter()
+                    .filter_map(|pk| {
+                        keys.iter()
+                            .position(|k| &k.public_key() == pk)
+                            .map(|i| i as u32)
+                    })
+                    .collect();
+                assert_eq!(
+                    selected_dealers, expected_dealer_indices,
+                    "Selection should match expected dealers"
+                );
+                let selected_players: Set<ed25519::PublicKey> = round
+                    .players
+                    .iter()
+                    .map(|&i| keys[i as usize].public_key())
+                    .try_collect()
+                    .expect("players are unique");
+
+                // Compute expected reveals
+                let mut expected_reveals: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
+                for &(dealer_idx, player_key_idx) in
+                    round.no_acks.iter().chain(round.bad_shares.iter())
+                {
+                    if !selected_dealers.contains(&dealer_idx) {
+                        continue;
+                    }
+                    let pk = keys[player_key_idx as usize].public_key();
+                    if selected_players.position(&pk).is_none() {
+                        continue;
+                    }
+                    *expected_reveals.entry(pk).or_insert(0) += 1;
+                }
+
+                // Verify each player's revealed status
+                let max_faults = selected_players.max_faults();
+                for player in player_set.iter() {
+                    let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
+                    let actual = observer_output.revealed().position(player).is_some();
+                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
+                }
 
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
@@ -2325,12 +2481,24 @@ mod test {
     }
 
     #[test]
-    fn too_many_reveals() -> anyhow::Result<()> {
+    fn too_many_reveals_dealer() -> anyhow::Result<()> {
         Plan::new(NonZeroU32::new(4).unwrap())
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(0, 0)
                     .no_ack(0, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn too_many_reveals_player() -> anyhow::Result<()> {
+        Plan::new(NonZeroU32::new(4).unwrap())
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(0, 0)
+                    .no_ack(1, 0)
+                    .no_ack(3, 0),
             )
             .run::<MinPk>(0)
     }

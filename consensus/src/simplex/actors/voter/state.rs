@@ -1,6 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
+        elector::{Config as ElectorConfig, Elector},
         interesting, min_active,
         scheme::Scheme,
         types::{
@@ -27,8 +28,9 @@ use tracing::{debug, warn};
 const GENESIS_VIEW: View = View::zero();
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme> {
+pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
+    pub elector: L,
     pub namespace: Vec<u8>,
     pub epoch: Epoch,
     pub activity_timeout: ViewDelta,
@@ -41,9 +43,11 @@ pub struct Config<S: certificate::Scheme> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+{
     context: E,
     scheme: S,
+    elector: L::Elector,
     namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
@@ -60,17 +64,24 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> 
     skipped_views: Counter,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, D> {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+    State<E, S, L, D>
+{
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
+
+        // Build elector with participants
+        let elector = cfg.elector.build(cfg.scheme.participants());
+
         Self {
             context,
             scheme: cfg.scheme,
+            elector,
             namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
@@ -130,16 +141,25 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
     }
 
     /// Advances the view and updates the leader.
-    fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
+    ///
+    /// If `seed` is `None`, this **must** be the first view after genesis (view 1).
+    /// For all subsequent views, a seed derived from the previous view's certificate
+    /// must be provided.
+    fn enter_view(&mut self, view: View, certificate: Option<&S::Certificate>) -> bool {
         if view <= self.view {
             return false;
         }
+
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
         let advance_deadline = now + self.notarization_timeout;
+
+        // Compute leader using elector
+        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
+
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
-        round.set_leader(seed); // may not be set until we actually enter
+        round.set_leader(leader); // may not be set until we actually enter
         self.view = view;
 
         // Update metrics
@@ -204,23 +224,15 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = notarization.view();
-        let seed = self
-            .scheme
-            .seed(notarization.round(), &notarization.certificate);
-        let added = self.create_round(view).add_notarization(notarization);
-        self.enter_view(view.next(), seed);
-        added
+        self.enter_view(view.next(), Some(&notarization.certificate));
+        self.create_round(view).add_notarization(notarization)
     }
 
     /// Inserts a nullification certificate and advances into the next view.
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
-        let seed = self
-            .scheme
-            .seed(nullification.round(), &nullification.certificate);
-        let added = self.create_round(view).add_nullification(nullification);
-        self.enter_view(view.next(), seed);
-        added
+        self.enter_view(view.next(), Some(&nullification.certificate));
+        self.create_round(view).add_nullification(nullification)
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
@@ -234,12 +246,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
             self.last_finalized = view;
         }
 
-        let seed = self
-            .scheme
-            .seed(finalization.round(), &finalization.certificate);
-        let added = self.create_round(view).add_finalization(finalization);
-        self.enter_view(view.next(), seed);
-        added
+        self.enter_view(view.next(), Some(&finalization.certificate));
+        self.create_round(view).add_finalization(finalization)
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.
@@ -533,6 +541,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, D: Digest> State<E, S, 
 mod tests {
     use super::*;
     use crate::simplex::{
+        elector::RoundRobin,
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -552,10 +561,11 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
-            let mut state: State<_, _, Sha256Digest> = State::new(
+            let mut state = State::new(
                 context,
                 Config {
                     scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -638,6 +648,7 @@ mod tests {
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
                 scheme: local_scheme,
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
@@ -645,7 +656,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Start proposal with missing parent
@@ -723,6 +734,7 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -730,7 +742,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: retry,
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context.clone(), cfg);
+            let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
 
             // Should return same deadline until something done
@@ -780,6 +792,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
@@ -787,7 +800,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add initial rounds
@@ -836,6 +849,7 @@ mod tests {
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
                 scheme: local_scheme,
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -843,7 +857,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Create proposal
@@ -888,6 +902,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -895,7 +910,7 @@ mod tests {
                 nullify_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Create parent proposal and certificate
@@ -934,6 +949,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -941,7 +957,7 @@ mod tests {
                 nullify_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add nullification certificate for view 1
@@ -981,6 +997,7 @@ mod tests {
             } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -988,7 +1005,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Add finalization
@@ -1027,10 +1044,11 @@ mod tests {
             let local_scheme = scheme_iter.next().unwrap();
             let other_schemes: Vec<_> = scheme_iter.collect();
             let epoch: Epoch = Epoch::new(3);
-            let mut state: State<_, _, Sha256Digest> = State::new(
+            let mut state = State::new(
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
+                    elector: <RoundRobin>::default(),
                     namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1064,10 +1082,11 @@ mod tests {
             assert!(state.construct_finalize(view).is_none());
 
             // Restart state and replay
-            let mut restarted: State<_, _, Sha256Digest> = State::new(
+            let mut restarted = State::new(
                 context,
                 Config {
                     scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
                     namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
@@ -1094,6 +1113,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
                 namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
@@ -1101,7 +1121,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
             let view = state.current_view();
 

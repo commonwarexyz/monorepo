@@ -10,7 +10,7 @@ use crate::{
     simplex::{
         scheme::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            seed_namespace_and_message, vote_namespace_and_message, SeededScheme,
+            seed_namespace_and_message, vote_namespace_and_message,
         },
         types::{Finalization, Notarization, Subject},
     },
@@ -696,14 +696,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
-    type Seed = Seed<V>;
-
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
-        Some(Seed::new(round, certificate.seed_signature))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1143,9 +1135,7 @@ mod tests {
 
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
-        let seed = schemes[0]
-            .seed(proposal.round, &certificate)
-            .expect("extract seed");
+        let seed = Seed::new(proposal.round, certificate.seed_signature);
 
         let encoded = seed.encode();
         let decoded = Seed::<V>::decode_cfg(encoded, &()).expect("decode seed");
@@ -1180,18 +1170,15 @@ mod tests {
 
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
-        let seed = schemes[0]
-            .seed(proposal.round, &certificate)
-            .expect("extract seed");
+        let seed = Seed::new(proposal.round, certificate.seed_signature);
 
         assert!(seed.verify(&schemes[0], NAMESPACE));
 
-        let invalid_seed = schemes[0]
-            .seed(
-                Round::new(proposal.epoch(), proposal.view().next()),
-                &certificate,
-            )
-            .expect("extract seed");
+        // Create an invalid seed with a mismatched round
+        let invalid_seed = Seed::new(
+            Round::new(proposal.epoch(), proposal.view().next()),
+            certificate.seed_signature,
+        );
 
         assert!(!invalid_seed.verify(&schemes[0], NAMESPACE));
     }
@@ -1375,7 +1362,7 @@ mod tests {
 
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
-        let seed = schemes[0].seed(proposal.round, &certificate).unwrap();
+        let seed = Seed::<V>::new(proposal.round, certificate.seed_signature);
         assert_eq!(seed.signature, certificate.seed_signature);
     }
 

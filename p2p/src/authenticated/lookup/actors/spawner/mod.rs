@@ -1,4 +1,4 @@
-use governor::Quota;
+use commonware_runtime::Quota;
 
 mod actor;
 mod ingress;

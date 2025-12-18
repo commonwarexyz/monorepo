@@ -4,7 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, Engine},
+    simplex::{self, elector::Random, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -16,10 +16,9 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Quota, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -104,7 +103,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -238,6 +237,7 @@ fn main() {
             context.with_label("engine"),
             simplex::Config {
                 scheme,
+                elector: Random,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
@@ -255,7 +255,6 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
             },
         );

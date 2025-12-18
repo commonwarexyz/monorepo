@@ -126,14 +126,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
-        utils::requester,
         Manager,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,
@@ -173,7 +171,7 @@ mod tests {
 
     async fn setup_validator(
         context: deterministic::Context,
-        oracle: &mut Oracle<K>,
+        oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
     ) -> (
@@ -203,12 +201,8 @@ mod tests {
             manager: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            requester_config: requester::Config {
-                me: Some(validator.clone()),
-                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-            },
+            initial: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
@@ -340,7 +334,7 @@ mod tests {
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,
-    ) -> Oracle<K> {
+    ) -> Oracle<K, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -353,7 +347,11 @@ mod tests {
         oracle
     }
 
-    async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
+    async fn setup_network_links(
+        oracle: &mut Oracle<K, deterministic::Context>,
+        peers: &[K],
+        link: Link,
+    ) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
                 if p2 == p1 {

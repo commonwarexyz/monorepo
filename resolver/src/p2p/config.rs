@@ -1,7 +1,7 @@
 use crate::{p2p::Producer, Consumer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Blocker, Manager};
+use commonware_p2p::{Blocker, Manager};
 use commonware_utils::Span;
 use std::time::Duration;
 
@@ -29,8 +29,14 @@ pub struct Config<
     /// The maximum size of the mailbox backlog
     pub mailbox_size: usize,
 
-    /// Configuration for the requester
-    pub requester_config: requester::Config<P>,
+    /// Local identity of the participant (if any).
+    pub me: Option<P>,
+
+    /// Initial expected performance for new participants.
+    pub initial: Duration,
+
+    /// Timeout for requests.
+    pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried
     pub fetch_retry_timeout: Duration,

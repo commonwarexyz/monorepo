@@ -2,8 +2,8 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        scheme::{self, SeededScheme},
-        select_leader,
+        elector::{Config as ElectorConfig, Elector},
+        scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::ordered::Set;
+use commonware_utils::ordered::{Quorum, Set};
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -29,22 +29,24 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme> {
+pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
+    pub elector: L,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
+pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
+    elector: L::Elector,
 
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Option<S::Seed>>>>,
+    pub certified: Arc<Mutex<HashSet<View>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
@@ -58,20 +60,25 @@ pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<E, S, D> Reporter<E, S, D>
+impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: Rng + CryptoRng,
-    S: SeededScheme,
+    S: Scheme,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+        // Build elector with participants
+        let elector = cfg.elector.build(&cfg.participants);
+
         Self {
             context,
             namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
+            elector,
             leaders: Arc::new(Mutex::new(HashMap::new())),
-            seeds: Arc::new(Mutex::new(HashMap::new())),
+            certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
@@ -85,21 +92,25 @@ where
         }
     }
 
-    fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
-        // We use the seed from view N to select the leader for view N+1
+    fn certified(&self, round: Round, certificate: &S::Certificate) {
+        // Record that this view has a certificate
+        self.certified.lock().unwrap().insert(round.view());
+
+        // We use the certificate from view N to determine the leader for view N+1.
         let next_round = Round::new(round.epoch(), round.view().next());
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let (leader, _) = select_leader::<S>(self.participants.as_ref(), next_round, seed);
-            leader
+            let leader = self.elector.elect(next_round, Some(certificate));
+            self.participants.key(leader).cloned().unwrap()
         });
     }
 }
 
-impl<E, S, D> crate::Reporter for Reporter<E, S, D>
+impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -150,11 +161,7 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, notarization.clone());
-                let seed = self
-                    .scheme
-                    .seed(notarization.round(), &notarization.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(notarization.round(), seed);
+                self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&self.scheme, &self.namespace) {
@@ -194,11 +201,7 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, nullification.clone());
-                let seed = self
-                    .scheme
-                    .seed(nullification.round, &nullification.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(nullification.round, seed);
+                self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&self.scheme, &self.namespace) {
@@ -240,11 +243,7 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
-                let seed = self
-                    .scheme
-                    .seed(finalization.round(), &finalization.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(finalization.round(), seed);
+                self.certified(finalization.round(), &finalization.certificate);
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();
@@ -314,10 +313,11 @@ where
     }
 }
 
-impl<E, S, D> Monitor for Reporter<E, S, D>
+impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
-    S: SeededScheme,
+    S: Scheme,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

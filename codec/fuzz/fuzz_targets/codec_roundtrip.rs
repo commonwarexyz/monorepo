@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 
 fn roundtrip_socket(socket: SocketAddr) {
@@ -45,6 +45,13 @@ fn roundtrip_ipv6(addr: Ipv6Addr) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
     let decoded = Ipv6Addr::decode(&mut &*encoded).expect("Failed to decode Ipv6Addr!");
+    assert_eq!(addr, decoded);
+}
+
+fn roundtrip_ip_addr(addr: IpAddr) {
+    let encoded = addr.encode();
+    assert_eq!(addr.encode_size(), encoded.len());
+    let decoded = IpAddr::decode(&mut &*encoded).expect("Failed to decode IpAddr!");
     assert_eq!(addr, decoded);
 }
 
@@ -299,6 +306,9 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
 struct WrappedSocketAddr(SocketAddr);
 
 #[derive(Arbitrary, Debug)]
+struct WrappedIpAddr(IpAddr);
+
+#[derive(Arbitrary, Debug)]
 struct WrappedIpv4Addr(Ipv4Addr);
 
 #[derive(Arbitrary, Debug)]
@@ -316,6 +326,7 @@ enum FuzzInput<'a> {
 
     // Network types
     Socket(WrappedSocketAddr),
+    Ip(WrappedIpAddr),
     Ipv4(WrappedIpv4Addr),
     Ipv6(WrappedIpv6Addr),
     SocketV4(WrappedSocketAddrV4),
@@ -384,6 +395,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
         // Network types
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
+        FuzzInput::Ip(it) => roundtrip_ip_addr(it.0),
         FuzzInput::Ipv4(it) => roundtrip_ipv4(it.0),
         FuzzInput::Ipv6(it) => roundtrip_ipv6(it.0),
         FuzzInput::SocketV4(it) => roundtrip_socket_v4(it.0),

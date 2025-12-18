@@ -21,9 +21,8 @@ use commonware_consensus::{
 use commonware_cryptography::{certificate::mocks::Fixture, Sha256};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize, NZU32};
+use commonware_utils::{max_faults, NZUsize};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
-use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -222,7 +221,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
-        let mut engine_contexts = Vec::new();
 
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
@@ -243,7 +241,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
-            engine_contexts.push(context.clone());
+            let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants
@@ -251,6 +249,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                     .try_into()
                     .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
+                elector: elector.clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
@@ -272,6 +271,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
+                elector,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -285,7 +285,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

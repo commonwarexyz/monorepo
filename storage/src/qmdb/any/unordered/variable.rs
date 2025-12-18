@@ -4,7 +4,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
-use super::operation::VariableOperation as Operation;
 use crate::{
     index::unordered::Index,
     journal::{
@@ -13,7 +12,7 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
-        any::{unordered::IndexedLog, VariableConfig, VariableValue},
+        any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
         Error,
     },
@@ -23,16 +22,20 @@ use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use tracing::warn;
+
+pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
+pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -56,13 +59,20 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
             Operation::<K, V>::is_commit,
         )
         .await?;
+
+        if log.size() == 0 {
+            warn!("Authenticated log is empty, initializing new db");
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .await?;
+            log.sync().await?;
+        }
 
         let log = Self::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
@@ -111,8 +121,8 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -267,34 +277,28 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
 
             let root = db.root();
-            assert_eq!(db.op_count(), 1960);
+            assert_eq!(db.op_count(), 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1960))
+                Some(Location::new_unchecked(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(755));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(749)
-            );
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm state is preserved after close and reopen.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 1960);
+            assert_eq!(db.op_count(), 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1960))
+                Some(Location::new_unchecked(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(755));
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                Location::new_unchecked(749)
-            );
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -328,7 +332,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
 
             async fn apply_more_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
@@ -386,11 +390,11 @@ pub(super) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             async fn apply_ops(
-                db: &mut Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
+                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
             ) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
@@ -403,21 +407,21 @@ pub(super) mod test {
             apply_ops(&mut db).await;
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Insert another 1000 keys then simulate failure after syncing the log.
             apply_ops(&mut db).await;
             db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Insert another 1000 keys then simulate failure (sync only the mmr).
             apply_ops(&mut db).await;
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -425,14 +429,14 @@ pub(super) mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_ops(&mut db).await;
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
-            assert!(db.op_count() > 0);
+            assert!(db.op_count() > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
