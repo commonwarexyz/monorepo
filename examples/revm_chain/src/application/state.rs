@@ -7,7 +7,7 @@
 //! - per-block execution snapshots (`InMemoryDB`) keyed by the consensus digest, and
 //! - a per-digest seed hash used to populate the next block's `prevrandao`.
 //!
-//! The deterministic simulation queries this state through `crate::application::Handle`.
+//! The deterministic simulation queries this state through `crate::application::NodeHandle`.
 
 use crate::{
     consensus::{digest_for_block, ConsensusDigest},

@@ -12,11 +12,11 @@ use crate::{
 use alloy_evm::revm::primitives::{Address, B256, U256};
 
 #[derive(Clone)]
-pub struct Handle {
+pub struct NodeHandle {
     state: Shared,
 }
 
-impl Handle {
+impl NodeHandle {
     pub(crate) const fn new(state: Shared) -> Self {
         Self { state }
     }

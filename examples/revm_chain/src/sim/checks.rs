@@ -6,7 +6,7 @@
 //! - the expected balances for the injected transfer.
 
 use super::{demo, ConsensusDigest};
-use crate::{application::Handle, consensus};
+use crate::{application::NodeHandle, consensus};
 use alloy_evm::revm::primitives::B256;
 use futures::{channel::mpsc, StreamExt as _};
 
@@ -53,7 +53,7 @@ pub(super) async fn wait_for_finalized_head(
 
 /// Query each node's application store at `head` and assert they all agree on the outcome.
 pub(super) async fn assert_all_nodes_converged(
-    nodes: &[Handle],
+    nodes: &[NodeHandle],
     head: ConsensusDigest,
     demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(crate::StateRoot, B256)> {

@@ -94,7 +94,7 @@ pub(super) async fn start_all_nodes(
     schemes: &[ThresholdScheme],
     demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(
-    Vec<application::Handle>,
+    Vec<application::NodeHandle>,
     mpsc::UnboundedReceiver<consensus::FinalizationEvent>,
 )> {
     // Per-channel rate limit used by the simulated P2P transport in this example.
@@ -129,7 +129,7 @@ async fn start_node(
     context: &deterministic::Context,
     oracle: &mut simulated::Oracle<Peer>,
     init: NodeInit<'_>,
-) -> anyhow::Result<application::Handle> {
+) -> anyhow::Result<application::NodeHandle> {
     let NodeInit {
         index,
         public_key,
@@ -154,7 +154,7 @@ async fn start_node(
     let block_cfg = block_codec_cfg();
     let state = application::Shared::new(demo.alloc.clone());
 
-    let handle = application::Handle::new(state.clone());
+    let handle = application::NodeHandle::new(state.clone());
     let app =
         application::RevmApplication::<ThresholdScheme>::new(BLOCK_CODEC_MAX_TXS, state.clone());
 
