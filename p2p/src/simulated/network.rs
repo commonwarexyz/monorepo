@@ -976,13 +976,12 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         // Determine the set of recipients that will receive the message
-        let Some(routed_recipients) = (self.forwarder)(self.replica, &self.recipients, &message)
-        else {
+        let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
             return Ok(Vec::new());
         };
 
-        // Update recipients in checked (already rate limited) and send
-        self.checked.modify_recipients(routed_recipients);
+        // Update recipients in checked and send
+        self.checked.modify_recipients(recipients);
         self.checked.send(message, priority).await
     }
 }
